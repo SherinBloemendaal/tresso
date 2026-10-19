@@ -20,7 +20,7 @@ import {
   type SyncedSignature,
   type SyncedThread,
 } from '@tresso/core'
-import { deleteMailDatabase, MailDatabase, type Contact, type Conversation, type Draft } from '@/mail/db'
+import { appliedFor, deleteMailDatabase, MailDatabase, type AppliedAction, type Contact, type Conversation, type Draft } from '@/mail/db'
 import { ApiError } from '@/api/errors'
 import { freshArrivals, mailNotifications } from '@/mail/mailNotifications'
 import { notifier } from '@/platform/notifier'
@@ -214,30 +214,39 @@ export const useMailStore = defineStore('mail', () => {
   }
 
   /**
-   * Reads, flags, archives, trashes or moves messages: the change shows at once and is undone here when the server
-   * refuses it. Large selections go in batches of {@link MAX_MESSAGES_PER_ACTION}.
+   * Reads, flags, archives, trashes or moves messages: the change shows at once and is undone here for the messages
+   * the server did not take. Large selections go in batches of {@link MAX_MESSAGES_PER_ACTION}. Returns the messages
+   * before and after, to build an undo from.
    */
-  async function act(messageIds: string[], action: MessageAction, folderId?: string): Promise<void> {
+  async function act(messageIds: string[], action: MessageAction, target: { folderId?: string; fromFolderId?: string } = {}): Promise<AppliedAction> {
     const database = db.value
     if (database === null || messageIds.length === 0) {
-      return
+      return { before: [], after: [] }
     }
-    const applied = await database.applyAction(messageIds, action, folderId)
+    const applied = await database.applyAction(messageIds, action, target.folderId, target.fromFolderId)
     await refresh()
+    let accepted = 0
     try {
       for (let start = 0; start < messageIds.length; start += MAX_MESSAGES_PER_ACTION) {
         const request: MessageActionRequest = { messageIds: messageIds.slice(start, start + MAX_MESSAGES_PER_ACTION), action }
-        if (folderId !== undefined) {
-          request.folderId = folderId
+        if (target.folderId !== undefined) {
+          request.folderId = target.folderId
+        }
+        if (target.fromFolderId !== undefined) {
+          request.fromFolderId = target.fromFolderId
         }
         await auth.send<MessageActionResult>('POST', '/api/v1/message-actions', request)
+        accepted = start + request.messageIds.length
       }
     } catch (error) {
-      await database.revertAction(applied)
+      // Earlier batches went through; only the rest goes back.
+      await database.revertAction(appliedFor(applied, new Set(messageIds.slice(accepted))))
       await refresh()
+      void syncNow()
       throw error
     }
     void syncNow()
+    return applied
   }
 
   function send(request: SendMessageRequest): Promise<SyncedOutgoingMessage> {

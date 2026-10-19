@@ -150,6 +150,12 @@ export interface AppliedAction {
   after: SyncedMessage[]
 }
 
+/** The part of an applied action that concerns these messages. */
+export function appliedFor(applied: AppliedAction, messageIds: Set<string>): AppliedAction {
+  const keep = applied.before.map((message) => messageIds.has(message.id))
+  return { before: applied.before.filter((_, i) => keep[i]), after: applied.after.filter((_, i) => keep[i]) }
+}
+
 function needsTheUser(message: SyncedMessage | undefined): boolean {
   return message?.verdict === 'do' || message?.verdict === 'delegate'
 }
@@ -326,7 +332,7 @@ export class MailDatabase implements SyncStore {
    *
    * @throws MissingFolderError when an account has nothing to archive or trash into; nothing changes then
    */
-  async applyAction(messageIds: string[], action: MessageAction, folderId?: string): Promise<AppliedAction> {
+  async applyAction(messageIds: string[], action: MessageAction, folderId?: string, fromFolderId?: string): Promise<AppliedAction> {
     const tx = this.db.transaction(ALL_STORES, 'readwrite')
     const folders = await tx.objectStore('folders').getAll()
     const accounts = new Map((await tx.objectStore('mailAccounts').getAll()).map((account) => [account.id, account.emailAddress]))
@@ -379,6 +385,9 @@ export class MailDatabase implements SyncStore {
           if (folderId === undefined) {
             throw new Error('A move needs a folder.')
           }
+          if (fromFolderId !== undefined) {
+            return message.folderIds.includes(fromFolderId) ? { ...message, folderIds: withFolder(message.folderIds.filter((id) => id !== fromFolderId), folderId) } : message
+          }
           return { ...message, folderIds: [folderId] }
       }
     })
@@ -396,7 +405,10 @@ export class MailDatabase implements SyncStore {
     return { before, after }
   }
 
-  /** Puts back what {@link applyAction} changed, on the messages the delta has not updated since. */
+  /**
+   * Puts back what {@link applyAction} changed, on the messages the delta has not updated since. It is only given
+   * messages whose request the server did not take, so a delta can only have brought them someone else's change.
+   */
   async revertAction(applied: AppliedAction): Promise<void> {
     const tx = this.db.transaction(ALL_STORES, 'readwrite')
     const inboxFolders = new Set(
