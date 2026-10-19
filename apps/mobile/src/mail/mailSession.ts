@@ -1,4 +1,15 @@
-import { RealtimeClient, SyncEngine, type ChangePage, type RealtimeAccess } from '@tresso/core'
+import {
+  appliedFor,
+  MAX_MESSAGES_PER_ACTION,
+  PartialActionError,
+  RealtimeClient,
+  SyncEngine,
+  type AppliedAction,
+  type ChangePage,
+  type MessageAction,
+  type MessageActionRequest,
+  type RealtimeAccess,
+} from '@tresso/core'
 import { MailDatabase } from '@/mail/mailDatabase'
 import type { Sql } from '@/mail/sql'
 
@@ -24,6 +35,8 @@ export interface MailSessionDeps {
   deleteSql(name: string): Promise<void>
   fetchPage(since: number, limit: number): Promise<ChangePage>
   fetchAccess(): Promise<RealtimeAccess>
+  /** POST /api/v1/message-actions */
+  postAction(request: MessageActionRequest): Promise<void>
   fetch?: typeof fetch
   onState(state: MailState): void
   /** Whether the app is in front when the session starts (it can be launched in the background). */
@@ -84,6 +97,44 @@ export class MailSession {
       this.update({ live: false })
       void open.realtime.stop()
     }
+  }
+
+  /**
+   * Reads, flags, archives, trashes or moves messages: the change shows at once and is undone for the messages the
+   * server did not take. Large selections go in batches; when a later batch fails, a PartialActionError carries what
+   * went through. Returns the messages before and after, for an undo.
+   */
+  async act(messageIds: string[], action: MessageAction, target: { folderId?: string; fromFolderId?: string } = {}): Promise<AppliedAction> {
+    const database = this.database
+    if (database === null || messageIds.length === 0) {
+      return { before: [], after: [] }
+    }
+    const applied = await database.applyAction(messageIds, action, target.folderId, target.fromFolderId)
+    this.changed()
+    let accepted = 0
+    try {
+      for (let start = 0; start < messageIds.length; start += MAX_MESSAGES_PER_ACTION) {
+        const request: MessageActionRequest = { messageIds: messageIds.slice(start, start + MAX_MESSAGES_PER_ACTION), action, ...target }
+        await this.deps.postAction(request)
+        accepted = start + request.messageIds.length
+      }
+    } catch (error) {
+      // Earlier batches went through; only the rest goes back.
+      await database.revertAction(appliedFor(applied, new Set(messageIds.slice(accepted))))
+      this.changed()
+      void this.syncNow()
+      if (accepted > 0) {
+        throw new PartialActionError(error, appliedFor(applied, new Set(messageIds.slice(0, accepted))), messageIds.length - accepted)
+      }
+      throw error
+    }
+    void this.syncNow()
+    return applied
+  }
+
+  /** The copy changed outside a pull (an action shown before the server confirms it): screens read it again. */
+  changed(): void {
+    this.update({ version: this.state.version + 1 })
   }
 
   syncNow(): Promise<void> {

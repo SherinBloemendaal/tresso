@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { ChangePage, SyncedMessage } from '@tresso/core'
+import { MissingFolderError, type ChangePage, type SyncedMessage } from '@tresso/core'
 import { MailDatabase, SCHEMA_VERSION } from '../mailDatabase'
 import type { Sql } from '../sql'
 import { memorySql } from './sqljs'
@@ -136,6 +136,30 @@ describe('MailDatabase on the device', () => {
 
     expect(await db.cursor()).toBe(10)
     expect((await db.thread('t1'))?.messages.map((m) => m.id)).toEqual(['m2', 'm1'])
+  })
+
+  it('shows actions at once and takes archived mail out of the inbox list', async () => {
+    const applied = await db.applyAction(['m1', 'm2'], 'archive')
+
+    expect(applied.after.map((m) => m.folderIds)).toEqual([['work-archive'], ['work-archive']])
+    expect((await db.inbox('work', 10)).map((c) => c.threadId)).toEqual([])
+    await db.applyAction(['m4'], 'flag')
+    expect((await db.thread('t3'))?.messages[0]?.flags.flagged).toBe(true)
+  })
+
+  it('says when there is nothing to trash into, and changes nothing', async () => {
+    await expect(db.applyAction(['m4'], 'trash')).rejects.toEqual(new MissingFolderError('kim@mail.example', 'Trash'))
+    expect((await db.thread('t3'))?.messages[0]?.folderIds).toEqual(['home-inbox'])
+  })
+
+  it('undoes an action the server refused, except where the server has spoken since', async () => {
+    const applied = await db.applyAction(['m2', 'm3'], 'move', 'work-archive')
+    await db.apply(page({ cursor: 11, messages: [message('m3', 't2', 'work', ['work-inbox'], '2026-10-19T10:00:00+00:00', { flags: seen })] }))
+
+    await db.revertAction(applied)
+
+    expect((await db.thread('t1'))?.messages.find((m) => m.id === 'm2')?.folderIds).toEqual(['work-inbox'])
+    expect((await db.thread('t2'))?.messages[0]).toMatchObject({ folderIds: ['work-inbox'], flags: { seen: true } })
   })
 
   it('refuses pages once closing, after storing the one in progress', async () => {

@@ -2,7 +2,18 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { AppState } from 'react-native'
 import { fetch as streamingFetch } from 'expo/fetch'
 import * as SecureStore from 'expo-secure-store'
-import type { ChangePage, ConversationSummary, MessageBody, RealtimeAccess, SyncedMailAccount, SyncedMessage, SyncedThread } from '@tresso/core'
+import {
+  type AppliedAction,
+  type ChangePage,
+  type ConversationSummary,
+  type MessageAction,
+  type MessageBody,
+  type RealtimeAccess,
+  type SyncedFolder,
+  type SyncedMailAccount,
+  type SyncedMessage,
+  type SyncedThread,
+} from '@tresso/core'
 import { useAuth } from '@/auth/AuthProvider'
 import { LAST_USER } from '@/auth/secureTokenStore'
 import { MailSession, type MailState } from '@/mail/mailSession'
@@ -14,6 +25,12 @@ const ME_RETRY_MS = 10_000
 
 interface Mail extends Omit<MailState, 'userId'> {
   mailAccounts(): Promise<SyncedMailAccount[]>
+  folders(): Promise<SyncedFolder[]>
+  /**
+   * Reads, flags, archives, trashes or moves messages: the change shows at once and is undone for the messages the
+   * server did not take. Large selections go in batches. Returns the messages before and after, for an undo.
+   */
+  act(messageIds: string[], action: MessageAction, target?: { folderId?: string; fromFolderId?: string }): Promise<AppliedAction>
   inbox(mailAccountId: string | null): Promise<ConversationSummary[]>
   thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null>
   body(messageId: string, allowRemoteContent: boolean): Promise<MessageBody>
@@ -37,6 +54,9 @@ export function MailProvider({ children }: { children: ReactNode }) {
         deleteSql,
         fetchPage: (since, limit) => auth.session.api<ChangePage>(`/api/v1/sync/changes?since=${since}&limit=${limit}`),
         fetchAccess: () => auth.session.api<RealtimeAccess>('/api/v1/realtime/token'),
+        postAction: async (request) => {
+          await auth.session.api('/api/v1/message-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) })
+        },
         // expo/fetch streams response bodies, which the realtime connection reads.
         fetch: streamingFetch as unknown as typeof fetch,
         onState: setState,
@@ -100,6 +120,11 @@ export function MailProvider({ children }: { children: ReactNode }) {
   }, [session])
 
   const mailAccounts = useCallback(async () => (await session.database?.mailAccounts()) ?? [], [session])
+  const folders = useCallback(async () => (await session.database?.folders()) ?? [], [session])
+  const act = useCallback(
+    (messageIds: string[], action: MessageAction, target: { folderId?: string; fromFolderId?: string } = {}) => session.act(messageIds, action, target),
+    [session],
+  )
   const inbox = useCallback(async (mailAccountId: string | null) => (await session.database?.inbox(mailAccountId, LIST_LIMIT)) ?? [], [session])
   const thread = useCallback(async (threadId: string) => (await session.database?.thread(threadId)) ?? null, [session])
   const body = useCallback(
@@ -110,8 +135,8 @@ export function MailProvider({ children }: { children: ReactNode }) {
   const syncNow = useCallback(() => session.syncNow(), [session])
   const { ready, version, syncState, syncError, live } = state
   const mail = useMemo<Mail>(
-    () => ({ ready, version, syncState, syncError: syncError ?? lookupError, live, mailAccounts, inbox, thread, body, syncNow }),
-    [ready, version, syncState, syncError, lookupError, live, mailAccounts, inbox, thread, body, syncNow],
+    () => ({ ready, version, syncState, syncError: syncError ?? lookupError, live, mailAccounts, folders, act, inbox, thread, body, syncNow }),
+    [ready, version, syncState, syncError, lookupError, live, mailAccounts, folders, act, inbox, thread, body, syncNow],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>
