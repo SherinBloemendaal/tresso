@@ -26,6 +26,8 @@ export interface MailSessionDeps {
   fetchAccess(): Promise<RealtimeAccess>
   fetch?: typeof fetch
   onState(state: MailState): void
+  /** Whether the app is in front when the session starts (it can be launched in the background). */
+  foreground?: boolean
 }
 
 interface Open {
@@ -51,9 +53,11 @@ export class MailSession {
   /** Goes up with every switch asked for: a switch that a newer one replaced stops where it is. */
   private wanted = 0
   private open: Open | null = null
-  private foreground = true
+  private foreground: boolean
 
-  constructor(private readonly deps: MailSessionDeps) {}
+  constructor(private readonly deps: MailSessionDeps) {
+    this.foreground = deps.foreground ?? true
+  }
 
   get database(): MailDatabase | null {
     return this.open?.database ?? null
@@ -154,8 +158,9 @@ export class MailSession {
     const opened = open
     this.open = opened
     this.update({ userId, ready: true, version: this.state.version + 1, syncError: null })
-    await this.pull(opened, () => engine.sync())
-    if (this.open === opened && this.foreground) {
+    // Not awaited: the copy on the device shows right away, and a switch (a sign-out) does not wait for the pull.
+    void this.pull(opened, () => engine.sync())
+    if (this.foreground) {
       opened.realtime.start()
     }
   }
