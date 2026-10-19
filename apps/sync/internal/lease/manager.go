@@ -109,6 +109,14 @@ func (m *Manager) reconcileLocked(ctx context.Context, accounts []api.Account) {
 	}
 
 	for id, r := range m.accounts {
+		// A syncer that ended on its own gave the account up (its login was refused). Forget it, so the account starts
+		// again once it is leased again: after the user fixed the password, the very next heartbeat may return it.
+		select {
+		case <-r.done:
+			delete(m.accounts, id)
+			continue
+		default:
+		}
 		if _, ok := leased[id]; !ok {
 			m.logger.Info("lease lost, stopping account", "account", id)
 			r.cancel()
