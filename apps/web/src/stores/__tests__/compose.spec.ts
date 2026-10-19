@@ -73,6 +73,10 @@ describe('compose store', () => {
           const file = init.body.get('file') as File
           return json({ id: 'f1', filename: file.name, contentType: file.type, size: file.size, scanStatus: 'pending', url: 'https://api.example.test/f1' }, 201)
         }
+        const draft = /^\/api\/v1\/drafts\/([^/]+)$/.exec(url.pathname)
+        if (draft !== null && method === 'GET') {
+          return json({ id: draft[1], version: 2, updatedAt: '2026-10-19T08:00:00Z', attachments: [{ id: 'f1', filename: 'notes.txt', contentType: 'text/plain', size: 8, scanStatus: 'pending', inline: false, contentId: null, url: 'https://api.example.test/f1?signed' }] })
+        }
         return json({ detail: 'unavailable' }, 503)
       }),
     )
@@ -137,8 +141,29 @@ describe('compose store', () => {
     const form = requests.find((r) => r.path.endsWith('/attachments'))?.body
     expect(form).toBeInstanceOf(FormData)
     expect(((form as FormData).get('file') as File).name).toBe('notes.txt')
-    expect(compose.draft?.attachments).toEqual([{ id: 'f1', filename: 'notes.txt', contentType: 'text/plain', size: 8, scanStatus: 'pending' }])
+    expect(compose.draft?.attachments).toEqual([{ id: 'f1', filename: 'notes.txt', contentType: 'text/plain', size: 8, scanStatus: 'pending', inline: false, contentId: null }])
     expect(compose.attaching).toEqual([])
+  })
+
+  it("opens a draft's file in a new tab that cannot reach back, and says so when the browser blocks the tab", async () => {
+    const compose = useComposeStore()
+    compose.openNew()
+    await compose.attach([new File(['Q4 notes'], 'notes.txt', { type: 'text/plain' })])
+    const tab = { opener: {} as unknown, location: { href: 'about:blank' }, close: vi.fn<() => void>() }
+    const open = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
+
+    await compose.openAttachment('f1')
+
+    expect(open).toHaveBeenCalledWith('about:blank', '_blank')
+    expect(tab.opener).toBeNull()
+    expect(tab.location.href).toBe('https://api.example.test/f1?signed')
+
+    open.mockReturnValue(null)
+    const before = window.location.href
+    await compose.openAttachment('f1')
+    expect(window.location.href).toBe(before)
+    expect(compose.notices.at(-1)).toMatchObject({ tone: 'error', text: 'The file could not be opened: the browser blocked the new tab.' })
+    open.mockRestore()
   })
 
   it('refuses to send without recipients', async () => {

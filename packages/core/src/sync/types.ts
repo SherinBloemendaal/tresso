@@ -110,11 +110,16 @@ export interface DraftAttachment {
   contentType: string
   size: number
   scanStatus: ScanStatus
+  /** Shown inside the text as cid:{contentId} (an image of a quoted original) rather than listed as a file. */
+  inline?: boolean
+  contentId?: string | null
 }
 
 /** A draft attachment with its download link: signed, valid for an hour, null while quarantined. */
 export interface DraftAttachmentLink extends DraftAttachment {
   url: string | null
+  /** The draft's version with this file, in the answer to adding it. */
+  draftVersion?: number | null
 }
 
 export interface SyncedDraft {

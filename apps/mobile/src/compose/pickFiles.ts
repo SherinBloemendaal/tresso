@@ -1,6 +1,7 @@
 import * as DocumentPicker from 'expo-document-picker'
 import * as ImagePicker from 'expo-image-picker'
 import type { AttachmentFile } from '@tresso/core'
+import { photoName, photoType } from './photoName'
 
 /**
  * What React Native's FormData takes for a file on the device: it reads the file at `uri` when the request is sent,
@@ -36,8 +37,9 @@ export async function pickPhotos(): Promise<AttachmentFile[]> {
     return []
   }
   return result.assets.map((asset, index) => {
-    const type = asset.mimeType ?? 'image/jpeg'
-    const name = asset.fileName ?? `Photo ${index + 1}.${type === 'image/png' ? 'png' : 'jpg'}`
+    const extension = asset.uri.split('/').pop()?.split('.').pop()?.toLowerCase()
+    const type = asset.mimeType ?? photoType(extension) ?? 'image/jpeg'
+    const name = photoName(asset.fileName ?? `Photo ${index + 1}`, type)
     const body: DeviceFile = { uri: asset.uri, name, type }
     return { name, type, size: asset.fileSize ?? 0, body }
   })

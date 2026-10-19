@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SyncedMessage } from './sync/types'
-import { composeBody, forwardSubject, parseAddresses, quotedOriginal, replyRecipients, replySubject, sendLaterOptions } from './compose'
+import { composeBody, forwardSubject, parseAddresses, quotedInlineImages, quotedOriginal, quoteWithContentId, replyRecipients, replySubject, sendLaterOptions, withInlineLinks } from './compose'
 
 function message(overrides: Partial<SyncedMessage> = {}): SyncedMessage {
   return {
@@ -121,5 +121,23 @@ describe('sendLaterOptions', () => {
   it('takes Monday a week ahead when it is Monday already', () => {
     const monday = sendLaterOptions(new Date(2026, 9, 19, 9, 0)).find((option) => option.key === 'mondayMorning')
     expect(monday?.at.getDate()).toBe(26)
+  })
+})
+
+describe('inline images in a quote', () => {
+  const url = 'https://api.example.test/content/attachments/a1?expires=1&signature=x'
+  const quote = `<blockquote><img src="${url.replace('&', '&amp;')}"></blockquote>`
+  const image = { id: 'a1', inline: true, contentId: 'logo@example.test', url }
+
+  it('finds the images a quote shows by their signed link', () => {
+    expect(quotedInlineImages(quote, [image, { ...image, id: 'a2', url: 'https://api.example.test/other' }, { ...image, id: 'a3', inline: false }])).toEqual([image])
+    expect(quotedInlineImages(quote, [{ ...image, contentId: null }])).toEqual([])
+  })
+
+  it('refers to an image by its content id, and shows it again through a fresh link', () => {
+    const sent = quoteWithContentId(quote, url, 'logo@example.test')
+    expect(sent).toBe('<blockquote><img src="cid:logo@example.test"></blockquote>')
+    expect(withInlineLinks(sent, [{ contentId: 'logo@example.test', url: 'https://fresh.test/a?b=1&c=2' }])).toBe('<blockquote><img src="https://fresh.test/a?b=1&amp;c=2"></blockquote>')
+    expect(withInlineLinks(sent, [{ contentId: 'logo@example.test', url: null }])).toBe(sent)
   })
 })

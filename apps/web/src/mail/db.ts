@@ -188,7 +188,7 @@ export class IndexedDbMailStore implements MailStore {
         case 'draft': {
           const local = await tx.objectStore('drafts').get(deleted.id)
           if (local !== undefined) {
-            const kept = deletedDraft(local)
+            const kept = deletedDraft(storedDraft(local))
             await (kept === null ? tx.objectStore('drafts').delete(deleted.id) : tx.objectStore('drafts').put(kept))
           }
           break

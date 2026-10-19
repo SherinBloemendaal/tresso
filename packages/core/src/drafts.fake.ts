@@ -25,6 +25,8 @@ export class FakeDraftApi implements DraftApi {
   duringFile: (() => Promise<void>) | null = null
   /** Every request fails as if the network were gone. */
   offline = false
+  /** Files of received messages that can be forwarded, by id; others come out as a PDF named after the id. */
+  readonly received = new Map<string, { filename: string; contentType: string; inline: boolean; contentId: string | null }>()
   private nextFile = 1
 
   async create(id: string, request: DraftRequest): Promise<SyncedDraft> {
@@ -67,10 +69,11 @@ export class FakeDraftApi implements DraftApi {
     this.calls.push(`forward ${id} ${attachmentId}`)
     const current = this.drafts.get(id)
     const existing = current?.attachments.find((attachment) => attachment.id === `forwarded-${attachmentId}`)
-    if (existing !== undefined) {
-      return { ...existing, url: null }
+    if (current !== undefined && existing !== undefined) {
+      return { ...existing, url: null, draftVersion: current.version }
     }
-    return this.addFile(id, `${attachmentId}.pdf`, 'application/pdf', 100, `forwarded-${attachmentId}`)
+    const source = this.received.get(attachmentId) ?? { filename: `${attachmentId}.pdf`, contentType: 'application/pdf', inline: false, contentId: null }
+    return this.addFile(id, source.filename, source.contentType, 100, `forwarded-${attachmentId}`, source.inline, source.contentId)
   }
 
   async detach(id: string, attachmentId: string): Promise<void> {
@@ -78,17 +81,19 @@ export class FakeDraftApi implements DraftApi {
     this.reachable()
     const current = this.drafts.get(id)
     if (current === undefined || !current.attachments.some((attachment) => attachment.id === attachmentId)) throw new ApiFailure(404)
-    this.drafts.set(id, { ...current, attachments: current.attachments.filter((attachment) => attachment.id !== attachmentId) })
+    this.drafts.set(id, { ...current, attachments: current.attachments.filter((attachment) => attachment.id !== attachmentId), version: current.version + 1 })
   }
 
-  private async addFile(id: string, filename: string, contentType: string, size: number, fileId = `file-${this.nextFile++}`): Promise<DraftAttachmentLink> {
+  private async addFile(id: string, filename: string, contentType: string, size: number, fileId = `file-${this.nextFile++}`, inline = false, contentId: string | null = null): Promise<DraftAttachmentLink> {
     await this.duringFile?.()
     this.reachable()
     const current = this.drafts.get(id)
     if (current === undefined) throw new ApiFailure(404)
-    const attachment = { id: fileId, filename, contentType, size, scanStatus: 'pending' as const }
-    this.drafts.set(id, { ...current, attachments: [...current.attachments, attachment] })
-    return { ...attachment, url: `https://api.example.test/content/draft-attachments/${fileId}?signed` }
+    const attachment = { id: fileId, filename, contentType, size, scanStatus: 'pending' as const, inline, contentId }
+    // Files are part of the draft: a change to them raises its version, as on the server.
+    const version = current.version + 1
+    this.drafts.set(id, { ...current, attachments: [...current.attachments, attachment], version })
+    return { ...attachment, url: `https://api.example.test/content/draft-attachments/${fileId}?signed`, draftVersion: version }
   }
 
   private reachable(): void {
