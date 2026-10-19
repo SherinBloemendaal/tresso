@@ -3,7 +3,11 @@ import { computed } from 'vue'
 import { RouterLink, type RouteLocationRaw } from 'vue-router'
 import type { Conversation } from '@/mail/db'
 import { dayLabel, senderName, shortTime } from '@/mail/format'
+import { useMailStore } from '@/stores/mail'
+import { useSelectionStore } from '@/stores/selection'
 import AppIcon from '@/components/AppIcon.vue'
+import BulkBar from '@/components/BulkBar.vue'
+import MenuButton from '@/components/MenuButton.vue'
 import SearchField from '@/components/SearchField.vue'
 import SenderAvatar from '@/components/SenderAvatar.vue'
 
@@ -17,6 +21,28 @@ const props = defineProps<{
   linkTo: (threadId: string) => RouteLocationRaw
 }>()
 const emit = defineEmits<{ showMore: [] }>()
+
+const mail = useMailStore()
+const selection = useSelectionStore()
+const DAY = 86_400_000
+const ages = [
+  { id: String(7 * DAY), label: 'Older than a week' },
+  { id: String(30 * DAY), label: 'Older than a month' },
+  { id: String(91 * DAY), label: 'Older than three months' },
+  { id: String(365 * DAY), label: 'Older than a year' },
+]
+
+function check(event: MouseEvent, threadId: string): void {
+  if (event.shiftKey) {
+    selection.extend(threadId, props.conversations.map((c) => c.threadId))
+    return
+  }
+  selection.toggle(threadId)
+}
+
+async function selectOlderThan(age: string): Promise<void> {
+  selection.set(await mail.threadsBefore(Date.now() - Number(age)))
+}
 
 const days = computed(() => {
   const groups: { label: string; conversations: Conversation[] }[] = []
@@ -37,37 +63,51 @@ const days = computed(() => {
 <template>
   <section class="list" :aria-label="title">
     <header class="header">
-      <h1>{{ title }}</h1>
+      <div class="title">
+        <h1>{{ title }}</h1>
+        <MenuButton label="Select" menu-label="Select conversations" :items="ages" :disabled="conversations.length === 0" @choose="selectOlderThan" />
+      </div>
       <SearchField />
     </header>
 
     <div class="scroll">
+      <BulkBar v-if="selection.active" :conversations="conversations" />
       <section v-for="day in days" :key="day.label" :aria-label="day.label">
         <h2 class="day">{{ day.label }}</h2>
-        <RouterLink
+        <div
           v-for="conversation in day.conversations"
           :key="conversation.threadId"
-          :to="linkTo(conversation.threadId)"
           class="row"
-          :class="{ unread: conversation.unreadCount > 0 }"
-          :aria-current="conversation.threadId === selectedThreadId ? 'true' : undefined"
+          :class="{ unread: conversation.unreadCount > 0, checked: selection.has(conversation.threadId) }"
         >
-          <span class="dot" :aria-label="conversation.unreadCount > 0 ? 'Unread' : undefined" />
-          <SenderAvatar :sender="conversation.senders[0] ?? { name: null, address: '?' }" />
-          <span class="body">
-            <span class="top">
-              <span class="senders">{{ conversation.senders.map(senderName).join(', ') }}</span>
-              <span v-if="conversation.messageCount > 1" class="count">{{ conversation.messageCount }}</span>
-              <span class="time">{{ shortTime(conversation.lastMessageAt) }}</span>
+          <button
+            type="button"
+            class="check"
+            role="checkbox"
+            :aria-checked="selection.has(conversation.threadId)"
+            :aria-label="`Select ${conversation.subject || '(no subject)'}`"
+            @click="check($event, conversation.threadId)"
+          >
+            <span class="box" aria-hidden="true" />
+          </button>
+          <RouterLink :to="linkTo(conversation.threadId)" class="link" :aria-current="conversation.threadId === selectedThreadId ? 'true' : undefined">
+            <span class="dot" :aria-label="conversation.unreadCount > 0 ? 'Unread' : undefined" />
+            <SenderAvatar :sender="conversation.senders[0] ?? { name: null, address: '?' }" />
+            <span class="body">
+              <span class="top">
+                <span class="senders">{{ conversation.senders.map(senderName).join(', ') }}</span>
+                <span v-if="conversation.messageCount > 1" class="count">{{ conversation.messageCount }}</span>
+                <span class="time">{{ shortTime(conversation.lastMessageAt) }}</span>
+              </span>
+              <span class="subject">
+                <AppIcon v-if="conversation.flagged" name="flag" :size="14" label="Flagged" />
+                <AppIcon v-if="conversation.hasAttachments" name="attachment" :size="14" label="Has attachments" />
+                {{ conversation.subject || '(no subject)' }}
+              </span>
+              <span class="snippet">{{ conversation.snippet }}</span>
             </span>
-            <span class="subject">
-              <AppIcon v-if="conversation.flagged" name="flag" :size="14" label="Flagged" />
-              <AppIcon v-if="conversation.hasAttachments" name="attachment" :size="14" label="Has attachments" />
-              {{ conversation.subject || '(no subject)' }}
-            </span>
-            <span class="snippet">{{ conversation.snippet }}</span>
-          </span>
-        </RouterLink>
+          </RouterLink>
+        </div>
       </section>
 
       <p v-if="conversations.length === 0 && !loading && !hasAccounts" class="empty">
@@ -111,18 +151,58 @@ h1 {
   font-weight: 600;
   color: var(--ink-3);
 }
+.title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
 .row {
   display: flex;
   align-items: flex-start;
+}
+.row:hover,
+.row.checked {
+  background: var(--ground);
+}
+.check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin: 14px 0 0 6px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.check:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+.box {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--line-strong);
+  border-radius: 4px;
+}
+.checked .box {
+  border-color: var(--focus);
+  background: var(--focus);
+}
+.link {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
   gap: 12px;
-  padding: 12px 20px 12px 12px;
+  padding: 12px 20px 12px 4px;
   color: var(--ink);
   text-decoration: none;
 }
-.row:hover {
-  background: var(--ground);
-}
-.row[aria-current='true'] {
+.link[aria-current='true'] {
   background: var(--selected);
   box-shadow: inset 3px 0 0 var(--focus);
 }

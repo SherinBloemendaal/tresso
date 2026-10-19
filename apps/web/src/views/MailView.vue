@@ -3,6 +3,7 @@ import { computed, watch } from 'vue'
 import { useRoute, type RouteLocationRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useMailStore } from '@/stores/mail'
+import { useSelectionStore } from '@/stores/selection'
 import ConversationList from '@/components/ConversationList.vue'
 import MailboxSidebar from '@/components/MailboxSidebar.vue'
 import ReadingPane from '@/components/ReadingPane.vue'
@@ -22,7 +23,16 @@ function linkTo(id: string): RouteLocationRaw {
     : { name: 'account-thread', params: { accountId: accountId.value, threadId: id } }
 }
 
-watch(accountId, (id) => void mail.showMailbox(id), { immediate: true })
+const selection = useSelectionStore()
+// A selection belongs to the mailbox it was made in.
+watch(
+  accountId,
+  (id) => {
+    selection.clear()
+    void mail.showMailbox(id)
+  },
+  { immediate: true },
+)
 
 function signOut(): void {
   auth.signOut()

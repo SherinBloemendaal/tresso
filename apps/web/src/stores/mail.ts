@@ -203,6 +203,20 @@ export const useMailStore = defineStore('mail', () => {
     return (await db.value?.thread(threadId)) ?? null
   }
 
+  /** Threads in the mailbox on screen from any of these senders (lower-case addresses), loaded in the list or not. */
+  async function threadsFrom(addresses: Set<string>): Promise<string[]> {
+    return (await db.value?.inboxThreadIds(mailbox.value, (c) => c.senders.some((sender) => addresses.has(sender.address.toLowerCase())))) ?? []
+  }
+
+  /** Threads in the mailbox on screen whose newest message is older than this moment (epoch ms). */
+  async function threadsBefore(moment: number): Promise<string[]> {
+    return (await db.value?.inboxThreadIds(mailbox.value, (c) => c.lastMessageAt < moment)) ?? []
+  }
+
+  async function messageIdsOf(threadIds: string[]): Promise<string[]> {
+    return (await db.value?.messageIdsOfThreads(threadIds)) ?? []
+  }
+
   async function folders(): Promise<SyncedFolder[]> {
     return (await db.value?.folders()) ?? []
   }
@@ -420,6 +434,9 @@ export const useMailStore = defineStore('mail', () => {
     showMailbox,
     showMore,
     thread,
+    threadsFrom,
+    threadsBefore,
+    messageIdsOf,
     folders,
     body,
     send,
