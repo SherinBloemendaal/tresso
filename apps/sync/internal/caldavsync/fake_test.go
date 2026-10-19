@@ -25,7 +25,17 @@ type fakeServer struct {
 	version    int
 	changes    []fakeChange
 	server     *httptest.Server
+	// pageSize cuts sync-collection answers short after that many resources (RFC 6578 3.6); 0 never does.
+	pageSize int
+	// syncStatus, when set, is the answer to every sync-collection request.
+	syncStatus int
+	// etagStatus, when set, is the answer to a PROPFIND for one resource.
+	etagStatus int
+	// shared adds a second calendar that refuses the login, as one shared with the user and taken back does.
+	shared bool
 }
+
+const sharedPath = "/dav/calendars/kim/shared/"
 
 type fakeObject struct {
 	etag string
@@ -67,7 +77,7 @@ func (f *fakeServer) remove(path string) {
 
 func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	user, password, ok := r.BasicAuth()
-	if !ok || user != "kim@company.example" || password != "app-password" {
+	if !ok || user != "kim@company.example" || password != "app-password" || strings.HasPrefix(r.URL.Path, sharedPath) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="calendars"`)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -88,7 +98,11 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		if f.syncTokens {
 			token = fmt.Sprintf("<d:sync-token>token-%d</d:sync-token>", f.version)
 		}
-		f.multistatus(w, `<d:response><d:href>`+homePath+`</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`+
+		shared := ""
+		if f.shared {
+			shared = `<d:response><d:href>` + sharedPath + `</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype><d:displayname>Shared</d:displayname><cs:getctag>shared-1</cs:getctag><c:supported-calendar-component-set><c:comp name="VEVENT"/></c:supported-calendar-component-set></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`
+		}
+		f.multistatus(w, shared+`<d:response><d:href>`+homePath+`</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`+
 			`<d:response><d:href>`+calendarPath+`</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype><d:displayname>Home</d:displayname>`+
 			`<a:calendar-color>#2E7D32FF</a:calendar-color><cs:getctag>ctag-`+fmt.Sprint(f.version)+`</cs:getctag>`+token+
 			`<c:supported-calendar-component-set><c:comp name="VEVENT"/></c:supported-calendar-component-set>`+
@@ -106,6 +120,8 @@ END:VCALENDAR</c:calendar-timezone>`+
 			responses += `<d:response><d:href>` + path + `</d:href><d:propstat><d:prop><d:getetag>` + xmlText(f.objects[path].etag) + `</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`
 		}
 		f.multistatus(w, responses)
+	case r.Method == "PROPFIND" && f.etagStatus != 0:
+		w.WriteHeader(f.etagStatus)
 	case r.Method == "PROPFIND":
 		object, ok := f.objects[r.URL.Path]
 		if !ok {
@@ -116,6 +132,10 @@ END:VCALENDAR</c:calendar-timezone>`+
 	case r.Method == "REPORT" && strings.Contains(string(body), "sync-collection"):
 		if !f.syncTokens {
 			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if f.syncStatus != 0 {
+			w.WriteHeader(f.syncStatus)
 			return
 		}
 		f.syncCollection(w, string(body))
@@ -189,10 +209,22 @@ func (f *fakeServer) syncCollection(w http.ResponseWriter, body string) {
 		}
 	}
 	changed := map[string]bool{}
+	upTo := f.version
+	truncated := ""
 	for _, change := range f.changes {
-		if change.version > since {
-			changed[change.path] = true
+		if change.version <= since || changed[change.path] {
+			continue
 		}
+		if f.pageSize > 0 && len(changed) == f.pageSize {
+			// The rest comes with the next request, from the token of the last change on this page.
+			truncated = `<d:response><d:href>` + calendarPath + `</d:href><d:status>HTTP/1.1 507 Insufficient Storage</d:status></d:response>`
+			break
+		}
+		changed[change.path] = true
+		upTo = change.version
+	}
+	if truncated == "" {
+		upTo = f.version
 	}
 	paths := make([]string, 0, len(changed))
 	for path := range changed {
@@ -210,7 +242,7 @@ func (f *fakeServer) syncCollection(w http.ResponseWriter, body string) {
 		}
 		responses += `<d:response><d:href>` + path + `</d:href><d:propstat><d:prop><d:getetag>` + xmlText(object.etag) + `</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`
 	}
-	f.multistatusWithToken(w, responses, fmt.Sprintf("token-%d", f.version))
+	f.multistatusWithToken(w, responses+truncated, fmt.Sprintf("token-%d", upTo))
 }
 
 func (f *fakeServer) paths() []string {
@@ -264,9 +296,11 @@ type fakeAPI struct {
 	etags      map[string]string // by remote id
 	batches    []api.ObjectBatch
 	inventory  [][]api.RemoteObject
+	partial    []bool
 	operations []api.CalendarOperation
 	results    map[string]api.OperationResult
 	statuses   []string
+	details    []string
 	password   string
 }
 
@@ -302,10 +336,11 @@ func (a *fakeAPI) Calendars(_ context.Context, _ string, list api.CalendarList) 
 	return states, nil
 }
 
-func (a *fakeAPI) CalendarInventory(_ context.Context, _, _, _ string, objects []api.RemoteObject) (api.InventoryResult, error) {
+func (a *fakeAPI) CalendarInventory(_ context.Context, _, _, _ string, objects []api.RemoteObject, partial bool) (api.InventoryResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.inventory = append(a.inventory, objects)
+	a.partial = append(a.partial, partial)
 	listed := map[string]bool{}
 	result := api.InventoryResult{Fetch: []string{}}
 	for _, object := range objects {
@@ -315,7 +350,7 @@ func (a *fakeAPI) CalendarInventory(_ context.Context, _, _, _ string, objects [
 		}
 	}
 	for remoteID := range a.etags {
-		if !listed[remoteID] {
+		if !listed[remoteID] && !partial {
 			delete(a.etags, remoteID)
 			result.Removed++
 		}
@@ -354,10 +389,11 @@ func (a *fakeAPI) ReportCalendarOperation(_ context.Context, _, operationID stri
 	return nil
 }
 
-func (a *fakeAPI) CalendarStatus(_ context.Context, _, _, status, _ string) error {
+func (a *fakeAPI) CalendarStatus(_ context.Context, _, _, status, detail string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.statuses = append(a.statuses, status)
+	a.details = append(a.details, detail)
 	return nil
 }
 

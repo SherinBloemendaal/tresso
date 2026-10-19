@@ -37,6 +37,8 @@ var (
 	ErrNotCalDAV = errors.New("no CalDAV server at this address")
 	// ErrInvalidSyncToken means the server no longer knows the sync token; a full listing is needed.
 	ErrInvalidSyncToken = errors.New("the sync token is no longer valid")
+	// ErrInsecure means a request would go over plain HTTP, which the login never does (outside local tests).
+	ErrInsecure = errors.New("refusing to talk to the calendar server over plain http")
 )
 
 // UntrustedError means a server asked for the login, but it is not a host the account trusts with its password.
@@ -49,7 +51,9 @@ func (e *UntrustedError) Error() string {
 }
 
 // Trust is where the mail password may go: exact hosts (the IMAP host, the CalDAV address the user entered or
-// confirmed) and the sites of known providers, whose CalDAV hosts vary (p42-caldav.icloud.com).
+// confirmed) and the sites of known providers, whose CalDAV hosts vary (p42-caldav.icloud.com). Besides these, a
+// trusted host may send Tresso to another host on its own site (example.com to caldav.example.com), by a redirect or
+// an href; see mayAuthenticate. A host on another site never gets it.
 type Trust struct {
 	hosts map[string]bool
 	sites map[string]bool
@@ -87,6 +91,8 @@ func (t Trust) allows(host string) bool {
 
 const (
 	maxMultistatus = 64 << 20
+	// maxDiscovery is what a discovery answer (principal, home) may be: a few properties, from servers not trusted yet.
+	maxDiscovery = 1 << 20
 	// MaxObject is the largest calendar object Tresso takes; the API refuses larger ones.
 	MaxObject = 1 << 20
 )
@@ -103,13 +109,15 @@ func (e *StatusError) Error() string {
 }
 
 type Client struct {
-	http     *http.Client
-	username string
-	password string
-	trust    Trust
+	http      *http.Client
+	username  string
+	password  string
+	trust     Trust
+	allowHTTP bool
 
 	mu sync.Mutex
-	// authed holds the trusted hosts that asked for the login and took it; they get it right away from then on.
+	// authed holds the origins (scheme, host and port) that asked for the login and took it; they get it right away
+	// from then on.
 	authed map[string]bool
 }
 
@@ -130,17 +138,17 @@ func New(dialer Dialer, username, password string, allowHTTP bool, trust Trust) 
 		Transport: transport,
 		Timeout:   2 * time.Minute,
 	}
-	c := &Client{http: client, username: username, password: password, trust: trust, authed: map[string]bool{}}
+	c := &Client{http: client, username: username, password: password, trust: trust, allowHTTP: allowHTTP, authed: map[string]bool{}}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return errors.New("too many redirects")
 		}
-		if req.URL.Scheme != "https" && !allowHTTP {
-			return fmt.Errorf("refusing a redirect to %s", req.URL.Scheme)
+		if !c.secure(req.URL) {
+			return fmt.Errorf("%w: a redirect to %s", ErrInsecure, req.URL.Scheme)
 		}
-		// http.Client drops the login on a redirect to another host. It goes along only to a host that took it
-		// before; any other host asks first (see request).
-		if c.hasAuthed(req.URL.Hostname()) {
+		// http.Client drops the login on a redirect to another host. It goes along only to an origin that took it
+		// before; any other one has to ask for it first, and then gets it only if it may (see request).
+		if c.hasAuthed(req.URL) {
 			req.SetBasicAuth(username, password)
 		}
 		return nil
@@ -148,16 +156,31 @@ func New(dialer Dialer, username, password string, allowHTTP bool, trust Trust) 
 	return c
 }
 
-func (c *Client) hasAuthed(host string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.authed[strings.ToLower(host)]
+// secure tells whether a request may go to the URL: https, or plain http in local test setups only.
+func (c *Client) secure(u *url.URL) bool {
+	return strings.EqualFold(u.Scheme, "https") || c.allowHTTP
 }
 
-func (c *Client) markAuthed(host string) {
+// origin is what the login is remembered for: the scheme, host and port, so https://host does not vouch for
+// http://host or another port.
+func origin(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"https": "443", "http": "80"}[strings.ToLower(u.Scheme)]
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Hostname()) + ":" + port
+}
+
+func (c *Client) hasAuthed(u *url.URL) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.authed[strings.ToLower(host)] = true
+	return c.authed[origin(u)]
+}
+
+func (c *Client) markAuthed(u *url.URL) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authed[origin(u)] = true
 }
 
 // trusts tells whether the account trusts the host of a URL with its password.
@@ -167,7 +190,7 @@ func (c *Client) trusts(target string) bool {
 }
 
 // mayAuthenticate tells whether the login may go to a host that asked for it: a trusted host, or one a trusted host
-// redirected to on its own site (example.com/.well-known/caldav to caldav.example.com).
+// sent Tresso to on its own site (a redirect or an href from example.com to caldav.example.com).
 func (c *Client) mayAuthenticate(origin, host string) bool {
 	return c.trust.allows(host) || (c.trust.allows(origin) && sameSite(origin, host))
 }
@@ -175,11 +198,15 @@ func (c *Client) mayAuthenticate(origin, host string) bool {
 // request sends a request with the login when the host took it before. When the server (after redirects) asks for
 // it, the request is sent once more with the login to where it ended up, if that host may have it.
 func (c *Client) request(ctx context.Context, method, target string, body []byte, header map[string]string) (*http.Response, error) {
-	origin, err := url.Parse(target)
+	start, err := url.Parse(target)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.send(ctx, method, target, body, header, c.hasAuthed(origin.Hostname()))
+	// Hrefs come from the server, so an http:// one is refused here, not only on redirects.
+	if !c.secure(start) {
+		return nil, fmt.Errorf("%w: %s", ErrInsecure, target)
+	}
+	resp, err := c.send(ctx, method, target, body, header, c.hasAuthed(start))
 	if err != nil || resp.StatusCode != http.StatusUnauthorized {
 		return resp, err
 	}
@@ -188,7 +215,10 @@ func (c *Client) request(ctx context.Context, method, target string, body []byte
 	if resp.Request.Header.Get("Authorization") != "" {
 		return nil, ErrUnauthorized
 	}
-	if !c.mayAuthenticate(origin.Hostname(), final.Hostname()) {
+	if !c.secure(final) {
+		return nil, fmt.Errorf("%w: %s", ErrInsecure, final)
+	}
+	if !c.mayAuthenticate(start.Hostname(), final.Hostname()) {
 		return nil, &UntrustedError{URL: final.String()}
 	}
 
@@ -200,7 +230,7 @@ func (c *Client) request(ctx context.Context, method, target string, body []byte
 		drain(resp)
 		return nil, ErrUnauthorized
 	}
-	c.markAuthed(final.Hostname())
+	c.markAuthed(final)
 	return resp, nil
 }
 
@@ -223,8 +253,13 @@ func (c *Client) send(ctx context.Context, method, target string, body []byte, h
 	return c.http.Do(req)
 }
 
-// multistatusRequest sends PROPFIND or REPORT and parses the 207 answer.
+// multistatusRequest sends PROPFIND or REPORT and parses the 207 answer, of at most maxMultistatus bytes.
 func (c *Client) multistatusRequest(ctx context.Context, method, target, depth, body string) (*multistatus, *url.URL, error) {
+	return c.multistatusRequestUpTo(ctx, method, target, depth, body, maxMultistatus)
+}
+
+// multistatusRequestUpTo is multistatusRequest with its own limit, for answers that are small by nature.
+func (c *Client) multistatusRequestUpTo(ctx context.Context, method, target, depth, body string, limit int64) (*multistatus, *url.URL, error) {
 	resp, err := c.request(ctx, method, target, []byte(xml.Header+body), map[string]string{"Content-Type": "application/xml; charset=utf-8", "Depth": depth})
 	if err != nil {
 		return nil, nil, err
@@ -238,7 +273,7 @@ func (c *Client) multistatusRequest(ctx context.Context, method, target, depth, 
 		return nil, nil, &StatusError{Method: method, URL: target, Status: resp.StatusCode}
 	}
 	var ms multistatus
-	if err := xml.NewDecoder(io.LimitReader(resp.Body, maxMultistatus)).Decode(&ms); err != nil {
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, limit)).Decode(&ms); err != nil {
 		return nil, nil, fmt.Errorf("%s %s: invalid multistatus: %w", method, target, err)
 	}
 	return &ms, resp.Request.URL, nil

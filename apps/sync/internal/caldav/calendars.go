@@ -35,9 +35,18 @@ type Account struct {
 // Open finds the principal and calendar home behind a context URL (a server root, a .well-known address or a
 // principal URL).
 func (c *Client) Open(ctx context.Context, contextURL string) (Account, error) {
-	ms, base, err := c.multistatusRequest(ctx, "PROPFIND", contextURL, "0", `<d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>`)
+	start, err := url.Parse(contextURL)
 	if err != nil {
 		return Account{}, err
+	}
+	ms, base, err := c.multistatusRequestUpTo(ctx, "PROPFIND", contextURL, "0", `<d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>`, maxDiscovery)
+	if err != nil {
+		return Account{}, err
+	}
+	// Where the server sent Tresso (a redirect) must be the same trusted site, or calendars from elsewhere would be
+	// synced into the account.
+	if !c.mayAuthenticate(start.Hostname(), base.Hostname()) {
+		return Account{}, &UntrustedError{URL: base.String()}
 	}
 	principal := ""
 	for _, r := range ms.Responses {
@@ -49,7 +58,7 @@ func (c *Client) Open(ctx context.Context, contextURL string) (Account, error) {
 		return Account{}, ErrNotCalDAV
 	}
 
-	ms, base, err = c.multistatusRequest(ctx, "PROPFIND", principal, "0", `<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-home-set/><c:schedule-default-calendar-URL/></d:prop></d:propfind>`)
+	ms, base, err = c.multistatusRequestUpTo(ctx, "PROPFIND", principal, "0", `<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-home-set/><c:schedule-default-calendar-URL/></d:prop></d:propfind>`, maxDiscovery)
 	if err != nil {
 		return Account{}, err
 	}
@@ -68,6 +77,9 @@ func (c *Client) Open(ctx context.Context, contextURL string) (Account, error) {
 	}
 	if account.HomeURL == "" {
 		return Account{}, ErrNotCalDAV
+	}
+	if home, err := url.Parse(account.HomeURL); err != nil || !c.mayAuthenticate(start.Hostname(), home.Hostname()) {
+		return Account{}, &UntrustedError{URL: account.HomeURL}
 	}
 	account.AutoSchedule = c.autoSchedule(ctx, account.HomeURL)
 	return account, nil
@@ -129,24 +141,30 @@ type Member struct {
 	Removed bool
 }
 
-// SyncCollection returns what changed since token (everything for an empty token) and the new token.
-func (c *Client) SyncCollection(ctx context.Context, calendarURL, token string) ([]Member, string, error) {
+// SyncCollection returns what changed since token (everything for an empty token), the new token, and whether the
+// server cut the answer short (RFC 6578 3.6: a 507 for the collection itself); then the caller asks again with the
+// new token for the rest.
+func (c *Client) SyncCollection(ctx context.Context, calendarURL, token string) ([]Member, string, bool, error) {
 	body := fmt.Sprintf(`<d:sync-collection xmlns:d="DAV:"><d:sync-token>%s</d:sync-token><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>`, escape(token))
 	ms, base, err := c.multistatusRequest(ctx, "REPORT", calendarURL, "0", body)
 	if err != nil {
 		var status *StatusError
 		if token != "" && errors.As(err, &status) && (status.Status == http.StatusForbidden || status.Status == http.StatusConflict) {
-			return nil, "", ErrInvalidSyncToken
+			return nil, "", false, ErrInvalidSyncToken
 		}
-		return nil, "", err
+		return nil, "", false, err
 	}
 	members := make([]Member, 0, len(ms.Responses))
+	truncated := false
 	for _, r := range ms.Responses {
 		if len(r.Hrefs) == 0 {
 			continue
 		}
 		href := resolve(base, r.Hrefs[0])
 		if sameURL(href, calendarURL) {
+			if statusCode(r.Status) == "507" {
+				truncated = true
+			}
 			continue
 		}
 		if statusCode(r.Status) == "404" {
@@ -159,7 +177,7 @@ func (c *Client) SyncCollection(ctx context.Context, calendarURL, token string) 
 		}
 		members = append(members, Member{Href: href, ETag: p.ETag})
 	}
-	return members, ms.SyncToken, nil
+	return members, ms.SyncToken, truncated, nil
 }
 
 // List returns every resource of a calendar with its ETag (for servers without sync-collection).
@@ -300,6 +318,7 @@ func (c *Client) Discover(ctx context.Context, emailAddress, imapHost string, re
 func (c *Client) discover(ctx context.Context, candidates []string) (Account, error) {
 	var lastErr error = ErrNotCalDAV
 	var unconfirmed string
+	var temporary error
 	for _, candidate := range candidates {
 		account, err := c.Open(ctx, candidate)
 		if err == nil && c.trusts(candidate) {
@@ -321,10 +340,18 @@ func (c *Client) discover(ctx context.Context, candidates []string) (Account, er
 		if errors.As(err, &untrusted) && unconfirmed == "" {
 			unconfirmed = candidate
 		}
+		if temporary == nil && IsTemporary(err) {
+			temporary = err
+		}
 		if ctx.Err() != nil {
 			return Account{}, ctx.Err()
 		}
 		lastErr = err
+	}
+	// A candidate that could not answer now (a timeout, a 5xx) may be the right one: try again soon rather than
+	// telling the user there is none, or asking them to confirm another.
+	if temporary != nil {
+		return Account{}, temporary
 	}
 	if unconfirmed != "" {
 		return Account{}, &ConfirmError{URL: unconfirmed}
@@ -419,4 +446,14 @@ func Candidates(ctx context.Context, emailAddress, imapHost string, resolver *ne
 		add("https://" + imapHost + "/.well-known/caldav")
 	}
 	return candidates
+}
+
+// IsTemporary tells whether an error may go away by itself: a timeout or a server error (5xx, 429).
+func IsTemporary(err error) bool {
+	var status *StatusError
+	if errors.As(err, &status) {
+		return status.Status >= 500 || status.Status == http.StatusTooManyRequests
+	}
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
 }

@@ -21,6 +21,7 @@ use App\Repository\CalendarOperationRepository;
 use App\Repository\CalendarRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\DependencyInjection\Attribute\Autowire;
 
 /**
  * What the worker reports about an account's provider calendars: the calendar list, the inventory of a calendar
@@ -37,11 +38,30 @@ final readonly class CalendarSynchronizer
         private CalendarOperationRepository $operations,
         private CalendarStore $store,
         private LoggerInterface $logger,
+        #[Autowire(env: 'bool:MAIL_ALLOW_UNSAFE_SERVERS')]
+        private bool $allowUnsafe,
     ) {
     }
 
+    /**
+     * The address the worker found becomes the one it sends the password to next time: never over plain HTTP (outside
+     * local test setups).
+     *
+     * @throws CalendarListRejected when the reported server address may not be stored
+     */
+    public function checkServer(CalendarListInput $input): void
+    {
+        if (null !== $input->serverUrl && 'https' !== strtolower((string) parse_url($input->serverUrl, \PHP_URL_SCHEME)) && !$this->allowUnsafe) {
+            throw new CalendarListRejected('The calendar server address must use https.');
+        }
+    }
+
+    /**
+     * @throws CalendarListRejected when the reported server address may not be stored
+     */
     public function syncCalendars(MailAccount $account, CalendarListInput $input): CalendarListResult
     {
+        $this->checkServer($input);
         $previousHost = null === $account->getCalendarServer() ? null : parse_url($account->getCalendarServer(), \PHP_URL_HOST);
         $host = null === $input->serverUrl ? $previousHost : parse_url($input->serverUrl, \PHP_URL_HOST);
         if (null !== $input->serverUrl) {
@@ -105,6 +125,9 @@ final readonly class CalendarSynchronizer
             }
         }
 
+        if ($input->partial) {
+            return new InventoryResult($fetch, 0);
+        }
         $gone = array_values(array_filter(array_keys($known), static fn (string $remoteId): bool => !isset($listed[$remoteId])));
         $removed = $this->removeRemote($calendar, $gone);
 
