@@ -36,7 +36,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
 
         [$until, $hasMore] = $this->boundary($userId, $since, $limit);
         if ($until === $since) {
-            return new SyncChanges($since, false, [], [], [], [], [], [], [], []);
+            return new SyncChanges($since, false, [], [], [], [], [], [], [], [], []);
         }
 
         $range = ['user' => $userId, 'since' => $since, 'until' => $until];
@@ -51,6 +51,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             $this->outgoingMessages($range),
             $this->signatures($range),
             $this->drafts($range),
+            $this->smartInboxes($range),
             $this->deleted($range),
         );
     }
@@ -79,6 +80,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 SELECT g.change_seq, COUNT(*) FROM signature g WHERE g.owner_id = :user AND g.change_seq > :since GROUP BY g.change_seq
                 UNION ALL
                 SELECT d.change_seq, COUNT(*) FROM draft d WHERE d.owner_id = :user AND d.change_seq > :since AND d.sending_as_id IS NULL GROUP BY d.change_seq
+                UNION ALL
+                SELECT c.change_seq, COUNT(*) FROM category c WHERE c.owner_id = :user AND c.change_seq > :since GROUP BY c.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -159,7 +162,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private function threads(array $range): array
     {
         $rows = $this->connection->fetchAllAssociative(
-            'SELECT t.id, t.mail_account_id, t.subject, t.message_count, t.last_message_at
+            'SELECT t.id, t.mail_account_id, t.subject, t.message_count, t.last_message_at, t.category_id, t.verdict, t.classification_reason
              FROM thread t JOIN mail_account a ON a.id = t.mail_account_id
              WHERE a.owner_id = :user AND t.change_seq > :since AND t.change_seq <= :until ORDER BY t.change_seq',
             $range,
@@ -171,6 +174,9 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'subject' => $r['subject'],
             'messageCount' => self::int($r['message_count']),
             'lastMessageAt' => self::date($r['last_message_at']),
+            'smartInboxId' => $r['category_id'],
+            'verdict' => $r['verdict'],
+            'classificationReason' => $r['classification_reason'],
         ], $rows);
     }
 
@@ -204,7 +210,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'receivedAt' => self::date($r['received_at']),
             'flags' => ['seen' => (bool) $r['seen'], 'flagged' => (bool) $r['flagged'], 'answered' => (bool) $r['answered'], 'draft' => (bool) $r['draft']],
             'hasAttachments' => (bool) $r['has_attachments'],
-            'categoryId' => $r['category_id'],
+            'smartInboxId' => $r['category_id'],
             'verdict' => $r['verdict'],
             'summary' => $r['summary'],
         ], $rows);
@@ -313,6 +319,31 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 'attachments' => $attachments[self::text($r['id'])] ?? [],
             ];
         }, $rows);
+    }
+
+    /**
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function smartInboxes(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT c.id, c.builtin, c.name, c.instructions, c.include_senders, c.exclude_senders, c.verdict, c.position
+             FROM category c WHERE c.owner_id = :user AND c.change_seq > :since AND c.change_seq <= :until ORDER BY c.change_seq',
+            $range,
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'builtin' => $r['builtin'],
+            'name' => $r['name'],
+            'instructions' => $r['instructions'],
+            'includeSenders' => json_decode(\is_string($r['include_senders']) ? $r['include_senders'] : '[]', true, flags: \JSON_THROW_ON_ERROR),
+            'excludeSenders' => json_decode(\is_string($r['exclude_senders']) ? $r['exclude_senders'] : '[]', true, flags: \JSON_THROW_ON_ERROR),
+            'verdict' => $r['verdict'],
+            'position' => self::int($r['position']),
+        ], $rows);
     }
 
     /**

@@ -13,4 +13,10 @@ enum Verdict: string
     case Delegate = 'delegate';
     case Know = 'know';
     case None = 'none';
+
+    /** @return list<string> */
+    public static function values(): array
+    {
+        return array_map(static fn (self $verdict): string => $verdict->value, self::cases());
+    }
 }

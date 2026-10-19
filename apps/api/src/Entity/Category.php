@@ -4,23 +4,36 @@ declare(strict_types=1);
 
 namespace App\Entity;
 
+use App\Classification\SenderPattern;
 use App\Enum\BuiltinCategory;
 use App\Enum\Verdict;
+use App\Repository\CategoryRepository;
+use App\Sync\Change\TracksChanges;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * A smart inbox category. Built-in categories are seeded per user so their instructions stay editable.
+ * A smart inbox (called a category in the schema). Built-in ones are created per user so their instructions and
+ * lists stay editable; custom ones are the user's own. Mail lands in exactly one smart inbox, whose verdict it gets
+ * unless a sender rule says otherwise.
  */
-#[ORM\Entity]
+#[ORM\Entity(repositoryClass: CategoryRepository::class)]
 #[ORM\UniqueConstraint(columns: ['owner_id', 'builtin'])]
-class Category
+#[ORM\Index(columns: ['owner_id', 'change_seq'])]
+class Category implements TracksChanges
 {
+    public const int NAME_MAX_LENGTH = 80;
+    public const int INSTRUCTIONS_MAX_LENGTH = 2000;
+    public const int SENDERS_MAX_COUNT = 500;
+
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
     private Uuid $id;
+
+    #[ORM\Column(type: Types::BIGINT, options: ['default' => 0])]
+    private int $changeSeq = 0;
 
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(nullable: false, onDelete: 'CASCADE')]
@@ -29,7 +42,7 @@ class Category
     #[ORM\Column(length: 16, nullable: true, enumType: BuiltinCategory::class)]
     private ?BuiltinCategory $builtin;
 
-    #[ORM\Column(length: 80)]
+    #[ORM\Column(length: self::NAME_MAX_LENGTH)]
     private string $name;
 
     /** Natural-language description the AI uses to recognise this category. */
@@ -93,6 +106,54 @@ class Category
         return $this->builtin;
     }
 
+    public function isBuiltin(): bool
+    {
+        return null !== $this->builtin;
+    }
+
+    /** Whether an entry of the include list covers this sender. */
+    public function includes(string $address): bool
+    {
+        return self::listMatches($this->includeSenders, $address);
+    }
+
+    /** Whether an entry of the exclude list covers this sender. The exclude list wins over everything else. */
+    public function excludes(string $address): bool
+    {
+        return self::listMatches($this->excludeSenders, $address);
+    }
+
+    /** Takes an exact entry off the exclude list, e.g. when the user moves mail from that sender here. */
+    public function stopExcluding(string $pattern): void
+    {
+        $pattern = SenderPattern::normalize($pattern);
+        if (\in_array($pattern, $this->excludeSenders, true)) {
+            $this->excludeSenders = array_values(array_filter($this->excludeSenders, static fn (string $entry): bool => $entry !== $pattern));
+        }
+    }
+
+    /**
+     * @param list<string> $patterns
+     *
+     * @return list<string>
+     */
+    private static function normalized(array $patterns): array
+    {
+        return array_values(array_unique(array_filter(array_map(SenderPattern::normalize(...), $patterns), static fn (string $p): bool => '' !== $p)));
+    }
+
+    /** @param list<string> $patterns */
+    private static function listMatches(array $patterns, string $address): bool
+    {
+        foreach ($patterns as $pattern) {
+            if (SenderPattern::matches($pattern, $address)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public function getName(): string
     {
         return $this->name;
@@ -122,7 +183,7 @@ class Category
     /** @param list<string> $includeSenders */
     public function setIncludeSenders(array $includeSenders): void
     {
-        $this->includeSenders = $includeSenders;
+        $this->includeSenders = self::normalized($includeSenders);
     }
 
     /** @return list<string> */
@@ -134,7 +195,7 @@ class Category
     /** @param list<string> $excludeSenders */
     public function setExcludeSenders(array $excludeSenders): void
     {
-        $this->excludeSenders = $excludeSenders;
+        $this->excludeSenders = self::normalized($excludeSenders);
     }
 
     public function getVerdict(): Verdict
@@ -185,5 +246,30 @@ class Category
     public function setPosition(int $position): void
     {
         $this->position = $position;
+    }
+
+    public function getChangeOwner(): User
+    {
+        return $this->owner;
+    }
+
+    public static function clientFields(): ?array
+    {
+        return ['builtin', 'name', 'instructions', 'includeSenders', 'excludeSenders', 'verdict', 'position'];
+    }
+
+    public static function changeType(): string
+    {
+        return 'smartInbox';
+    }
+
+    public function getChangeSeq(): int
+    {
+        return $this->changeSeq;
+    }
+
+    public function setChangeSeq(int $changeSeq): void
+    {
+        $this->changeSeq = $changeSeq;
     }
 }

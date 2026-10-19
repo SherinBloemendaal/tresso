@@ -22,6 +22,7 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Index(columns: ['mail_account_id', 'message_id_header'])]
 #[ORM\Index(columns: ['thread_id'])]
 #[ORM\Index(columns: ['mail_account_id', 'change_seq'])]
+#[ORM\Index(name: 'message_unclassified', columns: ['mail_account_id', 'received_at'], options: ['where' => '(classified_at IS NULL)'])]
 class Message implements TracksChanges
 {
     #[ORM\Id]
@@ -103,6 +104,7 @@ class Message implements TracksChanges
     #[ORM\Column(length: 512, nullable: true)]
     private ?string $summary = null;
 
+    /** When classification looked at this message; null while it waits for its turn. */
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $classifiedAt = null;
 
@@ -288,11 +290,11 @@ class Message implements TracksChanges
         return $this->classifiedAt;
     }
 
-    public function classify(?Category $category, Verdict $verdict, ?string $summary, \DateTimeImmutable $at): void
+    /** The smart inbox and verdict classification gave this message. The thread takes those of its newest one. */
+    public function classify(Category $category, Verdict $verdict, \DateTimeImmutable $at): void
     {
         $this->category = $category;
         $this->verdict = $verdict;
-        $this->summary = $summary;
         $this->classifiedAt = $at;
     }
 

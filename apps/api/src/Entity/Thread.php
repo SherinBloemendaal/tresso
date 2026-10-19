@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Entity;
 
+use App\Classification\ClassificationReason;
+use App\Enum\Verdict;
 use App\Mail\SubjectNormalizer;
 use App\Sync\Change\TracksChanges;
 use Doctrine\DBAL\Types\Types;
@@ -40,6 +42,21 @@ class Thread implements TracksChanges
 
     #[ORM\Column]
     private int $messageCount = 0;
+
+    /** The smart inbox the conversation is in; null until its first incoming message was classified. */
+    #[ORM\ManyToOne]
+    #[ORM\JoinColumn(onDelete: 'SET NULL')]
+    private ?Category $category = null;
+
+    #[ORM\Column(length: 16, nullable: true, enumType: Verdict::class)]
+    private ?Verdict $verdict = null;
+
+    /** Why the conversation is where it is; see {@see ClassificationReason}. */
+    #[ORM\Column(length: 32, nullable: true)]
+    private ?string $classificationReason = null;
+
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $classifiedAt = null;
 
     public function __construct(MailAccount $mailAccount, string $subject, \DateTimeImmutable $lastMessageAt)
     {
@@ -99,6 +116,40 @@ class Thread implements TracksChanges
         }
     }
 
+    public function getCategory(): ?Category
+    {
+        return $this->category;
+    }
+
+    public function getVerdict(): ?Verdict
+    {
+        return $this->verdict;
+    }
+
+    public function getClassificationReason(): ?string
+    {
+        return $this->classificationReason;
+    }
+
+    public function getClassifiedAt(): ?\DateTimeImmutable
+    {
+        return $this->classifiedAt;
+    }
+
+    /** Whether the user put the conversation where it is; automatic classification then leaves it alone. */
+    public function isClassifiedByUser(): bool
+    {
+        return ClassificationReason::USER === $this->classificationReason;
+    }
+
+    public function classify(Category $category, Verdict $verdict, string $reason, \DateTimeImmutable $at): void
+    {
+        $this->category = $category;
+        $this->verdict = $verdict;
+        $this->classificationReason = $reason;
+        $this->classifiedAt = $at;
+    }
+
     public function getChangeOwner(): User
     {
         return $this->mailAccount->getOwner();
@@ -106,7 +157,7 @@ class Thread implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        return ['subject', 'messageCount', 'lastMessageAt'];
+        return ['subject', 'messageCount', 'lastMessageAt', 'category', 'verdict', 'classificationReason'];
     }
 
     public static function changeType(): string
