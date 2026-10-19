@@ -134,6 +134,8 @@ jobs:
       - name: Mobile
         working-directory: apps/mobile
         run: |
+          npm run build:editor
+          git diff --exit-code -- src/compose/editorBundle.generated.ts || { echo "The editor bundle is out of date: run npm run build:editor in apps/mobile."; exit 1; }
           npx vitest run
           npx tsc --noEmit
           npx eslint --max-warnings 0 .
