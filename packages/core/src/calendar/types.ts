@@ -17,6 +17,8 @@ export interface SyncedCalendar {
   writable: boolean
   isDefault: boolean
   visible: boolean
+  /** A work calendar: its notifications keep to the user's working hours. */
+  work: boolean
   /** The provider sends invitations and replies itself. */
   providerSchedules: boolean
   position: number
@@ -93,4 +95,6 @@ export interface SyncedCalendarEvent {
   travelMinutes: number | null
   /** No reminders of its own: the user's default rules apply. */
   defaultReminders: boolean
+  /** Its reminders reach the user also in quiet and outside working hours. */
+  important: boolean
 }
