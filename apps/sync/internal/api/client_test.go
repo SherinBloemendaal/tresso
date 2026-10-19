@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -162,5 +163,47 @@ func TestRevokedTokenIsReplacedAndTheRequestRetried(t *testing.T) {
 	defer srv2.Close()
 	if _, err := New(context.Background(), srv2.URL, srv2.URL+"/oauth/token", "a", "b").Lease(context.Background(), "w1", 1); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Errorf("expected a 401 error, got %v", err)
+	}
+}
+
+func TestMailboxChangesAreClaimedAndReported(t *testing.T) {
+	var reported map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/internal/sync/accounts/acc-1/mailbox-changes/claim":
+			_, _ = w.Write([]byte(`{"changes":[` +
+				`{"id":"c1","kind":"flags","seen":true,"flagged":null,"locations":[{"folder":"INBOX","uidValidity":4294967295,"remoteUid":"7"}],"source":null,"target":null},` +
+				`{"id":"c2","kind":"move","seen":null,"flagged":null,"locations":[],"source":{"folder":"INBOX","uidValidity":1,"remoteUid":"7"},"target":{"folder":"Archive"}}]}`))
+		case "/internal/sync/accounts/acc-1/mailbox-changes/c2/report":
+			_ = json.NewDecoder(r.Body).Decode(&reported)
+			_, _ = w.Write([]byte(`{"accepted":true}`))
+		case "/internal/sync/accounts/acc-1/mailbox-changes/c3/report":
+			http.Error(w, `{"detail":"claim lost"}`, http.StatusConflict)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	client := NewWithHTTPClient(srv.URL, srv.Client())
+
+	changes, err := client.ClaimMailbox(context.Background(), "acc-1", "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 2 || changes[0].Kind != MailboxFlags || *changes[0].Seen != true || changes[0].Flagged != nil || *changes[0].Locations[0].UIDValidity != 4294967295 {
+		t.Fatalf("flag change = %+v", changes[0])
+	}
+	if changes[1].Source == nil || changes[1].Source.RemoteUID != "7" || changes[1].Target.Folder != "Archive" {
+		t.Fatalf("move = %+v", changes[1])
+	}
+
+	if err := client.ReportMailbox(context.Background(), "acc-1", "c2", "w1", MailboxDone, "", "12"); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(reported) != "map[outcome:done remoteUid:12 workerId:w1]" {
+		t.Errorf("report body = %v", reported)
+	}
+	if err := client.ReportMailbox(context.Background(), "acc-1", "c3", "w1", OutcomeFailed, "NO", ""); !errors.Is(err, ErrClaimLost) {
+		t.Errorf("a lost claim is reported as such, got %v", err)
 	}
 }

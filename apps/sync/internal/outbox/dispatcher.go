@@ -1,16 +1,21 @@
 // Package outbox does the account work users wait for: for each account this worker leases, it sends the mail that is
-// due (SMTP, a copy in Sent, the outcome reported) and keeps the Drafts folder in step with the user's drafts.
+// due (SMTP, a copy in Sent, the outcome reported), keeps the Drafts folder in step with the user's drafts, and makes
+// the user's changes to messages (read, flagged, moved) on the server.
 package outbox
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/emersion/go-imap/v2"
+
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/imapsync"
 	"tresso/sync/internal/smtpsend"
 	"tresso/sync/internal/storage"
 )
@@ -23,6 +28,8 @@ type API interface {
 	ClaimDrafts(ctx context.Context, accountID, workerID string) (api.DraftWork, error)
 	ReportDraftFiled(ctx context.Context, accountID, draftID, workerID string, version int, messageID string) error
 	ReportDraftRemoved(ctx context.Context, accountID, removalID, workerID string) error
+	ClaimMailbox(ctx context.Context, accountID, workerID string) ([]api.MailboxChange, error)
+	ReportMailbox(ctx context.Context, accountID, changeID, workerID, outcome, errorText, remoteUID string) error
 }
 
 // SentStore is the account's Sent folder.
@@ -39,6 +46,16 @@ type DraftsStore interface {
 	Close()
 }
 
+// MailboxStore makes changes to the account's messages on the server.
+type MailboxStore interface {
+	SetFlags(location api.MailboxLocation, seen, flagged *bool) error
+	Move(source api.MailboxLocation, target string) (string, error)
+	Close()
+}
+
+// OpenMailboxFunc connects for making changes; imapsync.OpenMailbox in production.
+type OpenMailboxFunc func(ctx context.Context, credentials api.Credentials) (MailboxStore, error)
+
 // OpenDraftsFunc opens the account's Drafts folder, creating it when there is none.
 type OpenDraftsFunc func(ctx context.Context, credentials api.Credentials) (DraftsStore, error)
 
@@ -54,6 +71,7 @@ type Dispatcher struct {
 	send       SendFunc
 	openSent   OpenSentFunc
 	openDrafts OpenDraftsFunc
+	openMail   OpenMailboxFunc
 	workerID   string
 	logger     *slog.Logger
 
@@ -64,8 +82,8 @@ type Dispatcher struct {
 
 type run struct{ again bool }
 
-func NewDispatcher(client API, store storage.Reader, send SendFunc, openSent OpenSentFunc, openDrafts OpenDraftsFunc, workerID string, logger *slog.Logger) *Dispatcher {
-	return &Dispatcher{api: client, store: store, send: send, openSent: openSent, openDrafts: openDrafts, workerID: workerID, logger: logger, running: map[string]*run{}}
+func NewDispatcher(client API, store storage.Reader, send SendFunc, openSent OpenSentFunc, openDrafts OpenDraftsFunc, openMail OpenMailboxFunc, workerID string, logger *slog.Logger) *Dispatcher {
+	return &Dispatcher{api: client, store: store, send: send, openSent: openSent, openDrafts: openDrafts, openMail: openMail, workerID: workerID, logger: logger, running: map[string]*run{}}
 }
 
 // Trigger makes the account's due mail go out. Runs for one account never overlap: a trigger during a run makes that
@@ -116,6 +134,7 @@ func (d *Dispatcher) process(ctx context.Context, accountID string) {
 	}
 	d.sendOutbox(ctx, logger, credentials, password)
 	d.fileDrafts(ctx, logger, credentials)
+	d.changeMailbox(ctx, logger, credentials)
 }
 
 func (d *Dispatcher) sendOutbox(ctx context.Context, logger *slog.Logger, credentials api.Credentials, password string) {
@@ -181,6 +200,90 @@ func (d *Dispatcher) fileDrafts(ctx context.Context, logger *slog.Logger, creden
 			logger.Warn("reporting the removed draft copy failed", "removal", removal.ID, "error", err)
 		}
 	}
+}
+
+// changeMailbox makes the user's changes to messages on the server, in the order they were made. A refusal is
+// reported, so Tresso undoes the change; when the connection fails, the rest is left unreported and comes back once
+// the claim expires, without counting as a failed attempt.
+func (d *Dispatcher) changeMailbox(ctx context.Context, logger *slog.Logger, credentials api.Credentials) {
+	changes, err := d.api.ClaimMailbox(ctx, credentials.AccountID, d.workerID)
+	if err != nil {
+		logger.Warn("claiming changes to messages failed", "error", err)
+		return
+	}
+	if len(changes) == 0 {
+		return
+	}
+	connection := &lazy[MailboxStore]{open: func() (MailboxStore, error) { return d.openMail(ctx, credentials) }}
+	defer connection.close()
+	mailbox, err := connection.get()
+	if err != nil {
+		logger.Warn("connecting to make changes to messages failed", "error", err)
+		return
+	}
+
+	for _, change := range changes {
+		changeLogger := logger.With("change", change.ID, "kind", change.Kind)
+		remoteUID, err := applyChange(mailbox, change)
+		outcome, text := api.MailboxDone, ""
+		if err != nil {
+			if !refused(err) {
+				changeLogger.Warn("making a change to a message failed; it comes back later", "error", err)
+				return
+			}
+			outcome, text = api.OutcomeFailed, err.Error()
+			if retryable(change, err) {
+				outcome = api.OutcomeRetry
+			}
+			changeLogger.Warn("the server did not make a change to a message", "outcome", outcome, "error", err)
+		}
+		if err := d.api.ReportMailbox(ctx, credentials.AccountID, change.ID, d.workerID, outcome, text, remoteUID); err != nil {
+			changeLogger.Warn("reporting a change to a message failed", "error", err)
+		}
+	}
+}
+
+func applyChange(mailbox MailboxStore, change api.MailboxChange) (string, error) {
+	switch change.Kind {
+	case api.MailboxFlags:
+		for _, location := range change.Locations {
+			if err := mailbox.SetFlags(location, change.Seen, change.Flagged); err != nil {
+				return "", err
+			}
+		}
+		return "", nil
+	case api.MailboxMove:
+		if change.Source == nil || change.Target == nil {
+			return "", fmt.Errorf("%w: a move without source or target", errInvalidChange)
+		}
+		return mailbox.Move(*change.Source, change.Target.Folder)
+	}
+	return "", fmt.Errorf("%w: unknown kind %q", errInvalidChange, change.Kind)
+}
+
+var errInvalidChange = errors.New("invalid change")
+
+// refused reports whether the server answered (or the change could not be made as asked) rather than the connection
+// failing: only an answer is worth reporting.
+func refused(err error) bool {
+	var response *imap.Error
+	return errors.As(err, &response) || errors.Is(err, imapsync.ErrFolderReset) || errors.Is(err, imapsync.ErrMessageGone) || errors.Is(err, errInvalidChange)
+}
+
+// retryable reports whether a refusal may pass: the server is busy, or a flag change met a folder that was reset
+// (the folder sync relearns its uids, after which the change applies to them).
+func retryable(change api.MailboxChange, err error) bool {
+	if errors.Is(err, imapsync.ErrFolderReset) {
+		return change.Kind == api.MailboxFlags
+	}
+	var response *imap.Error
+	if errors.As(err, &response) {
+		switch response.Code {
+		case imap.ResponseCodeUnavailable, imap.ResponseCodeInUse, imap.ResponseCodeLimit, imap.ResponseCodeServerBug, imap.ResponseCodeContactAdmin:
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, credentials api.Credentials, password string, sent *lazy[SentStore], message api.OutgoingMessage) {

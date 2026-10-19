@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emersion/go-imap/v2"
+
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/imapsync"
 	"tresso/sync/internal/smtpsend"
 	"tresso/sync/internal/storage"
 )
@@ -19,6 +22,10 @@ import (
 type report struct {
 	id, outcome, text string
 	copied            bool
+}
+
+type mailboxReport struct {
+	id, outcome, text, remoteUID string
 }
 
 type fakeAPI struct {
@@ -33,6 +40,23 @@ type fakeAPI struct {
 	drafts   api.DraftWork
 	filed    []string
 	removed  []string
+	changes  []api.MailboxChange
+	changed  []mailboxReport
+}
+
+func (f *fakeAPI) ClaimMailbox(context.Context, string, string) ([]api.MailboxChange, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	claimed := f.changes
+	f.changes = nil
+	return claimed, nil
+}
+
+func (f *fakeAPI) ReportMailbox(_ context.Context, _, changeID, _, outcome, text, remoteUID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.changed = append(f.changed, mailboxReport{changeID, outcome, text, remoteUID})
+	return nil
 }
 
 func (f *fakeAPI) ClaimDrafts(context.Context, string, string) (api.DraftWork, error) {
@@ -125,19 +149,48 @@ func (s *fakeDrafts) Remove(messageID string) error {
 }
 func (s *fakeDrafts) Close() {}
 
+// fakeMailbox records what it is asked to do and answers with the error queued for that change, if any.
+type fakeMailbox struct {
+	log    []string
+	errors map[string]error
+}
+
+func (m *fakeMailbox) SetFlags(location api.MailboxLocation, seen, flagged *bool) error {
+	m.log = append(m.log, fmt.Sprintf("flags %s/%s seen=%v flagged=%v", location.Folder, location.RemoteUID, show(seen), show(flagged)))
+	return m.errors["flags "+location.Folder+"/"+location.RemoteUID]
+}
+
+func (m *fakeMailbox) Move(source api.MailboxLocation, target string) (string, error) {
+	m.log = append(m.log, fmt.Sprintf("move %s/%s to %s", source.Folder, source.RemoteUID, target))
+	if err := m.errors["move "+source.Folder+"/"+source.RemoteUID]; err != nil {
+		return "", err
+	}
+	return "77", nil
+}
+
+func (m *fakeMailbox) Close() {}
+
+func show(flag *bool) string {
+	if flag == nil {
+		return "-"
+	}
+	return fmt.Sprint(*flag)
+}
+
 type harness struct {
-	api    *fakeAPI
-	sent   *fakeSent
-	drafts *fakeDrafts
-	store  *storage.Memory
-	sends  []smtpsend.Envelope
-	fail   error
-	mu     sync.Mutex
-	d      *Dispatcher
+	api     *fakeAPI
+	sent    *fakeSent
+	drafts  *fakeDrafts
+	mailbox *fakeMailbox
+	store   *storage.Memory
+	sends   []smtpsend.Envelope
+	fail    error
+	mu      sync.Mutex
+	d       *Dispatcher
 }
 
 func newHarness(messages ...api.OutgoingMessage) *harness {
-	h := &harness{api: &fakeAPI{smtpHost: "smtp.company.example", queue: [][]api.OutgoingMessage{messages}}, sent: &fakeSent{contains: map[string]bool{}}, drafts: &fakeDrafts{}, store: storage.NewMemory()}
+	h := &harness{api: &fakeAPI{smtpHost: "smtp.company.example", queue: [][]api.OutgoingMessage{messages}}, sent: &fakeSent{contains: map[string]bool{}}, drafts: &fakeDrafts{}, mailbox: &fakeMailbox{errors: map[string]error{}}, store: storage.NewMemory()}
 	_ = h.store.PutIfAbsent(context.Background(), "outgoing/ab/raw1", []byte("Subject: Hi\r\n\r\nHello\r\n"), "message/rfc822")
 	send := func(_ context.Context, _ api.ServerSettings, _, _ string, envelope smtpsend.Envelope, _ []byte) error {
 		h.mu.Lock()
@@ -152,7 +205,8 @@ func newHarness(messages ...api.OutgoingMessage) *harness {
 		return h.sent, nil
 	}
 	openDrafts := func(context.Context, api.Credentials) (DraftsStore, error) { return h.drafts, nil }
-	h.d = NewDispatcher(h.api, h.store, send, open, openDrafts, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	openMailbox := func(context.Context, api.Credentials) (MailboxStore, error) { return h.mailbox, nil }
+	h.d = NewDispatcher(h.api, h.store, send, open, openDrafts, openMailbox, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return h
 }
 
@@ -315,3 +369,81 @@ func TestAFailedDraftCopyIsNotReported(t *testing.T) {
 		t.Errorf("filed = %v; the claim must expire so the work comes back", h.api.filed)
 	}
 }
+
+func location(folder, uid string) api.MailboxLocation {
+	validity := uint32(1)
+	return api.MailboxLocation{Folder: folder, UIDValidity: &validity, RemoteUID: uid}
+}
+
+func TestMakesTheUsersChangesInOrderAndReportsThem(t *testing.T) {
+	h := newHarness()
+	yes := true
+	inbox := location("INBOX", "1")
+	h.api.changes = []api.MailboxChange{
+		{ID: "c1", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{inbox, location("Projects", "4")}},
+		{ID: "c2", Kind: api.MailboxMove, Source: &inbox, Target: &api.MailboxTarget{Folder: "Archive"}},
+	}
+
+	h.run()
+
+	wantLog := []string{"flags INBOX/1 seen=true flagged=-", "flags Projects/4 seen=true flagged=-", "move INBOX/1 to Archive"}
+	if !slices.Equal(h.mailbox.log, wantLog) {
+		t.Errorf("log = %q, want %q", h.mailbox.log, wantLog)
+	}
+	want := []mailboxReport{{"c1", api.MailboxDone, "", ""}, {"c2", api.MailboxDone, "", "77"}}
+	if !slices.Equal(h.api.changed, want) {
+		t.Errorf("reports = %+v, want %+v", h.api.changed, want)
+	}
+}
+
+func TestReportsWhatTheServerRefusesOrPutsOff(t *testing.T) {
+	h := newHarness()
+	yes := true
+	inbox, trash, gone := location("INBOX", "1"), location("Trash", "2"), location("INBOX", "3")
+	h.api.changes = []api.MailboxChange{
+		{ID: "refused", Kind: api.MailboxMove, Source: &inbox, Target: &api.MailboxTarget{Folder: "Nowhere"}},
+		{ID: "busy", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{trash}},
+		{ID: "gone", Kind: api.MailboxMove, Source: &gone, Target: &api.MailboxTarget{Folder: "Archive"}},
+		{ID: "reset-flags", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("Old", "5")}},
+		{ID: "reset-move", Kind: api.MailboxMove, Source: ptr(location("Old", "6")), Target: &api.MailboxTarget{Folder: "Archive"}},
+	}
+	h.mailbox.errors["move INBOX/1"] = &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeTryCreate, Text: "Mailbox does not exist"}
+	h.mailbox.errors["flags Trash/2"] = &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeUnavailable, Text: "Try later"}
+	h.mailbox.errors["move INBOX/3"] = imapsync.ErrMessageGone
+	h.mailbox.errors["flags Old/5"] = imapsync.ErrFolderReset
+	h.mailbox.errors["move Old/6"] = imapsync.ErrFolderReset
+
+	h.run()
+
+	outcomes := map[string]string{}
+	for _, r := range h.api.changed {
+		outcomes[r.id] = r.outcome
+	}
+	want := map[string]string{"refused": api.OutcomeFailed, "busy": api.OutcomeRetry, "gone": api.OutcomeFailed, "reset-flags": api.OutcomeRetry, "reset-move": api.OutcomeFailed}
+	if fmt.Sprint(outcomes) != fmt.Sprint(want) {
+		t.Errorf("outcomes = %v, want %v", outcomes, want)
+	}
+	if h.api.changed[0].text == "" {
+		t.Error("a refusal carries the reason")
+	}
+}
+
+func TestAConnectionFailureLeavesTheRestForLater(t *testing.T) {
+	h := newHarness()
+	yes := true
+	h.api.changes = []api.MailboxChange{
+		{ID: "c1", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "1")}},
+		{ID: "c2", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "2")}},
+		{ID: "c3", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "3")}},
+	}
+	h.mailbox.errors["flags INBOX/2"] = io.ErrUnexpectedEOF
+
+	h.run()
+
+	want := []mailboxReport{{"c1", api.MailboxDone, "", ""}}
+	if !slices.Equal(h.api.changed, want) {
+		t.Errorf("reports = %+v, want %+v: the claims of the rest expire and come back", h.api.changed, want)
+	}
+}
+
+func ptr[T any](value T) *T { return &value }
