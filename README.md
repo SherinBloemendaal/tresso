@@ -106,6 +106,27 @@ npm run dev:desktop
 npm run dev:mobile
 ```
 
+### Gmail and Microsoft 365
+
+Connecting Gmail and Microsoft 365 accounts needs an OAuth app at Google and at Microsoft, registered by whoever runs
+the server. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#registering-the-oauth-apps) lists the steps. In short:
+
+- Redirect URIs: `http://localhost:8080/connect/google/callback` and `http://localhost:8080/connect/microsoft/callback`
+  for the Docker stack (`<API_PUBLIC_URL>/connect/<provider>/callback` elsewhere).
+- Scopes: Google `openid email profile https://www.googleapis.com/auth/gmail.modify` (with the Gmail API enabled);
+  Microsoft Graph delegated `openid email profile offline_access User.Read Mail.ReadWrite Mail.Send`.
+- Put the client ids and secrets in `apps/api/.env.local`:
+
+  ```dotenv
+  GOOGLE_OAUTH_CLIENT_ID=...
+  GOOGLE_OAUTH_CLIENT_SECRET=...
+  MICROSOFT_OAUTH_CLIENT_ID=...
+  MICROSOFT_OAUTH_CLIENT_SECRET=...
+  MICROSOFT_OAUTH_TENANT=common
+  ```
+
+Without them the web app only offers IMAP accounts.
+
 ### Local services
 
 | Service | Address |

@@ -40,7 +40,7 @@ Delivered in steps, each its own pull request:
   results with highlights in the web client
 - [x] 1.5e Drafts synced across devices and filed in the account's Drafts folder, with conflicts between devices
   settled by the user
-- [ ] 1.6 Gmail and Microsoft 365: OAuth connection, Gmail API and Microsoft Graph sync
+- [x] 1.6 Gmail and Microsoft 365: OAuth connection, Gmail API and Microsoft Graph sync
 - [x] 1.7 Message actions: read, flag, archive, trash and move from the clients, made on the server by the worker
 
 ## Calendar
