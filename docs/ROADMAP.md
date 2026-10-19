@@ -92,7 +92,8 @@ Tresso Cloud: AI classification with feedback learning, automatic todo extractio
 - [x] 3.4 Mobile mail: a SQLite copy kept current by the delta and realtime, the Unified Inbox and conversations with
   their messages
 - [ ] 3.5 Tauri desktop with a local SQLite cache instead of the web view's IndexedDB
-- [ ] 3.6 Mobile message actions, compose and push (only `do` and `delegate` by default)
+- [x] 3.6 Mobile message actions: read on open, archive, trash, unread and flag, with the exact undo
+- [ ] 3.7 Mobile compose and push (only `do` and `delegate` by default)
 
 Tresso Cloud: teams, shared inboxes, assignments, internal comments, delegation rules, workload.
 
