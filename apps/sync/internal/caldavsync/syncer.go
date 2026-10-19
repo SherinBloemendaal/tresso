@@ -28,6 +28,7 @@ type API interface {
 	CalendarObjects(ctx context.Context, accountID, calendarID string, batch api.ObjectBatch) (api.ObjectBatchResult, error)
 	ClaimCalendarOperations(ctx context.Context, accountID, workerID string) ([]api.CalendarOperation, error)
 	ReportCalendarOperation(ctx context.Context, accountID, operationID string, result api.OperationResult) error
+	CalendarStatus(ctx context.Context, accountID, workerID, status, detail string) error
 }
 
 type Options struct {
@@ -94,8 +95,10 @@ func (s *Syncer) Run(ctx context.Context, account api.Account) error {
 
 	logger := s.logger.With("account", account.ID, "part", "calendar")
 	backoff := s.opts.MinBackoff
+	failures := 0
+	status := newStatusReporter(s, account.ID, logger)
 	for {
-		err := s.session(ctx, account, wake, logger)
+		err := s.session(ctx, account, wake, logger, status)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -103,12 +106,20 @@ func (s *Syncer) Run(ctx context.Context, account api.Account) error {
 		switch {
 		case errors.Is(err, caldav.ErrNotCalDAV), errors.Is(err, errNoServer):
 			logger.Info("no calendar server found for the account", "error", err, "retryIn", s.opts.NotFoundRetry)
+			status.report(ctx, api.CalendarUnsupported, "No calendar server was found for this account. If it has one, enter its CalDAV address in the account settings.")
 			wait = s.opts.NotFoundRetry
+			failures = 0
 		case errors.Is(err, caldav.ErrUnauthorized):
 			logger.Warn("the calendar server refused the login", "retryIn", s.opts.MaxBackoff)
+			status.report(ctx, api.CalendarAuthFailed, "The calendar server refused the login. Some providers need an app password for calendars.")
 			wait = s.opts.MaxBackoff
+			failures = 0
 		default:
+			failures++
 			logger.Warn("calendar sync failed", "error", err, "retryIn", backoff)
+			if failures >= maxQuietFailures {
+				status.report(ctx, api.CalendarError, "Calendars could not be synced; trying again.")
+			}
 			backoff = min(backoff*2, s.opts.MaxBackoff)
 		}
 		select {
@@ -122,8 +133,38 @@ func (s *Syncer) Run(ctx context.Context, account api.Account) error {
 
 var errNoServer = errors.New("the account has no calendar server")
 
+// maxQuietFailures is how many sessions in a row may fail for other reasons before the user is told.
+const maxQuietFailures = 3
+
+// statusReporter tells the API about a calendar problem once, not on every retry.
+type statusReporter struct {
+	syncer    *Syncer
+	accountID string
+	logger    *slog.Logger
+	last      string
+}
+
+func newStatusReporter(s *Syncer, accountID string, logger *slog.Logger) *statusReporter {
+	return &statusReporter{syncer: s, accountID: accountID, logger: logger}
+}
+
+func (r *statusReporter) report(ctx context.Context, status, detail string) {
+	if r.last == status {
+		return
+	}
+	if err := r.syncer.api.CalendarStatus(ctx, r.accountID, r.syncer.workerID, status, detail); err != nil {
+		r.logger.Warn("reporting the calendar status failed", "error", err)
+		return
+	}
+	r.last = status
+}
+
+func (r *statusReporter) reset() {
+	r.last = ""
+}
+
 // session opens the server and syncs until something fails.
-func (s *Syncer) session(ctx context.Context, account api.Account, wake <-chan struct{}, logger *slog.Logger) error {
+func (s *Syncer) session(ctx context.Context, account api.Account, wake <-chan struct{}, logger *slog.Logger, status *statusReporter) error {
 	credentials, err := s.api.Credentials(ctx, account.ID, s.workerID)
 	if err != nil {
 		return err
@@ -153,6 +194,8 @@ func (s *Syncer) session(ctx context.Context, account api.Account, wake <-chan s
 		if err := run.syncAll(ctx); err != nil {
 			return err
 		}
+		// A calendar list the API accepted makes the status active there.
+		status.reset()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

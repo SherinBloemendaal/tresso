@@ -265,6 +265,8 @@ type fakeAPI struct {
 	inventory  [][]api.RemoteObject
 	operations []api.CalendarOperation
 	results    map[string]api.OperationResult
+	statuses   []string
+	password   string
 }
 
 func newFakeAPI(caldavURL string) *fakeAPI {
@@ -277,8 +279,15 @@ func (a *fakeAPI) Credentials(context.Context, string, string) (api.Credentials,
 		EmailAddress: "kim@company.example",
 		Provider:     "imap",
 		Connection:   api.Connection{Username: "kim@company.example", CalDAV: a.caldavURL},
-		Secrets:      map[string]string{"type": "password", "password": "app-password"},
+		Secrets:      map[string]string{"type": "password", "password": a.secret()},
 	}, nil
+}
+
+func (a *fakeAPI) secret() string {
+	if a.password != "" {
+		return a.password
+	}
+	return "app-password"
 }
 
 func (a *fakeAPI) Calendars(_ context.Context, _ string, list api.CalendarList) ([]api.CalendarState, error) {
@@ -341,6 +350,13 @@ func (a *fakeAPI) ReportCalendarOperation(_ context.Context, _, operationID stri
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.results[operationID] = result
+	return nil
+}
+
+func (a *fakeAPI) CalendarStatus(_ context.Context, _, _, status, _ string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.statuses = append(a.statuses, status)
 	return nil
 }
 

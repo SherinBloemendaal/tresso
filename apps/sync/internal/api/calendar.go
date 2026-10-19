@@ -124,3 +124,14 @@ func (c *Client) ReportCalendarOperation(ctx context.Context, accountID, operati
 func calendarPath(accountID, calendarID, action string) string {
 	return accountPath(accountID, "calendars/"+url.PathEscape(calendarID)+"/"+action)
 }
+
+// Calendar sync statuses the worker reports; a working sync is reported by the calendar list itself.
+const (
+	CalendarUnsupported = "unsupported"
+	CalendarAuthFailed  = "auth_failed"
+	CalendarError       = "error"
+)
+
+func (c *Client) CalendarStatus(ctx context.Context, accountID, workerID, status, detail string) error {
+	return c.post(ctx, accountPath(accountID, "calendar-status"), map[string]any{"workerId": workerID, "status": status, "detail": detail}, nil)
+}
