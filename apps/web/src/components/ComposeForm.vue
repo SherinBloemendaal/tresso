@@ -13,6 +13,7 @@ import RichEditor from '@/components/RichEditor.vue'
 import MessageFrame from '@/components/MessageFrame.vue'
 import SignaturePreview from '@/components/SignaturePreview.vue'
 import { RouterLink } from 'vue-router'
+import { sendLaterOptions, type SendLaterKey } from '@tresso/core'
 
 const props = defineProps<{ draft: Draft }>()
 
@@ -85,24 +86,14 @@ watch(
 
 const send = handleSubmit(() => compose.send())
 
-function at(days: number, hour: number): Date {
-  const date = new Date()
-  date.setDate(date.getDate() + days)
-  date.setHours(hour, 0, 0, 0)
-  return date
+const laterLabels: Record<SendLaterKey, string> = {
+  thisEvening: 'This evening',
+  tomorrowMorning: 'Tomorrow morning',
+  tomorrowAfternoon: 'Tomorrow afternoon',
+  mondayMorning: 'Monday morning',
 }
 
-const laterOptions = computed(() => {
-  const now = new Date()
-  const nextMonday = (8 - now.getDay()) % 7 || 7
-  const options = [
-    { label: 'Tomorrow morning', time: at(1, 8) },
-    { label: 'Tomorrow afternoon', time: at(1, 13) },
-    { label: 'Monday morning', time: at(nextMonday, 8) },
-  ]
-  if (now.getHours() < 17) options.unshift({ label: 'This evening', time: at(0, 18) })
-  return options
-})
+const laterOptions = computed(() => sendLaterOptions().map((option) => ({ label: laterLabels[option.key], time: option.at })))
 
 const sendLater = (time: Date) =>
   handleSubmit(() => {
