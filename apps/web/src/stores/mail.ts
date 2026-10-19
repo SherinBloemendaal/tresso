@@ -18,6 +18,8 @@ import {
 } from '@tresso/core'
 import { deleteMailDatabase, MailDatabase, type Contact, type Conversation, type Draft } from '@/mail/db'
 import { ApiError } from '@/api/errors'
+import { freshArrivals, mailNotifications } from '@/mail/mailNotifications'
+import { notifier } from '@/platform/notifier'
 import { useAuthStore } from '@/stores/auth'
 
 const PAGE_SIZE = 500
@@ -51,6 +53,11 @@ export const useMailStore = defineStore('mail', () => {
   let userId: string | null = null
   let engine: SyncEngine | null = null
   let realtime: RealtimeClient | null = null
+  /**
+   * When notifications were switched on: after the first complete pull, so the mail that was already there (or that
+   * arrived while the app was closed) does not pop up all at once. null until then.
+   */
+  let notifyingSince: number | null = null
 
   async function start(forUserId: string): Promise<void> {
     if (userId === forUserId) {
@@ -67,7 +74,10 @@ export const useMailStore = defineStore('mail', () => {
       store: database,
       pageSize: PAGE_SIZE,
       fetchPage: (since, limit) => auth.api<ChangePage>(`/api/v1/sync/changes?since=${since}&limit=${limit}`),
-      onApplied: () => void refresh(),
+      onApplied: () => {
+        void refresh()
+        void notifyArrivals()
+      },
     })
     realtime = new RealtimeClient({
       fetchAccess: () => auth.api<RealtimeAccess>('/api/v1/realtime/token'),
@@ -92,6 +102,10 @@ export const useMailStore = defineStore('mail', () => {
       await run()
       syncState.value = 'idle'
       syncError.value = null
+      if (notifyingSince === null) {
+        db.value?.takeArrivals()
+        notifyingSince = Date.now()
+      }
     } catch (error) {
       syncState.value = 'error'
       syncError.value = error instanceof Error ? error.message : String(error)
@@ -104,10 +118,28 @@ export const useMailStore = defineStore('mail', () => {
     await refresh()
   }
 
+  /** Tells the user about new mail that needs them, unless they are looking at Tresso already. */
+  async function notifyArrivals(): Promise<void> {
+    const database = db.value
+    if (database === null || notifyingSince === null) {
+      return
+    }
+    const arrivals = freshArrivals(database.takeArrivals(), notifyingSince)
+    if (arrivals.length === 0 || notifier === null || document.hasFocus()) {
+      return
+    }
+    try {
+      await notifier.show(mailNotifications(arrivals))
+    } catch (error) {
+      console.error('Showing a notification failed', error)
+    }
+  }
+
   async function stop(): Promise<void> {
     await realtime?.stop()
     realtime = null
     engine = null
+    notifyingSince = null
     db.value?.close()
     db.value = null
     userId = null
