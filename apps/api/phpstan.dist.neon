@@ -4,6 +4,7 @@ parameters:
         - src
         - tests
     symfony:
-        containerXmlPath: var/cache/dev/App_KernelDevDebugContainer.xml
+        # The test container: it holds everything the dev one does plus the test doubles the tests fetch from it.
+        containerXmlPath: var/cache/test/App_KernelTestDebugContainer.xml
     doctrine:
         objectManagerLoader: tests/object-manager.php
