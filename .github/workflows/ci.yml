@@ -67,7 +67,7 @@ jobs:
         run: php bin/phpunit
       - name: PHPStan
         run: |
-          php bin/console cache:warmup --env=dev
+          php bin/console cache:warmup --env=test
           php -d memory_limit=1G vendor/bin/phpstan analyse --no-progress
 
   sync:
