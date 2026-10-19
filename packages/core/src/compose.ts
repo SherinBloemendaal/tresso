@@ -193,19 +193,34 @@ function decodeAttribute(value: string): string {
 }
 
 const TAG = /<([a-z][a-z0-9-]*)\b[^>]*>/gi
-const IMAGE_ATTRIBUTE = /(\s(src|background)\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi
+const IMAGE_ATTRIBUTE = /(\s(src|background|style)\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi
+const CSS_URL = /url\(\s*(["']?)([^"')]*)\1\s*\)/gi
 
 /**
- * Every image source in the HTML (an image's src, any element's background, as the body sanitizer leaves both),
- * read as a browser reads it, with a way to give it another one.
+ * Every image source in the HTML, read as a browser reads it, with a way to give it another one: an image's src, any
+ * element's background, and url() in inline styles (the body sanitizer resolves all three).
  */
 function mapImageSources(html: string, change: (source: string) => string | null): string {
   return html.replace(TAG, (tag: string, name: string) =>
     tag.replace(IMAGE_ATTRIBUTE, (whole: string, before: string, attribute: string, double?: string, single?: string, bare?: string) => {
-      if (attribute.toLowerCase() === 'src' && name.toLowerCase() !== 'img') {
+      const kind = attribute.toLowerCase()
+      if (kind === 'src' && name.toLowerCase() !== 'img') {
         return whole
       }
-      const next = change(decodeAttribute(double ?? single ?? bare ?? ''))
+      const value = decodeAttribute(double ?? single ?? bare ?? '')
+      if (kind === 'style') {
+        let changed = false
+        const style = value.replace(CSS_URL, (url: string, quote: string, source: string) => {
+          const next = change(source.trim())
+          if (next === null) {
+            return url
+          }
+          changed = true
+          return `url(${quote}${next}${quote})`
+        })
+        return changed ? `${before}"${escapeAttribute(style)}"` : whole
+      }
+      const next = change(value)
       return next === null ? whole : `${before}"${escapeAttribute(next)}"`
     }),
   )

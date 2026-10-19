@@ -223,16 +223,21 @@ export class DraftSync {
       const now = await store.draft(id)
       if (status === 409 && local.version > 0 && now !== null) {
         const remote = await this.api.get(id)
-        let behind = false
+        let movedOn = false
         await store.changeDraft(id, (stored) => {
-          behind = stored !== null && remote.version > stored.version
-          return stored && { ...stored, remoteVersion: behind ? remote.version : stored.remoteVersion }
+          if (stored === null) {
+            return null
+          }
+          // The copy here took a newer version of its own while the request was under way (a file change): the edits
+          // go up again on that one. Any other refusal is a version to settle, also one behind this copy's (a server
+          // restored from a backup): asking again would only be refused again.
+          movedOn = stored.version !== local.version && remote.version <= stored.version
+          return movedOn ? null : { ...stored, remoteVersion: remote.version }
         })
-        if (behind) {
-          this.onConflict()
-        } else {
-          // The copy here moved on meanwhile (a file change it took the version of): the edits go up on that one.
+        if (movedOn) {
           this.again.add(id)
+        } else {
+          this.onConflict()
         }
         return
       }

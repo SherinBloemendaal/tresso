@@ -71,6 +71,21 @@ describe('DraftSync', () => {
     expect(api.drafts.get('d1')).toMatchObject({ subject: 'Typed', version: 3 })
   })
 
+  it('asks to settle a draft the server has an older version of, instead of asking again and again', async () => {
+    await store.saveDraft(draft('d1', { pendingSave: true, updatedAt: 1 }))
+    await sync.upload('d1')
+    // The server was restored from a backup: its copy is older than the one here.
+    await store.saveDraft({ ...(await store.draft('d1'))!, version: 7, subject: 'Typed', pendingSave: true, updatedAt: 2 })
+
+    await sync.upload('d1')
+
+    expect(api.calls.filter((call) => call.startsWith('update'))).toEqual(['update d1 @7'])
+    expect(conflicts).toBe(1)
+    expect(await store.draft('d1')).toMatchObject({ remoteVersion: 1, pendingSave: true })
+    expect(await sync.resolveConflict('d1', 'mine')).toMatchObject({ remoteVersion: null })
+    expect(api.drafts.get('d1')).toMatchObject({ subject: 'Typed', version: 2 })
+  })
+
   it("takes no upload of its own for another device's either", async () => {
     await store.saveDraft(draft('d1', { pendingSave: true, updatedAt: 1 }))
     api.during = async () => {
