@@ -8,5 +8,26 @@
 {$SERVER_NAME::80} {
 	root /app/public
 	encode zstd br gzip
+
+	# Realtime hub (Mercure, modern mode). The API signs both publisher and subscriber tokens as issuer
+	# "tresso-api"; their audience is the hub's public URL.
+	mercure {
+		transport bolt {
+			path /data/mercure.db
+			size 10000
+			cleanup_frequency 0.3
+		}
+		resource_identifier {$MERCURE_PUBLIC_URL}
+		issuer tresso-api {
+			publisher {
+				jwt {$MERCURE_PUBLISHER_JWT_KEY} HS256
+			}
+			subscriber {
+				jwt {$MERCURE_SUBSCRIBER_JWT_KEY} HS256
+			}
+		}
+		cors_origins {$MERCURE_CORS_ORIGINS}
+	}
+
 	php_server
 }

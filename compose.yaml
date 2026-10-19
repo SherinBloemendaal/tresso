@@ -15,6 +15,12 @@ x-api-env: &api-env
   CLAMAV_PORT: "3310"
   MAILER_DSN: smtp://mailpit:1025
   SYNC_WORKER_CLIENT_SECRET: dev-sync-worker-secret
+  # Realtime hub; development keys only.
+  MERCURE_PUBLIC_URL: http://localhost:8080/.well-known/mercure
+  MERCURE_INTERNAL_URL: http://api/.well-known/mercure
+  MERCURE_PUBLISHER_JWT_KEY: dev-mercure-publisher-key-change-me-0123456789
+  MERCURE_SUBSCRIBER_JWT_KEY: dev-mercure-subscriber-key-change-me-012345678
+  MERCURE_CORS_ORIGINS: http://localhost:5173 tauri://localhost http://tauri.localhost
 
 services:
   api:
