@@ -7,7 +7,7 @@ import { memorySql } from '@tresso/core/testing/sql'
 const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [], ...extra }
 }
 
 /** Databases by name, as on a device: deleting one that is open fails, as expo-sqlite does. */
@@ -162,7 +162,7 @@ describe('MailSession', () => {
       receivedAt: '2026-10-19T08:00:00Z',
       flags: { seen: false, flagged: false, answered: false, draft: false },
       hasAttachments: false,
-      categoryId: null,
+      smartInboxId: null,
       verdict: null,
       summary: null,
     })
@@ -174,7 +174,7 @@ describe('MailSession', () => {
           ? page(1, {
               mailAccounts: [account],
               folders: [{ id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' }],
-              threads: ids.map((id) => ({ id: `t-${id}`, mailAccountId: 'work', subject: '', messageCount: 1, lastMessageAt: '2026-10-19T08:00:00Z' })),
+              threads: ids.map((id) => ({ id: `t-${id}`, mailAccountId: 'work', subject: '', messageCount: 1, lastMessageAt: '2026-10-19T08:00:00Z', smartInboxId: null, verdict: null, classificationReason: null })),
               messages: ids.map(message),
             })
           : page(since),
