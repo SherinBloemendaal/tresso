@@ -24,8 +24,8 @@ export interface DraftApi {
   attach(id: string, file: AttachmentFile): Promise<DraftAttachmentLink>
   /** POST /api/v1/drafts/{id}/forwarded-attachments: a file of a received message. */
   forward(id: string, attachmentId: string): Promise<DraftAttachmentLink>
-  /** DELETE /api/v1/drafts/{id}/attachments/{attachmentId} */
-  detach(id: string, attachmentId: string): Promise<void>
+  /** DELETE /api/v1/drafts/{id}/attachments/{attachmentId}: answers with the draft's version without the file. */
+  detach(id: string, attachmentId: string): Promise<{ draftVersion: number }>
 }
 
 /** Files are kept with the server's copy of a draft: without a connection there is nowhere to put them. */
@@ -223,13 +223,13 @@ export class DraftSync {
       const now = await store.draft(id)
       if (status === 409 && local.version > 0 && now !== null) {
         const remote = await this.api.get(id)
-        await store.saveDraft({ ...now, remoteVersion: remote.version })
+        await store.changeDraft(id, (stored) => stored && { ...stored, remoteVersion: remote.version > stored.version ? remote.version : null })
         this.onConflict()
         return
       }
       if (status === 404 && local.version > 0 && now !== null) {
         // Deleted on another device while it was being written here: it becomes a new draft again.
-        await store.saveDraft({ ...now, version: 0 })
+        await store.changeDraft(id, (stored) => stored && { ...stored, version: 0 })
         this.again.add(id)
         return
       }
@@ -238,15 +238,20 @@ export class DraftSync {
       }
       throw error
     }
-    const current = await store.draft(id)
+    let unchanged = true
+    const current = await store.changeDraft(id, (stored) => {
+      if (stored === null) {
+        return null
+      }
+      // Edits made while the upload was under way stay pending and go up in the next round.
+      unchanged = stored.updatedAt === local.updatedAt
+      return { ...withVersion(stored, saved.version), pendingSave: !unchanged }
+    })
     if (current === null) {
       // Deleted here while the upload was under way: the copy the server just stored goes too.
       await this.removeRemote(id)
       return
     }
-    // Edits made while the upload was under way stay pending and go up in the next round.
-    const unchanged = current.updatedAt === local.updatedAt
-    await store.saveDraft({ ...current, version: saved.version, pendingSave: !unchanged })
     if (!unchanged) {
       this.again.add(id)
     }
@@ -269,11 +274,13 @@ export class DraftSync {
       return local ?? null
     }
     const remote = await this.api.get(id)
-    const next: Draft =
-      keep === 'mine'
-        ? { ...local, version: remote.version, remoteVersion: null, pendingSave: true }
-        : { ...remote, attachments: (remote.attachments ?? []).map(withoutLink), updatedAt: Date.parse(remote.updatedAt), pendingSave: false, remoteVersion: null, outgoingId: null, noticedStatus: null }
-    await store.saveDraft(next)
+    const next = await store.changeDraft(id, (stored) =>
+      stored === null
+        ? null
+        : keep === 'mine'
+          ? { ...stored, version: remote.version, remoteVersion: null, pendingSave: true, attachments: (remote.attachments ?? []).map(withoutLink) }
+          : { ...remote, attachments: (remote.attachments ?? []).map(withoutLink), updatedAt: Date.parse(remote.updatedAt), pendingSave: false, remoteVersion: null, outgoingId: null, noticedStatus: null },
+    )
     if (keep === 'mine') {
       await this.upload(id)
     }
@@ -335,17 +342,14 @@ export class DraftSync {
   async detach(id: string, attachmentId: string): Promise<void> {
     await this.inLane(id, async () => {
       const before = await this.versionHere(id)
-      let removed = true
+      let after: number | null = null
       try {
-        await this.api.detach(id, attachmentId)
+        after = (await this.api.detach(id, attachmentId)).draftVersion
       } catch (error) {
         if (statusOf(error) !== 404) {
           throw error
         }
-        removed = false
       }
-      // The answer has no body: the version the removal gave the draft is asked for (none when that fails: offline).
-      const after = removed && before > 0 ? await this.api.get(id).then((remote) => remote.version, () => null) : null
       await this.note(id, (attachments) => attachments.filter((attachment) => attachment.id !== attachmentId), before, after)
     })
   }
@@ -373,12 +377,13 @@ export class DraftSync {
    * takes it, so the next edit is not taken for a conflict. Any other version is left for the next upload to find.
    */
   private async note(id: string, change: (attachments: DraftAttachment[]) => DraftAttachment[], before: number, after: number | null): Promise<void> {
-    const store = this.store()
-    const stored = await store?.draft(id)
-    if (store && stored) {
-      const version = after !== null && stored.version === before && after === before + 1 ? after : stored.version
-      await store.saveDraft({ ...stored, attachments: change(stored.attachments), version })
-    }
+    await this.store()?.changeDraft(id, (stored) => {
+      if (stored === null) {
+        return null
+      }
+      const changed = { ...stored, attachments: change(stored.attachments) }
+      return after !== null && stored.version === before && after === before + 1 ? withVersion(changed, after) : changed
+    })
   }
 
   /** Saves the draft and uploads it, reporting whether the server has it (so sending can take its Drafts copy away). */
@@ -387,13 +392,27 @@ export class DraftSync {
     if (!store) {
       return false
     }
-    // What the uploads learned (the server version, a conflict) stays: the draft on screen does not know it.
-    const stored = await store.draft(draft.id)
-    await store.saveDraft({ ...draft, version: stored?.version ?? draft.version, remoteVersion: stored?.remoteVersion ?? null, attachments: stored?.attachments ?? draft.attachments })
+    await store.changeDraft(draft.id, (stored) => withEdits(stored, draft))
     return this.upload(draft.id)
       .then(async () => ((await store.draft(draft.id))?.version ?? 0) > 0)
       .catch(() => false)
   }
+}
+
+/**
+ * The draft as stored with the server's version `version`, which the copy here now builds on. A version of another
+ * device noted meanwhile that is not past it was this device's own (a sync brought it back before the answer came).
+ */
+function withVersion(draft: Draft, version: number): Draft {
+  return { ...draft, version, remoteVersion: draft.remoteVersion !== null && draft.remoteVersion <= version ? null : draft.remoteVersion }
+}
+
+/**
+ * The edits made on screen laid over the draft as stored. What the uploads learned (the server version, a conflict)
+ * stays, and so do the files: the screen does not know either for sure.
+ */
+export function withEdits(stored: Draft | null, edited: Draft): Draft {
+  return { ...edited, version: stored?.version ?? edited.version, remoteVersion: stored?.remoteVersion ?? null, attachments: stored?.attachments ?? edited.attachments }
 }
 
 /** A draft attachment as the copy on a device keeps it: without its link, which expires. */

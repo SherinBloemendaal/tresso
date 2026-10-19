@@ -440,7 +440,8 @@ describe('Composer', () => {
 
   it("sends a reply's quoted images along, referred to by content id, and shows them through fresh links", async () => {
     const signed = 'https://api.example.test/content/attachments/logo?expires=1&signature=a'
-    originalHtml = `<p>Numbers?</p><img src="${signed.replace('&', '&amp;')}" alt="Logo">`
+    // As the body sanitizer writes it.
+    originalHtml = '<p>Numbers?</p><img src="https://api.example.test/content/attachments/logo?expires&#61;1&amp;signature&#61;a" alt="Logo" />'
     originalFiles = [{ id: 'logo', filename: 'logo.png', contentType: 'image/png', size: 100, inline: true, contentId: 'logo@example.test', scanStatus: 'clean', url: signed }]
     api.received.set('logo', { filename: 'logo.png', contentType: 'image/png', inline: true, contentId: 'logo@example.test' })
 
@@ -451,10 +452,10 @@ describe('Composer', () => {
     expect(api.calls).toContain(`forward ${draft.id} logo`)
     expect(draft.attachments).toMatchObject([{ id: 'forwarded-logo', inline: true, contentId: 'logo@example.test' }])
     expect(draft.quoteHtml).toContain('src="cid:logo@example.test"')
-    expect(draft.quoteHtml).not.toContain('signature=a')
+    expect(draft.quoteHtml).not.toContain('signature')
     expect(api.drafts.get(draft.id)!.quoteHtml).toContain('cid:logo@example.test')
     expect(composer.state.conflict).toBe(false)
-    expect(await composer.shownQuote()).toContain('src="https://api.example.test/content/draft-attachments/forwarded-logo?signed"')
+    expect(await composer.shownQuote(draft.quoteHtml)).toContain('src="https://api.example.test/content/draft-attachments/forwarded-logo?signed"')
   })
 
   it('takes the version a file gave the draft, so the next edit is no conflict', async () => {

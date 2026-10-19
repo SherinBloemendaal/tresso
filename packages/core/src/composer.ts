@@ -1,5 +1,5 @@
 import { isPlausibleAddress, quotedInlineImages, quoteWithContentId, withInlineLinks, type SendMessageRequest } from './compose'
-import { AttachmentsNeedTheServer, defaultSignatureOf, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome, withoutLink, type AttachmentFile, type DraftSync } from './drafts'
+import { AttachmentsNeedTheServer, defaultSignatureOf, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome, withEdits, withoutLink, type AttachmentFile, type DraftSync } from './drafts'
 import { CopyClosingError, type Draft, type MailStore } from './store/mailStore'
 import type { Address, DraftAttachment, MessageAttachment, MessageBody, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature } from './sync/types'
 
@@ -220,16 +220,13 @@ export class Composer {
    * The open draft's quote as it can be shown: images that go along with the draft are referred to by content id,
    * which a screen cannot load, so they are shown through fresh links (the quote unchanged when those cannot be had).
    */
-  async shownQuote(): Promise<string> {
+  async shownQuote(quoteHtml: string): Promise<string> {
     const draft = this.current.draft
-    if (draft === null) {
-      return ''
-    }
-    if (!draft.quoteHtml.includes('cid:')) {
-      return draft.quoteHtml
+    if (draft === null || !quoteHtml.includes('cid:')) {
+      return quoteHtml
     }
     const links = await this.deps.drafts.links(draft.id).catch(() => [])
-    return withInlineLinks(draft.quoteHtml, links)
+    return withInlineLinks(quoteHtml, links)
   }
 
   /** Notes files as on their way to a draft; returns their numbers, to say when each arrived. */
@@ -289,12 +286,10 @@ export class Composer {
       return
     }
     const store = this.storeOfDraft()
-    void store?.draft(draftId).then(async (stored) => {
-      if (stored) {
-        await store.saveDraft({ ...stored, quoteHtml: change(stored.quoteHtml), pendingSave: true, updatedAt: Date.now() })
-        await this.deps.drafts.upload(draftId).catch(() => undefined)
-      }
-    })
+    void store
+      ?.changeDraft(draftId, (stored) => stored && { ...stored, quoteHtml: change(stored.quoteHtml), pendingSave: true, updatedAt: Date.now() })
+      .then((stored) => (stored === null ? undefined : this.deps.drafts.upload(draftId)))
+      .catch(() => undefined)
   }
 
   /** The open draft's files as the server has them now (they are not edits: nothing is saved for them). */
@@ -336,13 +331,13 @@ export class Composer {
     if (draft === null || store === null) {
       return
     }
-    let isNew: boolean
+    let isNew = false
     try {
-      const stored = await store.draft(draft.id)
-      isNew = stored === null
-      // Keep what the upload learned (server version, a conflict) and lay the edits on top. The files are no edit:
-      // the copy here has them as the server last said, which may be newer than what this screen holds.
-      await store.saveDraft({ ...draft, version: stored?.version ?? draft.version, remoteVersion: stored?.remoteVersion ?? null, attachments: stored?.attachments ?? draft.attachments })
+      // Kept as one step, so what an upload or a file learned meanwhile is not written over.
+      await store.changeDraft(draft.id, (stored) => {
+        isNew = stored === null
+        return withEdits(stored, draft)
+      })
     } catch (error) {
       if (error instanceof CopyClosingError) {
         // Signed out meanwhile: the copy is going, and the draft with it.
@@ -489,7 +484,7 @@ export class Composer {
       // Worked out after the upload: the undo window is the time between queueing and sending.
       const at = sendAt ?? new Date(Date.now() + this.undoSeconds * 1000)
       const outgoing = await this.deps.send(sendRequest(draft, this.deps.signatures(), at, onServer))
-      await store.saveDraft({ ...((await store.draft(draft.id)) ?? draft), outgoingId: outgoing.id, pendingSave: false, updatedAt: Date.now() })
+      await store.changeDraft(draft.id, (stored) => ({ ...(stored ?? draft), outgoingId: outgoing.id, pendingSave: false, updatedAt: Date.now() }))
       this.deps.changed?.()
       if (this.current.draft?.id === draft.id) {
         this.set({ draft: null, conflict: false })
@@ -574,7 +569,7 @@ export class Composer {
       const outgoing = stored.outgoingId === null ? null : await store.outgoing(stored.outgoingId)
       if (stored.outgoingId !== null && outgoing === null && stored.mailAccountId === null) {
         // Its account was removed while it was on its way: the message went with it, unsent, and the draft is back.
-        await store.saveDraft({ ...reopenedDraft(stored), pendingSave: false })
+        await store.changeDraft(stored.id, (now) => now && { ...reopenedDraft(now), pendingSave: false })
         this.deps.changed?.()
         this.deps.notify({ text: `"${stored.subject || '(no subject)'}" was not sent: its account was removed. It is in Drafts.`, tone: 'error' }, 30000)
         continue
@@ -601,7 +596,7 @@ export class Composer {
           30000,
         )
       }
-      await store.saveDraft({ ...stored, noticedStatus: outgoing.status })
+      await store.changeDraft(stored.id, (now) => now && { ...now, noticedStatus: outgoing.status })
     }
     await this.showStoredFiles()
   }

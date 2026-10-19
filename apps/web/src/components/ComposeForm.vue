@@ -66,18 +66,18 @@ const [subject] = defineField('subject')
 const [html] = defineField('html')
 const [signatureId] = defineField('signatureId')
 const showQuote = ref(false)
-/** The quote with the images that go along through fresh links; null until those are loaded. */
-const shownQuote = ref<string | null>(null)
+/** The quote with the images that go along through fresh links, for the quote it was made from. */
+const shownQuote = ref<{ quote: string; shown: string } | null>(null)
 watch(
-  [showQuote, () => compose.draft?.quoteHtml],
-  async ([open]) => {
+  [showQuote, () => compose.draft?.quoteHtml ?? props.draft.quoteHtml],
+  async ([open, quote]) => {
     if (!open) {
       return
     }
-    const asked = compose.draft?.quoteHtml
-    const shown = await compose.shownQuote()
-    if (asked === compose.draft?.quoteHtml) {
-      shownQuote.value = shown
+    const shown = await compose.shownQuote(quote)
+    // A quote changed meanwhile has its own turn.
+    if (quote === (compose.draft?.quoteHtml ?? props.draft.quoteHtml)) {
+      shownQuote.value = { quote, shown }
     }
   },
   { immediate: true },
@@ -205,7 +205,7 @@ function keydown(event: KeyboardEvent): void {
       <button type="button" class="toggle" :aria-expanded="showQuote" @click="showQuote = !showQuote">
         {{ showQuote ? 'Hide' : 'Show' }} {{ draft.kind === 'forward' ? 'forwarded message' : 'quoted text' }}
       </button>
-      <MessageFrame v-if="showQuote" :html="shownQuote ?? draft.quoteHtml" :allow-remote-content="false" />
+      <MessageFrame v-if="showQuote" :html="shownQuote?.quote === draft.quoteHtml ? shownQuote.shown : draft.quoteHtml" :allow-remote-content="false" />
     </div>
 
     <p v-if="compose.error" class="form-error" role="alert">{{ compose.error }}</p>

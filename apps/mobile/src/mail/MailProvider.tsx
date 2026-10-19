@@ -95,9 +95,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
             return auth.session.api<DraftAttachmentLink>(`/api/v1/drafts/${encodeURIComponent(id)}/attachments`, { method: 'POST', body: form })
           },
           forward: (id, attachmentId) => auth.session.api<DraftAttachmentLink>(`/api/v1/drafts/${encodeURIComponent(id)}/forwarded-attachments`, json('POST', { attachmentId })),
-          detach: async (id, attachmentId) => {
-            await auth.session.api(`/api/v1/drafts/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`, json('DELETE'))
-          },
+          detach: (id, attachmentId) => auth.session.api<{ draftVersion: number }>(`/api/v1/drafts/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`, json('DELETE')),
         },
         // expo/fetch streams response bodies, which the realtime connection reads.
         fetch: streamingFetch as unknown as typeof fetch,

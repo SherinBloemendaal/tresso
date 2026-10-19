@@ -435,6 +435,18 @@ export class SqliteMailStore implements MailStore {
     return this.write(() => writeDraft(this.sql, draft))
   }
 
+  changeDraft(id: string, change: (stored: Draft | null) => Draft | null): Promise<Draft | null> {
+    return this.write(async () => {
+      const stored = await readDraft(this.sql, id)
+      const next = change(stored)
+      if (next === null) {
+        return stored
+      }
+      await writeDraft(this.sql, next)
+      return next
+    })
+  }
+
   async drafts(): Promise<Draft[]> {
     return (await this.reader.all<JsonRow>('SELECT json FROM drafts ORDER BY updated_at DESC, id DESC')).map((row) => storedDraft(parse<Draft>(row)))
   }

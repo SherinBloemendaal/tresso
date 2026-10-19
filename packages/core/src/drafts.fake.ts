@@ -76,12 +76,14 @@ export class FakeDraftApi implements DraftApi {
     return this.addFile(id, source.filename, source.contentType, 100, `forwarded-${attachmentId}`, source.inline, source.contentId)
   }
 
-  async detach(id: string, attachmentId: string): Promise<void> {
+  async detach(id: string, attachmentId: string): Promise<{ draftVersion: number }> {
     this.calls.push(`detach ${id} ${attachmentId}`)
     this.reachable()
     const current = this.drafts.get(id)
     if (current === undefined || !current.attachments.some((attachment) => attachment.id === attachmentId)) throw new ApiFailure(404)
-    this.drafts.set(id, { ...current, attachments: current.attachments.filter((attachment) => attachment.id !== attachmentId), version: current.version + 1 })
+    const version = current.version + 1
+    this.drafts.set(id, { ...current, attachments: current.attachments.filter((attachment) => attachment.id !== attachmentId), version })
+    return { draftVersion: version }
   }
 
   private async addFile(id: string, filename: string, contentType: string, size: number, fileId = `file-${this.nextFile++}`, inline = false, contentId: string | null = null): Promise<DraftAttachmentLink> {

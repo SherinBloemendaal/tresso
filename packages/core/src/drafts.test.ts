@@ -32,6 +32,48 @@ describe('DraftSync', () => {
     expect(await store.draft('d1')).toMatchObject({ version: 2, pendingSave: false })
   })
 
+  it("takes no file change of its own for another device's, when the sync brings it back before the answer", async () => {
+    await store.saveDraft(draft('d1', { pendingSave: true, updatedAt: 1 }))
+    await sync.upload('d1')
+    const realAttach = api.attach.bind(api)
+    api.attach = async (id, file) => {
+      // Typed while the file goes up: the edit waits for its upload.
+      await store.saveDraft({ ...(await store.draft('d1'))!, subject: 'Typed', pendingSave: true, updatedAt: 2 })
+      const answer = await realAttach(id, file)
+      // The realtime sync brings the draft as the file leaves it, before the answer to adding it.
+      await store.apply({ cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [{ ...api.drafts.get('d1')! }], deleted: [] })
+      return answer
+    }
+
+    await sync.attach('d1', { name: 'plan.pdf', type: 'application/pdf', size: 3, body: 'pdf' })
+
+    expect(await store.draft('d1')).toMatchObject({ version: 2, remoteVersion: null, pendingSave: true })
+    await sync.upload('d1')
+    expect(conflicts).toBe(0)
+    expect(api.drafts.get('d1')).toMatchObject({ subject: 'Typed', version: 3, attachments: [{ filename: 'plan.pdf' }] })
+  })
+
+  it("takes no upload of its own for another device's either", async () => {
+    await store.saveDraft(draft('d1', { pendingSave: true, updatedAt: 1 }))
+    api.during = async () => {
+      api.during = null
+      await store.saveDraft({ ...(await store.draft('d1'))!, subject: 'Typed meanwhile', updatedAt: 2 })
+    }
+    const realCreate = api.create.bind(api)
+    api.create = async (id, request) => {
+      const saved = await realCreate(id, request)
+      // The echo of the upload arrives first; the edit typed meanwhile is still pending.
+      await store.apply({ cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [saved], deleted: [] })
+      return saved
+    }
+
+    await sync.upload('d1')
+
+    expect(conflicts).toBe(0)
+    expect(await store.draft('d1')).toMatchObject({ version: 2, remoteVersion: null, pendingSave: false })
+    expect(api.drafts.get('d1')?.subject).toBe('Typed meanwhile')
+  })
+
   it('keeps edits made during an upload pending and sends them right after, never two uploads at once', async () => {
     await store.saveDraft(draft('d1', { pendingSave: true, updatedAt: 1 }))
     let edited = false

@@ -162,7 +162,7 @@ describe('compose store', () => {
     const before = window.location.href
     await compose.openAttachment('f1')
     expect(window.location.href).toBe(before)
-    expect(compose.notices.at(-1)).toMatchObject({ tone: 'error', text: 'The file could not be opened: the browser blocked the new tab.' })
+    expect(compose.notices[compose.notices.length - 1]).toMatchObject({ tone: 'error', text: 'The file could not be opened: the browser blocked the new tab.' })
     open.mockRestore()
   })
 
