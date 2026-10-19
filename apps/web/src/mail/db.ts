@@ -1,4 +1,5 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb'
+import { summarizeConversation } from '@tresso/core'
 import type {
   Address,
   ChangePage,
@@ -110,7 +111,6 @@ type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
 const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts']
 const VERSION = 4
-const SENDERS_PER_CONVERSATION = 3
 
 export function databaseName(userId: string): string {
   return `tresso-mail-${userId}`
@@ -678,34 +678,15 @@ function withFolder(folderIds: string[], folderId: string): string[] {
 async function refreshConversation(tx: WriteTx, threadId: string, inboxFolders: Set<string>): Promise<void> {
   const thread = await tx.objectStore('threads').get(threadId)
   const messages = thread === undefined ? [] : await tx.objectStore('messages').index('byThread').getAll(threadId)
-  if (thread === undefined || messages.length === 0) {
+  const summary = thread === undefined ? null : summarizeConversation(thread, messages, inboxFolders)
+  if (summary === null) {
     await tx.objectStore('conversations').delete(threadId)
     return
   }
 
-  messages.sort((a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt))
-  const newest = messages[0]!
-  const senders: Address[] = []
-  for (const message of messages) {
-    if (senders.length < SENDERS_PER_CONVERSATION && !senders.some((s) => s.address.toLowerCase() === message.from.address.toLowerCase())) {
-      senders.push(message.from)
-    }
-  }
-  const unreadCount = messages.filter((message) => !message.flags.seen).length
-  const inbox = messages.some((message) => message.folderIds.some((id) => inboxFolders.has(id))) ? 1 : 0
-
   await tx.objectStore('conversations').put({
-    threadId,
-    mailAccountId: thread.mailAccountId,
-    subject: thread.subject,
-    snippet: newest.snippet,
-    lastMessageAt: Date.parse(newest.receivedAt),
-    messageCount: messages.length,
-    unreadCount,
-    flagged: messages.some((message) => message.flags.flagged),
-    hasAttachments: messages.some((message) => message.hasAttachments),
-    senders,
-    inbox,
-    unreadInbox: inbox === 1 && unreadCount > 0 ? 1 : 0,
+    ...summary,
+    inbox: summary.inbox ? 1 : 0,
+    unreadInbox: summary.inbox && summary.unreadCount > 0 ? 1 : 0,
   })
 }
