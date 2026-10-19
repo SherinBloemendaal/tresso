@@ -139,3 +139,57 @@ func TestRunReleasesLeasesOnShutdown(t *testing.T) {
 		t.Fatalf("stopped %q, want a", id)
 	}
 }
+
+// givingUpSyncer ends its first run on its own, as the IMAP syncer does after a refused login, and blocks on later
+// runs.
+type givingUpSyncer struct {
+	mu   *sync.Mutex
+	runs *int
+	gave chan struct{}
+}
+
+func (s givingUpSyncer) Run(ctx context.Context, _ api.Account) error {
+	s.mu.Lock()
+	*s.runs++
+	run := *s.runs
+	s.mu.Unlock()
+	if run == 1 {
+		close(s.gave)
+		return nil
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestAccountThatGaveUpStartsAgainWhenLeasedAgain(t *testing.T) {
+	var mu sync.Mutex
+	runs := 0
+	gave := make(chan struct{})
+	syncer := givingUpSyncer{mu: &mu, runs: &runs, gave: gave}
+	leaser := &fakeLeaser{accounts: []api.Account{{ID: "a1", Provider: "imap"}}}
+	manager := NewManager(leaser, func(string) (Syncer, error) { return syncer, nil }, "w1", 10, time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	manager.Heartbeat(ctx)
+	<-gave
+
+	// The password was fixed before the next heartbeat, so the API keeps leasing the account to this worker.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		manager.Heartbeat(ctx)
+		mu.Lock()
+		current := runs
+		mu.Unlock()
+		if current == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runs = %d, want the account started again", current)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := manager.Running(); !slices.Equal(got, []string{"a1"}) {
+		t.Errorf("running = %v", got)
+	}
+}
