@@ -1,0 +1,127 @@
+/** Wire format of /api/v1/smart-inboxes, /api/v1/threads/{id}/classification and /api/v1/sender-rules, and helpers. */
+
+import type { Verdict } from './domain'
+import type { SyncedSmartInbox } from './sync/types'
+
+export type SmartInbox = SyncedSmartInbox
+
+export interface NewSmartInbox {
+  name: string
+  instructions: string
+  includeSenders: string[]
+  excludeSenders: string[]
+  verdict: Verdict
+}
+
+/** JSON merge patch: omitted fields stay as they are; the lists are replaced as a whole. */
+export type SmartInboxUpdate = Partial<NewSmartInbox>
+
+/** Where the user puts a conversation. Without `verdict` it gets the smart inbox's. */
+export interface ThreadClassificationRequest {
+  smartInboxId: string
+  verdict?: Verdict
+}
+
+export interface ThreadClassification {
+  threadId: string
+  smartInboxId: string
+  verdict: Verdict
+  reason: string
+  /** The sender rule the choice was remembered as; null for a conversation with only the user's own mail. */
+  senderRule: { id: string; sender: string; verdict: Verdict | null } | null
+}
+
+/** A correction remembered for a sender: their mail goes to the smart inbox, with the verdict when set. */
+export interface SenderRule {
+  id: string
+  /** An address, or `@domain`. */
+  sender: string
+  smartInboxId: string
+  verdict: Verdict | null
+  updatedAt: string
+}
+
+/** Every verdict, in the order they are offered. */
+export const VERDICTS: readonly Verdict[] = ['do', 'delegate', 'know', 'none']
+
+export function verdictLabel(verdict: Verdict): string {
+  switch (verdict) {
+    case 'do':
+      return 'Do'
+    case 'delegate':
+      return 'Hand over'
+    case 'know':
+      return 'Know'
+    case 'none':
+      return 'None'
+  }
+}
+
+/** Mirrors App\Classification\SenderPattern::REGEX: an address, or `@` and a domain with at least one dot. */
+export const SENDER_PATTERN = /^[^@\s]*@[^@\s.]+(\.[^@\s.]+)+$/
+
+export function normalizeSenderPattern(pattern: string): string {
+  return pattern.trim().toLowerCase()
+}
+
+export function isSenderPattern(pattern: string): boolean {
+  return SENDER_PATTERN.test(normalizeSenderPattern(pattern))
+}
+
+/** Sidebar order. */
+export function sortSmartInboxes<T extends Pick<SyncedSmartInbox, 'position' | 'id'>>(smartInboxes: T[]): T[] {
+  return [...smartInboxes].sort((a, b) => a.position - b.position || a.id.localeCompare(b.id))
+}
+
+/** The letter on a smart inbox's mark in the sidebar. */
+export function smartInboxMark(smartInbox: Pick<SyncedSmartInbox, 'builtin' | 'name'>): string {
+  switch (smartInbox.builtin) {
+    case 'todo':
+      return 'D'
+    case 'informational':
+      return 'K'
+    case 'notification':
+    case 'advertise':
+      return 'N'
+    case 'spam':
+      return 'S'
+    case null:
+      return (smartInbox.name.trim()[0] ?? '?').toUpperCase()
+  }
+}
+
+/** Why a conversation is in its smart inbox, in words; mirrors App\Classification\ClassificationReason. */
+export function classificationReasonText(reason: string | null): string | null {
+  switch (reason) {
+    case null:
+      return null
+    case 'user':
+      return 'You put it here.'
+    case 'sender_rule':
+      return 'You put mail from this sender here before.'
+    case 'include_list':
+      return 'The sender is on the include list.'
+    case 'server_spam':
+      return 'The mail server marked it as junk.'
+    case 'authentication_failed':
+      return 'It failed the checks that prove who sent it.'
+    case 'automated':
+      return 'A machine sent it.'
+    case 'marketing_sender':
+      return 'It comes from a marketing address.'
+    case 'bulk':
+      return 'It was sent in bulk.'
+    case 'notification_sender':
+      return 'It comes from an address that takes no replies.'
+    case 'unsubscribe_link':
+      return 'It has an unsubscribe link.'
+    case 'mailing_list':
+      return 'It came through a mailing list.'
+    case 'direct':
+      return 'Someone wrote to you directly.'
+    case 'copied':
+      return 'You are in copy.'
+    default:
+      return 'Classified automatically.'
+  }
+}

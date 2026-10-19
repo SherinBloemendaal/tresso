@@ -1,4 +1,5 @@
-import type { SyncedDraft, SyncedMessage } from '../sync/types'
+import type { Verdict } from '../domain'
+import type { SyncedDraft, SyncedMessage, SyncedThread } from '../sync/types'
 import type { Arrival, Contact, Draft } from './mailStore'
 
 function needsTheUser(message: SyncedMessage | null | undefined): boolean {
@@ -101,4 +102,14 @@ export function storedDraft(draft: Draft): Draft {
 /** Whether a draft holds something that exists nowhere else: edits not uploaded, or a message whose outcome is pending. */
 export function draftOnlyHere(draft: Draft): boolean {
   return draft.pendingSave || draft.outgoingId !== null
+}
+
+/** A thread as the user's choice leaves it, before the server confirms: in the smart inbox, with the verdict. */
+export function classifiedByUser(thread: SyncedThread, smartInboxId: string, verdict: Verdict): SyncedThread {
+  return { ...thread, smartInboxId, verdict, classificationReason: 'user' }
+}
+
+/** Whether a thread still shows the user's unconfirmed choice, so putting it back undoes nothing the delta brought. */
+export function stillAsClassified(current: SyncedThread | null | undefined, optimistic: { smartInboxId: string; verdict: Verdict }): boolean {
+  return current?.smartInboxId === optimistic.smartInboxId && current.verdict === optimistic.verdict && current.classificationReason === 'user'
 }

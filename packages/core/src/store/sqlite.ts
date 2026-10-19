@@ -1,15 +1,17 @@
 import { actionResult, type AppliedAction, type MessageAction } from '../actions'
-import { summarizeConversation, type ConversationSummary } from '../sync/conversation'
-import type { ChangePage, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedThread } from '../sync/types'
+import type { Verdict } from '../domain'
+import { sortSmartInboxes } from '../smartInboxes'
+import { inList, summarizeConversation, type ConversationSummary, type ListFolders, type ListScope } from '../sync/conversation'
+import type { ChangePage, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread } from '../sync/types'
 import { CopyClosingError, type Arrival, type Contact, type Draft, type MailStore } from './mailStore'
-import { arrivalOf, contactMatches, deletedDraft, draftOnlyHere, mergeContact, peopleOn, storedDraft, syncedDraft } from './rules'
+import { arrivalOf, classifiedByUser, contactMatches, deletedDraft, draftOnlyHere, mergeContact, peopleOn, stillAsClassified, storedDraft, syncedDraft } from './rules'
 import type { Sql, SqlValue } from './sql'
 
 /**
  * Raised whenever the copy changes shape. A copy made by another version is emptied and synced again from the start,
  * so nothing it skipped stays missing; drafts that exist only on this device are carried over.
  */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
@@ -27,10 +29,14 @@ CREATE TABLE IF NOT EXISTS conversations (
   inbox INTEGER NOT NULL,
   unread INTEGER NOT NULL,
   last_message_at INTEGER NOT NULL,
+  smart_inbox_id TEXT,
+  active INTEGER NOT NULL,
   json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS conversations_by_inbox ON conversations (inbox, last_message_at);
 CREATE INDEX IF NOT EXISTS conversations_by_account_inbox ON conversations (mail_account_id, inbox, last_message_at);
+CREATE INDEX IF NOT EXISTS conversations_by_smart_inbox ON conversations (smart_inbox_id, active, last_message_at);
+CREATE TABLE IF NOT EXISTS smart_inboxes (id TEXT PRIMARY KEY NOT NULL, builtin TEXT, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outgoing (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS outgoing_by_account ON outgoing (mail_account_id);
 CREATE TABLE IF NOT EXISTS contacts (key TEXT PRIMARY KEY NOT NULL, last_seen INTEGER NOT NULL, json TEXT NOT NULL);
@@ -41,7 +47,7 @@ CREATE TABLE IF NOT EXISTS signatures (id TEXT PRIMARY KEY NOT NULL, json TEXT N
 `
 
 /** Every table any version made, so a rebuild leaves none of an old shape behind. */
-const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'meta']
+const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'meta']
 
 type JsonRow = { json: string }
 
@@ -209,6 +215,9 @@ export class SqliteMailStore implements MailStore {
           case 'signature':
             await tx.run('DELETE FROM signatures WHERE id = ?', [deleted.id])
             break
+          case 'smartInbox':
+            await tx.run('DELETE FROM smart_inboxes WHERE id = ?', [deleted.id])
+            break
           case 'draft': {
             const local = await readDraft(tx, deleted.id)
             if (local !== null) {
@@ -235,8 +244,18 @@ export class SqliteMailStore implements MailStore {
       for (const signature of page.signatures) {
         await tx.run('INSERT OR REPLACE INTO signatures (id, json) VALUES (?, ?)', [signature.id, JSON.stringify(signature)])
       }
+      for (const smartInbox of page.smartInboxes) {
+        const known = await tx.first<{ id: string }>('SELECT id FROM smart_inboxes WHERE id = ?', [smartInbox.id])
+        await tx.run('INSERT OR REPLACE INTO smart_inboxes (id, builtin, json) VALUES (?, ?, ?)', [smartInbox.id, smartInbox.builtin, JSON.stringify(smartInbox)])
+        if (known === null && smartInbox.builtin === 'spam') {
+          // The Spam smart inbox decides which conversations the inboxes leave out.
+          for (const row of await tx.all<{ thread_id: string }>('SELECT thread_id FROM conversations')) {
+            affected.add(row.thread_id)
+          }
+        }
+      }
       for (const thread of page.threads) {
-        await tx.run('INSERT OR REPLACE INTO threads (id, mail_account_id, json) VALUES (?, ?, ?)', [thread.id, thread.mailAccountId, JSON.stringify(thread)])
+        await writeThread(tx, thread)
         affected.add(thread.id)
       }
       const inboxFolders = await inboxFolderIds(tx)
@@ -266,8 +285,9 @@ export class SqliteMailStore implements MailStore {
         }
       }
 
+      const lists = await listFoldersOf(tx)
       for (const threadId of affected) {
-        await refreshConversation(tx, threadId, inboxFolders)
+        await refreshConversation(tx, threadId, lists)
       }
       if (!this.resyncing) {
         await tx.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['cursor', String(page.cursor)])
@@ -341,26 +361,27 @@ export class SqliteMailStore implements MailStore {
     return signatures.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
   }
 
-  async inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]> {
-    const rows =
-      mailAccountId === null
-        ? await this.reader.all<JsonRow>('SELECT json FROM conversations WHERE inbox = 1 ORDER BY last_message_at DESC, thread_id DESC LIMIT ?', [limit])
-        : await this.reader.all<JsonRow>('SELECT json FROM conversations WHERE mail_account_id = ? AND inbox = 1 ORDER BY last_message_at DESC, thread_id DESC LIMIT ?', [
-            mailAccountId,
-            limit,
-          ])
+  async smartInboxes(): Promise<SyncedSmartInbox[]> {
+    return sortSmartInboxes((await this.reader.all<JsonRow>('SELECT json FROM smart_inboxes')).map((row) => parse<SyncedSmartInbox>(row)))
+  }
+
+  inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]> {
+    return this.list({ kind: 'inbox', mailAccountId }, limit)
+  }
+
+  async list(scope: ListScope, limit: number): Promise<ConversationSummary[]> {
+    const [where, params] = listWhere(scope)
+    const rows = await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE ${where} ORDER BY last_message_at DESC, thread_id DESC LIMIT ?`, [...params, limit])
     return rows.map((row) => parse<ConversationSummary>(row))
   }
 
-  async inboxThreadIds(mailAccountId: string | null, matches: (conversation: ConversationSummary) => boolean): Promise<string[]> {
-    const rows =
-      mailAccountId === null
-        ? await this.reader.all<JsonRow>('SELECT json FROM conversations WHERE inbox = 1 ORDER BY last_message_at DESC, thread_id DESC')
-        : await this.reader.all<JsonRow>('SELECT json FROM conversations WHERE mail_account_id = ? AND inbox = 1 ORDER BY last_message_at DESC, thread_id DESC', [mailAccountId])
+  async listThreadIds(scope: ListScope, matches: (conversation: ConversationSummary) => boolean): Promise<string[]> {
+    const [where, params] = listWhere(scope)
+    const rows = await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE ${where} ORDER BY last_message_at DESC, thread_id DESC`, params)
     return rows.map((row) => parse<ConversationSummary>(row)).filter(matches).map((conversation) => conversation.threadId)
   }
 
-  async describeThreads(mailAccountId: string | null, threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }> {
+  async describeThreads(scope: ListScope, threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }> {
     const found = new Map<string, ConversationSummary>()
     for (const chunk of chunks(threadIds)) {
       for (const row of await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE thread_id IN (${placeholders(chunk)})`, chunk)) {
@@ -373,7 +394,7 @@ export class SqliteMailStore implements MailStore {
     const senders = new Set<string>()
     for (const threadId of threadIds) {
       const conversation = found.get(threadId)
-      if (conversation === undefined || !conversation.inbox || (mailAccountId !== null && conversation.mailAccountId !== mailAccountId)) {
+      if (conversation === undefined || !inList(conversation, scope)) {
         continue
       }
       present.push(threadId)
@@ -405,6 +426,41 @@ export class SqliteMailStore implements MailStore {
       'SELECT a.id, COUNT(c.thread_id) AS count FROM mail_accounts a LEFT JOIN conversations c ON c.mail_account_id = a.id AND c.inbox = 1 AND c.unread = 1 GROUP BY a.id',
     )
     return new Map(rows.map((row) => [row.id, Number(row.count)]))
+  }
+
+  async unreadSmartInboxCounts(): Promise<Map<string, number>> {
+    const rows = await this.reader.all<{ id: string; count: number }>(
+      'SELECT s.id, COUNT(c.thread_id) AS count FROM smart_inboxes s LEFT JOIN conversations c ON c.smart_inbox_id = s.id AND c.active = 1 AND c.unread = 1 GROUP BY s.id',
+    )
+    return new Map(rows.map((row) => [row.id, Number(row.count)]))
+  }
+
+  classifyThread(threadId: string, smartInboxId: string, verdict: Verdict): Promise<SyncedThread | null> {
+    return this.write(async () => {
+      let previous: SyncedThread | null = null
+      await this.sql.transaction(async (tx) => {
+        const row = await tx.first<JsonRow>('SELECT json FROM threads WHERE id = ?', [threadId])
+        if (row === null) {
+          return
+        }
+        previous = parse<SyncedThread>(row)
+        await writeThread(tx, classifiedByUser(previous, smartInboxId, verdict))
+        await refreshConversation(tx, threadId, await listFoldersOf(tx))
+      })
+      return previous
+    })
+  }
+
+  restoreThread(previous: SyncedThread, optimistic: { smartInboxId: string; verdict: Verdict }): Promise<void> {
+    return this.write(() =>
+      this.sql.transaction(async (tx) => {
+        const row = await tx.first<JsonRow>('SELECT json FROM threads WHERE id = ?', [previous.id])
+        if (stillAsClassified(row === null ? null : parse<SyncedThread>(row), optimistic)) {
+          await writeThread(tx, previous)
+          await refreshConversation(tx, previous.id, await listFoldersOf(tx))
+        }
+      }),
+    )
   }
 
   async outbox(): Promise<SyncedOutgoingMessage[]> {
@@ -510,15 +566,19 @@ async function writeMessage(tx: Sql, message: SyncedMessage): Promise<void> {
   }
 }
 
+async function writeThread(tx: Sql, thread: SyncedThread): Promise<void> {
+  await tx.run('INSERT OR REPLACE INTO threads (id, mail_account_id, json) VALUES (?, ?, ?)', [thread.id, thread.mailAccountId, JSON.stringify(thread)])
+}
+
 async function rewrite(tx: Sql, messages: SyncedMessage[]): Promise<void> {
   const affected = new Set<string>()
   for (const message of messages) {
     await writeMessage(tx, message)
     affected.add(message.threadId)
   }
-  const inboxFolders = await inboxFolderIds(tx)
+  const lists = await listFoldersOf(tx)
   for (const threadId of affected) {
-    await refreshConversation(tx, threadId, inboxFolders)
+    await refreshConversation(tx, threadId, lists)
   }
 }
 
@@ -549,6 +609,23 @@ async function inboxFolderIds(tx: Sql): Promise<Set<string>> {
   return new Set((await tx.all<{ id: string }>("SELECT id FROM folders WHERE role = 'inbox'")).map((row) => row.id))
 }
 
+async function listFoldersOf(tx: Sql): Promise<ListFolders> {
+  const spam = await tx.first<{ id: string }>("SELECT id FROM smart_inboxes WHERE builtin = 'spam'")
+  return {
+    inboxFolderIds: await inboxFolderIds(tx),
+    spamFolderIds: new Set((await tx.all<{ id: string }>("SELECT id FROM folders WHERE role = 'spam'")).map((row) => row.id)),
+    spamSmartInboxId: spam?.id ?? null,
+  }
+}
+
+/** The WHERE clause of a list and its parameters; the indexes on conversations cover each. */
+function listWhere(scope: ListScope): [string, SqlValue[]] {
+  if (scope.kind === 'smartInbox') {
+    return ['smart_inbox_id = ? AND active = 1', [scope.smartInboxId]]
+  }
+  return scope.mailAccountId === null ? ['inbox = 1', []] : ['mail_account_id = ? AND inbox = 1', [scope.mailAccountId]]
+}
+
 async function deleteAccount(tx: Sql, accountId: string): Promise<void> {
   // Drafts outlive the account they were written from; they keep their text and need a new one to send.
   for (const row of await tx.all<JsonRow>('SELECT json FROM drafts WHERE mail_account_id = ?', [accountId])) {
@@ -561,20 +638,16 @@ async function deleteAccount(tx: Sql, accountId: string): Promise<void> {
   await tx.run('DELETE FROM mail_accounts WHERE id = ?', [accountId])
 }
 
-async function refreshConversation(tx: Sql, threadId: string, inboxFolders: Set<string>): Promise<void> {
+async function refreshConversation(tx: Sql, threadId: string, lists: ListFolders): Promise<void> {
   const thread = await tx.first<JsonRow>('SELECT json FROM threads WHERE id = ?', [threadId])
   const messages = thread === null ? [] : (await tx.all<JsonRow>('SELECT json FROM messages WHERE thread_id = ?', [threadId])).map((row) => parse<SyncedMessage>(row))
-  const summary = thread === null ? null : summarizeConversation(parse<SyncedThread>(thread), messages, inboxFolders)
+  const summary = thread === null ? null : summarizeConversation(parse<SyncedThread>(thread), messages, lists)
   if (summary === null) {
     await tx.run('DELETE FROM conversations WHERE thread_id = ?', [threadId])
     return
   }
-  await tx.run('INSERT OR REPLACE INTO conversations (thread_id, mail_account_id, inbox, unread, last_message_at, json) VALUES (?, ?, ?, ?, ?, ?)', [
-    threadId,
-    summary.mailAccountId,
-    summary.inbox ? 1 : 0,
-    summary.unreadCount > 0 ? 1 : 0,
-    summary.lastMessageAt,
-    JSON.stringify(summary),
-  ])
+  await tx.run(
+    'INSERT OR REPLACE INTO conversations (thread_id, mail_account_id, inbox, unread, last_message_at, smart_inbox_id, active, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [threadId, summary.mailAccountId, summary.inbox ? 1 : 0, summary.unreadCount > 0 ? 1 : 0, summary.lastMessageAt, summary.smartInboxId, summary.active ? 1 : 0, JSON.stringify(summary)],
+  )
 }
