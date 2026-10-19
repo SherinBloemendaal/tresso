@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App\Service;
 
+use App\Calendar\LocalCalendars;
 use App\Classification\BuiltinSmartInboxes;
-use App\Entity\Calendar;
 use App\Entity\User;
 use App\Entity\UserSettings;
 use Doctrine\ORM\EntityManagerInterface;
@@ -30,9 +30,7 @@ final readonly class UserProvisioner
         $user->setPassword($this->passwordHasher->hashPassword($user, $plainPassword));
         $this->entityManager->persist($user);
         $this->entityManager->persist(new UserSettings($user));
-        $calendar = Calendar::local($user, 'Tresso');
-        $calendar->setDefault(true);
-        $this->entityManager->persist($calendar);
+        $this->entityManager->persist(LocalCalendars::create($user));
 
         $this->builtinSmartInboxes->ensure($user);
 

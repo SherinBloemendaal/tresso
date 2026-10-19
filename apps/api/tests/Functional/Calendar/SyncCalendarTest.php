@@ -74,8 +74,41 @@ final class SyncCalendarTest extends DatabaseTestCase
         self::assertSame('active', $account['calendarStatus']);
         self::assertNull($account['calendarStatusDetail']);
 
+        $this->client->jsonRequest('POST', $this->base().'/calendar-status', ['workerId' => 'w1', 'status' => 'unconfirmed', 'detail' => 'A calendar server was found at https://company.example/.well-known/caldav.'], $this->worker);
+        self::assertResponseIsSuccessful();
+        self::assertSame('unconfirmed', $this->getJson('/api/v1/mail-accounts/'.$this->accountId, $this->kim)['calendarStatus']);
+
         $this->client->jsonRequest('POST', $this->base().'/calendar-status', ['workerId' => 'w1', 'status' => 'active'], $this->worker);
         self::assertResponseStatusCodeSame(422);
+    }
+
+    public function testAnIncompleteCalendarListRemovesNothing(): void
+    {
+        $this->reportCalendars();
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars', ['workerId' => 'w1', 'calendars' => []], $this->worker);
+        self::assertResponseIsSuccessful();
+        self::assertSame(['Holidays', 'Home'], $this->remoteCalendarNames());
+
+        // The first list from another server keeps the calendars; the next one from there is believed.
+        $other = ['workerId' => 'w1', 'serverUrl' => 'https://dav.elsewhere.example/', 'calendars' => [['remoteId' => 'https://dav.elsewhere.example/kim/main/', 'name' => 'Main']]];
+        $this->client->jsonRequest('POST', $this->base().'/calendars', $other, $this->worker);
+        self::assertSame(['Holidays', 'Home', 'Main'], $this->remoteCalendarNames());
+        $this->client->jsonRequest('POST', $this->base().'/calendars', $other, $this->worker);
+        self::assertSame(['Main'], $this->remoteCalendarNames());
+    }
+
+    public function testACalendarWithWritesToMakeIsKept(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->storeObject($home, 'standup.ics', '"1"', 'standup@company.example', 'Standup');
+        $eventId = self::string($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($home, ['summary' => 'Standup (short)']), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars', ['workerId' => 'w1', 'calendars' => [['remoteId' => self::HOLIDAYS, 'name' => 'Holidays', 'writable' => false]]], $this->worker);
+        self::assertSame(['Holidays', 'Home'], $this->remoteCalendarNames());
+        self::assertCount(1, $this->claim(), 'The write is still there.');
     }
 
     public function testRemovesCalendarsTheProviderNoLongerHas(): void
@@ -153,6 +186,86 @@ final class SyncCalendarTest extends DatabaseTestCase
         self::assertSame([], $this->decodedResponse()['fetch'], 'The stored version is the one the provider confirmed.');
     }
 
+    public function testASecondEditWaitsForTheFirstAndUsesItsEtag(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->storeObject($home, 'standup.ics', '"1"', 'standup@company.example', 'Standup');
+        $eventId = self::string($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($home, ['summary' => 'Standup (short)']), $this->kim);
+        $first = $this->claim();
+        self::assertSame('"1"', $first[0]['ifMatch']);
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($home, ['summary' => 'Standup (cancelled?)']), $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertSame([], $this->claim(), 'The second write waits while the first is under way.');
+
+        $this->report($first[0]['id'], ['outcome' => 'done', 'etag' => '"2"']);
+        $second = $this->claim();
+        self::assertCount(1, $second);
+        self::assertSame(self::HOME.'standup.ics', $second[0]['remoteId']);
+        self::assertSame('"2"', $second[0]['ifMatch'], 'Sent with the etag the first write got back, not a stale one.');
+        self::assertIsString($second[0]['ical']);
+        self::assertStringContainsString('SUMMARY:Standup (cancelled?)', $second[0]['ical']);
+    }
+
+    public function testAnEditOfANewEventUpdatesTheResourceItsCreationMade(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events', self::event($home), $this->kim);
+        $eventId = self::string($this->decodedResponse()['id'] ?? null);
+        $create = $this->claim();
+        self::assertNull($create[0]['remoteId']);
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($home, ['summary' => 'Renamed']), $this->kim);
+        $this->report($create[0]['id'], ['outcome' => 'done', 'remoteId' => self::HOME.'new.ics', 'etag' => '"1"']);
+
+        $update = $this->claim();
+        self::assertSame(self::HOME.'new.ics', $update[0]['remoteId'], 'Not a second resource.');
+        self::assertSame('"1"', $update[0]['ifMatch']);
+    }
+
+    public function testShiftingASeriesMovesItsExceptionsGivenInUtc(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$home.'/objects', ['workerId' => 'w1', 'changed' => [['remoteId' => self::HOME.'daily.ics', 'etag' => '"1"', 'ical' => implode("\r\n", [
+            'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Provider//EN', 'BEGIN:VEVENT', 'UID:daily@company.example', 'DTSTAMP:20261018T080000Z',
+            'DTSTART;TZID=Europe/Amsterdam:20261019T090000', 'DTEND;TZID=Europe/Amsterdam:20261019T091500', 'RRULE:FREQ=DAILY;COUNT=5',
+            // 21 October 09:00 in Amsterdam, written in UTC as some servers do.
+            'EXDATE:20261021T070000Z', 'SUMMARY:Daily', 'END:VEVENT', 'END:VCALENDAR', '',
+        ])]]], $this->worker);
+        self::assertResponseIsSuccessful();
+        $eventId = self::string($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId.'?scope=all', self::event($home, [
+            'summary' => 'Daily',
+            'recurrence' => 'FREQ=DAILY;COUNT=5',
+            'start' => ['dateTime' => '2026-10-19T10:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-19T10:15:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        $starts = array_column($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-25T00:00:00+00:00'), 'start');
+        self::assertSame([
+            ['dateTime' => '2026-10-19T08:00:00+00:00'],
+            ['dateTime' => '2026-10-20T08:00:00+00:00'],
+            ['dateTime' => '2026-10-22T08:00:00+00:00'],
+            ['dateTime' => '2026-10-23T08:00:00+00:00'],
+        ], $starts, 'The 21st stays excluded at its new time.');
+    }
+
+    public function testSeriesRepeatingMoreOftenThanHourlyAreSkipped(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$home.'/objects', ['workerId' => 'w1', 'changed' => [['remoteId' => self::HOME.'minutely.ics', 'etag' => '"1"', 'ical' => implode("\r\n", [
+            'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Provider//EN', 'BEGIN:VEVENT', 'UID:minutely@company.example', 'DTSTAMP:20261018T080000Z',
+            'DTSTART:20261019T090000Z', 'DURATION:PT1M', 'RRULE:FREQ=MINUTELY', 'SUMMARY:Spin', 'END:VEVENT', 'END:VCALENDAR', '',
+        ])]]], $this->worker);
+
+        self::assertResponseIsSuccessful();
+        self::assertSame(['stored' => 0, 'removed' => 0, 'skipped' => 1], $this->decodedResponse());
+    }
+
     public function testNewEventsAndDeletesReachTheProvider(): void
     {
         $home = $this->reportCalendars()[0]['id'];
@@ -211,6 +324,22 @@ final class SyncCalendarTest extends DatabaseTestCase
         self::assertResponseStatusCodeSame(404);
         $this->client->jsonRequest('POST', $this->base().'/calendar-operations/claim', ['workerId' => 'w2'], $this->worker);
         self::assertResponseStatusCodeSame(404);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function remoteCalendarNames(): array
+    {
+        $names = [];
+        foreach ($this->getJson('/api/v1/calendars', $this->kim) as $calendar) {
+            if (\is_array($calendar) && null !== $calendar['mailAccountId']) {
+                $names[] = self::string($calendar['name']);
+            }
+        }
+        sort($names);
+
+        return $names;
     }
 
     private function base(): string

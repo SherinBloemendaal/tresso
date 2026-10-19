@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\Calendar;
 
+use App\Calendar\OccurrenceExpander;
 use App\Tests\Functional\AuthenticatesUsers;
 use App\Tests\Functional\DatabaseTestCase;
 
@@ -223,6 +224,29 @@ final class CalendarEventApiTest extends DatabaseTestCase
         self::assertSame([], $this->occurrences($lisa, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00'));
     }
 
+    public function testOtherUsersCannotChangeAnswerOrReceiveAnEvent(): void
+    {
+        $event = $this->create();
+        $this->createUser('lisa@example.test', 'Lisa');
+        $lisa = $this->userHeaders('lisa@example.test', self::SCOPES);
+        $lisasCalendar = $this->localCalendarId($lisa);
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$event['id'], self::event($lisasCalendar, ['summary' => 'Taken']), $lisa);
+        self::assertResponseStatusCodeSame(404);
+        $this->client->request('DELETE', '/api/v1/calendar-events/'.$event['id'], server: $lisa);
+        self::assertResponseStatusCodeSame(404);
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events/'.$event['id'].'/response', ['response' => 'accepted'], $lisa);
+        self::assertResponseStatusCodeSame(404);
+
+        // Kim cannot move her event into Lisa's calendar either.
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$event['id'], self::event($lisasCalendar), $this->kim);
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame('calendarId', $this->violationPath());
+
+        self::assertSame('Weekly sync', $this->getJson('/api/v1/calendar-events/'.$event['id'], $this->kim)['summary']);
+        self::assertSame([], $this->occurrences($lisa, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00'));
+    }
+
     public function testRequiresCalendarScopes(): void
     {
         $mailOnly = $this->userHeaders('kim@example.test', ['mail:read']);
@@ -238,6 +262,53 @@ final class CalendarEventApiTest extends DatabaseTestCase
         $this->client->request('GET', '/api/v1/calendar-occurrences?'.http_build_query(['from' => '2026-01-01T00:00:00+00:00', 'to' => '2027-06-01T00:00:00+00:00']), server: $this->kim);
 
         self::assertResponseStatusCodeSame(400);
+    }
+
+    public function testLongRangesStayBounded(): void
+    {
+        $this->create(['recurrence' => 'FREQ=HOURLY']);
+
+        $occurrences = $this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2027-11-01T00:00:00+00:00');
+
+        self::assertCount(OccurrenceExpander::MAX_PER_SERIES, $occurrences, 'One dense series fills a range only up to its share.');
+    }
+
+    public function testAnUnknownTimeZoneIsRefused(): void
+    {
+        $this->client->request('GET', '/api/v1/calendar-occurrences?'.http_build_query(['from' => '2026-10-19T00:00:00+00:00', 'to' => '2026-10-20T00:00:00+00:00', 'timeZone' => 'Mars/Olympus']), server: $this->kim);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame('timeZone', $this->violationPath());
+    }
+
+    public function testAnOccurrenceTooFarIntoADenseSeriesIsRefused(): void
+    {
+        $series = $this->create(['recurrence' => 'FREQ=HOURLY']);
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?'.http_build_query(['scope' => 'this', 'recurrenceId' => '20400101T000000Z']), self::event($this->calendarId, [
+            'start' => ['dateTime' => '2040-01-01T02:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2040-01-01T03:00:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+
+        self::assertResponseStatusCodeSame(422);
+    }
+
+    public function testAnEventMovedBeforeTheDeltaWindowLeavesTheCopies(): void
+    {
+        $event = $this->create();
+        $cursor = $this->getJson('/api/v1/sync/changes?since=0', $this->kim)['cursor'];
+        self::assertIsInt($cursor);
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$event['id'], self::event($this->calendarId, [
+            'start' => ['dateTime' => '2020-01-06T09:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2020-01-06T09:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        $delta = $this->getJson('/api/v1/sync/changes?since='.$cursor, $this->kim);
+        self::assertSame([], $delta['calendarEvents']);
+        self::assertSame([['type' => 'calendarEvent', 'id' => $event['id']]], $delta['deleted']);
+        self::assertSame([], $this->getJson('/api/v1/sync/changes?since=0', $this->kim)['calendarEvents'], 'A new copy never gets it.');
     }
 
     public function testTheDeltaCarriesCalendarsAndEvents(): void

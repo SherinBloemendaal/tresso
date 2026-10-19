@@ -6,6 +6,7 @@ namespace App\Calendar;
 
 use App\Calendar\ICalendar\CalendarDocument;
 use App\Calendar\ICalendar\InvalidCalendarData;
+use App\Calendar\ICalendar\Occurrences;
 use App\Entity\Calendar;
 use App\Entity\CalendarEvent;
 use App\Entity\CalendarOperation;
@@ -41,6 +42,11 @@ final readonly class CalendarStore
         $uids = array_keys(CalendarDocument::eventsByUid($calendar));
         if ([$object->getUid()] !== $uids) {
             throw new InvalidCalendarData(\sprintf('A calendar resource holds the events of exactly one UID, got: %s.', implode(', ', $uids) ?: 'none'));
+        }
+        foreach (CalendarDocument::events($calendar) as $event) {
+            if (Occurrences::tooDense($event)) {
+                throw new InvalidCalendarData('Events that repeat more often than every hour are not supported.');
+            }
         }
 
         $object->setIcal($calendar->serialize());

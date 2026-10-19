@@ -8,9 +8,11 @@ use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProviderInterface;
 use App\ApiResource\CalendarOccurrence;
 use App\Calendar\OccurrenceExpander;
+use App\Calendar\TooManyOccurrences;
 use App\Security\CurrentUser;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
+use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 
 /**
  * @implements ProviderInterface<CalendarOccurrence>
@@ -39,9 +41,17 @@ final readonly class CalendarOccurrenceProvider implements ProviderInterface
         $calendarIds = $query?->all('calendarId') ?? [];
 
         try {
-            return $this->expander->expand($this->currentUser->get(), array_values(array_filter($calendarIds, \is_string(...))), $from, $to, new \DateTimeZone('' === $zone ? 'UTC' : $zone));
+            $timeZone = new \DateTimeZone('' === $zone ? 'UTC' : $zone);
+        } catch (\DateInvalidTimeZoneException $e) {
+            throw new BadRequestHttpException('timeZone must be an IANA time zone such as Europe/Amsterdam.', $e);
+        }
+
+        try {
+            return $this->expander->expand($this->currentUser->get(), array_values(array_filter($calendarIds, \is_string(...))), $from, $to, $timeZone);
         } catch (\InvalidArgumentException $e) {
             throw new BadRequestHttpException($e->getMessage(), $e);
+        } catch (TooManyOccurrences $e) {
+            throw new UnprocessableEntityHttpException($e->getMessage(), $e);
         }
     }
 }

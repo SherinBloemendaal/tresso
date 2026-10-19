@@ -17,6 +17,7 @@ use App\Entity\CalendarOperation;
 use App\Entity\MailAccount;
 use App\Enum\CalendarSyncStatus;
 use App\Repository\CalendarObjectRepository;
+use App\Repository\CalendarOperationRepository;
 use App\Repository\CalendarRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
@@ -33,6 +34,7 @@ final readonly class CalendarSynchronizer
         private EntityManagerInterface $entityManager,
         private CalendarRepository $calendars,
         private CalendarObjectRepository $objects,
+        private CalendarOperationRepository $operations,
         private CalendarStore $store,
         private LoggerInterface $logger,
     ) {
@@ -40,6 +42,8 @@ final readonly class CalendarSynchronizer
 
     public function syncCalendars(MailAccount $account, CalendarListInput $input): CalendarListResult
     {
+        $previousHost = null === $account->getCalendarServer() ? null : parse_url($account->getCalendarServer(), \PHP_URL_HOST);
+        $host = null === $input->serverUrl ? $previousHost : parse_url($input->serverUrl, \PHP_URL_HOST);
         if (null !== $input->serverUrl) {
             $account->setCalendarServer($input->serverUrl);
         }
@@ -66,10 +70,19 @@ final readonly class CalendarSynchronizer
             $seen[$remote->remoteId] = $calendar;
         }
 
+        // Calendars missing from the list go, unless the list cannot be trusted to be complete: an empty list, or the
+        // first list from another server (a flapping discovery must not wipe everything; the next list from the new
+        // server removes them). A calendar with writes still to make stays until they are made.
+        $trusted = [] !== $input->calendars && (null === $previousHost || $previousHost === $host);
         foreach ($existing as $remoteId => $calendar) {
-            if (!isset($seen[$remoteId])) {
-                $this->entityManager->remove($calendar);
+            if (isset($seen[$remoteId])) {
+                continue;
             }
+            if (!$trusted || $this->operations->hasPendingFor($calendar)) {
+                $this->logger->info('Keeping a calendar the provider did not list', ['calendar' => $calendar->getId()->toRfc4122(), 'trusted' => $trusted]);
+                continue;
+            }
+            $this->entityManager->remove($calendar);
         }
         $this->chooseDefault($input, $seen);
         $this->entityManager->flush();

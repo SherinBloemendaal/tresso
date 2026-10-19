@@ -16,7 +16,7 @@ use Psr\Log\LoggerInterface;
 
 /**
  * Records the calendar objects that came with a new message, at ingest, and has them applied to the user's calendars
- * once the ingest is committed. Parts that are not usable iTIP (no METHOD, no event, broken) are skipped: a message
+ * once the ingest is committed (when $apply says the message may change the calendar). Parts that are not usable iTIP (no METHOD, no event, broken) are skipped: a message
  * must never fail to ingest because of its calendar part.
  */
 final readonly class InvitationRecorder
@@ -28,7 +28,7 @@ final readonly class InvitationRecorder
     ) {
     }
 
-    public function record(Message $message, ?string $partMethod, string $ical): ?CalendarInvitation
+    public function record(Message $message, ?string $partMethod, string $ical, bool $apply): ?CalendarInvitation
     {
         try {
             $calendar = CalendarDocument::parse($ical);
@@ -60,7 +60,9 @@ final readonly class InvitationRecorder
 
         $invitation = new CalendarInvitation($message, $method, $uid, $sequence, $hasMaster ? '' : $recurrenceKey, $calendar->serialize());
         $this->entityManager->persist($invitation);
-        $this->afterCommit->dispatch(new ApplyCalendarInvitation($invitation->getId()->toRfc4122()));
+        if ($apply) {
+            $this->afterCommit->dispatch(new ApplyCalendarInvitation($invitation->getId()->toRfc4122()));
+        }
 
         return $invitation;
     }

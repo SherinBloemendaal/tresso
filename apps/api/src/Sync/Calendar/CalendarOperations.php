@@ -68,7 +68,7 @@ final readonly class CalendarOperations
             if (CalendarOperationKind::Delete === $operation->getKind()) {
                 return 'done';
             }
-            $remoteId = $result->remoteId ?? $operation->getRemoteId();
+            $remoteId = $result->remoteId ?? $object?->getRemoteId() ?? $operation->getRemoteId();
             if (null === $object) {
                 // Removed while its write was under way: the resource now at the provider has to go as well.
                 if (null !== $remoteId) {

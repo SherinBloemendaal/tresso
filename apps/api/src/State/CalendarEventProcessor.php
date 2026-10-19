@@ -31,6 +31,7 @@ use App\Security\CurrentUser;
 use Doctrine\ORM\EntityManagerInterface;
 use Sabre\VObject\InvalidDataException;
 use Sabre\VObject\Recur\RRuleIterator;
+use Sabre\VObject\Recur\MaxInstancesExceededException;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
@@ -76,9 +77,10 @@ final readonly class CalendarEventProcessor implements ProcessorInterface
             if ($data instanceof EventInput) {
                 $calendar = $this->calendar($user, $data->calendarId);
                 $changes = self::changes($data);
+                $organizer = $this->organizer($user, $data->organizerMailAccountId);
 
                 return CalendarEventResource::fromEntity($this->entityManager->wrapInTransaction(
-                    fn (): CalendarEvent => $this->editor->update($event, $changes, $scope, $recurrenceId, $calendar, $notify),
+                    fn (): CalendarEvent => $this->editor->update($event, $changes, $scope, $recurrenceId, $calendar, $notify, $organizer),
                 ));
             }
 
@@ -95,6 +97,8 @@ final readonly class CalendarEventProcessor implements ProcessorInterface
             }
         } catch (EditRejected|SchedulingFailed|InvalidCalendarData $e) {
             throw new UnprocessableEntityHttpException($e->getMessage(), $e);
+        } catch (MaxInstancesExceededException $e) {
+            throw new UnprocessableEntityHttpException('This series repeats too often. Choose fewer repetitions or an end date.', $e);
         }
 
         throw new \LogicException(\sprintf('Unexpected input for %s.', $operation->getName()));
