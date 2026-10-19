@@ -1,16 +1,6 @@
 import { ref, watch } from 'vue'
 import { defineStore } from 'pinia'
-import {
-  composeBody,
-  forwardSubject,
-  isPlausibleAddress,
-  quotedOriginal,
-  replyRecipients,
-  replySubject,
-  type Address,
-  type SendMessageRequest,
-  type SyncedMessage,
-} from '@tresso/core'
+import { defaultSignatureOf, isPlausibleAddress, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome, type Address, type SyncedMessage } from '@tresso/core'
 import { ApiError, errorMessage } from '@/api/errors'
 import type { Draft } from '@/mail/db'
 import { useMailStore } from '@/stores/mail'
@@ -24,30 +14,6 @@ export interface Notice {
   text: string
   tone: 'info' | 'error'
   action?: { label: string; run: () => void }
-}
-
-type DraftKind = Draft['kind']
-
-function newDraft(kind: DraftKind, mailAccountId: string | null, signatureId: string | null): Draft {
-  return {
-    id: crypto.randomUUID(),
-    mailAccountId,
-    to: [],
-    cc: [],
-    bcc: [],
-    subject: '',
-    html: '',
-    signatureId,
-    quoteHtml: '',
-    inReplyToMessageId: null,
-    kind,
-    version: 0,
-    pendingSave: true,
-    remoteVersion: null,
-    outgoingId: null,
-    noticedStatus: null,
-    updatedAt: Date.now(),
-  }
 }
 
 /**
@@ -86,8 +52,7 @@ export const useComposeStore = defineStore('compose', () => {
 
   /** The signature an account adds by default. */
   function defaultSignature(mailAccountId: string | null): string | null {
-    const id = mail.accounts.find((account) => account.id === mailAccountId)?.defaultSignatureId ?? null
-    return mail.signatures.some((signature) => signature.id === id) ? id : null
+    return defaultSignatureOf(mail.accounts, mail.signatures, mailAccountId)
   }
 
   /** Rises whenever a draft is (re)opened, so the form starts over even for the same draft. */
@@ -109,25 +74,13 @@ export const useComposeStore = defineStore('compose', () => {
 
   async function openReply(message: SyncedMessage, kind: 'reply' | 'replyAll' | 'forward'): Promise<void> {
     const body = await mail.body(message.id, false).catch(() => ({ html: null, text: message.snippet }))
-    const next = newDraft(kind, message.mailAccountId, defaultSignature(message.mailAccountId))
-    next.inReplyToMessageId = message.id
-    if (kind === 'forward') {
-      next.subject = forwardSubject(message.subject)
-    } else {
-      const recipients = replyRecipients(message, mail.accounts.map((account) => account.emailAddress), kind === 'replyAll')
-      next.to = recipients.to
-      next.cc = recipients.cc
-      next.subject = replySubject(message.subject)
-    }
-    next.quoteHtml = quotedOriginal(message, body, kind === 'forward' ? 'forward' : 'reply')
-    open(next)
+    open(replyDraft(message, body, kind, mail.accounts, mail.signatures))
   }
 
   async function openDraft(id: string): Promise<void> {
     const stored = await mail.draft(id)
     if (stored) {
-      // Editing a message that failed to send makes it a draft again.
-      open(stored.outgoingId === null ? stored : { ...stored, outgoingId: null, noticedStatus: null, pendingSave: true })
+      open(reopenedDraft(stored))
     }
   }
 
@@ -214,24 +167,9 @@ export const useComposeStore = defineStore('compose', () => {
     const at = sendAt ?? new Date(Date.now() + UNDO_SECONDS * 1000)
     // The draft goes up first, so the server can take it (and its Drafts folder copy) away when the message is queued.
     if (saveTimer !== null) clearTimeout(saveTimer)
-    await mail.saveDraft(current)
-    const onServer = await mail
-      .uploadDraft(current.id)
-      .then(async () => ((await mail.draft(current.id))?.version ?? 0) > 0)
-      .catch(() => false)
-    const request: SendMessageRequest = {
-      mailAccountId: current.mailAccountId!,
-      to: current.to,
-      cc: current.cc,
-      bcc: current.bcc,
-      subject: current.subject,
-      html: composeBody(current.html, mail.signatures.find((signature) => signature.id === current.signatureId)?.html ?? null, current.quoteHtml),
-      sendAt: at.toISOString(),
-      ...(current.inReplyToMessageId ? { inReplyToMessageId: current.inReplyToMessageId } : {}),
-      ...(onServer ? { draftId: current.id } : {}),
-    }
+    const onServer = await mail.uploadDraftForSending(current)
     try {
-      const outgoing = await mail.send(request)
+      const outgoing = await mail.send(sendRequest(current, mail.signatures, at, onServer))
       await mail.saveDraft({ ...((await mail.draft(current.id)) ?? current), outgoingId: outgoing.id, pendingSave: false, updatedAt: Date.now() })
       draft.value = null
       if (sendAt === undefined) {
@@ -291,15 +229,15 @@ export const useComposeStore = defineStore('compose', () => {
 
   async function followUpOnce(): Promise<void> {
     for (const stored of await mail.drafts()) {
-      if (stored.outgoingId === null) continue
-      const outgoing = await mail.outgoing(stored.outgoingId)
-      if (outgoing === null || outgoing.status === stored.noticedStatus) continue
-      if (outgoing.status === 'sent') {
+      const outgoing = stored.outgoingId === null ? null : await mail.outgoing(stored.outgoingId)
+      const outcome = sentOutcome(stored, outgoing)
+      if (outcome === null || outgoing === null) continue
+      if (outcome === 'sent') {
         await mail.deleteDraft(stored.id)
         if (outgoing.lastError) notify({ text: outgoing.lastError, tone: 'info' })
         continue
       }
-      if (outgoing.status === 'failed') {
+      if (outcome === 'failed') {
         notify(
           {
             text: `"${outgoing.subject || '(no subject)'}" was not sent. ${outgoing.lastError ?? ''}`.trim(),
