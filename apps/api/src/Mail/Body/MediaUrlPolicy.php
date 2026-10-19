@@ -9,9 +9,10 @@ namespace App\Mail\Body;
  * anything from the internet. Remote loads reveal to the sender that, when and where a message was read, so they
  * are removed unless the reader allowed them.
  */
-final class MediaUrlPolicy
+final class MediaUrlPolicy implements MediaUrlResolver
 {
-    private const string DATA_IMAGE = '~^data:image/(?:png|gif|jpe?g|webp|bmp|avif);base64,[a-z0-9+/=\s]+$~i';
+    /** Inline images in the formats every mail client shows; never SVG, which can carry scripts. */
+    public const string DATA_IMAGE = '~^data:image/(?:png|gif|jpe?g|webp|bmp|avif);base64,[a-z0-9+/=\s]+$~i';
 
     private bool $remoteContentFound = false;
 

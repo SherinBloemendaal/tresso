@@ -28,7 +28,7 @@ final class SyncChangesTest extends DatabaseTestCase
         $this->bootstrapOAuthClients();
         $this->createUser('kim@example.test', 'Kim');
         $this->createUser('lisa@example.test', 'Lisa');
-        $this->kim = $this->userHeaders('kim@example.test', ['mail:read', 'settings:write']);
+        $this->kim = $this->userHeaders('kim@example.test', ['mail:read', 'settings:write', 'signatures:write']);
 
         $this->client->jsonRequest('POST', '/api/v1/mail-accounts', [
             'emailAddress' => 'kim@company.example',
@@ -83,7 +83,7 @@ final class SyncChangesTest extends DatabaseTestCase
 
         self::assertSame($cursor, $page['cursor']);
         self::assertFalse($page['hasMore']);
-        self::assertSame([], [...$page['mailAccounts'], ...$page['folders'], ...$page['threads'], ...$page['messages'], ...$page['deleted']]);
+        self::assertSame([], [...$page['mailAccounts'], ...$page['folders'], ...$page['threads'], ...$page['messages'], ...$page['signatures'], ...$page['deleted']]);
     }
 
     public function testFlagChangeReturnsOnlyThatMessage(): void
@@ -158,6 +158,36 @@ final class SyncChangesTest extends DatabaseTestCase
         $page = $this->changes($cursor);
 
         self::assertSame([['type' => 'mailAccount', 'id' => $this->accountId]], $page['deleted']);
+    }
+
+    public function testSignatureAndAccountDefaultReachClients(): void
+    {
+        $cursor = $this->changes(0)['cursor'];
+
+        $this->client->jsonRequest('POST', '/api/v1/signatures', ['name' => 'Work', 'html' => '<p>Kim</p>', 'defaultFor' => [$this->accountId]], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+        $signatureId = $this->responseString('id');
+        $page = $this->changes($cursor);
+
+        self::assertSame([$signatureId], array_column($page['signatures'], 'id'));
+        self::assertSame('Work', $page['signatures'][0]['name']);
+        self::assertSame('<p>Kim</p>', $page['signatures'][0]['html']);
+        self::assertSame([$signatureId], array_column($page['mailAccounts'], 'defaultSignatureId'));
+    }
+
+    public function testDeletedSignatureIsReportedAndTheDefaultCleared(): void
+    {
+        $this->client->jsonRequest('POST', '/api/v1/signatures', ['name' => 'Work', 'html' => '<p>Kim</p>', 'defaultFor' => [$this->accountId]], $this->kim);
+        $signatureId = $this->responseString('id');
+        $cursor = $this->changes(0)['cursor'];
+
+        $this->client->request('DELETE', '/api/v1/signatures/'.$signatureId, server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+        $page = $this->changes($cursor);
+
+        self::assertSame([['type' => 'signature', 'id' => $signatureId]], $page['deleted']);
+        self::assertSame([$this->accountId], array_column($page['mailAccounts'], 'id'));
+        self::assertNull($page['mailAccounts'][0]['defaultSignatureId']);
     }
 
     public function testPagesNeverSplitAChangeNumber(): void
@@ -268,14 +298,14 @@ final class SyncChangesTest extends DatabaseTestCase
     }
 
     /**
-     * @return array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>}
+     * @return array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, signatures: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>}
      */
     private function changes(int $since, int $limit = 500): array
     {
         $this->client->request('GET', \sprintf('/api/v1/sync/changes?since=%d&limit=%d', $since, $limit), server: $this->kim);
         self::assertResponseIsSuccessful();
 
-        /** @var array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>} */
+        /** @var array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, signatures: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>} */
         return $this->decodedResponse();
     }
 

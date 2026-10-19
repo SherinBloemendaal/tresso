@@ -8,15 +8,15 @@ use Symfony\Component\HtmlSanitizer\HtmlSanitizerConfig;
 use Symfony\Component\HtmlSanitizer\Visitor\AttributeSanitizer\AttributeSanitizerInterface;
 
 /**
- * The only judge of URLs that load media: image sources and backgrounds go through the message's
- * {@see MediaUrlPolicy}, inline styles through the {@see CssSanitizer}. Other media attributes are dropped.
+ * The only judge of URLs that load media: image sources and backgrounds go through a {@see MediaUrlResolver}, inline
+ * styles through the {@see CssSanitizer}. Other media attributes are dropped.
  */
 final readonly class MediaAttributeSanitizer implements AttributeSanitizerInterface
 {
     public const array MEDIA_ATTRIBUTES = ['src', 'background', 'lowsrc', 'poster', 'srcset'];
 
     public function __construct(
-        private MediaUrlPolicy $policy,
+        private MediaUrlResolver $policy,
         private CssSanitizer $css,
     ) {
     }

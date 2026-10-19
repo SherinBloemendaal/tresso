@@ -27,6 +27,8 @@ final class ScopeTest extends TestCase
         self::assertSame(Scope::MailSend->role(), Scope::ROLE_MAIL_SEND);
         self::assertSame(Scope::SettingsRead->role(), Scope::ROLE_SETTINGS_READ);
         self::assertSame(Scope::SettingsWrite->role(), Scope::ROLE_SETTINGS_WRITE);
+        self::assertSame(Scope::SignaturesRead->role(), Scope::ROLE_SIGNATURES_READ);
+        self::assertSame(Scope::SignaturesWrite->role(), Scope::ROLE_SIGNATURES_WRITE);
         self::assertSame(Scope::SyncLease->role(), Scope::ROLE_SYNC_LEASE);
         self::assertSame(Scope::SyncIngest->role(), Scope::ROLE_SYNC_INGEST);
         self::assertSame(Scope::SyncCredentials->role(), Scope::ROLE_SYNC_CREDENTIALS);
