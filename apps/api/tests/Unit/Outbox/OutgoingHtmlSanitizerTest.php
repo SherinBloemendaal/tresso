@@ -24,6 +24,14 @@ final class OutgoingHtmlSanitizerTest extends TestCase
         self::assertStringContainsString('src="cid:logo@finance.example"', $html);
     }
 
+    public function testKeepsAnImageAnInlineStyleShows(): void
+    {
+        $html = $this->sanitizer->sanitize('<table><tr><td style="background-image:url(&quot;cid:ii_hero&quot;)">x</td></tr></table><p style="background:url(cid:bg@x)">y</p>', ['ii_hero' => 'h1@inline.tresso.invalid']);
+
+        self::assertStringContainsString('url(&#34;cid:h1@inline.tresso.invalid&#34;)', $html);
+        self::assertStringContainsString('url(cid:bg@x)', $html);
+    }
+
     public function testRefersToAnImageByTheIdItGoesOutUnder(): void
     {
         self::assertSame('<img src="cid:a1b2@inline.tresso.invalid" />', $this->sanitizer->sanitize('<img src="cid:ii_mgx81bq20">', ['ii_mgx81bq20' => 'a1b2@inline.tresso.invalid']));

@@ -13,6 +13,10 @@ use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
 use Symfony\Component\Mime\Header\MailboxListHeader;
 use Symfony\Component\Mime\Part\DataPart;
+use Symfony\Component\Mime\Part\Multipart\AlternativePart;
+use Symfony\Component\Mime\Part\Multipart\MixedPart;
+use Symfony\Component\Mime\Part\Multipart\RelatedPart;
+use Symfony\Component\Mime\Part\TextPart;
 use Symfony\Component\Uid\Uuid;
 
 /**
@@ -96,9 +100,8 @@ final readonly class MimeComposer
             ->cc(...self::addresses($composition->cc))
             ->bcc(...self::addresses($composition->bcc))
             ->subject($composition->subject)
-            ->date($composition->sendAt)
-            ->text($this->html->toText($html), 'utf-8')
-            ->html($html, 'utf-8');
+            ->date($composition->sendAt);
+        $inline = $files = [];
         foreach ($composition->attachments as $attachment) {
             try {
                 $content = $this->storage->read($attachment->objectKey);
@@ -108,12 +111,20 @@ final readonly class MimeComposer
             // A type that is not one makes an unusable part (or a broken header); such a file goes out as plain bytes.
             $type = 1 === preg_match(OutgoingAttachment::CONTENT_TYPE, $attachment->contentType) ? $attachment->contentType : 'application/octet-stream';
             $part = new DataPart($content, $attachment->filename, $type);
-            if (null !== $attachment->contentId) {
-                // The quoted text refers to it as cid:{contentId}; mail apps show it in place.
-                $part->asInline()->setContentId($contentIds[$attachment->contentId]);
+            if (null === $attachment->contentId) {
+                $files[] = $part;
+                continue;
             }
-            $email->addPart($part);
+            // The quoted text refers to it as cid:{contentId}; mail apps show it in place.
+            $inline[] = $part->asInline()->setContentId($contentIds[$attachment->contentId]);
         }
+        // Built here rather than by Symfony, which keeps an image with the text only when an img src or a background
+        // attribute names it: one an inline style shows would go out as a file.
+        $body = new AlternativePart(new TextPart($this->html->toText($html), 'utf-8'), new TextPart($html, 'utf-8', 'html'));
+        if ([] !== $inline) {
+            $body = new RelatedPart($body, ...$inline);
+        }
+        $email->setBody([] === $files ? $body : new MixedPart($body, ...$files));
         $headers = $email->getHeaders();
         $headers->addIdHeader('Message-ID', $messageId);
         $headers->addTextHeader('User-Agent', 'Tresso');
