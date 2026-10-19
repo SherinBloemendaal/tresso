@@ -1,0 +1,350 @@
+package imapsync
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"time"
+
+	"github.com/emersion/go-imap/v2"
+
+	"tresso/sync/internal/api"
+)
+
+// errFoldersChanged means a folder's UIDVALIDITY changed mid-session: the folder list must be reported again so the
+// API can reset that folder.
+var errFoldersChanged = errors.New("folder uidvalidity changed")
+
+type folderRun struct {
+	folder       api.Folder
+	cursor       *Cursor
+	lastPresence time.Time
+	// The folder as of the last sync's SELECT. A later SELECT that differs means something changed in between.
+	seen mailboxState
+}
+
+type mailboxState struct {
+	exists        uint32
+	uidNext       uint32
+	highestModSeq uint64
+}
+
+func stateOf(sel *imap.SelectData) mailboxState {
+	return mailboxState{exists: sel.NumMessages, uidNext: uint32(sel.UIDNext), highestModSeq: sel.HighestModSeq}
+}
+
+// syncFolder brings one folder up to date:
+//  1. new mail (UIDs from the cursor's UIDNext up),
+//  2. flag changes since the last MODSEQ (CONDSTORE),
+//  3. when full: which UIDs still exist (presence ranges), and flags too when the server lacks CONDSTORE,
+//  4. a budgeted step of the newest-first history backfill.
+//
+// The cursor only advances after the API accepted the work it describes, so a crash never skips mail.
+func (s *session) syncFolder(ctx context.Context, run *folderRun, full bool) error {
+	sel, err := s.client.Select(run.folder.RemoteName, &imap.SelectOptions{ReadOnly: true, CondStore: s.condStore}).Wait()
+	if err != nil {
+		return fmt.Errorf("select %q: %w", run.folder.RemoteName, err)
+	}
+	uidNext := uint32(sel.UIDNext)
+
+	if run.cursor != nil && sel.UIDValidity != run.cursor.UIDValidity {
+		return errFoldersChanged
+	}
+	run.seen = stateOf(sel)
+
+	dirty := false
+	if run.cursor == nil {
+		run.cursor = &Cursor{UIDValidity: sel.UIDValidity, UIDNext: uidNext, BackfillBelow: uidNext, HighestModSeq: sel.HighestModSeq}
+		dirty = true
+		full = false // nothing stored yet to compare against
+	}
+	cursor := run.cursor
+
+	// 1. New mail.
+	if uidNext > cursor.UIDNext {
+		uids, err := s.searchUIDs(&imap.UIDSet{imap.UIDRange{Start: imap.UID(cursor.UIDNext), Stop: imap.UID(uidNext - 1)}})
+		if err != nil {
+			return err
+		}
+		if err := s.ingest(ctx, run, uids, func(group []imap.UID) { cursor.UIDNext = max(cursor.UIDNext, uint32(slices.Max(group))+1) }); err != nil {
+			return err
+		}
+		if cursor.UIDNext != uidNext {
+			cursor.UIDNext = uidNext
+			dirty = true
+		}
+	}
+
+	// 2. Flag changes since the last known MODSEQ.
+	if s.condStore && sel.HighestModSeq > cursor.HighestModSeq {
+		if cursor.HighestModSeq > 0 && cursor.UIDNext > 1 {
+			if err := s.syncChangedFlags(ctx, run, sel.HighestModSeq); err != nil {
+				return err
+			}
+			dirty = false
+		} else {
+			cursor.HighestModSeq = sel.HighestModSeq
+			dirty = true
+		}
+	}
+
+	// 3 and 4 need the folder's complete UID list.
+	if full || !cursor.BackfillDone() {
+		all, err := s.searchUIDs(nil)
+		if err != nil {
+			return err
+		}
+		if full {
+			if err := s.reportPresence(ctx, run, all); err != nil {
+				return err
+			}
+			run.lastPresence = time.Now()
+			dirty = false
+		}
+		if !cursor.BackfillDone() {
+			if err := s.backfill(ctx, run, all); err != nil {
+				return err
+			}
+			dirty = false
+		}
+	}
+
+	if dirty {
+		_, err := s.api.Changes(ctx, s.account.ID, api.ChangeBatch{WorkerID: s.workerID, Folder: run.folder.RemoteName, Cursor: s.cursorString(run)})
+		return err
+	}
+	return nil
+}
+
+// backfill ingests a budgeted number of batches of older mail, newest first.
+func (s *session) backfill(ctx context.Context, run *folderRun, all []imap.UID) error {
+	cursor := run.cursor
+	cut, _ := slices.BinarySearch(all, imap.UID(cursor.BackfillBelow))
+	older := all[:cut]
+
+	for budget := s.opts.BackfillBatchesPerPass; budget > 0 && len(older) > 0; budget-- {
+		start := max(0, len(older)-s.opts.FetchBatch)
+		group := older[start:]
+		older = older[:start]
+		if err := s.ingest(ctx, run, group, func(done []imap.UID) {
+			cursor.BackfillBelow = min(cursor.BackfillBelow, uint32(slices.Min(done)))
+		}); err != nil {
+			return err
+		}
+	}
+
+	if len(older) == 0 && !cursor.BackfillDone() {
+		cursor.BackfillBelow = 1
+		_, err := s.api.Changes(ctx, s.account.ID, api.ChangeBatch{WorkerID: s.workerID, Folder: run.folder.RemoteName, Cursor: s.cursorString(run)})
+		return err
+	}
+	return nil
+}
+
+// ingest fetches messages in groups bounded by count and bytes, stores them and reports them with the cursor.
+func (s *session) ingest(ctx context.Context, run *folderRun, uids []imap.UID, advance func(group []imap.UID)) error {
+	if len(uids) == 0 {
+		return nil
+	}
+	sizes, err := s.client.Fetch(imap.UIDSetNum(uids...), &imap.FetchOptions{UID: true, RFC822Size: true}).Collect()
+	if err != nil {
+		return fmt.Errorf("fetch sizes: %w", err)
+	}
+	sizeOf := make(map[imap.UID]int64, len(sizes))
+	for _, m := range sizes {
+		sizeOf[m.UID] = m.RFC822Size
+	}
+
+	var group []imap.UID
+	var groupBytes int64
+	flush := func() error {
+		if len(group) == 0 {
+			return nil
+		}
+		err := s.ingestGroup(ctx, run, group, advance)
+		group, groupBytes = nil, 0
+		return err
+	}
+
+	for _, uid := range uids {
+		size, exists := sizeOf[uid]
+		if !exists {
+			continue // expunged meanwhile
+		}
+		if len(group) > 0 && (len(group) >= s.opts.FetchBatch || groupBytes+size > s.opts.MaxBatchBytes) {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		group = append(group, uid)
+		groupBytes += size
+	}
+	return flush()
+}
+
+func (s *session) ingestGroup(ctx context.Context, run *folderRun, group []imap.UID, advance func(group []imap.UID)) error {
+	fetched, err := s.client.Fetch(imap.UIDSetNum(group...), &imap.FetchOptions{
+		UID:          true,
+		Flags:        true,
+		InternalDate: true,
+		RFC822Size:   true,
+		ModSeq:       s.condStore,
+		BodySection:  []*imap.FetchItemBodySection{{Peek: true}},
+	}).Collect()
+	if err != nil {
+		return fmt.Errorf("fetch messages: %w", err)
+	}
+	slices.SortFunc(fetched, func(a, b *imapFetchBuffer) int { return int(a.UID) - int(b.UID) })
+
+	messages := make([]api.Message, 0, len(fetched))
+	for _, buf := range fetched {
+		msg, err := buildMessage(ctx, s.store, buf, s.condStore)
+		if err != nil {
+			return err
+		}
+		messages = append(messages, msg)
+	}
+
+	advance(group)
+	result, err := s.api.Messages(ctx, s.account.ID, api.MessageBatch{
+		WorkerID: s.workerID,
+		Folder:   run.folder.RemoteName,
+		Cursor:   s.cursorString(run),
+		Messages: messages,
+	})
+	if err != nil {
+		return err
+	}
+	s.logger.Debug("ingested", "folder", run.folder.RemoteName, "stored", result.Stored, "linked", result.Linked, "updated", result.Updated)
+	return nil
+}
+
+// syncChangedFlags reports flags of messages changed since the cursor's MODSEQ.
+func (s *session) syncChangedFlags(ctx context.Context, run *folderRun, highestModSeq uint64) error {
+	cursor := run.cursor
+	changed, err := s.client.Fetch(
+		imap.UIDSet{imap.UIDRange{Start: 1, Stop: imap.UID(cursor.UIDNext - 1)}},
+		&imap.FetchOptions{UID: true, Flags: true, ModSeq: true, ChangedSince: cursor.HighestModSeq},
+	).Collect()
+	if err != nil {
+		return fmt.Errorf("fetch changed flags: %w", err)
+	}
+
+	changes := make([]api.FlagChange, 0, len(changed))
+	for _, m := range changed {
+		modSeq := m.ModSeq
+		changes = append(changes, api.FlagChange{RemoteUID: uidString(m.UID), ModSeq: &modSeq, Flags: flagsOf(m.Flags)})
+	}
+	cursor.HighestModSeq = highestModSeq
+	return s.sendFlagChanges(ctx, run, changes)
+}
+
+// reportPresence tells the API which UIDs exist, in ranges, so removed messages disappear. Without CONDSTORE it also
+// reports every message's flags, as there is no cheaper way to learn about changes.
+func (s *session) reportPresence(ctx context.Context, run *folderRun, all []imap.UID) error {
+	cursor := run.cursor
+	if cursor.UIDNext <= 1 {
+		return nil
+	}
+	last := imap.UID(cursor.UIDNext - 1)
+	cut, _ := slices.BinarySearch(all, last+1)
+	known := all[:cut]
+
+	var ranges []api.PresenceRange
+	from := imap.UID(1)
+	for len(known) > 0 {
+		n := min(len(known), s.opts.PresenceChunk)
+		chunk := known[:n]
+		known = known[n:]
+		to := chunk[n-1]
+		if len(known) == 0 {
+			to = last
+		}
+		ranges = append(ranges, api.PresenceRange{FromUID: uint32(from), ToUID: uint32(to), UIDs: toUint32(chunk)})
+		from = to + 1
+	}
+	if from <= last {
+		ranges = append(ranges, api.PresenceRange{FromUID: uint32(from), ToUID: uint32(last), UIDs: []uint32{}})
+	}
+
+	for i := 0; i < len(ranges); i += maxRangesPerRequest {
+		batch := ranges[i:min(i+maxRangesPerRequest, len(ranges))]
+		if _, err := s.api.Changes(ctx, s.account.ID, api.ChangeBatch{WorkerID: s.workerID, Folder: run.folder.RemoteName, Cursor: s.cursorString(run), Presence: batch}); err != nil {
+			return err
+		}
+	}
+
+	if s.condStore || len(all[:cut]) == 0 {
+		return nil
+	}
+	return s.syncAllFlags(ctx, run, all[:cut])
+}
+
+func (s *session) syncAllFlags(ctx context.Context, run *folderRun, uids []imap.UID) error {
+	for i := 0; i < len(uids); i += maxFlagChangesPerRequest {
+		chunk := uids[i:min(i+maxFlagChangesPerRequest, len(uids))]
+		fetched, err := s.client.Fetch(imap.UIDSetNum(chunk...), &imap.FetchOptions{UID: true, Flags: true}).Collect()
+		if err != nil {
+			return fmt.Errorf("fetch flags: %w", err)
+		}
+		changes := make([]api.FlagChange, 0, len(fetched))
+		for _, m := range fetched {
+			changes = append(changes, api.FlagChange{RemoteUID: uidString(m.UID), Flags: flagsOf(m.Flags)})
+		}
+		if err := s.sendFlagChanges(ctx, run, changes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sendFlagChanges reports changes in chunks. It always sends at least one request, which also stores the cursor.
+func (s *session) sendFlagChanges(ctx context.Context, run *folderRun, changes []api.FlagChange) error {
+	for start := 0; ; start += maxFlagChangesPerRequest {
+		end := min(start+maxFlagChangesPerRequest, len(changes))
+		batch := api.ChangeBatch{WorkerID: s.workerID, Folder: run.folder.RemoteName, Cursor: s.cursorString(run), Flags: changes[start:end]}
+		if _, err := s.api.Changes(ctx, s.account.ID, batch); err != nil {
+			return err
+		}
+		if end >= len(changes) {
+			return nil
+		}
+	}
+}
+
+func (s *session) searchUIDs(set *imap.UIDSet) ([]imap.UID, error) {
+	criteria := &imap.SearchCriteria{}
+	if set != nil {
+		criteria.UID = []imap.UIDSet{*set}
+	}
+	data, err := s.client.UIDSearch(criteria, nil).Wait()
+	if err != nil {
+		return nil, fmt.Errorf("uid search: %w", err)
+	}
+	uids := data.AllUIDs()
+	slices.Sort(uids)
+	return uids, nil
+}
+
+func (s *session) cursorString(run *folderRun) *string {
+	encoded := run.cursor.Encode()
+	return &encoded
+}
+
+func toUint32(uids []imap.UID) []uint32 {
+	out := make([]uint32, len(uids))
+	for i, uid := range uids {
+		out[i] = uint32(uid)
+	}
+	return out
+}
+
+func uidString(uid imap.UID) string {
+	return fmt.Sprintf("%d", uid)
+}
+
+const (
+	maxRangesPerRequest      = 50
+	maxFlagChangesPerRequest = 2000
+)
