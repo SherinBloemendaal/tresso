@@ -83,6 +83,14 @@ final readonly class MimeComposer
         return substr(hash('sha256', $contentId), 0, 24).'@inline.tresso.invalid';
     }
 
+    /** Whether the text shows the image: cid:{contentId} whole, not as the start of a longer id. */
+    private static function refersTo(string $html, string $contentId): bool
+    {
+        $reference = preg_quote('cid:'.htmlspecialchars($contentId, \ENT_QUOTES | \ENT_HTML5, 'UTF-8'), '/');
+
+        return 1 === preg_match('/'.$reference.'(?=["\')\s]|&(?:quot|apos|#0*3[49]|#x0*2[27]);|$)/i', $html);
+    }
+
     private function build(Composition $composition, string $messageId): Email
     {
         $account = $composition->account;
@@ -114,7 +122,7 @@ final readonly class MimeComposer
             $contentId = null === $attachment->contentId ? null : $contentIds[$attachment->contentId];
             // An image goes with the text only while the text refers to it (cid:{contentId}), so mail apps show it in
             // place; one it no longer shows goes out as a file the recipient can see, not as a hidden part.
-            if (null === $contentId || !str_contains($html, 'cid:'.htmlspecialchars($contentId, \ENT_QUOTES | \ENT_HTML5, 'UTF-8'))) {
+            if (null === $contentId || !self::refersTo($html, $contentId)) {
                 $files[] = $part;
                 continue;
             }

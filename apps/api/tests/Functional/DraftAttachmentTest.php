@@ -487,7 +487,8 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $this->client->jsonRequest('POST', '/api/v1/drafts/'.$id.'/forwarded-attachments', ['attachmentId' => $logo], $this->kim);
         self::assertResponseStatusCodeSame(201);
 
-        $raw = $this->rawOf($this->send($id, html: '<p>The quote went.</p>'));
+        // Only a longer id that starts with its own is left in the text.
+        $raw = $this->rawOf($this->send($id, html: '<p>The quote went.</p><img src="cid:logo@finance.example.other">'));
 
         self::assertStringNotContainsString('multipart/related', $raw, 'Nothing would show it: hidden, the recipient could not see it was sent.');
         self::assertStringContainsString('Content-Disposition: attachment; name=logo.png; filename=logo.png', $raw);

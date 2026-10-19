@@ -32,6 +32,13 @@ final class OutgoingHtmlSanitizerTest extends TestCase
         self::assertStringContainsString('url(cid:bg@x)', $html);
     }
 
+    public function testReadsAStyleUrlWithHexQuotes(): void
+    {
+        $html = $this->sanitizer->sanitize('<p style="background:url(&#x22;cid:ii_hex&#x22;)">x</p>', ['ii_hex' => 'h3@inline.tresso.invalid']);
+
+        self::assertStringContainsString('cid:h3@inline.tresso.invalid', $html);
+    }
+
     public function testReadsAnIdWithAnAmpersandWhole(): void
     {
         self::assertSame('<img src="cid:h2@inline.tresso.invalid" />', $this->sanitizer->sanitize('<img src="cid:a&amp;b">', ['a&b' => 'h2@inline.tresso.invalid']));
