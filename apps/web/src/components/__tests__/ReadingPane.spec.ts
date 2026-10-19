@@ -7,6 +7,7 @@ import type { ChangePage, SyncedMessage } from '@tresso/core'
 import { deleteMailDatabase } from '@/mail/db'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
+import { useSelectionStore } from '@/stores/selection'
 import ReadingPane from '../ReadingPane.vue'
 
 const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }
@@ -226,6 +227,18 @@ describe('ReadingPane actions', () => {
 
     await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/'))
     expect(actions.map((a) => a.action)).toEqual(['markRead', 'archive'])
+  })
+
+  it('leaves its shortcuts to the list while conversations are selected there', async () => {
+    const wrapper = mountPane()
+    await opened(wrapper)
+    actions.length = 0
+    useSelectionStore().toggle('t9')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 's' }))
+    await settle()
+
+    expect(actions).toEqual([])
   })
 
   it('ignores a held key and shortcuts meant for the compose window', async () => {

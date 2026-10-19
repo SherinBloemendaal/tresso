@@ -468,6 +468,41 @@ export class MailDatabase implements SyncStore {
     return conversations
   }
 
+  /**
+   * Inbox threads (of one account, or of all) matching a test, newest first, however many there are: for selecting
+   * beyond the part of the list that is loaded.
+   */
+  async inboxThreadIds(mailAccountId: string | null, matches: (conversation: Conversation) => boolean): Promise<string[]> {
+    const tx = this.db.transaction('conversations')
+    const index = mailAccountId === null ? tx.store.index('byInboxDate') : tx.store.index('byAccountInboxDate')
+    const range =
+      mailAccountId === null
+        ? IDBKeyRange.bound([1, -Infinity], [1, Infinity])
+        : IDBKeyRange.bound([mailAccountId, 1, -Infinity], [mailAccountId, 1, Infinity])
+
+    const ids: string[] = []
+    for (let cursor = await index.openCursor(range, 'prev'); cursor !== null; cursor = await cursor.continue()) {
+      if (matches(cursor.value)) {
+        ids.push(cursor.value.threadId)
+      }
+    }
+
+    return ids
+  }
+
+  /** The messages of these threads, for acting on whole conversations. */
+  async messageIdsOfThreads(threadIds: string[]): Promise<string[]> {
+    const tx = this.db.transaction('messages')
+    const ids: string[] = []
+    for (const threadId of threadIds) {
+      for (const key of await tx.store.index('byThread').getAllKeys(threadId)) {
+        ids.push(key)
+      }
+    }
+
+    return ids
+  }
+
   /** Inbox threads with unread mail, per account. */
   async unreadInboxCounts(): Promise<Map<string, number>> {
     const tx = this.db.transaction(['mailAccounts', 'conversations'])
