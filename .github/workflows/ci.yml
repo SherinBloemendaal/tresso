@@ -132,7 +132,11 @@ jobs:
           npx oxlint .
           npx eslint .
       - name: Mobile
-        run: npm run type-check --workspace @tresso/mobile
+        working-directory: apps/mobile
+        run: |
+          npx vitest run
+          npx tsc --noEmit
+          npx eslint --max-warnings 0 .
 
   desktop:
     name: Desktop (Tauri)
