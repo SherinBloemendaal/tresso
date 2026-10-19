@@ -32,11 +32,12 @@ Delivered in steps, each its own pull request:
 - [x] 1.4c Account management in the web client: server settings found from the address, add, fix, pause and remove
   mail accounts, with the connection result shown live
 - [x] 1.5a Sending through the worker: outbox, send later and undo, retries, Sent copies, no double sends
-- [ ] 1.5b HTML signatures per account
+- [x] 1.5b HTML signatures per mail account: sanitized on save, a default per account, synced to clients, edited
+  in Settings with a live preview
 - [x] 1.5c Compose, reply and forward in the web client: recipient suggestions, undo send, send later, outbox, drafts
   kept on the device until a message is confirmed sent
-- [ ] 1.5e Drafts synced across devices and filed in the account's Drafts folder
 - [ ] 1.5d Search
+- [ ] 1.5e Drafts synced across devices and filed in the account's Drafts folder
 - [ ] 1.6 Gmail and Microsoft 365: OAuth connection, Gmail API and Microsoft Graph sync
 
 ## Phase 2: Do, hand over, know

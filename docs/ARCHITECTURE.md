@@ -288,6 +288,22 @@ IndexedDB while typing and kept until the message is confirmed sent, so a failed
 again; the outcome of each sent message is announced once. Recipient suggestions come from the people in synced
 mail, stored locally per user.
 
+### 3.11 Signatures
+
+- `/api/v1/signatures` (scopes `signatures:read` and `signatures:write`) lists, creates, updates (JSON merge patch)
+  and deletes the user's HTML signatures. Each mail account points at at most one default signature
+  (`mail_account.default_signature_id`), so one signature can be the default of several accounts. A signature's
+  `defaultFor` is the complete list of accounts that use it; writing it moves those accounts' default and clears it on
+  accounts left out. Accounts must belong to the same user. Deleting a signature clears the defaults in the same
+  transaction, so the accounts reach clients as changed.
+- The HTML is sanitized on save with symfony/html-sanitizer, so every client and the API hand out the same markup:
+  inline styles and layout attributes stay; scripts, event handlers, forms, frames, style elements and linked
+  stylesheets go. Images (sources, backgrounds, CSS `url()`) load only from `https:`, `data:` (plain image types)
+  or `cid:` references to parts sent with the message.
+- Signatures are part of the delta (`signatures`, tombstone type `signature`), and mail accounts carry
+  `defaultSignatureId`. The web client previews unsaved HTML in a sandboxed frame without scripts
+  (`signatureFrameDocument`), on a light and a dark background.
+
 ## 4. Scale notes
 
 - Every mail metadata row (folders, threads, messages, attachments) carries `mail_account_id` and every query path
