@@ -18,6 +18,7 @@ import {
   type MailStore,
   type SendMessageRequest,
   type SyncedDraft,
+  type DraftAttachmentLink,
   type SyncedFolder,
   type SyncedMailAccount,
   type SyncedMessage,
@@ -369,8 +370,16 @@ export const useMailStore = defineStore('mail', () => {
     {
       create: (id, request) => auth.send<SyncedDraft>('POST', '/api/v1/drafts', { ...request, draftId: id }),
       update: (id, request, expectedVersion) => auth.send<SyncedDraft>('PUT', `/api/v1/drafts/${encodeURIComponent(id)}`, { ...request, expectedVersion }),
-      get: (id) => auth.api<SyncedDraft>(`/api/v1/drafts/${encodeURIComponent(id)}`),
+      get: (id) => auth.api<SyncedDraft & { attachments: DraftAttachmentLink[] }>(`/api/v1/drafts/${encodeURIComponent(id)}`),
       remove: (id) => auth.send<void>('DELETE', `/api/v1/drafts/${encodeURIComponent(id)}`),
+      attach: (id, file) => {
+        // The browser sets the multipart boundary itself.
+        const form = new FormData()
+        form.append('file', file.body as Blob, file.name)
+        return auth.api<DraftAttachmentLink>(`/api/v1/drafts/${encodeURIComponent(id)}/attachments`, { method: 'POST', body: form })
+      },
+      forward: (id, attachmentId) => auth.send<DraftAttachmentLink>('POST', `/api/v1/drafts/${encodeURIComponent(id)}/forwarded-attachments`, { attachmentId }),
+      detach: (id, attachmentId) => auth.send<void>('DELETE', `/api/v1/drafts/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`),
     },
     () => void refresh(),
   )

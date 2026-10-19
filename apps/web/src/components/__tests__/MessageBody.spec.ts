@@ -49,7 +49,7 @@ describe('AttachmentList', () => {
     })
 
     expect(wrapper.findAll('a')).toHaveLength(1)
-    expect(wrapper.text()).toContain('2.0 KB, scanned, clean')
+    expect(wrapper.text()).toContain('2.0 KB, scanned, no threats')
     expect(wrapper.text()).toContain('blocked: contains malware')
   })
 })

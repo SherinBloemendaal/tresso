@@ -12,6 +12,7 @@ import RecipientField from '@/components/RecipientField.vue'
 import RichEditor from '@/components/RichEditor.vue'
 import MessageFrame from '@/components/MessageFrame.vue'
 import SignaturePreview from '@/components/SignaturePreview.vue'
+import DraftAttachments from '@/components/DraftAttachments.vue'
 import { RouterLink } from 'vue-router'
 import { sendLaterOptions, type SendLaterKey } from '@tresso/core'
 
@@ -23,6 +24,25 @@ const compose = useComposeStore()
 const mail = useMailStore()
 const showCopies = ref(props.draft.cc.length > 0 || props.draft.bcc.length > 0)
 const laterOpen = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
+const dropping = ref(false)
+/** The files of the draft as the server has them; they are not form fields. */
+const attachments = computed(() => compose.draft?.attachments ?? props.draft.attachments)
+
+function pickFiles(event: Event): void {
+  const input = event.target as HTMLInputElement
+  const files = [...(input.files ?? [])]
+  input.value = ''
+  void compose.attach(files)
+}
+
+function dropFiles(event: DragEvent): void {
+  dropping.value = false
+  const files = [...(event.dataTransfer?.files ?? [])]
+  if (files.length > 0) {
+    void compose.attach(files)
+  }
+}
 const customTime = ref('')
 const timeError = ref<string | null>(null)
 
@@ -120,7 +140,16 @@ function keydown(event: KeyboardEvent): void {
 </script>
 
 <template>
-  <form class="body" novalidate @submit.prevent="send" @keydown="keydown">
+  <form
+    class="body"
+    :class="{ dropping }"
+    novalidate
+    @submit.prevent="send"
+    @keydown="keydown"
+    @dragover.prevent="dropping = true"
+    @dragleave.self="dropping = false"
+    @drop.prevent="dropFiles"
+  >
     <div class="field-row" :class="{ invalid: errors.mailAccountId }">
       <FieldLabel tag="label" for="compose-from" name="mailAccountId" class="label">From</FieldLabel>
       <select id="compose-from" v-model="mailAccountId">
@@ -143,6 +172,8 @@ function keydown(event: KeyboardEvent): void {
 
     <RichEditor v-model="html" @submit="send" />
     <small v-if="errors.html" class="field-error">{{ errors.html }}</small>
+
+    <DraftAttachments :attachments="attachments" :attaching="compose.attaching" @open="compose.openAttachment" @remove="compose.removeAttachment" />
 
     <div class="signature">
       <label for="compose-signature" class="label">Signature</label>
@@ -180,6 +211,8 @@ function keydown(event: KeyboardEvent): void {
           </div>
         </div>
       </div>
+      <button type="button" class="button button-quiet" @click="fileInput?.click()">Attach files</button>
+      <input ref="fileInput" class="file-input" type="file" multiple tabindex="-1" aria-hidden="true" @change="pickFiles" />
       <span class="spacer" />
       <button type="button" class="button button-quiet" @click="compose.discard()">Discard</button>
     </footer>
@@ -187,6 +220,13 @@ function keydown(event: KeyboardEvent): void {
 </template>
 
 <style scoped>
+.file-input {
+  display: none;
+}
+.dropping {
+  outline: 2px dashed var(--focus);
+  outline-offset: -4px;
+}
 .body {
   display: flex;
   flex-direction: column;

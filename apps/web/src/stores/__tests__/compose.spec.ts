@@ -54,7 +54,7 @@ describe('compose store', () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input))
         const method = init?.method ?? 'GET'
-        requests.push({ method, path: url.pathname, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+        requests.push({ method, path: url.pathname, body: init?.body instanceof FormData ? init.body : init?.body ? JSON.parse(String(init.body)) : undefined })
         const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
         if (url.pathname === '/api/v1/sync/changes') {
           const since = Number(url.searchParams.get('since'))
@@ -63,6 +63,16 @@ describe('compose store', () => {
         if (url.pathname === '/api/v1/messages/m1/body') return json({ id: 'm1', html: '<p>Can you approve?</p>', text: null, hasRemoteContent: false, remoteContentLoaded: false, attachments: [] })
         if (url.pathname === '/api/v1/outgoing-messages') return json(outgoing('scheduled'), 201)
         if (url.pathname === '/api/v1/outgoing-messages/o1/cancel') return json(outgoing('cancelled'))
+        if (url.pathname === '/api/v1/drafts' && method === 'POST') {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+          return json({ ...body, id: body.draftId, version: 1, updatedAt: '2026-10-19T08:00:00Z', attachments: [] }, 201)
+        }
+        const upload = /^\/api\/v1\/drafts\/([^/]+)\/attachments$/.exec(url.pathname)
+        if (upload !== null && method === 'POST') {
+          if (!(init?.body instanceof FormData)) return json({ detail: 'Send the file as multipart/form-data.' }, 422)
+          const file = init.body.get('file') as File
+          return json({ id: 'f1', filename: file.name, contentType: file.type, size: file.size, scanStatus: 'pending', url: 'https://api.example.test/f1' }, 201)
+        }
         return json({ detail: 'unavailable' }, 503)
       }),
     )
@@ -114,6 +124,21 @@ describe('compose store', () => {
     compose.close()
 
     await vi.waitFor(async () => expect(await mail.draft(id)).toMatchObject({ subject: 'Re: Q4 budget', kind: 'replyAll' }))
+  })
+
+  it('attaches a file to a draft it puts on the server first, sending it as multipart', async () => {
+    const compose = useComposeStore()
+    compose.openNew()
+    const id = compose.draft!.id
+
+    await compose.attach([new File(['Q4 notes'], 'notes.txt', { type: 'text/plain' })])
+
+    expect(requests.filter((r) => r.method === 'POST').map((r) => r.path)).toEqual(['/api/v1/drafts', `/api/v1/drafts/${id}/attachments`])
+    const form = requests.find((r) => r.path.endsWith('/attachments'))?.body
+    expect(form).toBeInstanceOf(FormData)
+    expect(((form as FormData).get('file') as File).name).toBe('notes.txt')
+    expect(compose.draft?.attachments).toEqual([{ id: 'f1', filename: 'notes.txt', contentType: 'text/plain', size: 8, scanStatus: 'pending' }])
+    expect(compose.attaching).toEqual([])
   })
 
   it('refuses to send without recipients', async () => {
