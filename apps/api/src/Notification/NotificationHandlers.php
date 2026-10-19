@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace App\Notification;
 
 use App\Entity\CalendarObject;
-use App\Entity\User;
 use App\Entity\NotificationDelivery;
+use App\Entity\User;
 use App\Repository\NotificationPreferencesRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\Persistence\ManagerRegistry;
@@ -28,6 +28,8 @@ final readonly class NotificationHandlers
     private const string LATEST = '-'.NotificationDeliverer::MAX_LATE;
     /** A user whose planning failed is tried again after this. */
     private const string PLAN_BACKOFF = '+1 hour';
+    /** A notification whose delivery failed is tried again after this (it is no longer due once MAX_LATE passed). */
+    private const string FIRE_BACKOFF = '+5 minutes';
 
     public function __construct(
         private EntityManagerInterface $entityManager,
@@ -101,10 +103,23 @@ final readonly class NotificationHandlers
                 'failed' => NotificationDelivery::FAILED, 'sending' => NotificationDelivery::SENDING, 'max' => NotificationDispatcher::MAX_ATTEMPTS, 'stuck' => NotificationDispatcher::STUCK,
             ],
         );
-        foreach ([...$due, ...$retry] as $id) {
-            $this->deliverer->fire($id, $now);
+        // Each notification on its own: one that fails (and closes the entity manager) is logged and waits
+        // FIRE_BACKOFF, the others, the receipts and the planning go on.
+        foreach (array_unique([...$due, ...$retry]) as $id) {
+            try {
+                $this->deliverer->fire($id, $now);
+            } catch (\Throwable $e) {
+                $this->logger->error('Delivering a notification failed', ['notification' => $id, 'error' => $e->getMessage()]);
+                $this->managers->resetManager();
+                $this->backOff($id, $now);
+            }
         }
-        $this->dispatcher->checkReceipts($now);
+        try {
+            $this->dispatcher->checkReceipts($now);
+        } catch (\Throwable $e) {
+            $this->logger->error('Reading push receipts failed', ['error' => $e->getMessage()]);
+            $this->managers->resetManager();
+        }
 
         // Each user on their own: one that fails is logged and waits PLAN_BACKOFF, the others go on.
         foreach ($this->preferences->usersToPlan($now->add(new \DateInterval(self::PLAN_AHEAD)), $now, self::PLAN_BATCH) as $userId) {
@@ -116,5 +131,17 @@ final readonly class NotificationHandlers
                 $this->preferences->backOff($userId, $now->modify(self::PLAN_BACKOFF));
             }
         }
+    }
+
+    /**
+     * Moves a notification that could not be delivered a little later, so the sweep does not try it again at once,
+     * and gives up on it once its event is MAX_LATE past. A delivered one waits for its delivery rows' own pause.
+     */
+    private function backOff(string $id, \DateTimeImmutable $now): void
+    {
+        $connection = $this->entityManager->getConnection();
+        $params = ['id' => $id, 'now' => $now->format('Y-m-d H:i:s'), 'later' => $now->modify(self::FIRE_BACKOFF)->format('Y-m-d H:i:s'), 'latest' => $now->modify(self::LATEST)->format('Y-m-d H:i:s')];
+        $connection->executeStatement('UPDATE scheduled_notification SET dismissed_at = :now WHERE id = :id AND delivered_at IS NULL AND occurrence_starts_at <= :latest', $params);
+        $connection->executeStatement('UPDATE scheduled_notification SET fire_at = :later WHERE id = :id AND delivered_at IS NULL AND dismissed_at IS NULL AND fire_at < :later', $params);
     }
 }

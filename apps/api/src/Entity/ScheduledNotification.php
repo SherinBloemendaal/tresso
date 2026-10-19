@@ -56,6 +56,13 @@ class ScheduledNotification implements TracksChanges
     #[ORM\Column]
     private \DateTimeImmutable $occurrenceStartsAt;
 
+    /**
+     * The occurrence's start as the event writes it (a date, a wall clock, or a UTC instant): unlike
+     * occurrenceStartsAt it does not change with the user's zone, so it tells whether the occurrence really moved.
+     */
+    #[ORM\Column(length: 16, options: ['default' => ''])]
+    private string $occurrenceStart;
+
     #[ORM\Column(length: 255)]
     private string $title;
 
@@ -73,9 +80,13 @@ class ScheduledNotification implements TracksChanges
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $deliveredAt = null;
 
-    /** Each snooze starts a new round of deliveries. */
+    /** Each snooze starts a new round of deliveries, and so does the occurrence moving after a delivery. */
     #[ORM\Column]
     private int $round = 0;
+
+    /** The round waiting for delivery was started by a snooze (not by the occurrence moving). */
+    #[ORM\Column(options: ['default' => false])]
+    private bool $snoozed = false;
 
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $dismissedAt = null;
@@ -97,8 +108,9 @@ class ScheduledNotification implements TracksChanges
     /**
      * @param list<string> $channels
      */
-    public function __construct(User $user, CalendarEvent $event, string $occurrenceKey, NotificationKind $kind, string $slot, \DateTimeImmutable $fireAt, \DateTimeImmutable $occurrenceStartsAt, string $title, string $body, array $channels)
+    public function __construct(User $user, CalendarEvent $event, string $occurrenceKey, NotificationKind $kind, string $slot, \DateTimeImmutable $fireAt, \DateTimeImmutable $occurrenceStartsAt, string $occurrenceStart, string $title, string $body, array $channels)
     {
+        $this->occurrenceStart = $occurrenceStart;
         $this->id = Uuid::v7();
         $this->user = $user;
         $this->event = $event;
@@ -119,8 +131,9 @@ class ScheduledNotification implements TracksChanges
      *
      * @param list<string> $channels
      */
-    public function replan(\DateTimeImmutable $fireAt, \DateTimeImmutable $occurrenceStartsAt, string $title, string $body, array $channels): bool
+    public function replan(\DateTimeImmutable $fireAt, \DateTimeImmutable $occurrenceStartsAt, string $occurrenceStart, string $title, string $body, array $channels): bool
     {
+        $this->occurrenceStart = $occurrenceStart;
         if (null !== $this->heldUntil && $this->heldUntil > $fireAt) {
             $fireAt = $this->heldUntil;
         }
@@ -202,14 +215,41 @@ class ScheduledNotification implements TracksChanges
         return $this->heldUntil;
     }
 
+    /** The time it was held until no longer makes sense (the event moved before it); a replan decides again. */
+    public function releaseHold(): void
+    {
+        $this->heldUntil = null;
+    }
+
+    /**
+     * The occurrence now takes its fields from another row (an override, or one for this and future occurrences,
+     * appeared or went): the notification goes along, with its snooze, hold and deliveries.
+     */
+    public function moveTo(CalendarEvent $event): void
+    {
+        $this->event = $event;
+    }
+
+    public function getOccurrenceStart(): string
+    {
+        return $this->occurrenceStart;
+    }
+
+    public function isSnoozed(): bool
+    {
+        return $this->snoozed;
+    }
+
     /**
      * The occurrence moved after this was delivered: a new round with the new plan, so the devices show it again.
      *
      * @param list<string> $channels
      */
-    public function restart(\DateTimeImmutable $fireAt, \DateTimeImmutable $occurrenceStartsAt, string $title, string $body, array $channels): void
+    public function restart(\DateTimeImmutable $fireAt, \DateTimeImmutable $occurrenceStartsAt, string $occurrenceStart, string $title, string $body, array $channels): void
     {
         ++$this->round;
+        $this->snoozed = false;
+        $this->occurrenceStart = $occurrenceStart;
         $this->deliveredAt = null;
         $this->dismissedAt = null;
         $this->silent = false;
@@ -262,6 +302,7 @@ class ScheduledNotification implements TracksChanges
     {
         $this->deliveredAt = self::utc($at);
         $this->silent = $silent;
+        $this->snoozed = false;
     }
 
     public function getRound(): int
@@ -275,6 +316,7 @@ class ScheduledNotification implements TracksChanges
         $this->heldUntil = $this->fireAt;
         $this->deliveredAt = null;
         $this->dismissedAt = null;
+        $this->snoozed = true;
         ++$this->round;
     }
 
@@ -300,8 +342,9 @@ class ScheduledNotification implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        // Clients see a notification once it is delivered; planning changes are no change for them.
-        return ['deliveredAt', 'dismissedAt', 'silent', 'round'];
+        // Clients see a notification once it is delivered (or snoozed): the time a snooze comes again, moved by quiet
+        // hours too, is a change for them. The delta leaves out notifications that never reached a device.
+        return ['deliveredAt', 'dismissedAt', 'silent', 'round', 'snoozed', 'fireAt'];
     }
 
     public static function changeType(): string

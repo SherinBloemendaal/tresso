@@ -149,25 +149,50 @@ final readonly class NotificationPlanner
             }
         }
 
+        // An occurrence whose source row changed (an override, or one for this and future occurrences, appeared or
+        // went) keeps its notification: its snooze, hold and deliveries go along to the new row.
+        $previous = [];
+        foreach ($existing as $key => $notification) {
+            if (!isset($wanted[$key])) {
+                $previous[self::occurrenceSlot($notification->getOccurrenceKey(), $notification->getKind(), $notification->getSlot())] = $key;
+            }
+        }
+
         $tooLate = $now->modify(self::TOO_LATE);
         foreach ($wanted as $key => [$row, $plan]) {
             $notification = $existing[$key] ?? null;
             unset($existing[$key]);
+            $moved = $previous[self::occurrenceSlot($plan->occurrenceKey, $plan->kind, $plan->slot)] ?? null;
+            if (null === $notification && null !== $moved && isset($existing[$moved])) {
+                $notification = $existing[$moved];
+                unset($existing[$moved]);
+                $notification->moveTo($row);
+            }
             if (null !== $notification) {
                 $estimate = $notification->getEstimatedMinutes();
                 if (self::LEAVE_ESTIMATED_SLOT === $plan->slot && null !== $estimate) {
                     // The phone's estimate stays until it sends another.
-                    $plan = new Plan($plan->occurrenceKey, $plan->kind, $plan->slot, self::leaveAt($plan->startsAt, $estimate, $context), $plan->startsAt, $plan->title, self::leaveBody($estimate, trim($row->getLocation())), $plan->channels);
+                    $plan = new Plan($plan->occurrenceKey, $plan->kind, $plan->slot, self::leaveAt($plan->startsAt, $estimate, $context), $plan->startsAt, $plan->title, self::leaveBody($estimate, trim($row->getLocation())), $plan->channels, $plan->occurrenceStart);
                 }
                 if ($notification->isDelivered()) {
                     // The occurrence moved after its notification came: a new round for the new time, if still ahead.
-                    if ($plan->startsAt != $notification->getOccurrenceStartsAt() && $plan->fireAt > $now) {
-                        $notification->restart($plan->fireAt, $plan->startsAt, $plan->title, $plan->body, $plan->channels);
+                    // Not when only the user's zone changed (an all-day or floating occurrence keeps its start).
+                    if ($plan->occurrenceStart !== $notification->getOccurrenceStart() && $plan->fireAt > $now) {
+                        $notification->restart($plan->fireAt, $plan->startsAt, $plan->occurrenceStart, $plan->title, $plan->body, $plan->channels);
                         $this->announce($notification);
                     }
                     continue;
                 }
-                if ($notification->replan($plan->fireAt, $plan->startsAt, $plan->title, $plan->body, $plan->channels)) {
+                $held = $notification->getHeldUntil();
+                if (null !== $held && NotificationKind::FollowUp !== $plan->kind && $plan->startsAt != $notification->getOccurrenceStartsAt() && $held > $plan->startsAt) {
+                    // Snoozed or postponed past where the occurrence now starts: that time is meaningless now. A
+                    // reminder whose own time has passed comes at once, while the occurrence is still ahead.
+                    $notification->releaseHold();
+                    if ($plan->fireAt < $now && $plan->startsAt > $now) {
+                        $plan = $plan->firingAt($now);
+                    }
+                }
+                if ($notification->replan($plan->fireAt, $plan->startsAt, $plan->occurrenceStart, $plan->title, $plan->body, $plan->channels)) {
                     if ($notification->getFireAt() < $tooLate) {
                         // Moved into the past: too late to matter, as a new plan would be.
                         $this->entityManager->remove($notification);
@@ -180,7 +205,7 @@ final readonly class NotificationPlanner
             if ($plan->fireAt < $tooLate) {
                 continue;
             }
-            $notification = new ScheduledNotification($context->user, $row, $plan->occurrenceKey, $plan->kind, $plan->slot, $plan->fireAt, $plan->startsAt, $plan->title, $plan->body, $plan->channels);
+            $notification = new ScheduledNotification($context->user, $row, $plan->occurrenceKey, $plan->kind, $plan->slot, $plan->fireAt, $plan->startsAt, $plan->occurrenceStart, $plan->title, $plan->body, $plan->channels);
             $this->entityManager->persist($notification);
             $this->announce($notification);
         }
@@ -206,6 +231,7 @@ final readonly class NotificationPlanner
             return [];
         }
 
+        $occurrenceStart = Props::start($instance);
         $rule = ReminderRules::match($context->rules, $row, $context->self);
         $title = '' === $row->getSummary() ? '(no title)' : $row->getSummary();
         $plans = [];
@@ -215,7 +241,7 @@ final readonly class NotificationPlanner
             if ($shiftEarly) {
                 $fireAt = WorkingHours::shiftEarly($context->preferences, $fireAt, $start) ?? $fireAt;
             }
-            $plans[] = new Plan($key, NotificationKind::Reminder, $slot, $fireAt, $start, $title, self::reminderBody($row, $start, $end, $context->zone), $channels);
+            $plans[] = new Plan($key, NotificationKind::Reminder, $slot, $fireAt, $start, $title, self::reminderBody($row, $start, $end, $context->zone), $channels, $occurrenceStart);
         }
 
         $location = trim($row->getLocation());
@@ -223,20 +249,25 @@ final readonly class NotificationPlanner
         if ($context->preferences->isLeaveNow() && !$row->isAllDay() && '' !== $location && (null !== $row->getTravelMinutes() || true === $rule?->isLeaveNow())) {
             $travel = $row->getTravelMinutes();
             if (null !== $travel) {
-                $plans[] = new Plan($key, NotificationKind::LeaveNow, 'leave', self::leaveAt($start, $travel, $context), $start, $title, self::leaveBody($travel, $location), self::channels($context, NotificationKind::LeaveNow));
+                $plans[] = new Plan($key, NotificationKind::LeaveNow, 'leave', self::leaveAt($start, $travel, $context), $start, $title, self::leaveBody($travel, $location), self::channels($context, NotificationKind::LeaveNow), $occurrenceStart);
             } elseif ($this->travel->isAvailable($context->preferences->getTravelMode())) {
                 // Waits for the phone's estimate, and is moved to the moment to leave when it comes.
-                $plans[] = new Plan($key, NotificationKind::LeaveNow, self::LEAVE_ESTIMATED_SLOT, $start->modify(\sprintf('-%d minutes', self::LEAVE_CHECK_MINUTES)), $start, $title, self::leaveBody(null, $location), self::channels($context, NotificationKind::LeaveNow));
+                $plans[] = new Plan($key, NotificationKind::LeaveNow, self::LEAVE_ESTIMATED_SLOT, $start->modify(\sprintf('-%d minutes', self::LEAVE_CHECK_MINUTES)), $start, $title, self::leaveBody(null, $location), self::channels($context, NotificationKind::LeaveNow), $occurrenceStart);
             }
         }
         if ($others && null !== $rule?->getBriefMinutes()) {
-            $plans[] = new Plan($key, NotificationKind::Brief, 'brief', $start->modify(\sprintf('-%d minutes', $rule->getBriefMinutes())), $start, 'Brief: '.$title, 'Who is coming and what you discussed.', self::channels($context, NotificationKind::Brief));
+            $plans[] = new Plan($key, NotificationKind::Brief, 'brief', $start->modify(\sprintf('-%d minutes', $rule->getBriefMinutes())), $start, 'Brief: '.$title, 'Who is coming and what you discussed.', self::channels($context, NotificationKind::Brief), $occurrenceStart);
         }
         if ($others && !$row->isAllDay() && true === $rule?->isFollowUp() && $end > $now->modify('-1 hour')) {
-            $plans[] = new Plan($key, NotificationKind::FollowUp, 'follow', $end, $start, 'After: '.$title, 'How did it go? Add notes or follow-ups while it is fresh.', self::channels($context, NotificationKind::FollowUp));
+            $plans[] = new Plan($key, NotificationKind::FollowUp, 'follow', $end, $start, 'After: '.$title, 'How did it go? Add notes or follow-ups while it is fresh.', self::channels($context, NotificationKind::FollowUp), $occurrenceStart);
         }
 
         return $plans;
+    }
+
+    private static function occurrenceSlot(string $occurrenceKey, NotificationKind $kind, string $slot): string
+    {
+        return implode('|', [$occurrenceKey, $kind->value, $slot]);
     }
 
     /**

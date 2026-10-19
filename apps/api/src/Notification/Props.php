@@ -27,4 +27,20 @@ final class Props
             ? $property->getDateTime($zone)->setTimezone($utc)
             : new \DateTimeImmutable($property->getDateTime($zone)->format('Y-m-d'), $zone)->setTimezone($utc);
     }
+
+    /**
+     * The start as the event writes it, whatever the user's zone: the date of an all-day occurrence, the wall clock of
+     * a floating one, else the instant. It changes only when the occurrence itself moves.
+     */
+    public static function start(VEvent $instance): string
+    {
+        $property = CalendarProps::dateTime($instance, 'DTSTART');
+
+        return match (true) {
+            null === $property => '',
+            !$property->hasTime() => $property->getDateTime()->format('Ymd'),
+            true === $property->isFloating() => $property->getDateTime()->format('Ymd\THis'),
+            default => $property->getDateTime(new \DateTimeZone('UTC'))->format('Ymd\THis\Z'),
+        };
+    }
 }
