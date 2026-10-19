@@ -30,6 +30,8 @@ export class RealtimeClient {
   private stopped = true
   private loop: Promise<void> | null = null
   private failures = 0
+  /** Which run is current: a start right after a stop must not leave the old run going next to the new one. */
+  private generation = 0
 
   constructor(private readonly options: RealtimeOptions) {}
 
@@ -38,24 +40,32 @@ export class RealtimeClient {
       return
     }
     this.stopped = false
-    this.loop = this.run()
+    this.loop = this.run(++this.generation)
   }
 
   async stop(): Promise<void> {
     this.stopped = true
+    this.generation++
     this.controller?.abort()
-    await this.loop
-    this.loop = null
+    const loop = this.loop
+    await loop
+    if (this.loop === loop) {
+      this.loop = null
+    }
   }
 
-  private async run(): Promise<void> {
+  private current(generation: number): boolean {
+    return !this.stopped && generation === this.generation
+  }
+
+  private async run(generation: number): Promise<void> {
     const delays = this.options.retryDelays ?? DEFAULT_RETRY_DELAYS
     this.failures = 0
-    while (!this.stopped) {
+    while (this.current(generation)) {
       try {
         await this.listen()
       } catch (error) {
-        if (this.stopped) {
+        if (!this.current(generation)) {
           return
         }
         this.options.onError?.(error)
@@ -93,7 +103,9 @@ export class RealtimeClient {
       this.options.onConnected?.()
 
       const parser = new SseParser()
-      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
+      // TextDecoder in streaming mode rather than TextDecoderStream, which React Native does not have.
+      const decoder = new TextDecoder()
+      const reader = response.body.getReader()
       // Ends a pending read on stop or renewal even where aborting the request does not end the body stream.
       const cancel = () => void reader.cancel().catch(() => {})
       if (controller.signal.aborted) {
@@ -105,7 +117,7 @@ export class RealtimeClient {
         if (done) {
           throw new Error('The realtime hub closed the connection.')
         }
-        for (const event of parser.push(value)) {
+        for (const event of parser.push(decoder.decode(value, { stream: true }))) {
           this.handle(event.type, event.data)
         }
       }
