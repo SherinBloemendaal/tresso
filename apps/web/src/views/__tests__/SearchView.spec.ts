@@ -100,7 +100,7 @@ describe('SearchView', () => {
     await router.push({ name: 'search', query: { q } })
     await router.isReady()
     useMailStore().accounts = [
-      { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null },
+      { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null },
     ]
     const wrapper = mount(SearchView, { global: { plugins: [router] } })
     await settle()

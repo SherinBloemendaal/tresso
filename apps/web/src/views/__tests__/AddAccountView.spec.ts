@@ -16,14 +16,17 @@ const created: MailAccount = {
   username: 'kim@fastmail.com',
   imap: { host: 'imap.fastmail.com', port: 993, security: 'tls' },
   smtp: { host: 'smtp.fastmail.com', port: 465, security: 'tls' },
+  calendarUrl: null,
+  calendarStatus: 'unknown',
+  calendarStatusDetail: null,
   lastSyncedAt: null,
   createdAt: '2026-10-19T08:00:00+00:00',
   defaultSignatureId: null,
 }
 
 function synced(account: MailAccount): SyncedMailAccount {
-  const { id, emailAddress, displayName, provider, status, statusDetail, lastSyncedAt, defaultSignatureId } = account
-  return { id, emailAddress, displayName, provider, status, statusDetail, lastSyncedAt, defaultSignatureId }
+  const { id, emailAddress, displayName, provider, status, statusDetail, lastSyncedAt, defaultSignatureId, calendarStatus, calendarStatusDetail } = account
+  return { id, emailAddress, displayName, provider, status, statusDetail, lastSyncedAt, defaultSignatureId, calendarStatus, calendarStatusDetail }
 }
 
 /** Form validation runs asynchronously; let it and the requests it starts finish. */

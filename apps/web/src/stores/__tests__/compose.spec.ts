@@ -23,6 +23,7 @@ const original: SyncedMessage = {
   smartInboxId: null,
   verdict: null,
   summary: null,
+  calendarMethod: null,
 }
 
 function outgoing(status: SyncedOutgoingMessage['status'], lastError: string | null = null): SyncedOutgoingMessage {
@@ -30,7 +31,7 @@ function outgoing(status: SyncedOutgoingMessage['status'], lastError: string | n
 }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], deleted: [], ...extra }
 }
 
 describe('compose store', () => {
@@ -44,7 +45,7 @@ describe('compose store', () => {
     pages = [
       page(1, {
         mailAccounts: [
-          { id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: 's1' },
+          { id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: 's1', calendarStatus: 'unknown' as const, calendarStatusDetail: null },
         ],
         signatures: [{ id: 's1', name: 'Work', html: '<p>Kim Visser</p>', updatedAt: '2026-10-19T08:00:00Z' }],
       }),

@@ -24,6 +24,7 @@ function message(overrides: Partial<SyncedMessage> = {}): SyncedMessage {
     smartInboxId: null,
     verdict: null,
     summary: null,
+    calendarMethod: null,
     ...overrides,
   }
 }

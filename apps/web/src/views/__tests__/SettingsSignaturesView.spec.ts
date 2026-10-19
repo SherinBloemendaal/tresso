@@ -8,7 +8,7 @@ import SettingsSignaturesView from '../SettingsSignaturesView.vue'
 const UPDATED_AT = '2026-10-19T08:00:00+00:00'
 
 function account(id: string, displayName: string, defaultSignatureId: string | null): SyncedMailAccount {
-  return { id, emailAddress: `${id}@company.example`, displayName, provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId }
+  return { id, emailAddress: `${id}@company.example`, displayName, provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId, calendarStatus: 'unknown' as const, calendarStatusDetail: null }
 }
 
 function signature(id: string, name: string, html: string): SyncedSignature {

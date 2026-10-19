@@ -23,6 +23,8 @@ function page(cursor: number, hasMore = false, ids: string[] = []): ChangePage {
     signatures: [],
     drafts: [],
     smartInboxes: [],
+    calendars: [],
+    calendarEvents: [],
     deleted: [],
   }
 }

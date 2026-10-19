@@ -6,7 +6,7 @@ import { useMailStore } from '@/stores/mail'
 import { useSignaturesStore } from '../signatures'
 
 function account(id: string, defaultSignatureId: string | null): SyncedMailAccount {
-  return { id, emailAddress: `${id}@company.example`, displayName: id, provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId }
+  return { id, emailAddress: `${id}@company.example`, displayName: id, provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId, calendarStatus: 'unknown' as const, calendarStatusDetail: null }
 }
 
 const stored: Signature = { id: 'sig-1', name: 'Work', html: '<p>Kim</p>', defaultFor: ['work'], updatedAt: '2026-10-19T08:00:00+00:00' }
