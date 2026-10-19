@@ -36,24 +36,51 @@ final readonly class MercurePublisher
         }
         $token = $this->tokens->publisherToken(array_values($topics));
 
-        $responses = [];
+        $updates = [];
         foreach ($cursors as $userId => $cursor) {
-            $responses[$userId] = $this->httpClient->request('POST', $this->internalHubUrl, [
+            $updates[$userId] = ['topic' => $topics[$userId], 'type' => 'changes', 'data' => ['cursor' => $cursor]];
+        }
+        $this->post($token, $updates);
+    }
+
+    /**
+     * Tells the sync workers that these accounts have mail to send; the worker leasing an account picks it up.
+     *
+     * @param list<string> $mailAccountIds
+     */
+    public function publishOutbox(array $mailAccountIds): void
+    {
+        $token = $this->tokens->publisherToken([MercureTokens::OUTBOX_TOPIC]);
+        $updates = [];
+        foreach ($mailAccountIds as $mailAccountId) {
+            $updates[$mailAccountId] = ['topic' => MercureTokens::OUTBOX_TOPIC, 'type' => 'outbox', 'data' => ['mailAccountId' => $mailAccountId]];
+        }
+        $this->post($token, $updates);
+    }
+
+    /**
+     * @param array<string, array{topic: string, type: string, data: array<string, int|string>}> $updates
+     */
+    private function post(Token $token, array $updates): void
+    {
+        $responses = [];
+        foreach ($updates as $key => $update) {
+            $responses[$key] = $this->httpClient->request('POST', $this->internalHubUrl, [
                 'auth_bearer' => $token->value,
                 'body' => [
-                    'topic' => $topics[$userId],
-                    'data' => json_encode(['cursor' => $cursor], \JSON_THROW_ON_ERROR),
+                    'topic' => $update['topic'],
+                    'data' => json_encode($update['data'], \JSON_THROW_ON_ERROR),
                     'private' => 'on',
-                    'type' => 'changes',
+                    'type' => $update['type'],
                 ],
             ]);
         }
 
-        foreach ($responses as $userId => $response) {
+        foreach ($responses as $key => $response) {
             try {
                 $response->getContent();
             } catch (ExceptionInterface $exception) {
-                $this->logger->warning('Publishing the change cursor to Mercure failed.', ['userId' => $userId, 'exception' => $exception]);
+                $this->logger->warning('Publishing to Mercure failed.', ['update' => $key, 'exception' => $exception]);
             }
         }
     }

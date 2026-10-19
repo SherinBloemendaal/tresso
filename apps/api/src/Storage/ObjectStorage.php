@@ -22,4 +22,7 @@ interface ObjectStorage
      * @throws ObjectNotFound
      */
     public function stream(string $key): iterable;
+
+    /** Stores the object; content-addressed keys make writing it twice harmless. */
+    public function write(string $key, string $content, string $contentType): void;
 }

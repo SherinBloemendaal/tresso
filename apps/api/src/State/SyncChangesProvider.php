@@ -36,7 +36,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
 
         [$until, $hasMore] = $this->boundary($userId, $since, $limit);
         if ($until === $since) {
-            return new SyncChanges($since, false, [], [], [], [], []);
+            return new SyncChanges($since, false, [], [], [], [], [], []);
         }
 
         $range = ['user' => $userId, 'since' => $since, 'until' => $until];
@@ -48,6 +48,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             $this->folders($range),
             $this->threads($range),
             $this->messages($range),
+            $this->outgoingMessages($range),
             $this->deleted($range),
         );
     }
@@ -70,6 +71,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 SELECT t.change_seq, COUNT(*) FROM thread t JOIN mail_account a ON a.id = t.mail_account_id WHERE a.owner_id = :user AND t.change_seq > :since GROUP BY t.change_seq
                 UNION ALL
                 SELECT m.change_seq, COUNT(*) FROM message m JOIN mail_account a ON a.id = m.mail_account_id WHERE a.owner_id = :user AND m.change_seq > :since GROUP BY m.change_seq
+                UNION ALL
+                SELECT o.change_seq, COUNT(*) FROM outgoing_message o JOIN mail_account a ON a.id = o.mail_account_id WHERE a.owner_id = :user AND o.change_seq > :since GROUP BY o.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -197,6 +200,35 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'categoryId' => $r['category_id'],
             'verdict' => $r['verdict'],
             'summary' => $r['summary'],
+        ], $rows);
+    }
+
+    /**
+     * Bcc recipients are included: only the sender's own clients see this.
+     *
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function outgoingMessages(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT o.id, o.mail_account_id, o.status, o.subject, o.recipients, o.send_at, o.sent_at, o.last_error, o.in_reply_to_id
+             FROM outgoing_message o JOIN mail_account a ON a.id = o.mail_account_id
+             WHERE a.owner_id = :user AND o.change_seq > :since AND o.change_seq <= :until ORDER BY o.change_seq',
+            $range,
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'mailAccountId' => $r['mail_account_id'],
+            'status' => $r['status'],
+            'subject' => $r['subject'],
+            'recipients' => json_decode(\is_string($r['recipients']) ? $r['recipients'] : '{}', true, flags: \JSON_THROW_ON_ERROR),
+            'sendAt' => self::date($r['send_at']),
+            'sentAt' => self::date($r['sent_at']),
+            'lastError' => $r['last_error'],
+            'inReplyToMessageId' => $r['in_reply_to_id'],
         ], $rows);
     }
 
