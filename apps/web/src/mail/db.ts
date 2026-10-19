@@ -450,6 +450,18 @@ export class IndexedDbMailStore implements MailStore {
     await this.db.put('drafts', draft)
   }
 
+  async changeDraft(id: string, change: (stored: Draft | null) => Draft | null): Promise<Draft | null> {
+    const tx = this.db.transaction('drafts', 'readwrite')
+    const found = await tx.store.get(id)
+    const stored = found === undefined ? null : storedDraft(found)
+    const next = change(stored)
+    if (next !== null) {
+      await tx.store.put(next)
+    }
+    await tx.done
+    return next ?? stored
+  }
+
   async drafts(): Promise<Draft[]> {
     return (await this.db.getAllFromIndex('drafts', 'byUpdatedAt')).reverse().map(storedDraft)
   }

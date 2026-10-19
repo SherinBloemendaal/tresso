@@ -379,7 +379,7 @@ export const useMailStore = defineStore('mail', () => {
         return auth.api<DraftAttachmentLink>(`/api/v1/drafts/${encodeURIComponent(id)}/attachments`, { method: 'POST', body: form })
       },
       forward: (id, attachmentId) => auth.send<DraftAttachmentLink>('POST', `/api/v1/drafts/${encodeURIComponent(id)}/forwarded-attachments`, { attachmentId }),
-      detach: (id, attachmentId) => auth.send<void>('DELETE', `/api/v1/drafts/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`),
+      detach: (id, attachmentId) => auth.send<{ draftVersion: number }>('DELETE', `/api/v1/drafts/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`),
     },
     () => void refresh(),
   )

@@ -179,29 +179,61 @@ function escapeAttribute(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
 }
 
+const ENTITIES: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ', equals: '=' }
+
+/** An attribute's value as a browser reads it: `&amp;`, `&#61;` and the like written out. */
+function decodeAttribute(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (entity: string, name: string) => {
+    if (name.startsWith('#')) {
+      const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10)
+      return Number.isFinite(code) && code <= 0x10ffff ? String.fromCodePoint(code) : entity
+    }
+    return ENTITIES[name.toLowerCase()] ?? entity
+  })
+}
+
+const IMAGE_SOURCE = /(<img\b[^>]*?\ssrc\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi
+
+/** Every image source in the HTML, read as a browser reads it, with a way to give it another one. */
+function mapImageSources(html: string, change: (source: string) => string | null): string {
+  return html.replace(IMAGE_SOURCE, (whole: string, before: string, double?: string, single?: string, bare?: string) => {
+    const next = change(decodeAttribute(double ?? single ?? bare ?? ''))
+    return next === null ? whole : `${before}"${escapeAttribute(next)}"`
+  })
+}
+
+function imageSources(html: string): Set<string> {
+  const sources = new Set<string>()
+  mapImageSources(html, (source) => {
+    sources.add(source)
+    return null
+  })
+  return sources
+}
+
 /**
  * The quote with one inline image referred to by its content id instead of the signed link the body was shown with:
  * links expire within the hour, while the image goes along with the message.
  */
 export function quoteWithContentId(quoteHtml: string, url: string, contentId: string): string {
-  return quoteHtml.split(escapeAttribute(url)).join(`cid:${contentId}`).split(url).join(`cid:${contentId}`)
+  return mapImageSources(quoteHtml, (source) => (source === url ? `cid:${contentId}` : null))
 }
 
 /** The inline images of a body that a quote shows, by their signed link. */
 export function quotedInlineImages<T extends { inline: boolean; contentId: string | null; url: string | null }>(quoteHtml: string, attachments: T[]): (T & { contentId: string; url: string })[] {
+  const sources = imageSources(quoteHtml)
   return attachments.filter(
-    (attachment): attachment is T & { contentId: string; url: string } =>
-      attachment.inline && attachment.contentId !== null && attachment.url !== null && (quoteHtml.includes(attachment.url) || quoteHtml.includes(escapeAttribute(attachment.url))),
+    (attachment): attachment is T & { contentId: string; url: string } => attachment.inline && attachment.contentId !== null && attachment.url !== null && sources.has(attachment.url),
   )
 }
 
 /** For showing a draft on screen: its cid: images through the given links (fresh ones, from the draft's endpoint). */
 export function withInlineLinks(html: string, links: { contentId?: string | null; url: string | null }[]): string {
-  let shown = html
+  const byContentId = new Map<string, string>()
   for (const link of links) {
     if (link.contentId && link.url) {
-      shown = shown.split(`cid:${link.contentId}`).join(escapeAttribute(link.url))
+      byContentId.set(`cid:${link.contentId}`, link.url)
     }
   }
-  return shown
+  return byContentId.size === 0 ? html : mapImageSources(html, (source) => byContentId.get(source) ?? null)
 }

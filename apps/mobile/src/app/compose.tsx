@@ -99,7 +99,7 @@ export default function ComposeScreen() {
       return
     }
     let current = true
-    void composer.shownQuote().then((shown) => {
+    void composer.shownQuote(quote).then((shown) => {
       if (current) {
         setShownQuote({ quote, shown })
       }

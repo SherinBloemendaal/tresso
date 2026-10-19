@@ -118,6 +118,12 @@ export interface MailStore extends SyncStore {
   /** Contacts whose address or a word of whose name starts with the query, most recent first. */
   suggestContacts(query: string, limit: number): Promise<Contact[]>
   saveDraft(draft: Draft): Promise<void>
+  /**
+   * Changes a draft as one step: nothing else written to it in between (a sync, another save). `change` gets the
+   * draft as stored (null when there is none) and returns what to store, or null to leave it as it is; it must not
+   * wait for anything. Returns what is stored afterwards.
+   */
+  changeDraft(id: string, change: (stored: Draft | null) => Draft | null): Promise<Draft | null>
   /** Most recently changed first. */
   drafts(): Promise<Draft[]>
   draft(id: string): Promise<Draft | null>

@@ -140,7 +140,7 @@ export const useComposeStore = defineStore('compose', () => {
     attach,
     removeAttachment: (attachmentId: string) => composer.removeAttachment(attachmentId),
     openAttachment,
-    shownQuote: () => composer.shownQuote(),
+    shownQuote: (quoteHtml: string) => composer.shownQuote(quoteHtml),
     openNew,
     openReply,
     defaultSignature: (mailAccountId: string | null) => composer.defaultSignature(mailAccountId),

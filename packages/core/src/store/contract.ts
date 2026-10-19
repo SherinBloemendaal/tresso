@@ -291,6 +291,20 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
       expect(await db.draft('d1')).toEqual(draft('d1', { updatedAt: 1 }))
     })
 
+    it('changes a draft as one step, or leaves it as it is', async () => {
+      await db.saveDraft(draft('d1', { subject: 'First' }))
+
+      expect(await db.changeDraft('d1', (stored) => stored && { ...stored, subject: `${stored.subject}, changed` })).toMatchObject({ subject: 'First, changed' })
+      expect(await db.draft('d1')).toMatchObject({ subject: 'First, changed' })
+      expect(await db.changeDraft('d1', () => null)).toMatchObject({ subject: 'First, changed' })
+      expect(await db.changeDraft('gone', (stored) => stored)).toBeNull()
+      expect(await db.draft('gone')).toBeNull()
+
+      // Changes made at the same time each see the one before.
+      await Promise.all([1, 2, 3].map((n) => db.changeDraft('d1', (stored) => stored && { ...stored, subject: `${stored.subject} ${n}` })))
+      expect((await db.draft('d1'))!.subject).toBe('First, changed 1 2 3')
+    })
+
     it('keeps a sent draft until its outcome is known, and leaves unsaved edits alone', async () => {
       const synced = { id: 'd1', mailAccountId: 'work', kind: 'new' as const, to: [], cc: [], bcc: [], subject: 'Server', html: '', signatureId: null, quoteHtml: '', inReplyToMessageId: null, version: 3, updatedAt: '2026-10-19T08:00:00Z', attachments: [] }
       await db.apply(page({ cursor: 11, drafts: [synced] }))
