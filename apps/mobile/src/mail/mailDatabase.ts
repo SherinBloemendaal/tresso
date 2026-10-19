@@ -133,7 +133,10 @@ export class MailDatabase implements SyncStore {
     return this.write(() => this.store(page))
   }
 
-  /** Every write goes through here: one at a time, refused once the copy is closing, and waited for when it closes. */
+  /**
+   * Every write goes through here: one at a time, refused once the copy is closing, and waited for when it closes. A
+   * task must not call write() itself: it would wait behind its own turn forever.
+   */
   private async write<T>(task: () => Promise<T>): Promise<T> {
     if (this.shutting) {
       throw new CopyClosingError()
