@@ -74,6 +74,21 @@ class MessageLocation
         return $this->remoteUid;
     }
 
+    public function isPlaceholder(): bool
+    {
+        return str_starts_with($this->remoteUid, MailboxChange::PLACEHOLDER_PREFIX);
+    }
+
+    /** The copy a move put here has landed on the server under this uid. */
+    public function landed(string $remoteUid, ?int $modSeq): void
+    {
+        if (!$this->isPlaceholder()) {
+            throw new \LogicException('Only a placeholder copy can land.');
+        }
+        $this->remoteUid = $remoteUid;
+        $this->modSeq = $modSeq;
+    }
+
     public function getModSeq(): ?int
     {
         return $this->modSeq;

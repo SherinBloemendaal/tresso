@@ -14,6 +14,8 @@ use App\Entity\Message;
 use App\Entity\MessageLocation;
 use App\Entity\MessageReference;
 use App\Entity\MessageText;
+use App\Mailbox\MailboxChanges;
+use App\Repository\MailboxChangeRepository;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
@@ -26,6 +28,8 @@ final readonly class MessageIngestor
         private EntityManagerInterface $entityManager,
         private Threader $threader,
         private FolderLookup $folders,
+        private MailboxChangeRepository $mailboxChanges,
+        private MailboxChanges $changes,
     ) {
     }
 
@@ -34,11 +38,12 @@ final readonly class MessageIngestor
         return $this->entityManager->wrapInTransaction(function () use ($account, $batch): MessageBatchResult {
             $folder = $this->folders->get($account, $batch->folder);
             $stored = $linked = $updated = 0;
+            $pendingFlags = $this->mailboxChanges->messagesWithPendingFlags($account);
 
             foreach ($batch->messages as $input) {
                 $location = $this->entityManager->getRepository(MessageLocation::class)->findOneBy(['folder' => $folder, 'remoteUid' => $input->remoteUid]);
                 if (null !== $location) {
-                    $this->applyFlags($location->getMessage(), $input);
+                    $this->applyFlags($location->getMessage(), $input, $pendingFlags);
                     $location->setModSeq($input->modSeq);
                     ++$updated;
                     continue;
@@ -47,8 +52,11 @@ final readonly class MessageIngestor
                 $messageId = MessageIds::normalize($input->messageId);
                 $existing = $this->findExisting($account, $messageId, $input->rawObjectKey);
                 if (null !== $existing) {
-                    $this->addLocation($existing, $folder, $input);
-                    $this->applyFlags($existing, $input);
+                    // A copy a move from Tresso put here is not new: it lands instead.
+                    if (!$this->changes->arrived($existing, $folder, $input->remoteUid, $input->modSeq)) {
+                        $this->addLocation($existing, $folder, $input);
+                    }
+                    $this->applyFlags($existing, $input, $pendingFlags);
                     ++$linked;
                     continue;
                 }
@@ -89,7 +97,7 @@ final readonly class MessageIngestor
             'bcc' => self::addresses($input->bcc),
             'replyTo' => self::addresses($input->replyTo),
         ]);
-        $this->applyFlags($message, $input);
+        $this->applyFlags($message, $input, []);
         $this->entityManager->persist($message);
         $thread->recordMessage($receivedAt);
 
@@ -137,8 +145,17 @@ final readonly class MessageIngestor
         $this->entityManager->persist($location);
     }
 
-    private function applyFlags(Message $message, MessageInput $input): void
+    /**
+     * @param array<string, true> $pendingFlags messages with a flag change from Tresso the server has not confirmed:
+     *                                          their \Seen and \Flagged stay as the user set them meanwhile
+     */
+    private function applyFlags(Message $message, MessageInput $input, array $pendingFlags): void
     {
+        if (isset($pendingFlags[$message->getId()->toRfc4122()])) {
+            $message->updateFlags($message->isSeen(), $message->isFlagged(), $input->flags->answered, $input->flags->draft);
+
+            return;
+        }
         $message->updateFlags($input->flags->seen, $input->flags->flagged, $input->flags->answered, $input->flags->draft);
     }
 

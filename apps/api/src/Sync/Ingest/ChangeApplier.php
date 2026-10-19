@@ -7,6 +7,7 @@ namespace App\Sync\Ingest;
 use App\ApiResource\Input\Sync\ChangeBatchInput;
 use App\Entity\MailAccount;
 use App\Entity\MessageLocation;
+use App\Repository\MailboxChangeRepository;
 use App\Sync\Change\ChangeSequencer;
 use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
@@ -23,6 +24,7 @@ final readonly class ChangeApplier
         private FolderLookup $folders,
         private MessageJanitor $janitor,
         private ChangeSequencer $sequencer,
+        private MailboxChangeRepository $mailboxChanges,
     ) {
     }
 
@@ -31,6 +33,8 @@ final readonly class ChangeApplier
         $result = $this->entityManager->wrapInTransaction(function () use ($account, $batch): array {
             $folder = $this->folders->get($account, $batch->folder);
             $updated = $unknown = 0;
+            // A flag change from Tresso the server has not confirmed yet keeps \Seen and \Flagged as the user set them.
+            $pendingFlags = [] === $batch->flags ? [] : $this->mailboxChanges->messagesWithPendingFlags($account);
 
             foreach ($batch->flags as $change) {
                 $location = $this->entityManager->getRepository(MessageLocation::class)->findOneBy(['folder' => $folder, 'remoteUid' => $change->remoteUid]);
@@ -38,7 +42,14 @@ final readonly class ChangeApplier
                     ++$unknown;
                     continue;
                 }
-                $location->getMessage()->updateFlags($change->flags->seen, $change->flags->flagged, $change->flags->answered, $change->flags->draft);
+                $message = $location->getMessage();
+                $pending = isset($pendingFlags[$message->getId()->toRfc4122()]);
+                $message->updateFlags(
+                    $pending ? $message->isSeen() : $change->flags->seen,
+                    $pending ? $message->isFlagged() : $change->flags->flagged,
+                    $change->flags->answered,
+                    $change->flags->draft,
+                );
                 $location->setModSeq($change->modSeq);
                 ++$updated;
             }
