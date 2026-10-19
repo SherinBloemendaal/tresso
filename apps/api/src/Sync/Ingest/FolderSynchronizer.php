@@ -8,6 +8,8 @@ use ApiPlatform\Validator\Exception\ValidationException;
 use App\ApiResource\Input\Sync\FolderInput;
 use App\Entity\Folder;
 use App\Entity\MailAccount;
+use App\Sync\Change\ChangeSequencer;
+use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Validator\ConstraintViolation;
 use Symfony\Component\Validator\ConstraintViolationList;
@@ -24,7 +26,9 @@ final readonly class FolderSynchronizer
 {
     public function __construct(
         private EntityManagerInterface $entityManager,
+        private Connection $connection,
         private MessageJanitor $janitor,
+        private ChangeSequencer $sequencer,
     ) {
     }
 
@@ -36,6 +40,19 @@ final readonly class FolderSynchronizer
     public function sync(MailAccount $account, array $inputs): array
     {
         $this->assertUniqueNames($inputs);
+
+        return $this->entityManager->wrapInTransaction(fn (): array => $this->apply($account, $inputs));
+    }
+
+    /**
+     * @param list<FolderInput> $inputs
+     *
+     * @return list<FolderState>
+     */
+    private function apply(MailAccount $account, array $inputs): array
+    {
+        /** @var list<string> $affected messages that lost a folder */
+        $affected = [];
 
         /** @var array<string, Folder> $existing */
         $existing = [];
@@ -59,9 +76,7 @@ final readonly class FolderSynchronizer
             $folder->rename($input->displayName, $input->role);
             $reset = null !== $folder->getUidValidity() && null !== $input->uidValidity && $folder->getUidValidity() !== $input->uidValidity;
             if ($reset) {
-                $this->entityManager->createQuery('DELETE FROM App\Entity\MessageLocation l WHERE l.folder = :folder')
-                    ->setParameter('folder', $folder->getId(), 'uuid')
-                    ->execute();
+                $affected = [...$affected, ...$this->removeLocations($folder)];
                 $folder->updateSyncState($input->uidValidity, null);
             } elseif (null === $folder->getUidValidity() && null !== $input->uidValidity) {
                 $folder->updateSyncState($input->uidValidity, $folder->getSyncCursor());
@@ -71,13 +86,28 @@ final readonly class FolderSynchronizer
         }
 
         foreach ($existing as $deleted) {
+            $affected = [...$affected, ...$this->removeLocations($deleted)];
             $this->entityManager->remove($deleted);
         }
 
         $this->entityManager->flush();
         $this->janitor->removeOrphans($account);
+        // Messages still in other folders changed their membership.
+        $this->sequencer->touchMessages($account->getOwner()->getId(), array_values(array_unique($affected)));
 
         return $states;
+    }
+
+    /**
+     * @return list<string> ids of the messages that were in the folder
+     */
+    private function removeLocations(Folder $folder): array
+    {
+        /** @var list<string> */
+        return $this->connection->fetchFirstColumn(
+            'DELETE FROM message_location WHERE folder_id = :folder RETURNING message_id',
+            ['folder' => $folder->getId()->toRfc4122()],
+        );
     }
 
     /**

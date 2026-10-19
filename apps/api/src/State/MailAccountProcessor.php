@@ -40,6 +40,15 @@ final readonly class MailAccountProcessor implements ProcessorInterface
 
     public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): ?MailAccountResource
     {
+        // One transaction per write, so change numbers for client sync commit in order.
+        return $this->entityManager->wrapInTransaction(fn (): ?MailAccountResource => $this->write($data, $operation, $uriVariables));
+    }
+
+    /**
+     * @param array<string, mixed> $uriVariables
+     */
+    private function write(mixed $data, Operation $operation, array $uriVariables): ?MailAccountResource
+    {
         $owner = $this->currentUser->get();
 
         if ($data instanceof CreateMailAccount) {

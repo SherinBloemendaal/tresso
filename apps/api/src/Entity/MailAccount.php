@@ -9,6 +9,7 @@ use App\Enum\MailProvider;
 use App\Mail\ServerSettings;
 use App\Repository\MailAccountRepository;
 use Doctrine\DBAL\Types\Types;
+use App\Sync\Change\TracksChanges;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Uid\Uuid;
@@ -16,11 +17,15 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Entity(repositoryClass: MailAccountRepository::class)]
 #[ORM\UniqueConstraint(columns: ['owner_id', 'email_address'])]
 #[ORM\Index(columns: ['status', 'lease_expires_at'])]
-class MailAccount
+#[ORM\Index(columns: ['owner_id', 'change_seq'])]
+class MailAccount implements TracksChanges
 {
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
     private Uuid $id;
+
+    #[ORM\Column(type: Types::BIGINT, options: ['default' => 0])]
+    private int $changeSeq = 0;
 
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(nullable: false, onDelete: 'CASCADE')]
@@ -197,5 +202,30 @@ class MailAccount
     public function getCreatedAt(): \DateTimeImmutable
     {
         return $this->createdAt;
+    }
+
+    public function getChangeOwner(): User
+    {
+        return $this->owner;
+    }
+
+    public static function clientFields(): ?array
+    {
+        return ['emailAddress', 'displayName', 'provider', 'status', 'statusDetail', 'lastSyncedAt'];
+    }
+
+    public static function changeType(): string
+    {
+        return 'mailAccount';
+    }
+
+    public function getChangeSeq(): int
+    {
+        return $this->changeSeq;
+    }
+
+    public function setChangeSeq(int $changeSeq): void
+    {
+        $this->changeSeq = $changeSeq;
     }
 }
