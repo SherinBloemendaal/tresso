@@ -426,7 +426,8 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   place them again.
 - Classification sits behind `App\Classification\Classifier`. The open edition's `RuleBasedClassifier` decides, in
   this order: spam that no From-based rule may overrule, because a From address is easy to forge (DMARC failing a
-  reject or quarantine policy, and the server's spam verdict on mail whose sender did not pass DMARC); a sender rule (a
+  reject or quarantine policy, which not even the Spam exclude list overrules, and the server's spam verdict on mail
+  whose sender did not pass DMARC); a sender rule (a
   correction the user made earlier, by address, then domain and parent domains); the include lists (the user's own
   smart inboxes first); then signals in the message, each pointing at a built-in smart inbox: the server's spam
   verdict (junk folder, `$Junk` keyword, `X-Spam-Flag`, `X-Spam-Status`) (spam), `Auto-Submitted` or `Precedence:
@@ -439,17 +440,21 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   verdict is the smart inbox's unless a sender rule sets one. The `instructions` field is for AI classifiers such as
   the one in Tresso Cloud, which decorates the `Classifier` service and should keep sender rules and lists in charge.
 - The sync worker sends the headers the rules read (`headers`) and the junk keyword (`junk`) with each message; the
-  API keeps them in `message_signals`, apart from the message row and only for messages that have any. A junk keyword
+  API keeps them in `message_signals`, apart from the message row and only for messages that have any. Anyone can
+  write an Authentication-Results header, so a DMARC pass counts only when the receiving server wrote it: at Gmail
+  and Microsoft 365 the topmost header is always theirs; on other servers its authserv-id must belong to the
+  account's domain or its IMAP server's domain (`ReceivingServers`). A junk keyword
   set or cleared after ingest is not read again (flag changes carry only seen, flagged, answered and draft).
 - Classification runs after the ingest commits, on its own Messenger transport (`classify`) with its own consumer
   (`classifier` in Compose), so a first sync never holds up sending. It goes in batches of 200 per transaction, ten
   per job; a longer run queues the rest as a new job. Runs for one user take turns on an advisory lock. Each incoming
   message gets a smart inbox and verdict (clients notify on `do` and `delegate`); its conversation takes those of its
   newest incoming message. An unchanged outcome is not written, so classifying again resends nothing that did not
-  move. The user's own mail is never classified: mail from their accounts' addresses, and mail filed only in Sent or
-  Drafts (an alias). A message waits with `classified_at` empty, so a lost run is caught up by the next one.
+  move. The user's own mail is never classified: mail from their accounts' addresses, and mail filed in Sent or Drafts
+  and otherwise only in folders that hold everything (All Mail, an All or Archive folder), which covers an alias. A message waits with `classified_at` empty, so a lost run is caught up by the next one.
 - Corrections: `PUT /api/v1/threads/{id}/classification` (scopes `mail:write` and `settings:write`, because it
-  remembers a rule) with a smart inbox and optionally a verdict takes the user's classification lock, puts the
+  remembers a rule) with a smart inbox and optionally a verdict takes the user's smart inbox lock and then their
+  classification lock (the order every path keeps), reads the conversation and the smart inbox again, puts the
   conversation and its newest incoming message there for good (reason `user`; automatic classification leaves it
   alone from then on), remembers the choice for the sender as a sender rule (one per sender), takes the sender's
   address off that smart inbox's exclude list, and classifies again the last 30 days of mail from that sender. When a

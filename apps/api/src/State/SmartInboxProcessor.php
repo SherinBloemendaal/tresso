@@ -13,6 +13,7 @@ use App\ApiResource\Input\SmartInbox\UpdateSmartInbox;
 use App\ApiResource\SmartInboxResource;
 use App\Classification\ClassificationScheduler;
 use App\Classification\SenderPattern;
+use App\Classification\UserLocks;
 use App\Entity\Category;
 use App\Entity\User;
 use App\Enum\Verdict;
@@ -43,6 +44,7 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
         private Connection $connection,
         private ChangeSequencer $sequencer,
         private ClassificationScheduler $classification,
+        private UserLocks $locks,
     ) {
     }
 
@@ -59,7 +61,7 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
     {
         $owner = $this->currentUser->get();
         // Writes of one user take turns, so two requests cannot both pass the name and count checks below.
-        $this->connection->executeStatement('SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))', ['key' => 'smart-inboxes:'.$owner->getId()->toRfc4122()]);
+        $this->locks->smartInboxes($owner->getId());
         $existing = $this->smartInboxes->findOwnedBy($owner);
 
         if ($data instanceof CreateSmartInbox) {

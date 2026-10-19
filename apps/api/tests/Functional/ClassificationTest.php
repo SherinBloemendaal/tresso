@@ -4,10 +4,16 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional;
 
+use App\ApiResource\Input\SmartInbox\ThreadClassificationInput;
+use App\Classification\ClassificationHandlers;
 use App\Classification\ClassifyNewMail;
 use App\Classification\MailClassification;
 use App\Classification\ReclassifyMail;
+use App\Classification\ThreadCorrection;
+use App\Entity\Thread;
+use App\Entity\User;
 use Doctrine\DBAL\DriverManager;
+use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
 use Symfony\Component\Console\Tester\CommandTester;
 use Symfony\Component\Messenger\Envelope;
@@ -275,7 +281,11 @@ final class ClassificationTest extends DatabaseTestCase
 
     public function testCorrectionClassifiesAgainOnlyMailFromThatSender(): void
     {
-        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Invoice', ['from' => ['address' => 'billing@hosting.example']]), $this->message('2', 'Budget')]]);
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Invoice', ['from' => ['address' => 'billing@hosting.example']]),
+            $this->message('2', 'Budget'),
+            $this->message('3', 'Invoice again', ['from' => ['address' => 'billing@hosting.example']]),
+        ]]);
         $this->runClassification();
         $first = $this->changes(0);
         $inboxes = $this->builtinIds($first);
@@ -284,11 +294,109 @@ final class ClassificationTest extends DatabaseTestCase
         $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threads['Invoice'].'/classification', ['smartInboxId' => $inboxes['notification']], $this->kim);
         self::assertResponseIsSuccessful();
 
-        $queued = array_map(static fn (Envelope $envelope): object => $envelope->getMessage(), $this->takeQueued());
+        $envelopes = $this->takeQueued();
+        $queued = array_map(static fn (Envelope $envelope): object => $envelope->getMessage(), $envelopes);
         self::assertCount(1, $queued);
         self::assertInstanceOf(ReclassifyMail::class, $queued[0]);
         self::assertSame('billing@hosting.example', $queued[0]->sender);
         self::assertNotNull($queued[0]->since);
+
+        // Misplace every other conversation: a run over all mail would put them back, a run for the sender leaves them.
+        $this->connection()->executeStatement('UPDATE thread SET category_id = :spam, verdict = :none WHERE id IN (:budget, :again)', ['spam' => $inboxes['spam'], 'none' => 'none', 'budget' => $threads['Budget'], 'again' => $threads['Invoice again']]);
+        $this->runClassification($envelopes);
+
+        $after = array_column($this->changes(0)['threads'], null, 'subject');
+        self::assertSame([$inboxes['spam'], 'none'], [$after['Budget']['smartInboxId'], $after['Budget']['verdict']], 'Another sender is left alone.');
+        self::assertSame([$inboxes['notification'], 'know', 'sender_rule'], $this->classificationOf($after['Invoice again']));
+    }
+
+    public function testRerunForADomainCoversItsSubdomainsAndNoOtherSender(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Invoice', ['from' => ['address' => 'billing@hosting.example']]),
+            $this->message('2', 'Status', ['from' => ['address' => 'ops@eu.hosting.example']]),
+            $this->message('3', 'Look-alike', ['from' => ['address' => 'billing@myhosting.example']]),
+            $this->message('4', 'Budget'),
+        ]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $this->connection()->executeStatement('UPDATE thread SET category_id = :spam, verdict = :none', ['spam' => $inboxes['spam'], 'none' => 'none']);
+
+        static::getContainer()->get(MailClassification::class)->reclassify($this->kimsId(), null, '@hosting.example');
+
+        $after = array_column($this->connection()->fetchAllAssociative('SELECT t.subject, t.category_id FROM thread t'), 'category_id', 'subject');
+        self::assertSame($inboxes['todo'], $after['Invoice']);
+        self::assertSame($inboxes['todo'], $after['Status']);
+        self::assertSame($inboxes['spam'], $after['Look-alike']);
+        self::assertSame($inboxes['spam'], $after['Budget']);
+    }
+
+    public function testCorrectionReadsTheConversationAgainAfterTakingTheLocks(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $threadId = $first['threads'][0]['id'];
+        $entityManager = static::getContainer()->get(EntityManagerInterface::class);
+
+        // The request's copy says Informational, from before a classification run committed To do.
+        $this->connection()->executeStatement("UPDATE thread SET category_id = :info, verdict = 'know', classification_reason = 'copied' WHERE id = :id", ['info' => $inboxes['informational'], 'id' => $threadId]);
+        $entityManager->clear();
+        $owner = $entityManager->find(User::class, $this->kimsId());
+        self::assertInstanceOf(User::class, $owner);
+        self::assertNotNull($entityManager->find(Thread::class, Uuid::fromString($threadId)));
+        $this->connection()->executeStatement("UPDATE thread SET category_id = :todo, verdict = 'do', classification_reason = 'direct' WHERE id = :id", ['todo' => $inboxes['todo'], 'id' => $threadId]);
+
+        $input = new ThreadClassificationInput();
+        $input->smartInboxId = $inboxes['informational'];
+        static::getContainer()->get(ThreadCorrection::class)->correct($owner, $threadId, $input);
+
+        self::assertSame(
+            ['category_id' => $inboxes['informational'], 'verdict' => 'know', 'classification_reason' => 'user'],
+            $this->connection()->fetchAssociative('SELECT category_id, verdict, classification_reason FROM thread WHERE id = :id', ['id' => $threadId]),
+        );
+    }
+
+    public function testAStoppedJobQueuesTheRest(): void
+    {
+        foreach ([1, 2] as $part) {
+            $this->ingest('messages', ['folder' => 'INBOX', 'messages' => array_map(fn (int $i): array => $this->message($part.'-'.$i, 'Mail '.$part.'-'.$i), range(1, 101))]);
+        }
+        $this->takeQueued();
+        $container = static::getContainer();
+        $handlers = new ClassificationHandlers($container->get(MailClassification::class), $container->get(MessageBusInterface::class), 1);
+
+        $handlers->classifyNew(new ClassifyNewMail($this->kimsId()->toRfc4122()));
+        $queued = array_map(static fn (Envelope $envelope): object => $envelope->getMessage(), $this->takeQueued());
+        self::assertEquals([new ClassifyNewMail($this->kimsId()->toRfc4122())], $queued);
+
+        $handlers->classifyNew(new ClassifyNewMail($this->kimsId()->toRfc4122()));
+        self::assertSame([], $this->takeQueued(), 'Done: nothing more is queued.');
+
+        $handlers->reclassify(new ReclassifyMail($this->kimsId()->toRfc4122(), null));
+        $rest = array_map(static fn (Envelope $envelope): object => $envelope->getMessage(), $this->takeQueued());
+        self::assertCount(1, $rest);
+        self::assertInstanceOf(ReclassifyMail::class, $rest[0]);
+        self::assertNotNull($rest[0]->after);
+    }
+
+    public function testMailFiledAsSentInGmailStyleFoldersIsTheUsersOwn(): void
+    {
+        $this->ingest('folders', ['folders' => [
+            ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1],
+            ['remoteName' => '[Gmail]/Sent Mail', 'displayName' => 'Sent Mail', 'role' => 'sent', 'uidValidity' => 1],
+            ['remoteName' => '[Gmail]/All Mail', 'displayName' => 'All Mail', 'role' => 'all', 'uidValidity' => 1],
+        ]]);
+        $alias = $this->message('1', 'From my alias', ['messageId' => '<alias@x>', 'from' => ['address' => 'kim@alias.example'], 'to' => [['address' => 'anna@partner.example']]]);
+        $this->ingest('messages', ['folder' => '[Gmail]/Sent Mail', 'messages' => [$alias]]);
+        $this->ingest('messages', ['folder' => '[Gmail]/All Mail', 'messages' => [$alias, $this->message('2', 'Archived question', ['messageId' => '<archived@x>'])]]);
+        $this->runClassification();
+
+        $threads = array_column($this->changes(0)['threads'], null, 'subject');
+        self::assertSame([null, null, null], $this->classificationOf($threads['From my alias']));
+        self::assertSame('direct', $threads['Archived question']['classificationReason'], 'Mail only in All Mail is still classified.');
     }
 
     public function testCorrectionIntoASmartInboxThatExcludesTheSendersDomainIsRefused(): void
@@ -323,11 +431,32 @@ final class ClassificationTest extends DatabaseTestCase
         try {
             $this->client->jsonRequest('PUT', '/api/v1/threads/'.$first['threads'][0]['id'].'/classification', ['smartInboxId' => $this->builtinIds($first)['informational']], $this->kim);
 
-            self::assertResponseStatusCodeSame(500, 'The correction waited for the lock of the running classification and gave up.');
+            self::assertResponseStatusCodeSame(500);
+            self::assertStringContainsString('55P03', (string) $this->client->getResponse()->getContent(), 'The correction waited for the lock of the running classification until lock_timeout.');
         } finally {
             $this->connection()->executeStatement('RESET lock_timeout');
             $running->executeStatement('SELECT pg_advisory_unlock_all()');
             $running->close();
+        }
+    }
+
+    public function testCorrectionWaitsForAnotherDevicesSmartInboxEdit(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $first = $this->changes(0);
+
+        $editing = DriverManager::getConnection($this->separateConnectionParams());
+        $editing->executeStatement('SELECT pg_advisory_lock(hashtextextended(:key, 0))', ['key' => 'smart-inboxes:'.$this->kimsId()->toRfc4122()]);
+        $this->connection()->executeStatement("SET lock_timeout = '300ms'");
+        try {
+            $this->client->jsonRequest('PUT', '/api/v1/threads/'.$first['threads'][0]['id'].'/classification', ['smartInboxId' => $this->builtinIds($first)['informational']], $this->kim);
+
+            self::assertResponseStatusCodeSame(500);
+            self::assertStringContainsString('55P03', (string) $this->client->getResponse()->getContent(), 'The correction waited for the smart inbox edit, so its exclude list change cannot be lost.');
+        } finally {
+            $this->connection()->executeStatement('RESET lock_timeout');
+            $editing->executeStatement('SELECT pg_advisory_unlock_all()');
+            $editing->close();
         }
     }
 
@@ -384,6 +513,14 @@ final class ClassificationTest extends DatabaseTestCase
         self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM message WHERE classified_at IS NULL'));
     }
 
+    private function kimsId(): Uuid
+    {
+        $id = $this->connection()->fetchOne("SELECT id FROM app_user WHERE email = 'kim@example.test'");
+        self::assertIsString($id);
+
+        return Uuid::fromString($id);
+    }
+
     /**
      * Connection settings of the test database for a session outside the test transaction.
      *
@@ -436,7 +573,11 @@ final class ClassificationTest extends DatabaseTestCase
         }
     }
 
-    /** @return list<Envelope> */
+    /**
+     * @phpstan-impure
+     *
+     * @return list<Envelope>
+     */
     private function takeQueued(): array
     {
         $transport = $this->classifyTransport();

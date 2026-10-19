@@ -31,11 +31,12 @@ final readonly class MailClassification
     private const int BATCH_SIZE = 200;
 
     /**
-     * The message is only in Sent or Drafts: the user's own, also when sent from an address that is not one of their
-     * accounts (an alias).
+     * The message is filed as sent: in Sent or Drafts, and otherwise only in folders that hold everything (Gmail's All
+     * Mail, an IMAP All or Archive folder). It is the user's own, also when sent from an address that is not one of
+     * their accounts (an alias).
      */
-    private const string FILED_AS_SENT = "(EXISTS (SELECT 1 FROM message_location l WHERE l.message_id = m.id)
-        AND NOT EXISTS (SELECT 1 FROM message_location l JOIN folder f ON f.id = l.folder_id WHERE l.message_id = m.id AND f.role NOT IN ('sent', 'drafts')))";
+    private const string FILED_AS_SENT = "(EXISTS (SELECT 1 FROM message_location l JOIN folder f ON f.id = l.folder_id WHERE l.message_id = m.id AND f.role IN ('sent', 'drafts'))
+        AND NOT EXISTS (SELECT 1 FROM message_location l JOIN folder f ON f.id = l.folder_id WHERE l.message_id = m.id AND f.role NOT IN ('sent', 'drafts', 'all', 'archive')))";
 
     public function __construct(
         private EntityManagerInterface $entityManager,
@@ -45,6 +46,7 @@ final readonly class MailClassification
         private CategoryRepository $smartInboxes,
         private SenderRuleRepository $senderRules,
         private MailAccountRepository $accounts,
+        private UserLocks $locks,
     ) {
     }
 
@@ -206,7 +208,8 @@ final readonly class MailClassification
 
     /**
      * Applies the user's choice to a conversation: it moves to the smart inbox with the verdict, now and for good, and
-     * so does its newest incoming message (see {@see newestIncoming()}). The caller holds the user's lock.
+     * so does its newest incoming message (see {@see newestIncoming()}). The caller holds the user's locks (see
+     * {@see UserLocks}) and loaded the thread and the smart inbox after taking them.
      */
     public function placeByUser(Thread $thread, ?Message $newestIncoming, Category $smartInbox, Verdict $verdict): void
     {
@@ -235,12 +238,9 @@ final readonly class MailClassification
         return ['address' => $sender, 'domain' => '%@'.$domain, 'subdomain' => '%.'.$domain];
     }
 
-    public function lock(Uuid $userId): void
+    private function lock(Uuid $userId): void
     {
-        $this->connection->executeStatement(
-            'SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))',
-            ['key' => 'classify:'.$userId->toRfc4122()],
-        );
+        $this->locks->classification($userId);
     }
 
     private function context(User $user): ClassificationContext
@@ -343,8 +343,8 @@ final readonly class MailClassification
             /** @var list<string> $roles */
             $roles = json_decode($row['roles'], true, flags: \JSON_THROW_ON_ERROR);
             $folderRoles = array_values(array_filter(array_map(FolderRole::tryFrom(...), $roles)));
-            if ([] !== $folderRoles && [] === array_diff(array_map(static fn (FolderRole $r): string => $r->value, $folderRoles), [FolderRole::Sent->value, FolderRole::Drafts->value])) {
-                // Filed only as sent: the user's own, from an address Tresso does not know as theirs.
+            if (self::filedAsSent($folderRoles)) {
+                // The user's own, from an address Tresso does not know as theirs.
                 continue;
             }
             $recipients = $message->getRecipients();
@@ -361,10 +361,24 @@ final readonly class MailClassification
                 (bool) $row['junk'],
                 $folderRoles,
                 null !== $message->getInReplyTo(),
+                ReceivingServers::domainsFor($message->getMailAccount()),
             );
         }
 
         return $result;
+    }
+
+    /**
+     * Mirrors {@see FILED_AS_SENT}.
+     *
+     * @param list<FolderRole> $roles
+     */
+    private static function filedAsSent(array $roles): bool
+    {
+        $sent = array_filter($roles, static fn (FolderRole $role): bool => FolderRole::Sent === $role || FolderRole::Drafts === $role);
+        $elsewhere = array_filter($roles, static fn (FolderRole $role): bool => !\in_array($role, [FolderRole::Sent, FolderRole::Drafts, FolderRole::All, FolderRole::Archive], true));
+
+        return [] !== $sent && [] === $elsewhere;
     }
 
     /** @param list<string> $values */

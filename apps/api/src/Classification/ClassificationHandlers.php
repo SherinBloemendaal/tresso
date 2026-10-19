@@ -20,13 +20,14 @@ final readonly class ClassificationHandlers
     public function __construct(
         private MailClassification $classification,
         private MessageBusInterface $bus,
+        private int $batchesPerRun = self::BATCHES_PER_RUN,
     ) {
     }
 
     #[AsMessageHandler]
     public function classifyNew(ClassifyNewMail $message): void
     {
-        if ($this->classification->classifyNew(Uuid::fromString($message->userId), self::BATCHES_PER_RUN)) {
+        if ($this->classification->classifyNew(Uuid::fromString($message->userId), $this->batchesPerRun)) {
             $this->bus->dispatch(new ClassifyNewMail($message->userId));
         }
     }
@@ -39,7 +40,7 @@ final readonly class ClassificationHandlers
             null === $message->since ? null : new \DateTimeImmutable($message->since),
             $message->sender,
             $message->after,
-            self::BATCHES_PER_RUN,
+            $this->batchesPerRun,
         );
         if (null !== $next) {
             $this->bus->dispatch(new ReclassifyMail($message->userId, $message->since, $message->sender, $next));
