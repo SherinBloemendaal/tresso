@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { Stack, useRouter } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { sendLaterOptions, type Address, type Draft, type SendLaterKey } from '@tresso/core'
+import { sendLaterOptions, type Address, type AttachmentFile, type Draft, type SendLaterKey } from '@tresso/core'
+import { AttachmentRow } from '@/components/AttachmentRow'
 import { ChoiceSheet } from '@/components/ChoiceSheet'
 import { HtmlFrame } from '@/components/HtmlFrame'
 import { Icon, type IconName } from '@/components/Icon'
 import { useComposer } from '@/compose/ComposerProvider'
 import { LinkSheet } from '@/compose/LinkSheet'
+import { pickDocuments, pickPhotos } from '@/compose/pickFiles'
 import { MessageEditor, type EditorState, type MessageEditorHandle } from '@/compose/MessageEditor'
 import { RecipientField } from '@/compose/RecipientField'
 import { pickTimeOnAndroid, TimeSheet } from '@/compose/TimeSheet'
 import { isFutureTime } from '@/compose/time'
+import { useNotices } from '@/components/Notices'
 import { useMail } from '@/mail/MailProvider'
 import { useTheme, type Theme } from '@/theme'
 
@@ -41,6 +44,7 @@ export default function ComposeScreen() {
   const styles = useMemo(() => makeStyles(theme), [theme])
   const insets = useSafeAreaInsets()
   const router = useRouter()
+  const notices = useNotices()
   const editor = useRef<MessageEditorHandle>(null)
   const draft = state.draft
   const [showCopies, setShowCopies] = useState(draft !== null && draft.cc.length + draft.bcc.length > 0)
@@ -130,6 +134,28 @@ export default function ComposeScreen() {
       return
     }
     setPickFrom(initial)
+  }
+
+  async function attachFrom(pick: () => Promise<AttachmentFile[]>): Promise<void> {
+    try {
+      const files = await pick()
+      await composer.attach(files)
+    } catch (error) {
+      notices.notify({ text: `The files could not be picked: ${error instanceof Error ? error.message : String(error)}`, tone: 'error' })
+    }
+  }
+
+  async function openAttachment(id: string): Promise<void> {
+    try {
+      const url = await composer.attachmentLink(id)
+      if (url === null) {
+        notices.notify({ text: 'This file is blocked: it contains malware.', tone: 'error' })
+        return
+      }
+      await Linking.openURL(url)
+    } catch (error) {
+      notices.notify({ text: `The file could not be opened: ${error instanceof Error ? error.message : String(error)}`, tone: 'error' })
+    }
   }
 
   function cancel(): void {
@@ -290,6 +316,24 @@ export default function ComposeScreen() {
             </Pressable>
           </View>
 
+          {(draft.attachments.length > 0 || state.attaching.length > 0) && (
+            <View style={styles.files} accessibilityLabel="Attachments">
+              {draft.attachments.map((attachment) => (
+                <AttachmentRow
+                  key={attachment.id}
+                  filename={attachment.filename}
+                  size={attachment.size}
+                  scanStatus={attachment.scanStatus}
+                  {...(attachment.scanStatus === 'infected' ? {} : { onOpen: () => void openAttachment(attachment.id) })}
+                  onRemove={() => void composer.removeAttachment(attachment.id)}
+                />
+              ))}
+              {state.attaching.map((name, index) => (
+                <AttachmentRow key={`attaching-${index}`} filename={name} size={null} scanStatus={null} />
+              ))}
+            </View>
+          )}
+
           {state.error !== null && (
             <Text style={styles.error} accessibilityRole="alert">
               {state.error}
@@ -309,6 +353,8 @@ export default function ComposeScreen() {
           <FormatButton label={format.link === null ? 'Insert link' : 'Edit link'} icon="link" on={format.link !== null} onPress={() => setLinking(true)} styles={styles} theme={theme} />
           <View style={styles.spacer} />
           {state.savedAt !== null && <Text style={styles.saved}>Draft saved</Text>}
+          <FormatButton label="Attach file" icon="attach" on={false} onPress={() => void attachFrom(pickDocuments)} styles={styles} theme={theme} />
+          <FormatButton label="Insert photo" icon="photo" on={false} onPress={() => void attachFrom(pickPhotos)} styles={styles} theme={theme} />
         </View>
       </KeyboardAvoidingView>
 
@@ -436,6 +482,7 @@ function makeStyles(theme: Theme) {
     smallButton: { minHeight: 32, paddingHorizontal: 10, borderRadius: 6, justifyContent: 'center' },
     smallButtonLabel: { fontSize: 12, fontWeight: '600', color: theme.ink2 },
     error: { marginHorizontal: 16, marginTop: 12, fontSize: 14, color: theme.danger },
+    files: { marginHorizontal: 16, marginTop: 10, gap: 8 },
     toolbar: { flexDirection: 'row', alignItems: 'center', gap: 2, paddingHorizontal: 8, paddingTop: 4, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.line, backgroundColor: theme.surface },
     format: { width: 44, height: 44, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
     formatOn: { backgroundColor: theme.line },

@@ -6,6 +6,7 @@ import {
   type AppliedAction,
   type ChangePage,
   type Contact,
+  type DraftAttachmentLink,
   type DraftSync,
   type SendMessageRequest,
   type SqliteMailStore,
@@ -83,9 +84,19 @@ export function MailProvider({ children }: { children: ReactNode }) {
         drafts: {
           create: (id, request) => auth.session.api<SyncedDraft>('/api/v1/drafts', json('POST', { ...request, draftId: id })),
           update: (id, request, expectedVersion) => auth.session.api<SyncedDraft>(`/api/v1/drafts/${encodeURIComponent(id)}`, json('PUT', { ...request, expectedVersion })),
-          get: (id) => auth.session.api<SyncedDraft>(`/api/v1/drafts/${encodeURIComponent(id)}`),
+          get: (id) => auth.session.api<SyncedDraft & { attachments: DraftAttachmentLink[] }>(`/api/v1/drafts/${encodeURIComponent(id)}`),
           remove: async (id) => {
             await auth.session.api(`/api/v1/drafts/${encodeURIComponent(id)}`, json('DELETE'))
+          },
+          attach: (id, file) => {
+            // React Native's FormData reads the picked file from its URI; fetch sets the multipart boundary.
+            const form = new FormData()
+            form.append('file', file.body as unknown as Blob)
+            return auth.session.api<DraftAttachmentLink>(`/api/v1/drafts/${encodeURIComponent(id)}/attachments`, { method: 'POST', body: form })
+          },
+          forward: (id, attachmentId) => auth.session.api<DraftAttachmentLink>(`/api/v1/drafts/${encodeURIComponent(id)}/forwarded-attachments`, json('POST', { attachmentId })),
+          detach: async (id, attachmentId) => {
+            await auth.session.api(`/api/v1/drafts/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`, json('DELETE'))
           },
         },
         // expo/fetch streams response bodies, which the realtime connection reads.

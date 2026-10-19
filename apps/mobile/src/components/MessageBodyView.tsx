@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, View } from 'react-native'
 import type { MessageBody } from '@tresso/core'
+import { AttachmentRow } from '@/components/AttachmentRow'
 import { HtmlFrame } from '@/components/HtmlFrame'
 import { useMail } from '@/mail/MailProvider'
 import { useTheme, type Theme } from '@/theme'
@@ -32,6 +33,9 @@ export function MessageBodyView({ messageId }: { messageId: string }) {
     return <ActivityIndicator style={styles.loading} accessibilityLabel="Loading the message" />
   }
 
+  // Inline images are part of the text; the rest are files to open.
+  const files = body.attachments.filter((attachment) => !attachment.inline)
+
   return (
     <View style={styles.wrapper}>
       {body.hasRemoteContent && !body.remoteContentLoaded && (
@@ -55,6 +59,22 @@ export function MessageBodyView({ messageId }: { messageId: string }) {
           {body.text ?? ''}
         </Text>
       )}
+      {files.length > 0 && (
+        <View style={styles.files} accessibilityLabel="Attachments">
+          {files.map((file) => {
+            const url = file.url
+            return (
+              <AttachmentRow
+                key={file.id}
+                filename={file.filename}
+                size={file.size}
+                scanStatus={file.scanStatus}
+                {...(url === null ? {} : { onOpen: () => void Linking.openURL(url) })}
+              />
+            )
+          })}
+        </View>
+      )}
     </View>
   )
 }
@@ -62,6 +82,7 @@ export function MessageBodyView({ messageId }: { messageId: string }) {
 function makeStyles(theme: Theme) {
   return StyleSheet.create({
     wrapper: { gap: 8 },
+    files: { gap: 8 },
     text: { color: theme.ink, fontSize: 16, lineHeight: 24 },
     loading: { paddingVertical: 16 },
     error: { color: theme.danger, fontSize: 14 },
