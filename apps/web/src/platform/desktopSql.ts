@@ -4,12 +4,18 @@ import type { Sql, SqlValue } from '@tresso/core'
 type On = 'reader' | 'writer'
 
 /**
+ * This page load. When the web view reloads, the shell drops the handles of earlier page loads (and rolls back what
+ * they left open); handles of this one stay, even when two of its opens overlap.
+ */
+const PAGE = crypto.randomUUID()
+
+/**
  * A mail copy in the desktop shell's SQLite (see `apps/desktop/src-tauri/src/sql.rs`). Reads outside a transaction
  * go to a connection of their own, which sees the last committed state, so they need not wait for a page of the delta
  * being stored.
  */
 export async function openDesktopSql(name: string): Promise<Sql> {
-  const handle = await invoke<number>('sql_open', { name })
+  const handle = await invoke<number>('sql_open', { name, page: PAGE })
 
   function queries(on: On): Omit<Sql, 'transaction' | 'close'> {
     const select = <T>(source: string, params: SqlValue[] = []) => invoke<T[]>('sql_select', { handle, source, params, on })

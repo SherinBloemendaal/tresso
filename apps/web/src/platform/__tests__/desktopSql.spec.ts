@@ -37,7 +37,7 @@ describe('openDesktopSql', () => {
     await sql.exec('CREATE TABLE t (id TEXT)')
 
     expect(calls).toEqual([
-      { command: 'sql_open', args: { name: 'tresso-mail-kim' } },
+      { command: 'sql_open', args: { name: 'tresso-mail-kim', page: expect.any(String) } },
       { command: 'sql_select', args: { handle: 7, source: 'SELECT 1 AS n', params: [], on: 'reader' } },
       { command: 'sql_select', args: { handle: 7, source: 'SELECT 1 AS n', params: [], on: 'reader' } },
       { command: 'sql_run', args: { handle: 7, source: 'DELETE FROM t WHERE id = ?', params: ['x'] } },
@@ -83,6 +83,14 @@ describe('openDesktopSql', () => {
 
     expect(logged).toHaveBeenCalledWith('Undoing a failed write failed', new Error('gone'))
     logged.mockRestore()
+  })
+
+  it('opens every copy of one page load under the same page id', async () => {
+    await openDesktopSql('a')
+    await openDesktopSql('b')
+
+    const pages = calls.filter((call) => call.command === 'sql_open').map((call) => call.args.page)
+    expect(pages[0]).toBe(pages[1])
   })
 
   it('closes and deletes copies through the shell', async () => {
