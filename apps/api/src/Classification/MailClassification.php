@@ -13,6 +13,7 @@ use App\Enum\Verdict;
 use App\Repository\CategoryRepository;
 use App\Repository\MailAccountRepository;
 use App\Repository\SenderRuleRepository;
+use App\Sync\Change\ChangeSequencer;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Uid\Uuid;
@@ -38,6 +39,7 @@ final readonly class MailClassification
         private CategoryRepository $smartInboxes,
         private SenderRuleRepository $senderRules,
         private MailAccountRepository $accounts,
+        private ChangeSequencer $sequencer,
     ) {
     }
 
@@ -198,8 +200,25 @@ final readonly class MailClassification
         if ([] !== $this->builtinSmartInboxes->ensure($user)) {
             $this->entityManager->flush();
         }
+        $this->syncOlderSmartInboxes($user);
 
         return new ClassificationContext($this->ownAddresses($user), $this->smartInboxes->findOwnedBy($user), $this->senderRules->findOwnedBy($user));
+    }
+
+    /**
+     * Smart inboxes created before clients synced them have no change number, so clients would never get them. They
+     * get one here, the first time the user's mail is classified.
+     */
+    private function syncOlderSmartInboxes(User $user): void
+    {
+        $params = ['user' => $user->getId()->toRfc4122()];
+        if (false === $this->connection->fetchOne('SELECT 1 FROM category WHERE owner_id = :user AND change_seq = 0 LIMIT 1', $params)) {
+            return;
+        }
+        $this->connection->executeStatement(
+            'UPDATE category SET change_seq = :seq WHERE owner_id = :user AND change_seq = 0',
+            [...$params, 'seq' => $this->sequencer->next($user->getId())],
+        );
     }
 
     /** @return list<string> */
