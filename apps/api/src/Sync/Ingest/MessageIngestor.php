@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Sync\Ingest;
 
 use App\ApiResource\Input\Sync\AddressInput;
+use App\Classification\ClassificationScheduler;
 use App\ApiResource\Input\Sync\MessageBatchInput;
 use App\ApiResource\Input\Sync\MessageInput;
 use App\Entity\Attachment;
@@ -13,6 +14,7 @@ use App\Entity\MailAccount;
 use App\Entity\Message;
 use App\Entity\MessageLocation;
 use App\Entity\MessageReference;
+use App\Entity\MessageSignals;
 use App\Entity\MessageText;
 use App\Mailbox\MailboxChanges;
 use App\Repository\MailboxChangeRepository;
@@ -30,6 +32,7 @@ final readonly class MessageIngestor
         private FolderLookup $folders,
         private MailboxChangeRepository $mailboxChanges,
         private MailboxChanges $changes,
+        private ClassificationScheduler $classification,
     ) {
     }
 
@@ -100,6 +103,11 @@ final readonly class MessageIngestor
         $this->applyFlags($message, $input, []);
         $this->entityManager->persist($message);
         $thread->recordMessage($receivedAt);
+
+        if ([] !== $input->headers || $input->junk) {
+            $this->entityManager->persist(new MessageSignals($message, $input->headers, $input->junk));
+        }
+        $this->classification->mailArrived($account->getOwner()->getId());
 
         if ('' !== $input->bodyText) {
             $this->entityManager->persist(new MessageText($message, $input->bodyText));

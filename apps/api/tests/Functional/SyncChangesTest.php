@@ -29,7 +29,7 @@ final class SyncChangesTest extends DatabaseTestCase
         $this->bootstrapOAuthClients();
         $this->createUser('kim@example.test', 'Kim');
         $this->createUser('lisa@example.test', 'Lisa');
-        $this->kim = $this->userHeaders('kim@example.test', ['mail:read', 'settings:write', 'signatures:write']);
+        $this->kim = $this->userHeaders('kim@example.test', ['mail:read', 'settings:read', 'settings:write', 'signatures:write']);
 
         $this->client->jsonRequest('POST', '/api/v1/mail-accounts', [
             'emailAddress' => 'kim@company.example',
@@ -84,7 +84,7 @@ final class SyncChangesTest extends DatabaseTestCase
 
         self::assertSame($cursor, $page['cursor']);
         self::assertFalse($page['hasMore']);
-        self::assertSame([], [...$page['mailAccounts'], ...$page['folders'], ...$page['threads'], ...$page['messages'], ...$page['signatures'], ...$page['deleted']]);
+        self::assertSame([], [...$page['mailAccounts'], ...$page['folders'], ...$page['threads'], ...$page['messages'], ...$page['signatures'], ...$page['smartInboxes'], ...$page['deleted']]);
     }
 
     public function testFlagChangeReturnsOnlyThatMessage(): void
@@ -224,8 +224,38 @@ final class SyncChangesTest extends DatabaseTestCase
         $this->client->request('GET', '/api/v1/sync/changes?since=0', server: $lisa);
 
         self::assertResponseIsSuccessful();
-        self::assertSame(0, $this->decodedResponse()['cursor']);
-        self::assertSame([], $this->decodedResponse()['messages']);
+        /** @var array{cursor: int, mailAccounts: list<mixed>, folders: list<mixed>, threads: list<mixed>, messages: list<mixed>, smartInboxes: list<array<string, mixed>>} $page */
+        $page = $this->decodedResponse();
+        self::assertSame(1, $page['cursor'], 'Only the built-in smart inboxes Lisa got with her account.');
+        self::assertSame([], [...$page['mailAccounts'], ...$page['folders'], ...$page['threads'], ...$page['messages']]);
+        $lisasSmartInboxes = $this->connection()->fetchFirstColumn("SELECT c.id FROM category c JOIN app_user u ON u.id = c.owner_id WHERE u.email = 'lisa@example.test'");
+        self::assertEqualsCanonicalizing($lisasSmartInboxes, array_column($page['smartInboxes'], 'id'));
+    }
+
+    public function testSmartInboxesReachClients(): void
+    {
+        $first = $this->changes(0);
+        self::assertSame(['todo', 'informational', 'notification', 'advertise', 'spam'], array_column($first['smartInboxes'], 'builtin'));
+
+        $this->client->jsonRequest('POST', '/api/v1/smart-inboxes', ['name' => 'Invoices', 'includeSenders' => ['@supplier.example'], 'verdict' => 'do'], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+        $id = $this->responseString('id');
+        $page = $this->changes($first['cursor']);
+
+        self::assertSame([[
+            'id' => $id,
+            'builtin' => null,
+            'name' => 'Invoices',
+            'instructions' => '',
+            'includeSenders' => ['@supplier.example'],
+            'excludeSenders' => [],
+            'verdict' => 'do',
+            'position' => 5,
+        ]], $page['smartInboxes']);
+
+        $this->client->request('DELETE', '/api/v1/smart-inboxes/'.$id, server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+        self::assertContains(['type' => 'smartInbox', 'id' => $id], $this->changes($page['cursor'])['deleted']);
     }
 
     public function testRequiresMailReadScope(): void
@@ -302,14 +332,14 @@ final class SyncChangesTest extends DatabaseTestCase
     }
 
     /**
-     * @return array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, signatures: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>}
+     * @return array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, signatures: list<array<string, mixed>>, smartInboxes: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>}
      */
     private function changes(int $since, int $limit = 500): array
     {
         $this->client->request('GET', \sprintf('/api/v1/sync/changes?since=%d&limit=%d', $since, $limit), server: $this->kim);
         self::assertResponseIsSuccessful();
 
-        /** @var array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, signatures: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>} */
+        /** @var array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, signatures: list<array<string, mixed>>, smartInboxes: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>} */
         return $this->decodedResponse();
     }
 

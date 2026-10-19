@@ -16,6 +16,13 @@ framework:
                     max_retries: 5
                     delay: 1000
                     multiplier: 3
+            # Classification has its own queue too: a user's first sync classifies a lot of mail at once.
+            classify:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%_classify'
+                retry_strategy:
+                    max_retries: 5
+                    delay: 1000
+                    multiplier: 3
             failed: '%env(MESSENGER_TRANSPORT_DSN)%_failed'
             sync: 'sync://'
 
@@ -23,6 +30,8 @@ framework:
             App\Outbox\ReleaseOutgoingMessage: async
             App\Search\IndexUserMail: search
             App\Outbox\CollectUpload: async
+            App\Classification\ClassifyNewMail: classify
+            App\Classification\ReclassifyMail: classify
 
 when@test:
     framework:
@@ -30,4 +39,5 @@ when@test:
             transports:
                 async: 'in-memory://'
                 search: 'in-memory://'
+                classify: 'in-memory://'
                 failed: 'in-memory://'

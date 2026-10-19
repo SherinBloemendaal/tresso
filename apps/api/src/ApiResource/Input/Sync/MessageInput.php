@@ -6,6 +6,7 @@ namespace App\ApiResource\Input\Sync;
 
 use App\Entity\MessageText;
 use Symfony\Component\Validator\Constraints as Assert;
+use Symfony\Component\Validator\Context\ExecutionContextInterface;
 
 /**
  * One message in one folder, as parsed by the worker. The raw MIME is already in object storage.
@@ -83,10 +84,39 @@ final class MessageInput
     #[Assert\Length(max: MessageText::MAX_LENGTH)]
     public string $bodyText = '';
 
+    /**
+     * Headers that tell automated, bulk and junk mail apart, by lower-cased name: list-unsubscribe,
+     * list-unsubscribe-post, list-id, precedence, auto-submitted, feedback-id, x-spam-flag, x-spam-status and
+     * authentication-results. Missing headers are left out.
+     *
+     * @var array<string, string>
+     */
+    #[Assert\Count(max: 20)]
+    #[Assert\All([new Assert\Type('string'), new Assert\Length(max: 1000)])]
+    #[Assert\Callback([self::class, 'validateHeaderNames'])]
+    public array $headers = [];
+
+    /** The server flagged the message as junk (IMAP keyword `$Junk`, and no `$NotJunk`). */
+    public bool $junk = false;
+
     /** @var list<AttachmentInput> */
     #[Assert\Count(max: 500)]
     #[Assert\Valid]
     public array $attachments = [];
+
+    /**
+     * @param array<mixed> $headers
+     */
+    public static function validateHeaderNames(array $headers, ExecutionContextInterface $context): void
+    {
+        foreach (array_keys($headers) as $name) {
+            if (!\is_string($name) || 1 !== preg_match('/^[a-z0-9-]{1,64}$/', $name)) {
+                $context->buildViolation('Header names are lower-case letters, digits and dashes.')->atPath('headers')->addViolation();
+
+                return;
+            }
+        }
+    }
 
     public function __construct()
     {
