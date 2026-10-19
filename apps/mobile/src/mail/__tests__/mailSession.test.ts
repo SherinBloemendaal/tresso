@@ -165,6 +165,7 @@ describe('MailSession', () => {
       smartInboxId: null,
       verdict: null,
       summary: null,
+      calendarMethod: null,
     })
     const requests: MessageActionRequest[] = []
     const { mail } = session(
