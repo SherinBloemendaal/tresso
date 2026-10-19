@@ -352,18 +352,25 @@ features attach through interfaces.
   privileges), `is_default` (one per account: where new events and accepted invitations go), and the user's own
   `visible` and color override, which never go back to the provider. The provider sync cursor (sync-token, ctag,
   Google `nextSyncToken`, Graph delta link) is internal and not a client change.
-- **Event** (`calendar_event`, synced) is one iCalendar `VEVENT`: a single event, the master of a recurring series,
-  or an override of one occurrence. Rows are unique on `(calendar_id, uid, recurrence_id)`, so a series and its
-  overrides share the `UID` exactly as RFC 5545 has it. Fields:
-  - `uid`, `sequence`, `recurrence_id` (the original start of the overridden occurrence as a UTC instant, or the
-    date for all-day series; null on masters and single events), `status` (`confirmed`, `tentative`, `cancelled`).
+- **Calendar object** (`calendar_object`, internal): one iCalendar object as a provider stores it in one resource,
+  every `VEVENT` with one `UID` (a series with its overrides, or a single event). Its complete iCalendar text is the
+  truth: Tresso edits the parsed object and serializes it again, so properties it does not model (`X-` properties,
+  `VTIMEZONE`s, `ATTACH`, `VALARM`s of other clients) survive an edit. Provider state: `remote_id` (CalDAV href,
+  Google or Graph event id) and `etag`.
+- **Event** (`calendar_event`, synced) is the projection of one `VEVENT` of an object: a single event, the master of
+  a recurring series, or an override of one occurrence. Rows are only written by projecting their object, so they
+  always agree with its text. Unique on `(calendar_id, uid, recurrence_key)`. Fields:
+  - `uid`, `sequence`, `recurrence_key` (the original start of the overridden occurrence as a UTC instant
+    `YYYYMMDDTHHMMSSZ`, or the date `YYYYMMDD` for all-day series; empty on masters and single events; clients see it
+    as `recurrenceId`), `status` (`confirmed`, `tentative`, `cancelled`).
   - `summary`, `description`, `location`, `url`, `transparency` (`busy`/`free`), `visibility`
     (`public`/`private`/`confidential`).
   - Time: `start` and `end` as wall-clock values with their IANA time zone (`start_tz`, `end_tz`; null means floating),
     or dates when `all_day` is set (`DTEND` exclusive, as in RFC 5545). `DURATION` is converted to an end on ingest.
     Windows time zone names from Exchange and Outlook are mapped to IANA names on ingest; unknown `VTIMEZONE`
     definitions are matched by their rules, and the original definition stays in the stored iCalendar.
-  - Recurrence: `rrule` (the `RRULE` value as text), `rdates` and `exdates` (lists of instants or dates).
+  - Recurrence: `rrule` (the `RRULE` value as text), `rdates` and `exdates` (lists of recurrence keys, so they
+    compare with overrides as plain strings).
   - Two UTC columns only for range queries: `starts_at` and `ends_at` of the first occurrence, and `series_ends_at`
     (end of the last occurrence; null when the series never ends). All-day and floating events are stored with
     UTC as their zone in these columns and are widened by 14 hours on each side when queried, then filtered in the
@@ -371,13 +378,11 @@ features attach through interfaces.
   - `organizer` and `attendees` (JSON: address, name, role, `partstat`, `rsvp`, kind), plus `self_partstat`, the
     response of the account owner, kept as a column so "needs action" can be found and indexed.
   - `reminders` (JSON list of `VALARM`s: trigger relative to start or end, or absolute, and action) and
-    `conference` (JSON: provider `teams`, `meet` or `other`, join URL, conference id, dial-in), read from
-    `X-MICROSOFT-*`/`X-GOOGLE-CONFERENCE`, Graph `onlineMeeting` and Google `conferenceData`.
-  - `message_id`: the invitation this event came from, when it came by mail.
-  - Provider state, internal: `remote_href` and `etag` (CalDAV resource; overrides share their master's resource)
-    or the Google/Graph event id. For CalDAV the complete original resource is kept (`ical`), so properties Tresso
-    does not model (`X-` properties, `VTIMEZONE`s, `ATTACH`) survive an edit: writes change the parsed object and
-    serialize it again instead of building a new one.
+    `conference` (JSON: provider `teams`, `meet`, `zoom`, `webex` or `other`, join URL, conference id, dial-in), read
+    from RFC 7986 `CONFERENCE`, `X-MICROSOFT-*`/`X-GOOGLE-CONFERENCE`, Graph `onlineMeeting`, Google
+    `conferenceData`, or a join link in the location, URL or description.
+  - `message_id`: the invitation this event came from, when it came by mail; `sync_error`: why the last change did
+    not reach the provider.
 - Parsing, serializing and recurrence expansion use `sabre/vobject` (iCalendar and RRULE per RFC 5545, Windows
   zone mapping). Clients expand recurrence for their local copy with `ical.js` in `packages/core`; the API's range
   endpoint is the reference both are tested against.
@@ -388,12 +393,12 @@ Scopes `calendar:read` and `calendar:write`, in the user scopes of the first-par
 
 | Call | Purpose |
 |---|---|
-| `GET /api/v1/calendars` | The user's calendars. `PATCH` changes name and color (written to the provider when it allows it), visibility and the default calendar. `POST`/`DELETE` only for local calendars. |
-| `GET /api/v1/calendar-occurrences?from&to&calendarId[]` | Occurrences in a range (at most 400 days), recurrence expanded: per occurrence the event id, the `recurrenceId`, start, end and the event's fields, overrides applied and exceptions removed. |
+| `GET /api/v1/calendars` | The user's calendars. `PATCH` changes the user's color, visibility and the default calendar, and the name of local calendars (provider calendars are renamed at the provider). `POST`/`DELETE` only for local calendars. |
+| `GET /api/v1/calendar-occurrences?from&to&timeZone&calendarId[]` | Occurrences in a range (at most 400 days), recurrence expanded: per occurrence the event id, the `recurrenceId`, start, end and the event's fields, overrides applied and exceptions removed. |
 | `GET /api/v1/calendar-events/{id}` | One event as stored (series or override). |
 | `POST /api/v1/calendar-events` | Create in a writable calendar. |
-| `PATCH /api/v1/calendar-events/{id}?scope=&recurrenceId=` | Edit; for a series `scope` is `this`, `following` or `all`. |
-| `DELETE /api/v1/calendar-events/{id}?scope=&recurrenceId=` | Delete with the same scopes. |
+| `PUT /api/v1/calendar-events/{id}?scope=&recurrenceId=&notify=` | Save the editor's complete event; for a series `scope` is `this`, `following` or `all`, and `recurrenceId` the occurrence the user edited. A different `calendarId` moves the event (whole series only). |
+| `DELETE /api/v1/calendar-events/{id}?scope=&recurrenceId=&notify=` | Delete with the same scopes. |
 | `POST /api/v1/calendar-events/{id}/response` | RSVP: `accepted`, `tentative` or `declined`, optional comment, for the series or one occurrence, optionally without telling the organizer. |
 
 Edits of recurring events follow what Google Calendar, Outlook and Apple Calendar agree on:
@@ -404,10 +409,14 @@ Edits of recurring events follow what Google Calendar, Outlook and Apple Calenda
   is converted to the equivalent `UNTIL`); a new series with a new `UID` starts at the occurrence with the edited
   fields and takes over the later overrides and exceptions, moved by the same time shift. Deleting cuts the
   series with `UNTIL`.
-- **All:** the master changes. A start time shift moves every override's `recurrence_id` and every `EXDATE` by the
-  same amount, so exceptions stay attached to their occurrences; overrides keep their own changed fields.
-- Every change to an event with attendees raises `SEQUENCE` when it changes time, place or the recurrence, which is
-  what tells attendees' clients that an update supersedes the previous one (RFC 5546).
+- **All:** the master changes by the shift the user gave the edited occurrence. That shift also moves every
+  override's `recurrence_id` and every `EXDATE` and `RDATE`, so exceptions stay attached to their occurrences;
+  overrides keep their own changed fields. A changed recurrence rule, or a switch between all-day and timed, starts
+  the series fresh: its overrides and exceptions belong to occurrences that no longer exist and are dropped.
+- Every change to time, place, status or the recurrence raises `SEQUENCE`, which is what tells attendees' clients
+  that an update supersedes the previous one (RFC 5546). Which iTIP messages a change needs (requests to new and
+  current attendees, cancellations to removed ones, a reply to the organizer) is decided by sabre/vobject's iTIP
+  broker from the object before and after the change.
 
 Writes to provider calendars are optimistic: the row changes at once (clients see it in the delta), and an outbound
 **calendar operation** (`PUT` or `DELETE` of one resource, with the `etag` it was based on) is queued for the
@@ -486,8 +495,58 @@ refuses the login does not stop mail, and reports a calendar status of its own.
   work offline and switching weeks costs no request. The local copy is limited to events whose series touches the
   last 2 years or the future, which the API filters with `series_ends_at`; older history is read through the range
   endpoint.
-- Reminders are scheduled by the clients from the synced events (web notifications while open, local notifications
-  on mobile and desktop). Server-sent reminder push follows with phase 3 push.
+- Reminders are scheduled and sent by the server (next section), so they reach every device, also when no app is
+  open.
+
+#### Reminders and notifications
+
+Reminders are a reason to use Tresso over a default calendar: they fire on every device the user has, also when no
+app is open, they know about travel and quiet hours, and they bracket a meeting with a brief before and a follow-up
+after.
+
+- **What can remind:**
+  - Event reminders: any number per event, each with an offset (or absolute time) and its own channels. Stored as
+    `VALARM`s in the event's iCalendar, so other clients see them too; the channels ride along as
+    `X-TRESSO-CHANNELS` (an `ACTION:EMAIL` alarm means email). An event without own reminders, and not marked
+    "no reminders", gets the user's **default rules**.
+  - Default rules (`reminder_rule`, per user): which reminders an event gets when it has none, by calendar and by
+    kind of event: timed or all-day, with or without attendees, organized or invited, with an online meeting, with a
+    physical location. The most specific matching rule wins. New users start with 10 minutes before timed events
+    (push) and 09:00 the day before all-day events (push).
+  - **Leave now:** for events with a physical location, optional per rule or event: the reminder fires at
+    start minus travel time minus a margin. Travel time is either fixed by the user per event ("30 minutes") or
+    estimated by a `TravelTimeEstimator` from the user's last known location (shared by mobile and desktop only
+    when the user allows it, kept as one coarse point with its time) and the event's location. The open edition
+    implements the estimator with a self-hostable OSRM routing server and a Nominatim geocoder when they are
+    configured (`ROUTING_OSRM_URL`, `GEOCODER_NOMINATIM_URL`), and without them only offers fixed travel times.
+    The estimate is refreshed when the location changes and an hour, then 15 minutes, before the planned time.
+  - **Pre-meeting brief:** for events with attendees, optional per rule, a few minutes before the start: who is
+    coming and the recent threads with them. The open edition writes the brief from mail metadata (threads with the
+    attendees in the last 60 days, their last messages); Tresso Cloud adds an AI summary through
+    `MeetingBriefWriter`.
+  - **Follow-up nudge:** after a meeting with attendees ends, optional per rule: a nudge to write notes (a private
+    note on the event, never sent to the provider) and, once todos exist (phase 2), to turn them into todos.
+- **Channels:** web push (VAPID, RFC 8030/8291, for the web app and browsers that run it), mobile push through
+  Expo's push service (APNs/FCM), desktop through the realtime connection while the desktop app runs (the app shows
+  a native notification), and email (from the system sender `NOTIFICATIONS_FROM`). Devices register themselves
+  (`POST /api/v1/notification-devices` with their kind and push subscription or Expo token); a subscription the
+  push service reports gone is removed.
+- **Quiet hours and focus:** per user, days and times in their zone during which notifications are delivered
+  silently (listed, no sound or banner), and focus rules: while an event marked busy is running, only reminders of
+  the user's own meetings and leave-now alerts break through. A reminder whose event starts after quiet hours end is
+  moved to the end of the quiet hours instead.
+- **Scheduling:** a planner keeps `scheduled_notification` rows for the next 8 days of occurrences: per occurrence,
+  reminder and kind, with its fire time. It replans an event whenever its rows are projected, and a rolling sweep
+  extends the window. Each row is announced as a delayed Messenger message for its fire time (transport `push`),
+  dispatched after commit, like the release of scheduled mail. When it fires, the handler re-checks that the row is
+  still current (the event may have moved since), applies quiet hours and focus, and delivers. A sweep every
+  minute (Symfony Scheduler) fires rows that are due and not delivered, so a lost message only delays a reminder.
+- **Idempotent delivery:** every delivery is recorded per device (`notification_delivery`, unique on the scheduled
+  notification and the device), so a retried message or a sweep never notifies a device twice. Clients dismiss or
+  snooze through the API; a dismissal on one device clears the notification on the others.
+- `GET /api/v1/notifications` lists recent and upcoming notifications for the in-app list; reminder rules, quiet
+  hours, focus rules and devices are managed under `/api/v1/notification-settings` and
+  `/api/v1/notification-devices` (scopes `settings:read` and `settings:write`).
 
 #### Online meetings
 
@@ -509,7 +568,7 @@ Tresso Cloud (`packages/api-bundle` in its repository) replaces them with AI ver
 | `EventDraftInterpreter`: free text ("lunch with Sam Thursday 12:30 at Café Loos") to an event draft | none (capability off) | AI interpretation in the user's language and time zone |
 | `MeetingTimeFinder`: proposed slots for a duration, attendees and a window | free/busy of the user's own calendars within working hours | adds attendees' availability where it is known and ranks by preferences and habits |
 | `EventExtractor`: events and deadlines in a message | the message's `text/calendar` parts | AI extraction from the text, deadlines offered as todos |
-| `MeetingBriefWriter`: a brief before a meeting (who, previous threads, open todos, attachments) | none (capability off) | AI brief from the related mail and todos |
+| `MeetingBriefWriter`: a brief before a meeting (who, previous threads, open todos, attachments) | attendees and the recent threads with them, from mail metadata | AI summary of the related mail and todos |
 
 Drafts from these features are never saved by themselves: the client shows them in the event editor or as
 suggestions, and the user saves. Content sent to an AI provider follows Tresso Cloud's data processing terms.
