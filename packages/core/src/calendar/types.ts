@@ -1,5 +1,6 @@
 /** Wire format of calendars and events: in the delta, and from /api/v1/calendars and /api/v1/calendar-events. */
 
+import type { NotificationChannel } from '../notifications'
 import type { Address } from '../sync/types'
 
 export type CalendarSource = 'local' | 'caldav' | 'google' | 'microsoft'
@@ -44,7 +45,7 @@ export interface Reminder {
   relatedTo: 'start' | 'end'
   /** The absolute time (YYYYMMDDTHHMMSSZ), or null. */
   at: string | null
-  channels: ('push' | 'email')[]
+  channels: NotificationChannel[]
 }
 
 export interface Conference {
