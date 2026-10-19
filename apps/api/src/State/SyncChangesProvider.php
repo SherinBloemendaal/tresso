@@ -276,7 +276,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
         $attachments = [];
         if ([] !== $rows) {
             foreach ($this->connection->fetchAllAssociative(
-                'SELECT a.draft_id, a.id, a.filename, a.content_type, a.size, a.scan_status FROM draft_attachment a
+                'SELECT a.draft_id, a.id, a.filename, a.content_type, a.size, a.scan_status, a.inline, a.content_id FROM draft_attachment a
                  WHERE a.draft_id = ANY(CAST(:drafts AS UUID[])) ORDER BY a.draft_id, a.position',
                 ['drafts' => '{'.implode(',', array_map(static fn (array $r): string => self::text($r['id']), $rows)).'}'],
             ) as $a) {
@@ -286,6 +286,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
                     'contentType' => $a['content_type'],
                     'size' => self::int($a['size']),
                     'scanStatus' => $a['scan_status'],
+                    'inline' => (bool) $a['inline'],
+                    'contentId' => $a['content_id'],
                 ];
             }
         }

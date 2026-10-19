@@ -76,6 +76,7 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
                     throw new NotFoundHttpException('Attachment not found.');
                 }
                 $draft->detach($attachment);
+                $draft->filesChanged(new \DateTimeImmutable());
                 $this->entityManager->remove($attachment);
                 $this->uploads->releaseAll([$attachment]);
                 $this->entityManager->flush();
@@ -86,13 +87,18 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
 
         $attachment = $data instanceof ForwardAttachmentInput ? $this->forward($user, $draftId, $data) : $this->upload($user, $draftId);
 
-        return DraftAttachmentOutput::fromEntity($attachment, $this->urls->forDraft($attachment));
+        return DraftAttachmentOutput::fromEntity($attachment, $this->urls->forDraft($attachment), $attachment->getDraft()->getVersion());
     }
 
     private function upload(User $user, string $draftId): DraftAttachment
     {
-        $file = $this->requests->getCurrentRequest()?->files->get('file');
+        $request = $this->requests->getCurrentRequest();
+        $file = $request?->files->get('file');
         if (!$file instanceof UploadedFile) {
+            // PHP drops a body larger than post_max_size altogether: what arrives is an empty form with a length.
+            if ((int) $request?->headers->get('Content-Length', '0') > 0 && 0 === \count($request?->files->all() ?? []) && 0 === \count($request?->request->all() ?? [])) {
+                throw self::invalid('file', \sprintf('The file is too large (at most %s).', AttachmentLimits::describe($this->limits->maxAttachmentBytes)));
+            }
             throw self::invalid('file', 'Send the file as multipart/form-data in the field "file".');
         }
         if (!$file->isValid()) {
@@ -122,6 +128,7 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
                 $attachment = new DraftAttachment($draft, $filename, $contentType, $size, $sha, $key, $draft->nextAttachmentPosition(), new \DateTimeImmutable());
                 $this->entityManager->persist($attachment);
                 $draft->attach($attachment);
+                $draft->filesChanged(new \DateTimeImmutable());
                 $this->entityManager->flush();
 
                 return $attachment;
@@ -155,16 +162,18 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
             $attachment = new DraftAttachment(
                 $draft,
                 self::filename($source->getFilename()),
-                $source->getContentType(),
+                // As the sender declared it, which may be malformed; the message is built only from well-formed types.
+                1 === preg_match(self::CONTENT_TYPE, $source->getContentType()) ? strtolower($source->getContentType()) : 'application/octet-stream',
                 $source->getSize(),
                 $source->getSha256(),
                 $source->getObjectKey(),
                 $draft->nextAttachmentPosition(),
                 new \DateTimeImmutable(),
             );
-            $attachment->takeScanFrom($source);
+            $attachment->takeFrom($source);
             $this->entityManager->persist($attachment);
             $draft->attach($attachment);
+            $draft->filesChanged(new \DateTimeImmutable());
             $this->entityManager->flush();
 
             return $attachment;

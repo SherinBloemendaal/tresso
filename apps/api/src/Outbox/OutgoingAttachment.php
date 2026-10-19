@@ -14,11 +14,13 @@ final readonly class OutgoingAttachment
         public string $contentType,
         public string $objectKey,
         public int $size,
+        /** Shown inside the text as cid:{contentId}; null for a file listed with the message. */
+        public ?string $contentId = null,
     ) {
     }
 
     public static function fromDraft(DraftAttachment $attachment): self
     {
-        return new self($attachment->getFilename(), $attachment->getContentType(), $attachment->getObjectKey(), $attachment->getSize());
+        return new self($attachment->getFilename(), $attachment->getContentType(), $attachment->getObjectKey(), $attachment->getSize(), $attachment->isInline() ? $attachment->getContentId() : null);
     }
 }

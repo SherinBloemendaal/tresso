@@ -53,6 +53,16 @@ class DraftAttachment
     #[ORM\Column(length: 255, nullable: true)]
     private ?string $scanSignature = null;
 
+    /**
+     * Shown inside the text (an image of the original a reply or forward quotes), referred to as cid:{contentId},
+     * rather than listed as a file.
+     */
+    #[ORM\Column(options: ['default' => false])]
+    private bool $inline = false;
+
+    #[ORM\Column(length: 255, nullable: true)]
+    private ?string $contentId = null;
+
     /** Order in the draft: attachments keep the order they were added in. */
     #[ORM\Column]
     private int $position;
@@ -139,10 +149,25 @@ class DraftAttachment
         $this->scanSignature = ScanStatus::Infected === $status ? $signature : null;
     }
 
-    /** Taken from a received attachment, whose scan applies to this copy too. */
-    public function takeScanFrom(Attachment $attachment): void
+    /** Taken from a received attachment, whose scan applies to this copy too, and which stays inline if it was. */
+    public function takeFrom(Attachment $attachment): void
     {
         $this->recordScan($attachment->getScanStatus(), $attachment->getScanSignature());
+        $contentId = $attachment->getContentId();
+        if ($attachment->isInline() && null !== $contentId && '' !== $contentId) {
+            $this->inline = true;
+            $this->contentId = $contentId;
+        }
+    }
+
+    public function isInline(): bool
+    {
+        return $this->inline;
+    }
+
+    public function getContentId(): ?string
+    {
+        return $this->contentId;
     }
 
     public function getPosition(): int

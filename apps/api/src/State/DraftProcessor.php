@@ -112,7 +112,8 @@ final readonly class DraftProcessor implements ProcessorInterface
         $id = $uriVariables['id'] ?? null;
         $owned = \is_string($id) ? $this->drafts->findOneOwnedBy($user, $id) : null;
         $draft = null === $owned ? null : $this->entityManager->find(Draft::class, $owned->getId(), LockMode::PESSIMISTIC_WRITE);
-        if (!$draft instanceof Draft) {
+        // Sending may have taken it while this request waited for the lock: it is out of sight until it comes back.
+        if (!$draft instanceof Draft || $draft->isSending()) {
             throw new NotFoundHttpException('Draft not found.');
         }
 

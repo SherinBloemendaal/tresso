@@ -6,6 +6,7 @@ namespace App\Tests\Functional;
 
 use App\Entity\Draft;
 use App\Entity\DraftAttachment;
+use App\Entity\DraftCopyRemoval;
 use App\Outbox\CollectUpload;
 use App\Outbox\UploadCollector;
 use App\Tests\Support\InMemoryObjectStorage;
@@ -84,7 +85,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $drafts = $this->decodedResponse()['drafts'] ?? null;
         self::assertIsArray($drafts);
         self::assertIsArray($drafts[0] ?? null);
-        self::assertSame([['id' => $attachment['id'], 'filename' => 'Q4 notes.txt', 'contentType' => 'text/plain', 'size' => \strlen(self::NOTES), 'scanStatus' => 'pending']], $drafts[0]['attachments'], 'The delta has the files without links, which would expire on the device.');
+        self::assertSame([['id' => $attachment['id'], 'filename' => 'Q4 notes.txt', 'contentType' => 'text/plain', 'size' => \strlen(self::NOTES), 'scanStatus' => 'pending', 'inline' => false, 'contentId' => null]], $drafts[0]['attachments'], 'The delta has the files without links, which would expire on the device.');
     }
 
     public function testDownloadsAnAttachmentOnlyThroughItsSignedLink(): void
@@ -244,7 +245,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $this->client->request('GET', '/api/v1/drafts/'.$id, server: $this->kim);
         self::assertResponseIsSuccessful();
         $draft = $this->decodedResponse();
-        self::assertSame(1, $draft['version'], 'Back as it was, so the device that sent it can go on writing it.');
+        self::assertSame(2, $draft['version'], 'Back as it was (the file made it version 2), so the device that sent it can go on writing it.');
         self::assertIsArray($draft['attachments']);
         self::assertCount(1, $draft['attachments']);
         $this->client->request('GET', '/api/v1/sync/changes?since='.$cursor, server: $this->kim);
@@ -252,7 +253,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
         self::assertIsArray($drafts);
         self::assertSame($id, \is_array($drafts[0] ?? null) ? $drafts[0]['id'] : null, 'Every device gets it back.');
 
-        $this->client->jsonRequest('PUT', '/api/v1/drafts/'.$id, ['mailAccountId' => $this->accountId, 'kind' => 'new', 'to' => [['address' => 'anna@finance.example', 'name' => null]], 'cc' => [], 'bcc' => [], 'subject' => 'Notes, edited', 'html' => '', 'quoteHtml' => '', 'expectedVersion' => 1], $this->kim);
+        $this->client->jsonRequest('PUT', '/api/v1/drafts/'.$id, ['mailAccountId' => $this->accountId, 'kind' => 'new', 'to' => [['address' => 'anna@finance.example', 'name' => null]], 'cc' => [], 'bcc' => [], 'subject' => 'Notes, edited', 'html' => '', 'quoteHtml' => '', 'expectedVersion' => 2], $this->kim);
         self::assertResponseIsSuccessful();
     }
 
@@ -343,6 +344,157 @@ final class DraftAttachmentTest extends DatabaseTestCase
         static::getContainer()->get(UploadCollector::class)->collect('attachments/ab/'.$sha);
     }
 
+    public function testAFileChangeIsANewVersionOfTheDraft(): void
+    {
+        $id = $this->newDraft();
+
+        $this->uploadRaw($id, 'notes.txt', self::NOTES);
+        self::assertResponseStatusCodeSame(201);
+        self::assertSame(2, $this->decodedResponse()['draftVersion'] ?? null, 'The answer says which version the draft is now.');
+
+        $this->client->jsonRequest('POST', '/api/v1/drafts/'.$id.'/forwarded-attachments', ['attachmentId' => $this->receivedAttachmentId], $this->kim);
+        self::assertSame(3, $this->decodedResponse()['draftVersion'] ?? null);
+        $forwarded = $this->responseString('id');
+        $this->client->jsonRequest('POST', '/api/v1/drafts/'.$id.'/forwarded-attachments', ['attachmentId' => $this->receivedAttachmentId], $this->kim);
+        self::assertSame(3, $this->decodedResponse()['draftVersion'] ?? null, 'Forwarding it again changes nothing.');
+
+        $this->client->request('DELETE', '/api/v1/drafts/'.$id.'/attachments/'.$forwarded, server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+        $this->client->request('GET', '/api/v1/drafts/'.$id, server: $this->kim);
+        self::assertSame(4, $this->decodedResponse()['version'] ?? null);
+    }
+
+    public function testAFileAddedAfterFilingFilesTheDraftAgain(): void
+    {
+        $id = $this->newDraft(['subject' => 'Notes']);
+        $this->connection()->executeStatement("UPDATE draft SET updated_at = now() - interval '1 minute' WHERE id = :id", ['id' => $id]);
+        $this->entityManager()->clear();
+        self::assertSame([$id], $this->claimFiling());
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/drafts/'.$id.'/filed', ['workerId' => 'w1', 'version' => 1, 'messageId' => '<draft-1@tresso>'], $this->worker);
+        self::assertResponseIsSuccessful();
+
+        $this->upload($id, 'notes.txt', self::NOTES);
+        $this->connection()->executeStatement("UPDATE draft SET updated_at = now() - interval '1 minute', filing_claimed_until = NULL WHERE id = :id", ['id' => $id]);
+        $this->entityManager()->clear();
+
+        self::assertSame([$id], $this->claimFiling(), 'The copy in the Drafts folder gets the file too.');
+    }
+
+    public function testADraftBeingSentIsNotFiledNorChanged(): void
+    {
+        $id = $this->newDraft(['to' => [['address' => 'anna@finance.example', 'name' => null]], 'subject' => 'Notes']);
+        $this->send($id, '+1 hour');
+        $this->connection()->executeStatement("UPDATE draft SET updated_at = now() - interval '1 minute' WHERE id = :id", ['id' => $id]);
+        $this->entityManager()->clear();
+
+        self::assertSame([], $this->claimFiling(), 'It is on its way, not in the Drafts folder.');
+        $this->client->jsonRequest('PUT', '/api/v1/drafts/'.$id, ['mailAccountId' => $this->accountId, 'kind' => 'new', 'to' => [], 'cc' => [], 'bcc' => [], 'subject' => 'Changed', 'html' => '', 'quoteHtml' => '', 'expectedVersion' => 1], $this->kim);
+        self::assertResponseStatusCodeSame(404);
+        $this->client->request('DELETE', '/api/v1/drafts/'.$id, server: $this->kim);
+        self::assertResponseStatusCodeSame(404);
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/drafts/'.$id.'/filed', ['workerId' => 'w1', 'version' => 1, 'messageId' => '<late@tresso>'], $this->worker);
+        self::assertResponseIsSuccessful();
+        self::assertSame(1, $this->entityManager()->getRepository(DraftCopyRemoval::class)->count([]), 'A copy filed just before it was sent is taken away again.');
+    }
+
+    public function testRetriesThatRunOutBringTheDraftBackToEveryDevice(): void
+    {
+        $id = $this->newDraft(['to' => [['address' => 'anna@finance.example', 'name' => null]], 'subject' => 'Notes']);
+        $this->upload($id, 'notes.txt', self::NOTES);
+        $sent = $this->send($id);
+        $this->claimOutbox();
+        $this->connection()->executeStatement('UPDATE outgoing_message SET attempts = 6 WHERE id = :id', ['id' => $sent]);
+        $this->entityManager()->clear();
+
+        $this->reportOutbox($sent, ['outcome' => 'retry', 'error' => 'Connection lost']);
+        self::assertResponseIsSuccessful();
+
+        self::assertSame('failed', $this->connection()->fetchOne('SELECT status FROM outgoing_message WHERE id = :id', ['id' => $sent]));
+        $this->client->request('GET', '/api/v1/sync/changes?since=0', server: $this->kim);
+        $drafts = $this->decodedResponse()['drafts'] ?? null;
+        self::assertIsArray($drafts);
+        self::assertSame([$id], array_map(static fn (mixed $draft): mixed => \is_array($draft) ? $draft['id'] : null, $drafts), 'A device starting over gets it too.');
+    }
+
+    public function testRemovingTheAccountWhileSendingBringsTheDraftBack(): void
+    {
+        $id = $this->newDraft(['to' => [['address' => 'anna@finance.example', 'name' => null]], 'subject' => 'Notes']);
+        $this->upload($id, 'notes.txt', self::NOTES);
+        $this->send($id, '+1 hour');
+
+        $this->client->request('DELETE', '/api/v1/mail-accounts/'.$this->accountId, server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+
+        $this->client->request('GET', '/api/v1/drafts/'.$id, server: $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertNull($this->decodedResponse()['mailAccountId'] ?? null, 'Back, without the account it was to go from.');
+        $attachments = $this->decodedResponse()['attachments'] ?? null;
+        self::assertIsArray($attachments);
+        self::assertCount(1, $attachments);
+    }
+
+    public function testSendsANameInAnyScriptAndAnUnknownTypeAsBytes(): void
+    {
+        $id = $this->newDraft(['to' => [['address' => 'anna@finance.example', 'name' => null]], 'subject' => 'Notes']);
+        $this->upload($id, 'Begroting één.txt', self::NOTES);
+        $this->connection()->executeStatement("UPDATE attachment SET content_type = 'pdf; evil' WHERE id = :id", ['id' => $this->receivedAttachmentId]);
+        $this->client->jsonRequest('POST', '/api/v1/drafts/'.$id.'/forwarded-attachments', ['attachmentId' => $this->receivedAttachmentId], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+        self::assertSame('application/octet-stream', $this->decodedResponse()['contentType'] ?? null);
+
+        $raw = str_replace("\r\n ", ' ', $this->rawOf($this->send($id)));
+
+        self::assertStringContainsStringIgnoringCase("filename*=utf-8''".rawurlencode('Begroting één.txt'), str_replace(' ', '', $raw));
+        self::assertStringContainsString('Content-Type: application/octet-stream; name="Factuur 42.pdf"', $raw);
+    }
+
+    public function testATooLargeBodyIsReportedAsATooLargeFile(): void
+    {
+        $id = $this->newDraft();
+
+        // What PHP leaves of a request past post_max_size: no fields, no files, only its length.
+        $this->client->request('POST', '/api/v1/drafts/'.$id.'/attachments', server: $this->kim + ['CONTENT_TYPE' => 'multipart/form-data; boundary=x', 'CONTENT_LENGTH' => '30000000', 'HTTP_ACCEPT' => 'application/json']);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertStringContainsString('The file is too large', (string) $this->client->getResponse()->getContent());
+    }
+
+    public function testAForwardedInlineImageGoesOutInlineWithItsContentId(): void
+    {
+        $logo = $this->receiveLogo();
+        $id = $this->newDraft(['to' => [['address' => 'anna@finance.example', 'name' => null]], 'kind' => 'reply', 'quoteHtml' => '<img src="cid:logo@finance.example">']);
+
+        $this->client->jsonRequest('POST', '/api/v1/drafts/'.$id.'/forwarded-attachments', ['attachmentId' => $logo], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+        self::assertSame(['inline' => true, 'contentId' => 'logo@finance.example'], array_intersect_key($this->decodedResponse(), ['inline' => 0, 'contentId' => 0]));
+
+        $raw = $this->rawOf($this->send($id));
+        self::assertStringContainsString('Content-ID: <logo@finance.example>', $raw);
+        self::assertStringContainsString('Content-Disposition: inline', $raw);
+    }
+
+    public function testADraftThatCannotBeFiledIsTriedAgainOnceItChanges(): void
+    {
+        $id = $this->newDraft(['subject' => 'Broken']);
+        $this->upload($id, 'gone.txt', 'soon gone');
+        $sha = hash('sha256', 'soon gone');
+        $key = 'uploads/'.substr($sha, 0, 2).'/'.$sha;
+        $this->storage()->delete($key);
+        $this->connection()->executeStatement("UPDATE draft SET updated_at = now() - interval '1 minute'");
+        $this->entityManager()->clear();
+        self::assertSame([], $this->claimFiling());
+        self::assertSame(Draft::UNFILEABLE, $this->connection()->fetchOne('SELECT filing_claimed_by FROM draft WHERE id = :id', ['id' => $id]));
+        self::assertSame([], $this->claimFiling(), 'Not tried again on every claim.');
+
+        $this->storage()->put($key, 'soon gone');
+        $this->client->jsonRequest('PUT', '/api/v1/drafts/'.$id, ['mailAccountId' => $this->accountId, 'kind' => 'new', 'to' => [], 'cc' => [], 'bcc' => [], 'subject' => 'Fixed', 'html' => '', 'quoteHtml' => '', 'expectedVersion' => 2], $this->kim);
+        self::assertResponseIsSuccessful();
+        $this->connection()->executeStatement("UPDATE draft SET updated_at = now() - interval '1 minute'");
+        $this->entityManager()->clear();
+
+        self::assertSame([$id], $this->claimFiling());
+    }
+
     /**
      * @param array<string, mixed> $changes
      */
@@ -428,6 +580,21 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/outbox/'.$outgoingId.'/result', ['workerId' => 'w1'] + $result, $this->worker);
     }
 
+    /**
+     * The drafts a worker gets to file now.
+     *
+     * @return list<mixed>
+     */
+    private function claimFiling(): array
+    {
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/drafts/claim', ['workerId' => 'w1'], $this->worker);
+        self::assertResponseIsSuccessful();
+        $files = $this->decodedResponse()['files'] ?? null;
+        self::assertIsArray($files);
+
+        return array_map(static fn (mixed $file): mixed => \is_array($file) ? $file['draftId'] : null, array_values($files));
+    }
+
     private function cursor(): int
     {
         $cursor = $this->decodedResponse()['cursor'] ?? null;
@@ -480,6 +647,39 @@ final class DraftAttachmentTest extends DatabaseTestCase
         self::assertResponseIsSuccessful();
 
         $id = $this->connection()->fetchOne('SELECT id FROM attachment LIMIT 1');
+        self::assertIsString($id);
+
+        return $id;
+    }
+
+    /** A message with a logo shown in its body, as a received inline image. */
+    private function receiveLogo(): string
+    {
+        $raw = "From: billing@finance.example\r\nSubject: Logo\r\n\r\nSee the logo";
+        $rawSha = hash('sha256', $raw);
+        $rawKey = 'raw/'.substr($rawSha, 0, 2).'/'.$rawSha;
+        $this->storage()->put($rawKey, $raw);
+        $png = "\x89PNG logo";
+        $sha = hash('sha256', $png);
+        $this->storage()->put('attachments/'.substr($sha, 0, 2).'/'.$sha, $png);
+
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
+            'remoteUid' => '2',
+            'rawObjectKey' => $rawKey,
+            'size' => \strlen($raw),
+            'receivedAt' => '2026-10-19T09:00:00+00:00',
+            'messageId' => '<logo@finance.example>',
+            'subject' => 'Logo',
+            'from' => ['address' => 'billing@finance.example', 'name' => 'Finance'],
+            'to' => [['address' => 'kim@company.example']],
+            'snippet' => 'See the logo',
+            'attachments' => [
+                ['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => \strlen($png), 'sha256' => $sha, 'inline' => true, 'contentId' => 'logo@finance.example'],
+            ],
+        ]]], $this->worker);
+        self::assertResponseIsSuccessful();
+
+        $id = $this->connection()->fetchOne("SELECT id FROM attachment WHERE filename = 'logo.png'");
         self::assertIsString($id);
 
         return $id;

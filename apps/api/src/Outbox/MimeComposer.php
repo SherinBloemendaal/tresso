@@ -83,7 +83,14 @@ final readonly class MimeComposer
             } catch (ObjectNotFound $exception) {
                 throw new MissingAttachment($attachment->filename, $exception);
             }
-            $email->addPart(new DataPart($content, $attachment->filename, $attachment->contentType));
+            // A type without a subtype would make an unusable part; such a file goes out as plain bytes.
+            $type = 1 === preg_match('~^[^/\s]+/[^/\s]+$~', $attachment->contentType) ? $attachment->contentType : 'application/octet-stream';
+            $part = new DataPart($content, $attachment->filename, $type);
+            if (null !== $attachment->contentId) {
+                // The quoted text refers to it as cid:{contentId}; mail apps show it in place.
+                $part->asInline()->setContentId($attachment->contentId);
+            }
+            $email->addPart($part);
         }
         $headers = $email->getHeaders();
         $headers->addIdHeader('Message-ID', $messageId);
