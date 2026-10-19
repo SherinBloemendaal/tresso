@@ -28,6 +28,8 @@ enum Scope: string
     /** Role granted by the OAuth2 authenticator for this scope (see `role_prefix`). */
     public const string ROLE_PREFIX = 'ROLE_OAUTH2_';
 
+    public const string ROLE_SETTINGS_READ = 'ROLE_OAUTH2_SETTINGS:READ';
+    public const string ROLE_SETTINGS_WRITE = 'ROLE_OAUTH2_SETTINGS:WRITE';
     public const string ROLE_SYNC_LEASE = 'ROLE_OAUTH2_SYNC:LEASE';
     public const string ROLE_SYNC_INGEST = 'ROLE_OAUTH2_SYNC:INGEST';
     public const string ROLE_SYNC_CREDENTIALS = 'ROLE_OAUTH2_SYNC:CREDENTIALS';

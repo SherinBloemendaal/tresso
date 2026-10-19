@@ -6,12 +6,14 @@ namespace App\Entity;
 
 use App\Enum\MailAccountStatus;
 use App\Enum\MailProvider;
+use App\Mail\ServerSettings;
+use App\Repository\MailAccountRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Uid\Uuid;
 
-#[ORM\Entity]
+#[ORM\Entity(repositoryClass: MailAccountRepository::class)]
 #[ORM\UniqueConstraint(columns: ['owner_id', 'email_address'])]
 #[ORM\Index(columns: ['status', 'lease_expires_at'])]
 class MailAccount
@@ -34,7 +36,7 @@ class MailAccount
     private MailProvider $provider;
 
     /**
-     * Server settings without secrets (IMAP/SMTP host, port, security).
+     * Server settings without secrets: {"imap": {...}, "smtp": {...}, "username": "..."}.
      *
      * @var array<string, mixed>
      */
@@ -97,16 +99,49 @@ class MailAccount
         return $this->provider;
     }
 
-    /** @return array<string, mixed> */
+    public function setDisplayName(string $displayName): void
+    {
+        $this->displayName = $displayName;
+    }
+
+    public function configureServers(ServerSettings $imap, ServerSettings $smtp, string $username): void
+    {
+        $this->connection = ['imap' => $imap->toArray(), 'smtp' => $smtp->toArray(), 'username' => $username];
+    }
+
+    public function getImap(): ServerSettings
+    {
+        return ServerSettings::fromArray($this->connectionPart('imap'));
+    }
+
+    public function getSmtp(): ServerSettings
+    {
+        return ServerSettings::fromArray($this->connectionPart('smtp'));
+    }
+
+    public function getUsername(): string
+    {
+        $username = $this->connection['username'] ?? null;
+
+        return \is_string($username) ? $username : throw new \UnexpectedValueException('The mail account has no username.');
+    }
+
+    /**
+     * Connection settings as the sync workers receive them.
+     *
+     * @return array<string, mixed>
+     */
     public function getConnection(): array
     {
         return $this->connection;
     }
 
-    /** @param array<string, mixed> $connection */
-    public function setConnection(array $connection): void
+    /** @return array<mixed> */
+    private function connectionPart(string $part): array
     {
-        $this->connection = $connection;
+        $value = $this->connection[$part] ?? null;
+
+        return \is_array($value) ? $value : throw new \UnexpectedValueException(\sprintf('The mail account has no %s settings.', $part));
     }
 
     public function getEncryptedCredentials(): ?string
