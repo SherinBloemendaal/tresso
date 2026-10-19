@@ -414,11 +414,13 @@ and the main window may only open http(s) pages in the browser and read the link
 The desktop app keeps the mail copy in SQLite instead of the web view's IndexedDB (`apps/web/src/mail/store.ts`
 picks the store). Rust commands (`apps/desktop/src-tauri/src/sql.rs`, rusqlite with SQLite bundled) open one database
 per user in the app's data folder with two connections: one writes, one reads, in WAL mode, so the lists read the last
-committed state while a page of the delta is stored. The client queues its writes, so the writer never meets another
-one. A web view that reloads leaves handles behind; opening the same copy again drops them, rolling back what they
-left open. Sign-out closes the copy and then deletes its files. The first time the desktop app opens a user's copy,
+committed state while a page of the delta is stored. The commands run off the main thread, so the window stays
+responsive while SQLite works or waits. The client queues its writes, so the writer never meets another one; a
+transaction a failed write left open is rolled back before the next one begins. A web view that reloads leaves handles
+behind; opening the same copy again drops them, rolling back what they left open. Sign-out closes the copy and then
+deletes its files, refused while any connection (a read still running) uses them. The first time the desktop app opens a user's copy,
 drafts that exist only in the old IndexedDB copy (unsaved edits, messages whose outcome is pending) are carried over,
-and that copy is removed.
+each removed from the old copy once moved, and then that copy is removed.
 
 The desktop app notifies natively about mail that needs the user: a message that is unread, in an inbox and judged
 `do` or `delegate` for the first time, whether it arrived judged or was classified later (the mail store's `apply`
