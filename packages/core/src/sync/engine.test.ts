@@ -25,6 +25,8 @@ function page(cursor: number, hasMore = false, ids: string[] = []): ChangePage {
     smartInboxes: [],
     calendars: [],
     calendarEvents: [],
+    notifications: [],
+    eventNotes: [],
     deleted: [],
   }
 }
