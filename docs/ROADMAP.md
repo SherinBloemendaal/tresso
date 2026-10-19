@@ -46,19 +46,24 @@ Delivered in steps, each its own pull request:
 
 Built next to phase 1, each step its own pull request. See "3.13 Calendar" in the architecture.
 
-- [x] C1 Architecture: data model, sync sources, invitations, client sync, online meetings, AI interfaces
+- [x] C1 Architecture: data model, sync sources, invitations, client sync, reminders and notifications, online
+  meetings, AI interfaces
 - [ ] C2 Calendar core: calendars (provider and local Tresso calendar) and events with RFC 5545 recurrence,
   overrides, exceptions, time zones, attendees, reminders and conference data; occurrences in a range; create, edit
   and delete with "this / this and following / all"; RSVP with iTIP replies through the outbox; calendars and
   events in the delta; `text/calendar` parts parsed by the worker and applied as invitations; CalDAV sync for IMAP
   accounts (discovery, sync-token or ctag, outbound writes)
-- [ ] C3 Calendar clients: day, week, month and agenda views and the event editor in the web client, the invitation
-  card with RSVP in the reading pane, a mini agenda next to mail; agenda and event detail on mobile, on shared types
-  and recurrence expansion in `packages/core`
-- [ ] C4 Google and Microsoft calendars and online meetings: Google Calendar API and Microsoft Graph calendar sync
+- [ ] C3 Reminders and notifications: server-side scheduling with a sweep, idempotent delivery per device, web push,
+  Expo push, desktop realtime and email channels, multiple reminders per event with their own channels, default
+  rules per calendar and kind of event, leave-now with fixed or estimated travel time, quiet hours and focus rules,
+  pre-meeting briefs and follow-up nudges
+- [ ] C4 Calendar clients: day, week, month and agenda views and the event editor in the web client, the invitation
+  card with RSVP in the reading pane, a mini agenda next to mail, notification settings and push registration;
+  agenda and event detail on mobile with Expo push, on shared types and recurrence expansion in `packages/core`
+- [ ] C5 Google and Microsoft calendars and online meetings: Google Calendar API and Microsoft Graph calendar sync
   through the provider OAuth layer (1.6), Teams meetings through Graph, Google Meet through `conferenceData`, join
   buttons for every recognized meeting link
-- [ ] C5 Calendar assistant interfaces in the open edition with the deterministic meeting time finder
+- [ ] C6 Calendar assistant interfaces in the open edition with the deterministic meeting time finder
 
 Tresso Cloud: natural language event creation, meeting time suggestions with attendees' availability, events and
 deadlines extracted from mail, meeting briefs.
