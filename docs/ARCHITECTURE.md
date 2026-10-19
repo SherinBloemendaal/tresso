@@ -345,6 +345,13 @@ All Mail aside) no exact undo exists, so none is offered. Each action changes th
 (`MailDatabase.applyAction`), so lists update at once; when the server does not take it (for a large selection, the
 batches it did not take), it is put back, except on messages the delta updated since.
 
+Bulk actions in the web client: conversations are selected with their checkboxes (shift selects a range), by age
+from the list's Select menu, or as everything from the senders of the selected ones; the last two search the whole
+mailbox on screen in the local copy, not only the part of the list that is loaded. A bar above the list then marks
+read or unread, archives, moves (within one account) or trashes every message of the selected conversations, with the
+same exact undo as a single conversation (`apps/web/src/mail/useMessageActions.ts`); K, E, # and Escape work while a
+selection exists, and the conversation's own shortcuts wait.
+
 Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
 addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is
 sent with a `sendAt` a few seconds ahead, so "Undo" can cancel it; "Send later" picks a time. The draft is saved in
