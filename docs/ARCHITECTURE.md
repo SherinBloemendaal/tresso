@@ -350,7 +350,9 @@ from the list's Select menu, or as everything from the senders of the selected o
 mailbox on screen in the local copy, not only the part of the list that is loaded. A bar above the list then marks
 read or unread, archives, moves (within one account) or trashes every message of the selected conversations, with the
 same exact undo as a single conversation (`apps/web/src/mail/useMessageActions.ts`); K, E, # and Escape work while a
-selection exists, and the conversation's own shortcuts wait.
+selection exists (not in menus or fields), and the conversation's own shortcuts wait. Conversations that leave the
+mailbox meanwhile (sync from another device) drop out of the selection, and the undo puts back what it exactly can,
+saying how many messages that were in several folders it leaves.
 
 Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
 addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is
