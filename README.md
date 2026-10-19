@@ -167,7 +167,8 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/) with
   `.env.local` files or the deployment environment. In production set at least `APP_SECRET`, `OAUTH_PASSPHRASE`,
   `OAUTH_ENCRYPTION_KEY`, `SYNC_WORKER_CLIENT_SECRET`, `DATA_KEYS` and `DATA_KEY_CURRENT`, the Mercure hub
   settings (`MERCURE_PUBLIC_URL`, `MERCURE_INTERNAL_URL`, `MERCURE_CORS_ORIGINS` and two different keys of at least
-  32 bytes in `MERCURE_PUBLISHER_JWT_KEY` and `MERCURE_SUBSCRIBER_JWT_KEY`), and keep `MAIL_ALLOW_UNSAFE_SERVERS=0`.
+  32 bytes in `MERCURE_PUBLISHER_JWT_KEY` and `MERCURE_SUBSCRIBER_JWT_KEY`), the object storage settings
+  (`S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`), and keep `MAIL_ALLOW_UNSAFE_SERVERS=0`.
 - Desktop and mobile sign in through the `tresso://auth/callback` scheme. Until the native apps phase, the desktop
   shell signs in through the web dev server.
 

@@ -195,6 +195,24 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
     middleware reports commits and rollbacks), and only after the response went out (`kernel.terminate`; console
     commands and Messenger messages publish when they finish). A rolled-back write publishes nothing. A failed
     publish is logged, never raised.
+- Message content: the delta never carries bodies. `GET /api/v1/messages/{id}/body` (scope `mail:read`) reads the
+  raw message from object storage, picks the HTML and text parts, and returns HTML that is safe to render:
+  - An allowlist sanitizer (symfony/html-sanitizer) removes scripts, event handlers, forms, frames and embedded
+    objects; links get `target="_blank"` and `rel="noopener noreferrer"`. Layout attributes, classes and inline
+    styles stay, because mail layouts depend on them. Style elements are kept as sanitized CSS in front of the body.
+  - Every URL that loads media (image sources, backgrounds, CSS `url()`) passes one policy: `cid:` references
+    become signed attachment URLs, `data:` is allowed for plain image types only, and anything from the internet
+    is removed unless the request says `remoteContent=allow`. Remote loads tell the sender that, when and where a
+    message was read, so they are blocked by default; `hasRemoteContent` lets the client offer to load them. CSS
+    escapes are resolved before checking, so escaped names cannot slip past.
+  - Clients render the HTML in a sandboxed frame without scripts and with a Content-Security-Policy that allows
+    images only from the API (and from the internet once allowed): a second, independent layer.
+  - Attachments are listed with a signed URL (`/content/attachments/{id}`, valid for an hour, no access token,
+    because images inside rendered mail cannot send one). Only plain image types are served inline; everything else
+    downloads as `application/octet-stream`. Every response carries `nosniff` and `Content-Security-Policy:
+    default-src 'none'; sandbox`. Quarantined (infected) attachments have no URL and are never served.
+  - A part counts as inline when the HTML references its Content-ID; the worker decides this, because mail clients
+    disagree on the disposition of embedded images. The Content-ID is kept for every part.
 
 ### 3.6 Processing pipeline (per new message)
 
