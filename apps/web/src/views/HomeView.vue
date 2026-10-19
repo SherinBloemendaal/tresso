@@ -1,33 +1,40 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
+import TressoMark from '@/components/TressoMark.vue'
+import MailView from '@/views/MailView.vue'
 
 const auth = useAuthStore()
-const error = ref<string | null>(null)
-
-onMounted(async () => {
-  if (!auth.isAuthenticated) {
-    return
-  }
-  try {
-    await auth.loadMe()
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-  }
-})
 </script>
 
 <template>
-  <main class="home">
-    <template v-if="auth.me">
-      <h1>Hi {{ auth.me.displayName }}</h1>
-      <p>Signed in as {{ auth.me.email }}.</p>
-      <button type="button" @click="auth.signOut()">Sign out</button>
-    </template>
-    <template v-else-if="!auth.isAuthenticated">
-      <h1>Every email is something to do, to hand over, or to know.</h1>
-      <button type="button" @click="auth.signIn()">Sign in</button>
-    </template>
-    <p v-if="error" role="alert">{{ error }}</p>
+  <MailView v-if="auth.isAuthenticated" />
+  <main v-else class="welcome">
+    <TressoMark :size="56" />
+    <h1>Every email is something to do, to hand over, or to know.</h1>
+    <button type="button" class="button button-primary sign-in" @click="auth.signIn()">Sign in</button>
   </main>
 </template>
+
+<style scoped>
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  min-height: 100%;
+  padding: 32px 16px;
+  text-align: center;
+}
+h1 {
+  max-width: 640px;
+  margin: 0;
+  font: 700 40px/46px var(--font-display);
+  letter-spacing: -0.02em;
+}
+.sign-in {
+  height: 44px;
+  padding: 0 24px;
+  font-size: 15px;
+}
+</style>

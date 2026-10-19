@@ -1,0 +1,188 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+import { RouterLink, type RouteLocationRaw } from 'vue-router'
+import type { Conversation } from '@/mail/db'
+import { dayLabel, senderName, shortTime } from '@/mail/format'
+import AppIcon from '@/components/AppIcon.vue'
+import SenderAvatar from '@/components/SenderAvatar.vue'
+
+const props = defineProps<{
+  title: string
+  conversations: Conversation[]
+  selectedThreadId: string | null
+  hasMore: boolean
+  loading: boolean
+  linkTo: (threadId: string) => RouteLocationRaw
+}>()
+const emit = defineEmits<{ showMore: [] }>()
+
+const days = computed(() => {
+  const groups: { label: string; conversations: Conversation[] }[] = []
+  for (const conversation of props.conversations) {
+    const label = dayLabel(conversation.lastMessageAt)
+    const last = groups[groups.length - 1]
+    if (last?.label === label) {
+      last.conversations.push(conversation)
+    } else {
+      groups.push({ label, conversations: [conversation] })
+    }
+  }
+
+  return groups
+})
+</script>
+
+<template>
+  <section class="list" :aria-label="title">
+    <header class="header">
+      <h1>{{ title }}</h1>
+    </header>
+
+    <div class="scroll">
+      <section v-for="day in days" :key="day.label" :aria-label="day.label">
+        <h2 class="day">{{ day.label }}</h2>
+        <RouterLink
+          v-for="conversation in day.conversations"
+          :key="conversation.threadId"
+          :to="linkTo(conversation.threadId)"
+          class="row"
+          :class="{ unread: conversation.unreadCount > 0 }"
+          :aria-current="conversation.threadId === selectedThreadId ? 'true' : undefined"
+        >
+          <span class="dot" :aria-label="conversation.unreadCount > 0 ? 'Unread' : undefined" />
+          <SenderAvatar :sender="conversation.senders[0] ?? { name: null, address: '?' }" />
+          <span class="body">
+            <span class="top">
+              <span class="senders">{{ conversation.senders.map(senderName).join(', ') }}</span>
+              <span v-if="conversation.messageCount > 1" class="count">{{ conversation.messageCount }}</span>
+              <span class="time">{{ shortTime(conversation.lastMessageAt) }}</span>
+            </span>
+            <span class="subject">
+              <AppIcon v-if="conversation.flagged" name="flag" :size="14" label="Flagged" />
+              <AppIcon v-if="conversation.hasAttachments" name="attachment" :size="14" label="Has attachments" />
+              {{ conversation.subject || '(no subject)' }}
+            </span>
+            <span class="snippet">{{ conversation.snippet }}</span>
+          </span>
+        </RouterLink>
+      </section>
+
+      <p v-if="conversations.length === 0 && !loading" class="empty">Nothing in this inbox.</p>
+      <p v-if="conversations.length === 0 && loading" class="empty">Loading your mail…</p>
+      <button v-if="hasMore" type="button" class="button button-quiet more" @click="emit('showMore')">Show older mail</button>
+    </div>
+  </section>
+</template>
+
+<style scoped>
+.list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+.header {
+  padding: 20px 20px 12px;
+  border-bottom: 1px solid var(--line);
+}
+h1 {
+  margin: 0;
+  font: 700 28px/34px var(--font-display);
+}
+.scroll {
+  overflow-y: auto;
+  padding-bottom: 16px;
+}
+.day {
+  margin: 0;
+  padding: 18px 20px 6px 64px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 20px 12px 12px;
+  color: var(--ink);
+  text-decoration: none;
+}
+.row:hover {
+  background: var(--ground);
+}
+.row[aria-current='true'] {
+  background: var(--selected);
+  box-shadow: inset 3px 0 0 var(--focus);
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 16px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.unread .dot {
+  background: var(--unread);
+}
+.body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.top {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.senders {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.unread .senders,
+.unread .subject {
+  font-weight: 600;
+}
+.count,
+.time {
+  font-size: 12px;
+  color: var(--ink-3);
+  flex-shrink: 0;
+}
+.subject {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.subject svg {
+  flex-shrink: 0;
+  color: var(--ink-2);
+}
+.snippet {
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.empty {
+  padding: 32px 20px;
+  margin: 0;
+  color: var(--ink-3);
+  text-align: center;
+}
+.more {
+  display: flex;
+  margin: 12px auto 0;
+}
+</style>

@@ -12,7 +12,7 @@ describe('App', () => {
   })
 
   it('offers sign in when signed out', async () => {
-    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', name: 'home', component: HomeView }] })
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', name: 'unified', component: HomeView }] })
     await router.push('/')
     await router.isReady()
 

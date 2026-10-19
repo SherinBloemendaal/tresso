@@ -10,7 +10,7 @@ const error = ref<string | null>(null)
 onMounted(async () => {
   try {
     await auth.completeSignIn(window.location.href)
-    await router.replace({ name: 'home' })
+    await router.replace({ name: 'unified' })
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   }
@@ -21,7 +21,7 @@ onMounted(async () => {
   <main>
     <p v-if="error" role="alert">
       Sign-in failed: {{ error }}
-      <RouterLink :to="{ name: 'home' }">Try again</RouterLink>
+      <RouterLink :to="{ name: 'unified' }">Try again</RouterLink>
     </p>
     <p v-else>Signing you in…</p>
   </main>
