@@ -188,7 +188,8 @@ final class VTimezoneBuilder
         $rules = [];
         foreach ($byKind as $kind) {
             $firstYear = (int) self::local($kind[0]['ts'], $kind[0]['from'])->format('Y');
-            if (\count($kind) < $lastYear - $firstYear) {
+            // One change of the kind in every year from the first through $lastYear.
+            if (\count($kind) < $lastYear - $firstYear + 1) {
                 return null;
             }
             $rule = self::nthWeekdayRule($kind) ?? self::onOrAfterRule($kind);

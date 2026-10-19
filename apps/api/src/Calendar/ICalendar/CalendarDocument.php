@@ -20,6 +20,7 @@ final class CalendarDocument
 
     public static function parse(string $ical): VCalendar
     {
+        ObservanceTimezoneGuesser::register();
         if (\strlen($ical) > self::MAX_BYTES) {
             throw new InvalidCalendarData('The calendar object is too large.');
         }

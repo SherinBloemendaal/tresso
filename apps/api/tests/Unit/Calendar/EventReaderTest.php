@@ -82,6 +82,35 @@ final class EventReaderTest extends TestCase
         self::assertNull(self::read(['DTSTART:20261019T090000Z', 'RRULE:FREQ=WEEKLY'])->seriesEndsAt);
     }
 
+    public function testAnEndlessRuleWithExtraDatesHasNoEnd(): void
+    {
+        self::assertNull(self::read(['DTSTART:20261019T090000Z', 'RRULE:FREQ=WEEKLY', 'RDATE:20261020T090000Z'])->seriesEndsAt);
+    }
+
+    public function testTheSeriesEndsAtItsLatestDateInItsOwnZone(): void
+    {
+        $data = self::read(['DTSTART:20261019T090000Z', 'DTEND:20261019T093000Z', 'RRULE:FREQ=DAILY;COUNT=2', 'RDATE;TZID=America/New_York:20261105T090000', 'RDATE:20261101T090000Z']);
+
+        self::assertSame('2026-11-05T14:30:00+00:00', $data->seriesEndsAt?->format(\DATE_ATOM));
+    }
+
+    public function testAZoneOfItsOwnIsReadFromTheEventsDefinition(): void
+    {
+        $calendar = CalendarDocument::parse(implode("\r\n", [
+            'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Microsoft Corporation//Outlook 16.0 MIMEDIR//EN',
+            'BEGIN:VTIMEZONE', 'TZID:Customized Time Zone',
+            'BEGIN:STANDARD', 'DTSTART:16010101T030000', 'TZOFFSETFROM:+0200', 'TZOFFSETTO:+0100', 'RRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=10', 'END:STANDARD',
+            'BEGIN:DAYLIGHT', 'DTSTART:16010101T020000', 'TZOFFSETFROM:+0100', 'TZOFFSETTO:+0200', 'RRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=3', 'END:DAYLIGHT',
+            'END:VTIMEZONE',
+            'BEGIN:VEVENT', 'UID:custom@example', 'DTSTART;TZID=Customized Time Zone:20261021T140000', 'DTEND;TZID=Customized Time Zone:20261021T150000', 'END:VEVENT',
+            'END:VCALENDAR', '',
+        ]));
+
+        $data = EventReader::read(CalendarDocument::events($calendar)[0], $calendar, []);
+
+        self::assertSame('2026-10-21T12:00:00+00:00', $data->startsAt->format(\DATE_ATOM));
+    }
+
     public function testReadsStatusTransparencyAndReminders(): void
     {
         $data = self::read(['DTSTART:20261019T090000Z', 'STATUS:CANCELLED', 'TRANSP:TRANSPARENT', 'BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER;RELATED=END:-PT5M', 'END:VALARM', 'BEGIN:VALARM', 'ACTION:EMAIL', 'TRIGGER;VALUE=DATE-TIME:20261018T120000Z', 'END:VALARM']);

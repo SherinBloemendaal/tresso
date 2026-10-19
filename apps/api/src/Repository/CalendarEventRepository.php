@@ -97,8 +97,8 @@ class CalendarEventRepository extends ServiceEntityRepository
             ->where('c.owner = :owner')
             ->andWhere('EXISTS (SELECT 1 FROM '.CalendarEvent::class.' e WHERE e.object = r AND e.startsAt < :to AND (e.seriesEndsAt IS NULL OR e.seriesEndsAt > :from))')
             ->setParameter('owner', $owner->getId(), 'uuid')
-            ->setParameter('from', $from->sub($margin))
-            ->setParameter('to', $to->add($margin))
+            ->setParameter('from', $from->setTimezone(new \DateTimeZone('UTC'))->sub($margin))
+            ->setParameter('to', $to->setTimezone(new \DateTimeZone('UTC'))->add($margin))
             ->orderBy('r.id');
         if ([] !== $calendarIds) {
             $qb->andWhere('c.id IN (:calendars)')->setParameter('calendars', array_map(static fn (string $id): string => Uuid::fromString($id)->toRfc4122(), $calendarIds));
