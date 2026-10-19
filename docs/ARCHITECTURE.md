@@ -953,8 +953,9 @@ after. Everything lives in `apps/api/src/Notification`.
     `GET /api/v1/notification-devices/web-push-key`.
   - Mobile (`expo`): the Expo push token; sent through Expo's push service (`EXPO_ACCESS_TOKEN` when the project
     requires it). A `PushMessage` names its Android notification channel; the phone creates `reminders` (calendar
-    notifications, the default) and `mail` with sound, and `reminders_silent` and `mail_silent` with low importance
-    for silent deliveries (on Android the channel decides sound). Expo's receipts are read some minutes after each
+    notifications, the default) at normal importance with sound and `reminders_silent` at low importance without
+    sound for silent deliveries, at every launch (on Android the channel decides sound). Mail notifications (phase
+    3.7) add `mail` and `mail_silent` the same way. Expo's receipts are read some minutes after each
     send, and phones they report as `DeviceNotRegistered` are removed.
   - Desktop (`desktop`): no push service; the delivered notification reaches the running app through the delta
     (`notifications`) and the realtime ping that comes with every change, and the app shows it natively.
@@ -985,32 +986,47 @@ after. Everything lives in `apps/api/src/Notification`.
   delivered. Then the `NotificationDispatcher` sends it: given a user, a `PushMessage` (id, kind, title, body, a
   path in the app or none, silent, and a data map), a delivery key and the channels, it claims one
   `notification_delivery` per key and target (unique, `INSERT ... ON CONFLICT`) before anything is sent, so a
-  retried message or a sweep never notifies a device twice. Sends happen after that commit, their outcome is
-  recorded afterwards, and devices the push service no longer knows are removed. A failed send is tried again by the
-  sweep after a pause that doubles each time (at most 5 attempts), and one that never reported back (a crash) after
-  10 minutes; a send that went out never is. Calendar notifications use the key `calendar:{notification}:{round}`;
+  retried message or a sweep never notifies a device twice. For calendar notifications the claim is part of the
+  transaction that marks the notification delivered, so a crash before the sends leaves claimed rows to retry, never
+  a delivered notification nobody sends. Sends happen after that commit, their outcome is recorded afterwards, and
+  devices the push service no longer knows are removed. A failed send is tried again by the sweep after a pause that
+  doubles each time (at most 5 attempts), and one that never reported back (a crash) after 10 minutes; a send that
+  went out never is. A retry reaches only the targets of the first delivery, not devices registered since. The sweep
+  delivers each notification on its own: one that fails is logged and moved 5 minutes later (dropped once its event
+  is 2 hours past), and the other notifications, the receipts and the planning go on. Calendar notifications use the key `calendar:{notification}:{round}`;
   any other feature (mail, phase 3.7) sends through the same dispatcher with keys of its own.
 - **Lateness:** nothing is delivered more than 2 hours after its time, nor a reminder more than 15 minutes after its
   event started (or after its own later time, for alarms relative to the end and snoozes); follow-ups are the
   exception. A replan that moves a notification into the past drops it.
 - **Replans:** plans are recomputed on every change of the event, the rules or the settings. A fire time set by a
   snooze or by a postponement (quiet hours, working hours, a focus block) is kept: a replan never moves the
-  notification before it. When an occurrence moves after its notification was delivered, the notification starts a
-  new round at the new time, if that is still ahead. A focus block never holds a notification past the start of
+  notification before it, unless the event moved to start before that time; then the hold goes, and a reminder whose
+  own time has passed comes at once. A notification belongs to its occurrence, not to the row the occurrence takes
+  its fields from: when an override (or one for this and future occurrences) appears or goes, the notification moves
+  along with its snooze, hold and deliveries, so it is neither lost nor sent twice. When an occurrence moves after
+  its notification was delivered, the notification starts a new round at the new time, if that is still ahead;
+  "moves" means its start as the event writes it changed (a date, a wall clock or an instant), so a change of the
+  user's zone alone never sends an all-day or floating reminder again. A focus block never holds a notification past the start of
   its event; it comes silently instead. Planning runs per user in the sweep; a user whose planning fails is logged
   and tried again an hour later, and the others go on.
 - **In the apps:** `GET /api/v1/notifications` lists the last week and the coming days; `POST .../dismiss` clears a
   notification on every device (the delta carries `dismissedAt`), `POST .../snooze` delivers it again later (a new
   round): after some minutes, or `until` one of the choices a reminder offers (`snoozeChoices` in the settings: 5,
   10 or 15 minutes, one minute before the start, the start, or the end of the meeting the user is in now). A snoozed
-  notification is in the delta with `deliveredAt` null and `snoozedUntil`, so every device hides it until it comes
-  again.
+  notification is in the delta with `deliveredAt` null and `snoozedUntil` (moved by quiet hours too), so every device
+  hides it until it comes again. One waiting for its occurrence's new time (a new round after the event moved) has
+  `deliveredAt` and `snoozedUntil` both null: hidden too, but not shown as snoozed.
 - **Devices and addresses:** a push endpoint belongs to one user: registering it removes it from whoever had it
-  before (someone signed out on that phone). Email notifications go only to the user's sign-in address or one of
+  before (someone signed out on that phone). Registrations of one endpoint take turns (an advisory lock), so two at
+  once do not fail on its unique key. Known limit: Expo gives no proof that the caller holds the phone, so anyone
+  who learns another user's Expo push token can register it and receive that user's reminders until the owner's app
+  registers again (each launch). Binding a registration to a challenge sent to the device is a later step (C4, with
+  the phone's push registration); web push endpoints are unguessable capability URLs. Email notifications go only to the user's sign-in address or one of
   their mail accounts' addresses.
 - **Time zones:** quiet hours, working hours, all-day reminders and floating times (date-times without a zone) are
-  read in the user's zone from the notification settings (`timeZone`, UTC until a client sets it; the clients set it
-  from the device's zone).
+  read in the user's zone from the notification settings (`timeZone`, UTC until a client sets it). The web app, the
+  desktop app and the phone send the device's zone once signed in and again when they come to the front in another
+  zone (`keepTimeZone` in `@tresso/core`), so reminders follow the device the user last used.
 - **Deployment:** this stage (C3) needs the calendar core (C2) in the same deploy: the planner reads
   `default_reminders` and the other projection columns C2 adds.
 
