@@ -53,17 +53,18 @@ final readonly class NotificationDeliverer
         if (!Uuid::isValid($notificationId)) {
             return;
         }
-        /** @var array{?ScheduledNotification, ?ScheduledNotification} $next */
-        $next = $this->entityManager->wrapInTransaction(fn (): array => $this->prepare(Uuid::fromString($notificationId), $now));
-        [$deliver, $askEstimate] = $next;
-        if (null !== $deliver) {
-            $this->dispatcher->send(
-                $deliver->getUser(),
-                $this->message($deliver, $now),
-                self::deliveryKey($deliver),
-                NotificationChannelChoice::fromValues($deliver->getChannels()),
-                $now,
-            );
+        /** @var array{?ScheduledNotification, ?ScheduledNotification, list<array{string, ?\App\Entity\NotificationDevice, ?string}>} $next */
+        $next = $this->entityManager->wrapInTransaction(function () use ($notificationId, $now): array {
+            [$deliver, $askEstimate, $retry] = $this->prepare(Uuid::fromString($notificationId), $now);
+            // Claimed in the same transaction that marks it delivered: a crash before the sends leaves claimed rows,
+            // which the sweep tries again, never a delivered notification nobody sends.
+            $claimed = null === $deliver ? [] : $this->dispatcher->claim($deliver->getUser(), self::deliveryKey($deliver), NotificationChannelChoice::fromValues($deliver->getChannels()), !$retry);
+
+            return [$deliver, $askEstimate, $claimed];
+        });
+        [$deliver, $askEstimate, $claimed] = $next;
+        if (null !== $deliver && [] !== $claimed) {
+            $this->dispatcher->deliver($claimed, $this->message($deliver, $now), self::deliveryKey($deliver), $now);
         }
         if (null !== $askEstimate) {
             $this->askForEstimate($askEstimate, $now);
@@ -81,36 +82,38 @@ final readonly class NotificationDeliverer
      * What to do now: the notification to send (marked delivered), or the leave-now notification to ask the phone
      * an estimate for; neither when there is nothing to do (yet).
      *
-     * @return array{?ScheduledNotification, ?ScheduledNotification}
+     * The third value tells whether this is a retry of a delivery made before.
+     *
+     * @return array{?ScheduledNotification, ?ScheduledNotification, bool}
      */
     private function prepare(Uuid $id, \DateTimeImmutable $now): array
     {
         $notification = $this->entityManager->find(ScheduledNotification::class, $id, LockMode::PESSIMISTIC_WRITE);
         if (null === $notification || null !== $notification->getDismissedAt()) {
-            return [null, null];
+            return [null, null, false];
         }
         if ($notification->isDelivered()) {
             // Delivered in this round: send again what failed or got stuck; the dispatcher leaves what went out alone.
             $recent = $notification->getDeliveredAt() > $now->modify('-'.self::MAX_LATE);
 
-            return [$recent ? $notification : null, null];
+            return [$recent ? $notification : null, null, true];
         }
         $event = $notification->getEvent();
         if (null === $event) {
             $this->entityManager->remove($notification);
             $this->entityManager->flush();
 
-            return [null, null];
+            return [null, null, false];
         }
         if ($notification->getFireAt()->getTimestamp() > $now->getTimestamp() + self::EARLY_SECONDS) {
-            return [null, null];
+            return [null, null, false];
         }
         if (self::isStale($notification, $now)) {
             // After an outage, or for an event already under way: a late reminder is noise.
             $this->entityManager->remove($notification);
             $this->entityManager->flush();
 
-            return [null, null];
+            return [null, null, false];
         }
 
         $user = $notification->getUser();
@@ -124,16 +127,16 @@ final readonly class NotificationDeliverer
                 $notification->dismiss($now);
                 $this->entityManager->flush();
 
-                return [null, null];
+                return [null, null, false];
             }
             $notification->postpone(min($latest, $now->modify(self::ESTIMATE_AGAIN)));
             $this->entityManager->flush();
             $this->planner->announce($notification);
 
-            return [null, $notification];
+            return [null, $notification, false];
         }
         if (NotificationKind::Brief === $notification->getKind()) {
-            $notification->replan($notification->getFireAt(), $notification->getOccurrenceStartsAt(), $notification->getTitle(), $this->briefs->brief($event, $notification->getOccurrenceKey())->headline(), $notification->getChannels());
+            $notification->replan($notification->getFireAt(), $notification->getOccurrenceStartsAt(), $notification->getOccurrenceStart(), $notification->getTitle(), $this->briefs->brief($event, $notification->getOccurrenceKey())->headline(), $notification->getChannels());
         }
 
         $important = $event->isImportant();
@@ -173,7 +176,7 @@ final readonly class NotificationDeliverer
         $notification->markDelivered($now, $silent);
         $this->entityManager->flush();
 
-        return [$notification, null];
+        return [$notification, null, false];
     }
 
     private static function isStale(ScheduledNotification $notification, \DateTimeImmutable $now): bool
@@ -189,7 +192,7 @@ final readonly class NotificationDeliverer
     }
 
     /**
-     * @return array{null, null}
+     * @return array{null, null, false}
      */
     private function postpone(ScheduledNotification $notification, \DateTimeImmutable $until): array
     {
@@ -197,7 +200,7 @@ final readonly class NotificationDeliverer
         $this->entityManager->flush();
         $this->planner->announce($notification);
 
-        return [null, null];
+        return [null, null, false];
     }
 
     /**

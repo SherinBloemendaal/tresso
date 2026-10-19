@@ -473,7 +473,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
         $rows = $this->connection->fetchAllAssociative(
             // Delivered ones, and snoozed ones (a later round not delivered yet), so every device hides a snoozed
             // notification until it comes again.
-            'SELECT n.id, n.kind, n.event_id, n.occurrence_key, n.title, n.body, n.occurrence_starts_at, n.delivered_at, n.dismissed_at, n.silent, n.round, n.fire_at
+            'SELECT n.id, n.kind, n.event_id, n.occurrence_key, n.title, n.body, n.occurrence_starts_at, n.delivered_at, n.dismissed_at, n.silent, n.round, n.snoozed, n.fire_at
              FROM scheduled_notification n
              WHERE n.user_id = :user AND n.change_seq > :since AND n.change_seq <= :until
                AND (n.delivered_at > :recent OR (n.delivered_at IS NULL AND n.round > 0 AND n.fire_at > :recent))
@@ -493,7 +493,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'dismissedAt' => self::date($r['dismissed_at']),
             'silent' => (bool) $r['silent'],
             'round' => self::int($r['round']),
-            'snoozedUntil' => null === $r['delivered_at'] ? self::date($r['fire_at']) : null,
+            // Not delivered in this round: snoozed until a time, or waiting for the occurrence's new time.
+            'snoozedUntil' => null === $r['delivered_at'] && (bool) $r['snoozed'] ? self::date($r['fire_at']) : null,
         ], $rows);
     }
 

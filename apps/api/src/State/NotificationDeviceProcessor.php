@@ -43,8 +43,12 @@ final readonly class NotificationDeviceProcessor implements ProcessorInterface
             self::check($data, $kind);
 
             return NotificationDeviceResource::fromEntity($this->entityManager->wrapInTransaction(function () use ($user, $data, $kind, $now): NotificationDevice {
+                // Registrations of one endpoint take turns, so two at the same moment (two users on one phone, or a
+                // retry) do not both insert it and fail on the unique key.
+                $this->entityManager->getConnection()->executeStatement('SELECT pg_advisory_xact_lock(hashtextextended(:endpoint, 0))', ['endpoint' => 'notification-device:'.$data->endpoint]);
                 // A push endpoint is one browser or phone, so it belongs to whoever registered it last: someone who
-                // signed out there must not get their reminders on the next person's screen.
+                // signed out there must not get their reminders on the next person's screen. Expo gives no proof
+                // that the caller holds the device, so whoever knows a token can take it over (see ARCHITECTURE.md).
                 foreach ($this->devices->findOfOthersByEndpoint($user, $data->endpoint) as $previous) {
                     $this->entityManager->remove($previous);
                 }

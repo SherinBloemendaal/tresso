@@ -24,7 +24,14 @@ final readonly class Plan
         public string $title,
         public string $body,
         public array $channels,
+        /** The occurrence's start as the event writes it (Props::start). */
+        public string $occurrenceStart,
     ) {
+    }
+
+    public function firingAt(\DateTimeImmutable $fireAt): self
+    {
+        return new self($this->occurrenceKey, $this->kind, $this->slot, $fireAt, $this->startsAt, $this->title, $this->body, $this->channels, $this->occurrenceStart);
     }
 
     public function key(CalendarEvent $event): string
