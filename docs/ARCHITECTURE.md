@@ -720,7 +720,7 @@ Scopes `calendar:read` and `calendar:write`, in the user scopes of the first-par
 | Call | Purpose |
 |---|---|
 | `GET /api/v1/calendars` | The user's calendars. `PATCH` changes the user's color, visibility and the default calendar, and the name of local calendars (provider calendars are renamed at the provider). `POST`/`DELETE` only for local calendars. |
-| `GET /api/v1/calendar-occurrences?from&to&timeZone&calendarId[]` | Occurrences in a range (at most 400 days), recurrence expanded: per occurrence the event id, the `recurrenceId`, start, end and the event's fields, overrides applied and exceptions removed. Series are expanded one occurrence at a time, at most 2000 per series and 10,000 per answer (more is a 422 asking for a shorter range). Series that repeat more often than hourly are refused when stored, from the editor and from providers alike. |
+| `GET /api/v1/calendar-occurrences?from&to&timeZone&calendarId[]` | Occurrences in a range (at most 400 days), recurrence expanded: per occurrence the event id, the `recurrenceId`, start, end and the event's fields, overrides applied and exceptions removed. Series are expanded one occurrence at a time, at most 10,000 per answer (more is a 422 asking for a shorter range, never a silently shortened series; an hourly series fits the longest range). A series is the union of its `RRULE` and `RDATE`s (each in its own `TZID`) less its `EXDATE`s; an override with `RANGE=THISANDFUTURE` changes the later occurrences too. Floating and all-day events are read in `timeZone`. Series that repeat more often than hourly are refused when stored, from the editor and from providers alike. |
 | `GET /api/v1/calendar-events/{id}` | One event as stored (series or override). |
 | `POST /api/v1/calendar-events` | Create in a writable calendar. |
 | `PUT /api/v1/calendar-events/{id}?scope=&recurrenceId=&notify=` | Save the editor's complete event; for a series `scope` is `this`, `following` or `all`, and `recurrenceId` the occurrence the user edited. A different `calendarId` moves the event (whole series only). |
@@ -732,10 +732,12 @@ Edits of recurring events follow what Google Calendar, Outlook and Apple Calenda
 - **This occurrence:** an override with the occurrence's `recurrence_id` is created or changed. Deleting one adds an
   `EXDATE` and removes its override.
 - **This and following:** the series is split. The original gets an `UNTIL` just before the occurrence (a `COUNT`
-  is converted to the equivalent `UNTIL`); a new series with a new `UID` starts at the occurrence with the edited
+  is converted to the equivalent `UNTIL`, which is floating for a floating series); the new series keeps what is left
+  of a `COUNT`, counted as RFC 5545 does, before `EXDATE`s take any away. The new series with a new `UID` starts at the occurrence with the edited
   fields and takes over the later overrides and exceptions, moved by the same time shift. Deleting cuts the
   series with `UNTIL`.
-- **All:** the master changes by the shift the user gave the edited occurrence. That shift also moves every
+- **All:** the master changes by the shift the user gave the edited occurrence, measured from where that occurrence
+  is shown (a moved occurrence's own start). That shift also moves every
   override's `recurrence_id` and every `EXDATE` and `RDATE`, so exceptions stay attached to their occurrences;
   overrides keep their own changed fields. A changed recurrence rule, or a switch between all-day and timed, starts
   the series fresh: its overrides and exceptions belong to occurrences that no longer exist and are dropped.
@@ -763,8 +765,9 @@ accepted.
 
 - **CalDAV** for IMAP accounts (`apps/sync/internal/caldavsync` on a small WebDAV client in `internal/caldav`, through
   the guarded dialer). The client keeps objects as raw iCalendar text in both directions and reads colors, ctags and
-  privileges, which general WebDAV libraries do not. The mail password goes only where it belongs: it is sent after
-  a server asks for it (401), and only to a trusted host: the IMAP host, the CalDAV address the user entered (or
+  privileges, which general WebDAV libraries do not. The mail password goes only where it belongs: never over plain
+  HTTP (hrefs and redirects included; the API also refuses an `http://` server address), only after a server asks for
+  it (401) and is remembered per scheme, host and port, and only to a trusted host: the IMAP host, the CalDAV address the user entered (or
   that was found on a trusted host before), and the CalDAV site of a known provider (iCloud's hosts vary). A trusted
   host may redirect to another host of its own site; hrefs and redirects to other sites never get it:
   - Discovery: the account's stored CalDAV URL, else RFC 6764 (`_caldavs._tcp` SRV and TXT records, then
@@ -774,15 +777,23 @@ accepted.
     `current-user-principal`, `calendar-home-set` and the calendars with their name, color, supported components
     (only `VEVENT` calendars are synced), privileges, `getctag` and `sync-token`. The URL that worked is reported
     back and stored with the account; a server without CalDAV is reported as `unsupported` and looked for again
-    daily. Guessed candidates (the web host of the mail domain, hosts named in DNS) are not trusted: they never get
+    daily; a timeout or server error during discovery is retried with backoff instead. Discovery answers are read up
+    to 1 MiB. Guessed candidates (the web host of the mail domain, hosts named in DNS) are not trusted: they never get
     the login and are never used or stored, also when they answer without asking for it. When one answers and no
     trusted one works, the status becomes `unconfirmed` with that address, and the user confirms it by entering it
     as the account's `calendarUrl`.
   - Changes: `sync-collection` (RFC 6578) with the stored token when the server supports it; otherwise the `getctag`
     is compared and, when it changed, the resource etags are listed and only changed resources fetched with
     `calendar-multiget`. Every 2 minutes, and right after a write. Missing tokens (`valid-sync-token` error) fall back
-    to a full listing. A full listing goes to `POST .../calendars/{calendarId}/inventory` (every href with its etag),
-    which removes what is gone and answers which hrefs to fetch.
+    to a full listing, and a failing `sync-collection` to a plain listing. A server that cuts its answer short (a 507
+    for the collection, RFC 6578 3.6) is asked again from the token it gave: changes are applied page by page, and a
+    full listing is collected over all pages before anything is removed. A full listing goes to
+    `POST .../calendars/{calendarId}/inventory` (every href with its etag), which removes what is gone and answers
+    which hrefs to fetch. A listing over 50,000 resources goes in `partial` pages, which remove nothing. Removals go
+    in batches of 5,000, the cursor with the last one. Calendars, hrefs and etags longer than the API takes are left
+    out (and logged), so one cannot block a calendar for good. A calendar that refuses the login (a share taken back)
+    is skipped; only when every calendar refuses is the account's status `auth_failed`. Status details are cut to 500
+    characters and name server addresses without login or query.
   - Ingest: `POST /internal/sync/accounts/{id}/calendars` (the complete calendar list, answers each calendar's
     cursor; calendars missing from the list are deleted, except after an empty list, after the first list from
     another server, and while they have writes to make) and `POST /internal/sync/accounts/{id}/calendars/{calendarId}/objects`
@@ -816,15 +827,28 @@ accepted.
   Trash is not recorded; it is applied only from the inbox, and not when the message arrived before the account was
   connected (the first sync must not replay years of invitations). Anyone can send calendar mail, so:
   - a `REQUEST` or `CANCEL` counts only from the event's organizer (as stored, or as the message names for an event
-    that is new; a delegate named in `SENT-BY` may send for them), never changes who organizes the event, never
-    touches an event the user organizes or that has no organizer, and may raise `SEQUENCE` by at most 100;
-  - a `REPLY` counts only when its single attendee is the sender and already an attendee of the event.
+    that is new). A delegate may send for them only when the stored event already names it in `SENT-BY`; a `SENT-BY`
+    in the message itself is the sender's own claim and proves nothing, so a new event counts only from its
+    organizer. It never changes who organizes the event, never touches an event the user organizes or that has no
+    organizer, and may raise `SEQUENCE` by at most 100;
+  - a `REPLY` counts only when its single attendee is the sender (in any letter case) and already an attendee of the
+    event, and carries an answer; a reply sabre cannot read is ignored once, not retried.
+  - Order follows RFC 5546: a higher `SEQUENCE` is newer, at the same `SEQUENCE` a later `DTSTAMP` is, and an update at
+    the same `SEQUENCE` keeps the user's answer. Messages about single occurrences are merged into the stored event,
+    one occurrence each; a `CANCEL` of occurrences compares each with its own `SEQUENCE` and skips ones the series
+    does not have. Applying locks the invitation and the stored event, so the worker and the user's apply action, or
+    an edit made meanwhile, never overwrite each other. Of several stored events with the `UID`, the one in a calendar
+    of the receiving account is used, else the Tresso one.
   - The sender is the message's `From` address as the mail server delivered it. Tresso does not check SPF, DKIM or
     DMARC for this yet, so a forged `From` that the receiving server let through passes these checks; they keep
     strangers from acting for someone else, not a forger from acting for the organizer. Checking the
     `Authentication-Results` the receiving server adds is a later step.
-  - An invitation the calendar did not take by itself (outside the inbox, or from before the account was connected)
-    shows `canAdd`; `POST /api/v1/messages/{id}/invitation/add` adds it on the user's word, with the same checks.
+  - Calendar mail (`REQUEST`, `CANCEL` or `REPLY`) the calendar did not take by itself (outside the inbox, or from
+    before the account was connected) shows `canApply`; `POST /api/v1/messages/{id}/invitation/apply` applies it on
+    the user's word, with the same checks, and a second apply changes nothing. Mail moved into the inbox later, or
+    rescued from Spam, is recorded and applied then. When there is no calendar to write to (the account's default is
+    read-only, or its provider schedules by itself) the apply is a 422 saying so, and the invitation stays to apply
+    later.
   - `REQUEST` (new or updated invitation): if the user has the event with that `UID` in a provider calendar, the
     provider owns it (CalDAV servers with scheduling, Google and Microsoft put invitations into the calendar
     themselves) and nothing is written. Otherwise the event is created or updated in the account's default
@@ -839,7 +863,8 @@ accepted.
   events in the same time, and the event id in the user's calendar when there is one.
 - An RSVP updates the user's `partstat` on the event and sends the reply the way the calendar's source needs it
   (provider API, CalDAV server scheduling, or iTIP). An iTIP `REPLY` goes through the outbox like any mail: a
-  message to the organizer from the invited account, with a `text/calendar; method=REPLY` part holding only the
+  message to the organizer from the invited account (or, when no account sends as the invited address, the account
+  the invitation came to), with a `text/calendar; method=REPLY` part holding only the
   replying attendee, the event's `UID`, `SEQUENCE`, `RECURRENCE-ID` when answering one occurrence, and the
   optional comment, and a short human-readable text part. Its subject follows the common form ("Accepted:
   Weekly sync").
