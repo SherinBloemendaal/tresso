@@ -1,6 +1,7 @@
 import { ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import {
+  composeBody,
   forwardSubject,
   isPlausibleAddress,
   quotedOriginal,
@@ -27,7 +28,7 @@ export interface Notice {
 
 type DraftKind = Draft['kind']
 
-function newDraft(kind: DraftKind, mailAccountId: string | null): Draft {
+function newDraft(kind: DraftKind, mailAccountId: string | null, signatureId: string | null): Draft {
   return {
     id: crypto.randomUUID(),
     mailAccountId,
@@ -36,6 +37,8 @@ function newDraft(kind: DraftKind, mailAccountId: string | null): Draft {
     bcc: [],
     subject: '',
     html: '',
+    signatureId,
+    quoteHtml: '',
     inReplyToMessageId: null,
     kind,
     outgoingId: null,
@@ -78,6 +81,12 @@ export const useComposeStore = defineStore('compose', () => {
     return mail.mailbox ?? mail.accounts[0]?.id ?? null
   }
 
+  /** The signature an account adds by default. */
+  function defaultSignature(mailAccountId: string | null): string | null {
+    const id = mail.accounts.find((account) => account.id === mailAccountId)?.defaultSignatureId ?? null
+    return mail.signatures.some((signature) => signature.id === id) ? id : null
+  }
+
   function open(next: Draft): void {
     draft.value = next
     minimized.value = false
@@ -87,12 +96,13 @@ export const useComposeStore = defineStore('compose', () => {
   }
 
   function openNew(to: Address[] = []): void {
-    open({ ...newDraft('new', defaultAccount()), to })
+    const account = defaultAccount()
+    open({ ...newDraft('new', account, defaultSignature(account)), to })
   }
 
   async function openReply(message: SyncedMessage, kind: 'reply' | 'replyAll' | 'forward'): Promise<void> {
     const body = await mail.body(message.id, false).catch(() => ({ html: null, text: message.snippet }))
-    const next = newDraft(kind, message.mailAccountId)
+    const next = newDraft(kind, message.mailAccountId, defaultSignature(message.mailAccountId))
     next.inReplyToMessageId = message.id
     if (kind === 'forward') {
       next.subject = forwardSubject(message.subject)
@@ -102,7 +112,7 @@ export const useComposeStore = defineStore('compose', () => {
       next.cc = recipients.cc
       next.subject = replySubject(message.subject)
     }
-    next.html = `<p></p>${quotedOriginal(message, body, kind === 'forward' ? 'forward' : 'reply')}`
+    next.quoteHtml = quotedOriginal(message, body, kind === 'forward' ? 'forward' : 'reply')
     open(next)
   }
 
@@ -167,7 +177,7 @@ export const useComposeStore = defineStore('compose', () => {
       cc: current.cc,
       bcc: current.bcc,
       subject: current.subject,
-      html: current.html,
+      html: composeBody(current.html, mail.signatures.find((signature) => signature.id === current.signatureId)?.html ?? null, current.quoteHtml),
       sendAt: at.toISOString(),
       ...(current.inReplyToMessageId ? { inReplyToMessageId: current.inReplyToMessageId } : {}),
     }
@@ -207,8 +217,30 @@ export const useComposeStore = defineStore('compose', () => {
     }
   }
 
-  /** Follows every draft that was sent: confirmed ones are removed, failed ones offered for editing, once each. */
-  async function followUp(): Promise<void> {
+  let following: Promise<void> | null = null
+  let followAgain = false
+
+  /**
+   * Follows every draft that was sent: confirmed ones are removed, failed ones offered for editing, once each. Runs
+   * never overlap, or two could announce the same outcome; a call during a run makes it go round once more.
+   */
+  function followUp(): Promise<void> {
+    followAgain = true
+    if (following !== null) return following
+    following = (async () => {
+      try {
+        while (followAgain) {
+          followAgain = false
+          await followUpOnce()
+        }
+      } finally {
+        following = null
+      }
+    })()
+    return following
+  }
+
+  async function followUpOnce(): Promise<void> {
     for (const stored of await mail.drafts()) {
       if (stored.outgoingId === null) continue
       const outgoing = await mail.outgoing(stored.outgoingId)
@@ -250,6 +282,7 @@ export const useComposeStore = defineStore('compose', () => {
     undoable,
     openNew,
     openReply,
+    defaultSignature,
     openDraft,
     update,
     discard,

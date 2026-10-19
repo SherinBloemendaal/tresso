@@ -6,7 +6,7 @@ import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import ComposeForm from '../ComposeForm.vue'
 
-const draft: Draft = { id: 'd1', mailAccountId: 'work', to: [], cc: [], bcc: [], subject: 'Hello', html: '<p>Hi</p>', inReplyToMessageId: null, kind: 'new', outgoingId: null, noticedStatus: null, updatedAt: 1 }
+const draft: Draft = { id: 'd1', mailAccountId: 'work', to: [], cc: [], bcc: [], subject: 'Hello', html: '<p>Hi</p>', signatureId: null, quoteHtml: '', inReplyToMessageId: null, kind: 'new', outgoingId: null, noticedStatus: null, updatedAt: 1 }
 
 async function settle(): Promise<void> {
   for (let i = 0; i < 5; i++) {
@@ -18,12 +18,12 @@ async function settle(): Promise<void> {
 function setup(initial: Draft) {
   setActivePinia(createPinia())
   const mail = useMailStore()
-  mail.accounts = [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null }]
+  mail.accounts = [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }]
   const compose = useComposeStore()
   const send = vi.fn<(sendAt?: Date) => Promise<void>>(async () => {})
   compose.send = send
   compose.update = vi.fn<(changes: Partial<Draft>) => void>()
-  const wrapper = mount(ComposeForm, { props: { draft: initial }, attachTo: document.body })
+  const wrapper = mount(ComposeForm, { props: { draft: initial }, attachTo: document.body, global: { stubs: { RouterLink: true } } })
   return { wrapper, send }
 }
 

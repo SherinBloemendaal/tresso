@@ -227,7 +227,6 @@ export const useMailStore = defineStore('mail', () => {
     syncNow,
     forget,
     refresh,
-    syncNow,
     showMailbox,
     showMore,
     thread,

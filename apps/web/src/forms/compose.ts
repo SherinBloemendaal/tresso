@@ -15,6 +15,7 @@ export const composeSchema = z
     bcc: z.array(recipient),
     subject: z.string().max(998, 'The subject is too long.').refine((value) => !/[\r\n]/.test(value), 'The subject cannot contain line breaks.'),
     html: z.string().max(2_000_000, 'The message is too long.'),
+    signatureId: z.string().nullable(),
   })
   .superRefine((values, context) => {
     if (values.to.length + values.cc.length + values.bcc.length === 0) {
