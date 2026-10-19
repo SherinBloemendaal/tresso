@@ -29,7 +29,8 @@ Delivered in steps, each its own pull request:
 - [x] 1.4a Message content API: sanitized HTML body with remote content blocked by default, signed attachment URLs
 - [x] 1.4b Web client: sign-in, Unified Inbox and per-account inboxes from a local IndexedDB copy kept current by
   delta sync and realtime, reading pane rendering the body in a sandboxed frame
-- [ ] 1.4c Account management in the web client: add, edit, pause and remove mail accounts
+- [x] 1.4c Account management in the web client: server settings found from the address, add, fix, pause and remove
+  mail accounts, with the connection result shown live
 - [ ] 1.5 Compose, reply and forward, HTML signatures per account, sending through the worker, search
 - [ ] 1.6 Gmail and Microsoft 365: OAuth connection, Gmail API and Microsoft Graph sync
 
