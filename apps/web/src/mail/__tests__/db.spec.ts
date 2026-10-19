@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ChangePage, SyncedMessage } from '@tresso/core'
 import { openDB } from 'idb'
-import { databaseName, deleteMailDatabase, MailDatabase } from '../db'
+import { databaseName, deleteMailDatabase, MailDatabase, MissingFolderError } from '../db'
 
 const USER = 'user-1'
 
@@ -245,6 +245,36 @@ describe('MailDatabase', () => {
       }),
     )
     expect(db.takeArrivals().map((arrival) => arrival.messageId)).toEqual(['m8'])
+  })
+
+  it('shows actions at once and takes archived mail out of the inbox list', async () => {
+    const applied = await db.applyAction(['m1', 'm2'], 'archive')
+
+    expect(applied.after.map((m) => m.folderIds)).toEqual([['work-archive'], ['work-archive']])
+    expect((await db.inbox('work', 10)).map((c) => c.threadId)).toEqual([])
+    await db.applyAction(['m1', 'm2'], 'flag')
+    expect((await db.thread('t1'))?.messages.map((m) => m.flags.flagged)).toEqual([true, true])
+  })
+
+  it('archives into All Mail where there is no Archive folder, and says when there is neither', async () => {
+    await db.apply(page({ cursor: 11, folders: [{ id: 'home-all', mailAccountId: 'home', name: '[Gmail]/All Mail', displayName: 'All Mail', role: 'all' }] }))
+    expect((await db.applyAction(['m4'], 'archive')).after[0]?.folderIds).toEqual(['home-all'])
+
+    await expect(db.applyAction(['m4'], 'trash')).rejects.toEqual(new MissingFolderError('kim@mail.example', 'Trash'))
+    expect((await db.thread('t3'))?.messages[0]?.folderIds).toEqual(['home-all'])
+  })
+
+  it('undoes an action the server refused, except where the server has spoken since', async () => {
+    const applied = await db.applyAction(['m2', 'm3'], 'move', 'work-archive')
+    // The delta brought a newer version of m3 in the meantime.
+    await db.apply(page({ cursor: 11, messages: [message('m3', 't2', 'work', ['work-inbox'], '2026-10-19T10:00:00+00:00', { flags: { seen: true, flagged: false, answered: false, draft: false } })] }))
+
+    await db.revertAction(applied)
+
+    const thread = await db.thread('t1')
+    expect(thread?.messages.find((m) => m.id === 'm2')?.folderIds).toEqual(['work-inbox'])
+    expect((await db.thread('t2'))?.messages[0]).toMatchObject({ folderIds: ['work-inbox'], flags: { seen: true } })
+    expect((await db.inbox('work', 10)).map((c) => c.threadId).sort()).toEqual(['t1', 't2'])
   })
 
   it('keeps data per user and deletes it on request', async () => {

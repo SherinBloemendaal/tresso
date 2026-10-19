@@ -2,6 +2,7 @@ import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransactio
 import type {
   Address,
   ChangePage,
+  MessageAction,
   SyncedFolder,
   SyncedMailAccount,
   SyncedMessage,
@@ -133,6 +134,20 @@ export interface Arrival {
   snippet: string
   receivedAt: string
   verdict: 'do' | 'delegate'
+}
+
+/** The account has no folder for the action, e.g. nothing to archive into. */
+export class MissingFolderError extends Error {
+  constructor(readonly account: string, readonly folder: string) {
+    super(`${account} has no ${folder} folder.`)
+    this.name = 'MissingFolderError'
+  }
+}
+
+/** Messages as they were before {@link MailDatabase.applyAction} and as it left them, to undo it with. */
+export interface AppliedAction {
+  before: SyncedMessage[]
+  after: SyncedMessage[]
 }
 
 function needsTheUser(message: SyncedMessage | undefined): boolean {
@@ -302,6 +317,103 @@ export class MailDatabase implements SyncStore {
     await tx.objectStore('meta').put(page.cursor, 'cursor')
     await tx.done
     this.arrivals.push(...arrivals)
+  }
+
+  /**
+   * Makes an action show at once, before the server confirms it: flags change, and archived, trashed or moved
+   * messages change folders (archiving takes them out of the inbox into Archive, or All Mail where there is none).
+   * The delta brings the server's version right after.
+   *
+   * @throws MissingFolderError when an account has nothing to archive or trash into; nothing changes then
+   */
+  async applyAction(messageIds: string[], action: MessageAction, folderId?: string): Promise<AppliedAction> {
+    const tx = this.db.transaction(ALL_STORES, 'readwrite')
+    const folders = await tx.objectStore('folders').getAll()
+    const accounts = new Map((await tx.objectStore('mailAccounts').getAll()).map((account) => [account.id, account.emailAddress]))
+    const byRole = (accountId: string, ...roles: SyncedFolder['role'][]): SyncedFolder | undefined => {
+      for (const role of roles) {
+        const folder = folders.find((candidate) => candidate.mailAccountId === accountId && candidate.role === role)
+        if (folder !== undefined) {
+          return folder
+        }
+      }
+      return undefined
+    }
+    const inboxFolders = new Set(folders.filter((folder) => folder.role === 'inbox').map((folder) => folder.id))
+
+    const before: SyncedMessage[] = []
+    for (const id of messageIds) {
+      const message = await tx.objectStore('messages').get(id)
+      if (message !== undefined) {
+        before.push(message)
+      }
+    }
+
+    const after = before.map((message) => {
+      const flags = message.flags
+      switch (action) {
+        case 'markRead':
+        case 'markUnread':
+          return { ...message, flags: { ...flags, seen: action === 'markRead' } }
+        case 'flag':
+        case 'unflag':
+          return { ...message, flags: { ...flags, flagged: action === 'flag' } }
+        case 'archive': {
+          const target = byRole(message.mailAccountId, 'archive', 'all')
+          if (target === undefined) {
+            throw new MissingFolderError(accounts.get(message.mailAccountId) ?? message.mailAccountId, 'Archive')
+          }
+          if (!message.folderIds.some((id) => inboxFolders.has(id))) {
+            return message
+          }
+          return { ...message, folderIds: withFolder(message.folderIds.filter((id) => !inboxFolders.has(id)), target.id) }
+        }
+        case 'trash': {
+          const target = byRole(message.mailAccountId, 'trash')
+          if (target === undefined) {
+            throw new MissingFolderError(accounts.get(message.mailAccountId) ?? message.mailAccountId, 'Trash')
+          }
+          return { ...message, folderIds: [target.id] }
+        }
+        case 'move':
+          if (folderId === undefined) {
+            throw new Error('A move needs a folder.')
+          }
+          return { ...message, folderIds: [folderId] }
+      }
+    })
+
+    const affected = new Set<string>()
+    for (const message of after) {
+      await tx.objectStore('messages').put(message)
+      affected.add(message.threadId)
+    }
+    for (const threadId of affected) {
+      await refreshConversation(tx, threadId, inboxFolders)
+    }
+    await tx.done
+
+    return { before, after }
+  }
+
+  /** Puts back what {@link applyAction} changed, on the messages the delta has not updated since. */
+  async revertAction(applied: AppliedAction): Promise<void> {
+    const tx = this.db.transaction(ALL_STORES, 'readwrite')
+    const inboxFolders = new Set(
+      (await tx.objectStore('folders').getAll()).filter((folder) => folder.role === 'inbox').map((folder) => folder.id),
+    )
+    const affected = new Set<string>()
+    for (const [index, previous] of applied.before.entries()) {
+      const current = await tx.objectStore('messages').get(previous.id)
+      if (current !== undefined && JSON.stringify(current) === JSON.stringify(applied.after[index])) {
+        await tx.objectStore('messages').put(previous)
+        affected.add(previous.threadId)
+      }
+    }
+    for (const threadId of affected) {
+      await refreshConversation(tx, threadId, inboxFolders)
+    }
+    await tx.done
   }
 
   /** The arrivals of the pages applied since the last call, oldest first. */
@@ -482,6 +594,10 @@ async function rememberContacts(tx: WriteTx, message: SyncedMessage): Promise<vo
       messages: (known?.messages ?? 0) + 1,
     })
   }
+}
+
+function withFolder(folderIds: string[], folderId: string): string[] {
+  return folderIds.includes(folderId) ? folderIds : [...folderIds, folderId]
 }
 
 async function refreshConversation(tx: WriteTx, threadId: string, inboxFolders: Set<string>): Promise<void> {

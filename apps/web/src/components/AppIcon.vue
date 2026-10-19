@@ -16,6 +16,10 @@ const paths = {
   forward: ['M15 14l5-5-5-5', 'M20 9H10a6 6 0 00-6 6v4'],
   search: ['M11 4a7 7 0 100 14 7 7 0 000-14z', 'M20 20l-3.5-3.5'],
   close: ['M6 6l12 12', 'M18 6L6 18'],
+  archive: ['M3 4h18v4H3z', 'M5 8v12h14V8', 'M10 12h4'],
+  trash: ['M4 7h16', 'M9 7V4h6v3', 'M6 7l1 13h10l1-13'],
+  unread: ['M3 6h18v12H3z', 'M3 7l9 6 9-6'],
+  folder: ['M3 6h6l2 2h10v11H3z'],
 } as const
 
 defineProps<{ name: keyof typeof paths; size?: number; label?: string }>()

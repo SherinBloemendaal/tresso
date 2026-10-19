@@ -3,7 +3,11 @@ import { defineStore } from 'pinia'
 import {
   RealtimeClient,
   SyncEngine,
+  MAX_MESSAGES_PER_ACTION,
   type ChangePage,
+  type MessageAction,
+  type MessageActionRequest,
+  type MessageActionResult,
   type MessageBody,
   type RealtimeAccess,
   type DraftRequest,
@@ -209,6 +213,33 @@ export const useMailStore = defineStore('mail', () => {
     return auth.api<MessageBody>(`/api/v1/messages/${encodeURIComponent(messageId)}/body${query}`)
   }
 
+  /**
+   * Reads, flags, archives, trashes or moves messages: the change shows at once and is undone here when the server
+   * refuses it. Large selections go in batches of {@link MAX_MESSAGES_PER_ACTION}.
+   */
+  async function act(messageIds: string[], action: MessageAction, folderId?: string): Promise<void> {
+    const database = db.value
+    if (database === null || messageIds.length === 0) {
+      return
+    }
+    const applied = await database.applyAction(messageIds, action, folderId)
+    await refresh()
+    try {
+      for (let start = 0; start < messageIds.length; start += MAX_MESSAGES_PER_ACTION) {
+        const request: MessageActionRequest = { messageIds: messageIds.slice(start, start + MAX_MESSAGES_PER_ACTION), action }
+        if (folderId !== undefined) {
+          request.folderId = folderId
+        }
+        await auth.send<MessageActionResult>('POST', '/api/v1/message-actions', request)
+      }
+    } catch (error) {
+      await database.revertAction(applied)
+      await refresh()
+      throw error
+    }
+    void syncNow()
+  }
+
   function send(request: SendMessageRequest): Promise<SyncedOutgoingMessage> {
     return auth.send<SyncedOutgoingMessage>('POST', '/api/v1/outgoing-messages', request)
   }
@@ -374,6 +405,7 @@ export const useMailStore = defineStore('mail', () => {
     start,
     stop,
     syncNow,
+    act,
     forget,
     refresh,
     showMailbox,
