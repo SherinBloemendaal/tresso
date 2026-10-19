@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"tresso/sync/internal/providersend"
 )
@@ -341,13 +342,29 @@ func (f *fakeGmail) list(w http.ResponseWriter, q map[string][]string) {
 		if id, ok := strings.CutPrefix(search, "rfc822msgid:"); ok && providersend.HeaderValue(m.raw, "Message-ID") != "<"+id+">" {
 			continue
 		}
+		// in:sent never finds a sent copy in Trash, even with includeSpamTrash; from:me does.
 		if rest, ok := strings.CutPrefix(search, "in:sent after:"); ok {
 			after, recipients, _ := strings.Cut(rest, " ")
+			seconds, _ := strconv.ParseInt(after, 10, 64)
+			if !slices.Contains(m.labels, "SENT") || slices.Contains(m.labels, "TRASH") || m.received < seconds*1000 {
+				continue
+			}
+			if recipients != "" && !f.sentTo(m, recipients) {
+				continue
+			}
+		}
+		if rest, ok := strings.CutPrefix(search, "from:me after:"); ok {
+			after, narrowing, _ := strings.Cut(rest, " ")
 			seconds, _ := strconv.ParseInt(after, 10, 64)
 			if !slices.Contains(m.labels, "SENT") || m.received < seconds*1000 {
 				continue
 			}
-			if recipients != "" && !f.sentTo(m, recipients) {
+			group, subject, _ := strings.Cut(narrowing, ` subject:"`)
+			if group != "" && !f.sentTo(m, group) {
+				continue
+			}
+			// Gmail matches a subject by its words: a term without any matches nothing.
+			if subject = strings.TrimSuffix(subject, `"`); subject != "" && (!hasWord(subject) || !strings.Contains(strings.ToLower(providersend.HeaderValue(m.raw, "Subject")), strings.ToLower(subject))) {
 				continue
 			}
 		}
@@ -484,4 +501,8 @@ func (f *fakeGmail) addSent(raw []byte, ms int64) {
 	defer f.mu.Unlock()
 	m := f.store(raw, "", "SENT")
 	m.received = ms
+}
+
+func hasWord(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) })
 }

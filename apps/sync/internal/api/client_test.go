@@ -284,3 +284,16 @@ func TestMailboxChangesAreClaimedAndReported(t *testing.T) {
 		t.Errorf("a lost claim is reported as such, got %v", err)
 	}
 }
+
+// Fails without the LastAttempt field: the API's lastAttempt flag decides which text ends an undecided message.
+func TestClaimedOutgoingMessagesSayWhetherItIsTheLastAttempt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"messages":[{"id":"o1","rawObjectKey":"outgoing/aa/1","envelopeFrom":"kim@example.test","recipients":["sam@example.test"],"messageId":"o1@example.test","attempt":6,"lastAttempt":true}]}`))
+	}))
+	defer srv.Close()
+
+	messages, err := NewWithHTTPClient(srv.URL, srv.Client()).ClaimOutbox(context.Background(), "acc-1", "w1")
+	if err != nil || len(messages) != 1 || messages[0].Attempt != 6 || !messages[0].LastAttempt {
+		t.Fatalf("messages = %+v, %v", messages, err)
+	}
+}

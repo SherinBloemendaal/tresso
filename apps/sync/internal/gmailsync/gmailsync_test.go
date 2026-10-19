@@ -595,10 +595,10 @@ func TestEarlierSendIsFoundWhenGmailReplacedTheMessageID(t *testing.T) {
 	}
 	since := time.Now().Add(-time.Hour)
 	sam := []string{"sam@example.test"}
-	if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: sam}, since); err != nil || !found {
+	if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: sam}, marked, since); err != nil || !found {
 		t.Errorf("SentBefore = %v, %v; want the earlier send found by its outbox marker", found, err)
 	}
-	if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: sam}, since); err != nil || found {
+	if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: sam}, marked, since); err != nil || found {
 		t.Errorf("SentBefore(other) = %v, %v", found, err)
 	}
 }
@@ -713,12 +713,12 @@ func TestDuplicateCheckOnlyReadsMailToTheRecipient(t *testing.T) {
 	store := OpenSent(context.Background(), client)
 	since := now.Add(-time.Hour)
 
-	found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, since)
+	found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, marked, since)
 	if err != nil || !found {
 		t.Errorf("SentBefore = %v, %v", found, err)
 	}
 	// A message whose first attempt failed before sending: decided "not sent", so the retry sends it.
-	found, err = store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: []string{"anna@example.test"}}, since)
+	found, err = store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: []string{"anna@example.test"}}, marked, since)
 	if err != nil || found {
 		t.Errorf("SentBefore(never sent) = %v, %v", found, err)
 	}
@@ -754,5 +754,101 @@ func TestDraftRemovalOnlyLooksAtDraftsSinceTheDraftStarted(t *testing.T) {
 	}
 	if h.gmail.metadataGets > 2 {
 		t.Errorf("%d metadata requests; drafts older than the draft may not be read", h.gmail.metadataGets)
+	}
+}
+
+func sentWithSubject(to, subject, messageID string) []byte {
+	return []byte("From: kim@example.test\r\nTo: " + to + "\r\nSubject: " + subject + "\r\nMessage-ID: <" + messageID + ">\r\n\r\nHello\r\n")
+}
+
+// Fails on the earlier code: the scan stopped at 2000 messages and called the question undecided, which used up the
+// message's attempts. The subject narrows the search, and the whole window is read when it still holds many.
+func TestDuplicateCheckReadsTheWholeWindowForABusyRecipient(t *testing.T) {
+	h := newHarness(t)
+	h.gmail.rewriteIDs = true
+	now := time.Now()
+	for i := range 2100 {
+		h.gmail.addSent(sentWithSubject("sam@example.test", "Status", fmt.Sprintf("busy-%d@example.test", i)), now.Add(-time.Minute).UnixMilli()-int64(i))
+	}
+	client := sendClient(h, h.syncer.opts.Client)
+	store := OpenSent(context.Background(), client)
+	since := now.Add(-time.Hour)
+
+	// Another subject: only our copy is read.
+	ours := sentWithSubject("sam@example.test", "Quarterly numbers", "o1@example.test")
+	marked, _ := providersend.SetHeader(ours, providersend.OutgoingIDHeader, providersend.OutgoingMarker("outgoing-1", "o1@example.test"))
+	if err := Send(context.Background(), client, marked, []string{"sam@example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, marked, since)
+	if err != nil || !found || h.gmail.metadataGets > 1 {
+		t.Errorf("SentBefore = %v, %v after %d reads", found, err, h.gmail.metadataGets)
+	}
+
+	// The same subject as 2100 others, never sent: every one is read and the answer is "not sent", not undecided.
+	h.gmail.metadataGets = 0
+	same := sentWithSubject("sam@example.test", "Status", "o2@example.test")
+	found, err = store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: []string{"sam@example.test"}}, same, since)
+	if err != nil || found || h.gmail.metadataGets != 2100 {
+		t.Errorf("SentBefore(never sent) = %v, %v after %d reads", found, err, h.gmail.metadataGets)
+	}
+}
+
+// Fails on the earlier code: in:sent does not find a sent copy the user moved to Trash, so a retry sent it again.
+func TestDuplicateCheckFindsASentCopyInTrash(t *testing.T) {
+	h := newHarness(t)
+	h.gmail.rewriteIDs = true
+	client := sendClient(h, h.syncer.opts.Client)
+	raw := sentWithSubject("sam@example.test", "Hi", "o1@example.test")
+	marked, _ := providersend.SetHeader(raw, providersend.OutgoingIDHeader, providersend.OutgoingMarker("outgoing-1", "o1@example.test"))
+	if err := Send(context.Background(), client, marked, []string{"sam@example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	h.gmail.mu.Lock()
+	for _, m := range h.gmail.messages {
+		m.labels = append(m.labels, "TRASH")
+	}
+	h.gmail.mu.Unlock()
+
+	found, err := OpenSent(context.Background(), client).SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, marked, time.Now().Add(-time.Hour))
+	if err != nil || !found {
+		t.Errorf("SentBefore = %v, %v; the copy in Trash was sent", found, err)
+	}
+}
+
+// Fails on the earlier code: removing a copy that is gone read the header of every draft since the draft started
+// (a day before it, for clock differences), however long ago that was. Now at most a week back is read.
+func TestRemovingAGoneDraftCopyReadsAtMostAWeekOfDrafts(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now()
+	for i := range 300 {
+		h.gmail.addDraft(sentWithSubject("other@example.test", "Old", fmt.Sprintf("old-%d@example.test", i)), now.Add(-10*24*time.Hour).UnixMilli())
+	}
+	draftID := fakeapi.UUIDv7(now.Add(-30*24*time.Hour), 1)
+	drafts := OpenDrafts(context.Background(), sendClient(h, h.syncer.opts.Client))
+
+	if err := drafts.Remove(draftID + ".4@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if h.gmail.metadataGets != 0 {
+		t.Errorf("%d drafts read for a copy that is gone", h.gmail.metadataGets)
+	}
+}
+
+// Fails on the earlier code: Gmail matches a subject by its words, so a subject of only punctuation matched nothing,
+// the earlier copy was not found, and the retry sent the message again.
+func TestDuplicateCheckIgnoresASubjectWithoutWords(t *testing.T) {
+	h := newHarness(t)
+	h.gmail.rewriteIDs = true
+	client := sendClient(h, h.syncer.opts.Client)
+	raw := sentWithSubject("sam@example.test", "???", "o1@example.test")
+	marked, _ := providersend.SetHeader(raw, providersend.OutgoingIDHeader, providersend.OutgoingMarker("outgoing-1", "o1@example.test"))
+	if err := Send(context.Background(), client, marked, []string{"sam@example.test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := OpenSent(context.Background(), client).SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, marked, time.Now().Add(-time.Hour))
+	if err != nil || !found {
+		t.Errorf("SentBefore = %v, %v", found, err)
 	}
 }

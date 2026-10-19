@@ -52,16 +52,18 @@ func (s *DraftsStore) AppendDraft(raw []byte, _ time.Time) error {
 // Remove deletes every draft whose message has this Message-ID (without angle brackets), or carries its marker in
 // providersend.DraftCopyHeader when Gmail replaced the Message-ID. A draft that is gone already counts as removed.
 //
-// The marker is only looked for among drafts that came after the copy could have been made (draftsSince), newest
-// first and at most maxScan of them. A copy not found there was never filed or is gone: it counts as removed, so the
-// removal never comes back for ever.
+// The marker is only looked for among drafts that came after the copy could have been made (draftsSince), and at
+// most a week back. Gmail search cannot match custom headers, so each of those drafts costs a metadata read (5 quota
+// units); batching would only save round trips, not quota, so the window is the bound. A copy not found there was
+// never filed, is gone, or is older than a week and had its Message-ID replaced by Gmail: it counts as removed (the
+// last case leaves an extra draft in Gmail, nothing is lost), so the removal never comes back for ever.
 func (s *DraftsStore) Remove(messageID string) error {
 	targets, err := s.drafts(url.Values{"q": {"rfc822msgid:" + messageID}}, 0)
 	if err != nil {
 		return err
 	}
 	if len(targets) == 0 {
-		recent, err := s.drafts(url.Values{"q": {fmt.Sprintf("after:%d", draftsSince(messageID, time.Now()).Unix())}}, maxScan)
+		recent, err := s.drafts(url.Values{"q": {fmt.Sprintf("after:%d", draftsSince(messageID, time.Now()).Unix())}}, 0)
 		if err != nil {
 			return err
 		}
@@ -90,22 +92,23 @@ func (s *DraftsStore) Remove(messageID string) error {
 
 type draftRef struct{ id, messageID string }
 
-// draftCopyWindow bounds how far back a draft copy is looked for when its Message-ID does not say when the draft was
-// started.
-const draftCopyWindow = 30 * 24 * time.Hour
+// draftCopyWindow is how far back a draft copy is looked for by its header.
+const draftCopyWindow = 7 * 24 * time.Hour
 
 // draftClockMargin allows for the clock of the device that chose the draft's id: clients make draft ids, so a device
 // whose clock runs ahead would otherwise start the search after its copies were filed.
 const draftClockMargin = 24 * time.Hour
 
-// draftsSince is the earliest a copy with this Message-ID can have been filed: the API composes a draft copy's
-// Message-ID from the draft's id (<draft id>.<version>@domain), and a UUIDv7 id says when the draft was started.
+// draftsSince is where the header search for a copy with this Message-ID starts: the earliest it can have been filed
+// (the API composes a draft copy's Message-ID from the draft's id, <draft id>.<version>@domain, and a UUIDv7 id says
+// when the draft was started), but never more than draftCopyWindow back.
 func draftsSince(messageID string, now time.Time) time.Time {
+	since := now.Add(-draftCopyWindow)
 	draftID, _, _ := strings.Cut(messageID, ".")
-	if started, ok := providersend.UUIDv7Time(draftID); ok {
+	if started, ok := providersend.UUIDv7Time(draftID); ok && started.Add(-draftClockMargin).After(since) {
 		return started.Add(-draftClockMargin)
 	}
-	return now.Add(-draftCopyWindow)
+	return since
 }
 
 // drafts lists the drafts matching query, newest first; at most limit of them when limit is above 0.

@@ -1,6 +1,7 @@
 package graphsync
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -318,7 +319,7 @@ func TestSendPostsBase64MIMEWithBcc(t *testing.T) {
 	h := newHarness(t)
 	message := []byte("From: kim@example.test\r\nTo: anna@example.test\r\nSubject: Hi\r\n\r\nHello\r\n")
 
-	if err := Send(context.Background(), sendClient(h, h.syncer.opts.Client), message, []string{"anna@example.test", "hidden@example.test"}); err != nil {
+	if err := Send(context.Background(), sendClient(h, h.syncer.opts.Client), message, []string{"anna@example.test", "hidden@example.test"}, "marker-1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -338,7 +339,7 @@ func TestSendPostsBase64MIMEWithBcc(t *testing.T) {
 func TestSendErrors(t *testing.T) {
 	h := newHarness(t)
 	h.graph.fail(http.StatusBadRequest, `{"error":{"code":"ErrorInvalidRecipients","message":"At least one recipient is not valid."}}`)
-	err := Send(context.Background(), sendClient(h, h.syncer.opts.Client), []byte("To: a@example.test\r\n\r\nx"), nil)
+	err := Send(context.Background(), sendClient(h, h.syncer.opts.Client), []byte("To: a@example.test\r\n\r\nx"), nil, "marker-1")
 	var sendErr *providersend.Error
 	if !errors.As(err, &sendErr) || !sendErr.Permanent || sendErr.Message != "Outlook refused the message. Outlook said: ErrorInvalidRecipients: At least one recipient is not valid." {
 		t.Errorf("400: %#v", err)
@@ -347,13 +348,13 @@ func TestSendErrors(t *testing.T) {
 	opts := h.syncer.opts.Client
 	opts.HTTP.MaxAttempts = 1
 	h.graph.fail(http.StatusServiceUnavailable, `{"error":{"code":"ServiceUnavailable"}}`)
-	err = Send(context.Background(), sendClient(h, opts), []byte("To: a@example.test\r\n\r\nx"), nil)
+	err = Send(context.Background(), sendClient(h, opts), []byte("To: a@example.test\r\n\r\nx"), nil, "marker-1")
 	if !errors.As(err, &sendErr) || sendErr.Permanent {
 		t.Errorf("503: %#v", err)
 	}
 
 	big := append([]byte("To: a@example.test\r\n\r\n"), make([]byte, maxSendBody)...)
-	err = Send(context.Background(), sendClient(h, opts), big, nil)
+	err = Send(context.Background(), sendClient(h, opts), big, nil, "marker-1")
 	if !errors.As(err, &sendErr) || !sendErr.Permanent || len(h.graph.sent) != 0 {
 		t.Errorf("too large: %#v, sent %d", err, len(h.graph.sent))
 	}
@@ -705,7 +706,7 @@ func TestEarlierSendIsFoundWhenExchangeReplacedTheMessageID(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Send(context.Background(), client, marked, []string{"sam@example.test"}); err != nil {
+		if err := Send(context.Background(), client, marked, []string{"sam@example.test"}, "marker-1"); err != nil {
 			t.Fatal(err)
 		}
 
@@ -715,10 +716,10 @@ func TestEarlierSendIsFoundWhenExchangeReplacedTheMessageID(t *testing.T) {
 		}
 		since := time.Now().Add(-time.Hour)
 		sam := []string{"sam@example.test"}
-		if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: sam}, since); err != nil || !found {
+		if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: sam}, nil, since); err != nil || !found {
 			t.Errorf("properties %v: SentBefore = %v, %v; want the earlier send found by its outbox id", asProperty, found, err)
 		}
-		if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: sam}, since); err != nil || found {
+		if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: sam}, nil, since); err != nil || found {
 			t.Errorf("properties %v: SentBefore(other) = %v, %v", asProperty, found, err)
 		}
 	}
@@ -770,17 +771,17 @@ func TestDuplicateCheckOnlyReadsSentItemsToTheRecipient(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Send(context.Background(), client, marked, []string{"sam@example.test"}); err != nil {
+		if err := Send(context.Background(), client, marked, []string{"sam@example.test"}, "marker-1"); err != nil {
 			t.Fatal(err)
 		}
 		store := OpenSent(context.Background(), client)
 		since := now.Add(-time.Hour)
 
-		found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, since)
+		found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, nil, since)
 		if err != nil || !found {
 			t.Errorf("refused %v: SentBefore = %v, %v", refused, found, err)
 		}
-		found, err = store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: []string{"anna@example.test"}}, since)
+		found, err = store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: []string{"anna@example.test"}}, nil, since)
 		if err != nil || found {
 			t.Errorf("refused %v: SentBefore(never sent) = %v, %v", refused, found, err)
 		}
@@ -817,5 +818,183 @@ func TestDraftRemovalOnlyLooksAtDraftsSinceTheDraftStarted(t *testing.T) {
 	}
 	if h.graph.headerReads > 2 {
 		t.Errorf("%d drafts read; drafts older than the draft may not be", h.graph.headerReads)
+	}
+}
+
+// Fails on the earlier code, which sent with sendMail and looked for the X- header: when Exchange keeps neither the
+// Message-ID nor the header, the earlier attempt's copy was not found and the retry sent the message twice. Sending
+// through a draft marked with an extended property finds it with one request.
+func TestEarlierSendIsFoundByItsExtendedProperty(t *testing.T) {
+	h := newHarness(t)
+	h.graph.rewriteIDs, h.graph.stripCustomHeaders = true, true
+	client := sendClient(h, h.syncer.opts.Client)
+	marker := providersend.OutgoingMarker("outgoing-1", "o1@example.test")
+	if err := Send(context.Background(), client, mailTo("sam@example.test", "o1@example.test"), []string{"sam@example.test"}, marker); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.graph.log(); !slices.Equal(got, []string{"create draft-1", "send draft-1"}) {
+		t.Errorf("ops = %v; the message goes out through a draft", got)
+	}
+
+	store := OpenSent(context.Background(), client)
+	h.graph.headerReads = 0
+	found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, nil, time.Now().Add(-time.Hour))
+	if err != nil || !found {
+		t.Errorf("SentBefore = %v, %v", found, err)
+	}
+	if h.graph.headerReads != 0 {
+		t.Errorf("%d messages read; the property filter needs none", h.graph.headerReads)
+	}
+}
+
+// Fails on the earlier code, which deleted any marked draft it found: a draft left by a failed send may still be
+// sent by Exchange (it accepts the send and sends a little later), so a young one is "not decided yet", and only one
+// that stayed in Drafts for 15 minutes counts as stopped: it is deleted, and the message is sent anew.
+func TestADraftLeftByAFailedSendCountsAsStoppedOnlyWhenOldEnough(t *testing.T) {
+	h := newHarness(t)
+	client := sendClient(h, h.syncer.opts.Client)
+	marker := providersend.OutgoingMarker("outgoing-1", "o1@example.test")
+	h.graph.failSend = http.StatusBadGateway // may have sent: the draft stays
+	if err := Send(context.Background(), client, mailTo("sam@example.test", "o1@example.test"), []string{"sam@example.test"}, marker); err == nil {
+		t.Fatal("the failed send reported success")
+	}
+	message := api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}
+	store := OpenSent(context.Background(), client)
+
+	found, err := store.SentBefore(message, nil, time.Now().Add(-time.Hour))
+	if found || !errors.Is(err, providersend.ErrMaybeSending) {
+		t.Errorf("young draft: SentBefore = %v, %v; want may still be sending", found, err)
+	}
+
+	h.graph.age("draft-1", 20*time.Minute)
+	found, err = store.SentBefore(message, nil, time.Now().Add(-time.Hour))
+	if err != nil || found {
+		t.Errorf("old draft: SentBefore = %v, %v; the message was never sent", found, err)
+	}
+	if got := h.graph.log(); !slices.Equal(got, []string{"create draft-1", "delete draft-1"}) {
+		t.Errorf("ops = %v", got)
+	}
+
+	// A refused send (4xx) cannot have gone out: its draft is deleted at once.
+	h.graph.failSend = http.StatusBadRequest
+	if err := Send(context.Background(), client, mailTo("sam@example.test", "o2@example.test"), []string{"sam@example.test"}, "marker-2"); err == nil {
+		t.Fatal("the refused send reported success")
+	}
+	if got := h.graph.log(); !slices.Equal(got[2:], []string{"create draft-2", "delete draft-2"}) {
+		t.Errorf("ops = %v", got)
+	}
+}
+
+// Fails on the earlier code: a draft in the Outbox is on its way however old it looks.
+func TestADraftInTheOutboxIsNotDecidedYet(t *testing.T) {
+	h := newHarness(t)
+	client := sendClient(h, h.syncer.opts.Client)
+	h.graph.failSend = http.StatusGatewayTimeout
+	_ = Send(context.Background(), client, mailTo("sam@example.test", "o1@example.test"), []string{"sam@example.test"}, providersend.OutgoingMarker("outgoing-1", "o1@example.test"))
+	h.graph.mu.Lock()
+	h.graph.messages["draft-1"].folder = "f-outbox"
+	h.graph.mu.Unlock()
+	h.graph.age("draft-1", time.Hour)
+
+	found, err := OpenSent(context.Background(), client).SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, nil, time.Now().Add(-2*time.Hour))
+	if found || !errors.Is(err, providersend.ErrMaybeSending) {
+		t.Errorf("SentBefore = %v, %v; want may still be sending", found, err)
+	}
+	if got := h.graph.log(); slices.Contains(got, "delete draft-1") {
+		t.Errorf("a draft on its way was deleted: %v", got)
+	}
+}
+
+// Fails on the earlier code: when marking failed and so did deleting the unmarked draft, the retry's Message-ID
+// lookup (over the whole mailbox) took that draft for a sent copy, and the message was never sent.
+func TestAnUnmarkedLeftoverDraftIsNotTakenForASentCopy(t *testing.T) {
+	h := newHarness(t)
+	client := sendClient(h, h.syncer.opts.Client)
+	h.graph.failPatch, h.graph.failDelete = http.StatusBadGateway, http.StatusServiceUnavailable
+	if err := Send(context.Background(), client, mailTo("sam@example.test", "o1@example.test"), []string{"sam@example.test"}, providersend.OutgoingMarker("outgoing-1", "o1@example.test")); err == nil {
+		t.Fatal("a send whose draft could not be marked reported success")
+	}
+	message := api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}
+	store := OpenSent(context.Background(), client)
+
+	if found, err := store.SentBefore(message, nil, time.Now().Add(-time.Hour)); found || !errors.Is(err, providersend.ErrNotDecided) {
+		t.Errorf("young leftover: SentBefore = %v, %v", found, err)
+	}
+	h.graph.age("draft-1", 20*time.Minute)
+	if found, err := store.SentBefore(message, nil, time.Now().Add(-time.Hour)); found || err != nil {
+		t.Errorf("old leftover: SentBefore = %v, %v; want not sent", found, err)
+	}
+	if got := h.graph.log(); !slices.Contains(got, "delete draft-1") {
+		t.Errorf("the leftover draft stayed: %v", got)
+	}
+}
+
+// Fails on the earlier code, which deleted the draft and failed the send when the marker was refused: a 4xx on the
+// PATCH means Exchange does not take markers on MIME drafts, so the draft goes out unmarked, logged once per account.
+func TestARefusedMarkerSendsUnmarked(t *testing.T) {
+	h := newHarness(t)
+	var logs bytes.Buffer
+	opts := h.syncer.opts.Client
+	opts.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	opts.Account = "acc-refused-marker"
+	client := sendClient(h, opts)
+	for i, id := range []string{"o1", "o2"} {
+		h.graph.failPatch = http.StatusBadRequest
+		if err := Send(context.Background(), client, mailTo("sam@example.test", id+"@example.test"), []string{"sam@example.test"}, fmt.Sprintf("marker-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	want := []string{"create draft-1", "patch refused draft-1", "send draft-1", "create draft-2", "patch refused draft-2", "send draft-2"}
+	if got := h.graph.log(); !slices.Equal(got, want) {
+		t.Errorf("ops = %v\nwant %v", got, want)
+	}
+	if n := strings.Count(logs.String(), "refused the Tresso marker"); n != 1 {
+		t.Errorf("logged %d times, want once: %s", n, logs.String())
+	}
+	// The unmarked copy is still found, by its Message-ID.
+	found, err := OpenSent(context.Background(), client).SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, nil, time.Now().Add(-time.Hour))
+	if err != nil || !found {
+		t.Errorf("SentBefore = %v, %v", found, err)
+	}
+}
+
+// Fails on the earlier code: the header fallback stopped at 2000 Sent Items and called the question undecided.
+func TestDuplicateFallbackReadsTheWholeWindow(t *testing.T) {
+	h := newHarness(t)
+	now := time.Now()
+	for i := range 2100 {
+		h.graph.addAt(fmt.Sprintf("busy-%d", i), "f-sent", now.Add(-time.Minute), mailTo("sam@example.test", fmt.Sprintf("busy-%d@example.test", i)))
+	}
+	store := OpenSent(context.Background(), sendClient(h, h.syncer.opts.Client))
+
+	found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: []string{"sam@example.test"}}, nil, now.Add(-time.Hour))
+	if err != nil || found || h.graph.headerReads != 2100 {
+		t.Errorf("SentBefore(never sent) = %v, %v after %d reads", found, err, h.graph.headerReads)
+	}
+}
+
+// Fails on the earlier code: draft copies were found by Message-ID or by reading headers; the property filter needs
+// no reads, also when Exchange replaced the Message-ID.
+func TestDraftCopiesAreRemovedByTheirExtendedProperty(t *testing.T) {
+	h := newHarness(t)
+	h.graph.rewriteIDs = true
+	drafts := OpenDrafts(context.Background(), sendClient(h, h.syncer.opts.Client))
+	for _, n := range []string{"1", "2"} {
+		if err := drafts.AppendDraft(mailTo("sam@example.test", "d1."+n+"@example.test"), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.graph.headerReads = 0
+
+	if err := drafts.Remove("d1.1@example.test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := h.graph.log(); !slices.Equal(got, []string{"create draft-1", "create draft-2", "delete draft-1"}) {
+		t.Errorf("ops = %v", got)
+	}
+	if h.graph.headerReads != 0 {
+		t.Errorf("%d drafts read; the property filter needs none", h.graph.headerReads)
 	}
 }

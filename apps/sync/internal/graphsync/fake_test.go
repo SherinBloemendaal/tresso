@@ -54,6 +54,12 @@ type fakeGraph struct {
 	rewriteIDs bool
 	// headersAsProperties returns custom headers only as named extended properties, not as internetMessageHeaders.
 	headersAsProperties bool
+	// stripCustomHeaders drops the X- headers of a message it sends, as Exchange may.
+	stripCustomHeaders bool
+	// failSend answers the next draft send with this status, once.
+	failSend int
+	// failPatch answers the next PATCH with this status, once; failDelete the next permanentDelete.
+	failPatch, failDelete int
 	// refuseRecipientFilter answers a recipient filter with 400, as a Graph that does not support it would.
 	refuseRecipientFilter bool
 	// headerReads counts listed messages whose headers were asked for, to show how much a lookup reads.
@@ -69,6 +75,8 @@ type fakeMessage struct {
 	flagged    bool
 	received   time.Time // zero: Graph reports no receive time, only the creation time
 	created    time.Time
+	draft      bool
+	props      map[string]string // extended properties by id
 }
 
 type fakeEvent struct {
@@ -101,7 +109,7 @@ func (f *fakeGraph) standardTree() {
 		{"f-sent", "Sent Items", ""}, {"f-inbox", "Inbox", ""}, {"f-proj", "Projects", "f-inbox"}, {"f-acme", "Acme", "f-proj"},
 		{"f-drafts", "Drafts", ""}, {"f-trash", "Deleted Items", ""}, {"f-junk", "Junk Email", ""}, {"f-notes", "Notes", ""},
 	}
-	f.wellKnown = map[string]string{"inbox": "f-inbox", "sentitems": "f-sent", "drafts": "f-drafts", "deleteditems": "f-trash", "junkemail": "f-junk"}
+	f.wellKnown = map[string]string{"inbox": "f-inbox", "sentitems": "f-sent", "drafts": "f-drafts", "deleteditems": "f-trash", "junkemail": "f-junk", "outbox": "f-outbox"}
 }
 
 func (f *fakeGraph) add(id, folder string, received int, raw []byte) {
@@ -227,7 +235,7 @@ func (f *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.nextID++
 		id := "draft-" + strconv.Itoa(f.nextID)
-		f.messages[id] = &fakeMessage{id: id, folder: f.wellKnown["drafts"], raw: f.rewrite(raw, id), created: time.Now().UTC(), received: time.Now().UTC()}
+		f.messages[id] = &fakeMessage{id: id, folder: f.wellKnown["drafts"], raw: f.rewrite(raw, id), created: time.Now().UTC(), received: time.Now().UTC(), draft: true}
 		f.event(f.wellKnown["drafts"], id)
 		f.ops = append(f.ops, "create "+id)
 		w.WriteHeader(http.StatusCreated)
@@ -248,6 +256,58 @@ func (f *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 		item := f.item(m)
 		item["parentFolderId"] = m.folder
 		writeJSON(w, item)
+	case r.Method == http.MethodPatch && len(parts) == 2 && parts[0] == "messages":
+		m, ok := f.messages[parts[1]]
+		if !ok {
+			writeError(w, http.StatusNotFound, `{"error":{"code":"ErrorItemNotFound"}}`)
+			return
+		}
+		if f.failPatch != 0 {
+			status := f.failPatch
+			f.failPatch = 0
+			f.ops = append(f.ops, "patch refused "+m.id)
+			writeError(w, status, `{"error":{"code":"ErrorInvalidRequest","message":"The property cannot be set."}}`)
+			return
+		}
+		var patch struct {
+			Properties []struct{ ID, Value string } `json:"singleValueExtendedProperties"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&patch)
+		for _, p := range patch.Properties {
+			if m.props == nil {
+				m.props = map[string]string{}
+			}
+			m.props[p.ID] = p.Value
+		}
+		writeJSON(w, f.item(m))
+	case r.Method == http.MethodPost && len(parts) == 3 && parts[0] == "messages" && parts[2] == "send":
+		m, ok := f.messages[parts[1]]
+		if !ok || !m.draft {
+			writeError(w, http.StatusNotFound, `{"error":{"code":"ErrorItemNotFound"}}`)
+			return
+		}
+		if f.failSend != 0 {
+			status := f.failSend
+			f.failSend = 0
+			writeError(w, status, `{"error":{"code":"ErrorSendFailed"}}`)
+			return
+		}
+		// Sent: the copy goes to Sent Items, keeping its id and extended properties, maybe not its Message-ID and
+		// X- headers.
+		f.sent = append(f.sent, sentRequest{contentType: "text/plain", body: []byte(base64.StdEncoding.EncodeToString(m.raw))})
+		f.event(m.folder, m.id)
+		m.folder, m.draft, m.received = f.wellKnown["sentitems"], false, time.Now().UTC()
+		m.raw = f.rewrite(m.raw, "sent-"+m.id)
+		if f.stripCustomHeaders {
+			m.raw = withoutCustomHeaders(m.raw)
+		}
+		f.event(m.folder, m.id)
+		f.ops = append(f.ops, "send "+m.id)
+		w.WriteHeader(http.StatusAccepted)
+	case r.Method == http.MethodPost && len(parts) == 3 && parts[0] == "messages" && parts[2] == "permanentDelete" && f.failDelete != 0:
+		status := f.failDelete
+		f.failDelete = 0
+		writeError(w, status, `{"error":{"code":"ServiceUnavailable"}}`)
 	case r.Method == http.MethodPost && len(parts) == 3 && parts[0] == "messages" && parts[2] == "permanentDelete":
 		m, ok := f.messages[parts[1]]
 		if !ok {
@@ -312,10 +372,19 @@ func (f *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 		f.rawGets[m.id]++
 		_, _ = w.Write(m.raw)
 	case len(parts) == 1 && parts[0] == "messages":
-		var value []map[string]string
+		var value []map[string]any
+		if id, want, ok := propertyFilter(q.Get("$filter")); ok {
+			for _, m := range f.messages {
+				if strings.EqualFold(m.props[id], want) {
+					value = append(value, f.markedItem(m))
+				}
+			}
+			writeJSON(w, map[string]any{"value": value})
+			return
+		}
 		for _, m := range f.messages {
 			if strings.Contains(q.Get("$filter"), "'<") && strings.Contains(string(m.raw), "Message-ID: "+strings.TrimSuffix(strings.SplitN(q.Get("$filter"), "'", 2)[1], "'")) {
-				value = append(value, map[string]string{"id": m.id})
+				value = append(value, f.markedItem(m))
 			}
 		}
 		writeJSON(w, map[string]any{"value": value})
@@ -361,7 +430,7 @@ func (f *fakeGraph) item(m *fakeMessage) map[string]any {
 	if m.flagged {
 		status = "flagged"
 	}
-	item := map[string]any{"id": m.id, "isRead": m.read, "isDraft": false, "flag": map[string]string{"flagStatus": status},
+	item := map[string]any{"id": m.id, "isRead": m.read, "isDraft": m.draft, "flag": map[string]string{"flagStatus": status},
 		"receivedDateTime": nil, "createdDateTime": m.created.Format(time.RFC3339), "lastModifiedDateTime": m.created.Format(time.RFC3339)}
 	if !m.received.IsZero() {
 		item["receivedDateTime"] = m.received.Format(time.RFC3339)
@@ -448,7 +517,9 @@ func (f *fakeGraph) listMessages(w http.ResponseWriter, folder string, q map[str
 		f.t.Errorf("listing ordered by %q", orderby)
 	}
 	keep := func(*fakeMessage) bool { return true }
-	if filter := get("$filter"); strings.HasPrefix(filter, "internetMessageId eq '") {
+	if id, value, ok := propertyFilter(get("$filter")); ok {
+		keep = func(m *fakeMessage) bool { return strings.EqualFold(m.props[id], value) }
+	} else if filter := get("$filter"); strings.HasPrefix(filter, "internetMessageId eq '") {
 		id := strings.TrimSuffix(strings.TrimPrefix(filter, "internetMessageId eq '"), "'")
 		keep = func(m *fakeMessage) bool { return strings.Contains(string(m.raw), "Message-ID: "+id+"\r\n") }
 	} else if after, ok := strings.CutPrefix(filter, "sentDateTime ge "); ok {
@@ -527,7 +598,15 @@ func (f *fakeGraph) listMessages(w http.ResponseWriter, folder string, q map[str
 	}
 	out := map[string]any{"value": items}
 	if end < len(all) {
-		link := f.base + "/me/mailFolders/" + folder + "/messages?$select=" + messageFields + "&$top=" + strconv.Itoa(top) + "&$skip=" + strconv.Itoa(end)
+		// Like Graph, the next link keeps the query: selection, expansion, filter and order.
+		sel := get("$select")
+		if sel == "" {
+			sel = messageFields
+		}
+		link := f.base + "/me/mailFolders/" + folder + "/messages?$select=" + sel + "&$top=" + strconv.Itoa(top) + "&$skip=" + strconv.Itoa(end)
+		if expand := get("$expand"); expand != "" {
+			link += "&$expand=" + queryEscape(expand)
+		}
 		if filter := get("$filter"); filter != "" {
 			link += "&$filter=" + queryEscape(filter)
 		}
@@ -571,6 +650,7 @@ func (f *fakeGraph) rewrite(raw []byte, id string) []byte {
 // internetMessageHeaders, or as named extended properties of the internet headers property set.
 func (f *fakeGraph) listItem(m *fakeMessage, sel, expand string) map[string]any {
 	item := f.item(m)
+	item["parentFolderId"] = m.folder
 	if strings.Contains(sel, "internetMessageHeaders") {
 		f.headerReads++
 	}
@@ -607,4 +687,39 @@ func (f *fakeGraph) addAt(id, folder string, t time.Time, raw []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.messages[id] = &fakeMessage{id: id, folder: folder, raw: raw, received: t.UTC(), created: t.UTC()}
+}
+
+// propertyFilter reads a "singleValueExtendedProperties/Any(ep: ep/id eq '<id>' and ep/value eq '<value>')" filter.
+func propertyFilter(filter string) (id, value string, ok bool) {
+	rest, ok := strings.CutPrefix(filter, "singleValueExtendedProperties/Any(ep: ep/id eq '")
+	if !ok {
+		return "", "", false
+	}
+	id, rest, _ = strings.Cut(rest, "' and ep/value eq '")
+	value = strings.ReplaceAll(strings.TrimSuffix(rest, "')"), "''", "'")
+	return id, value, true
+}
+
+// withoutCustomHeaders drops every X- header of raw's header section.
+func withoutCustomHeaders(raw []byte) []byte {
+	head, body, _ := strings.Cut(string(raw), "\r\n\r\n")
+	var kept []string
+	for _, line := range strings.Split(head, "\r\n") {
+		if !strings.HasPrefix(strings.ToLower(line), "x-") {
+			kept = append(kept, line)
+		}
+	}
+	return []byte(strings.Join(kept, "\r\n") + "\r\n\r\n" + body)
+}
+
+// markedItem is a message as the lookups of earlier attempts read it.
+func (f *fakeGraph) markedItem(m *fakeMessage) map[string]any {
+	return map[string]any{"id": m.id, "isDraft": m.draft, "parentFolderId": m.folder, "lastModifiedDateTime": m.created.Format(time.RFC3339)}
+}
+
+// age makes a message look last changed d ago.
+func (f *fakeGraph) age(id string, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.messages[id].created = time.Now().Add(-d).UTC()
 }

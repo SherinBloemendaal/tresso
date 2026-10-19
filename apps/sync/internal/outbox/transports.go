@@ -112,7 +112,9 @@ func (t graphTransport) Open(credentials api.Credentials) (Sender, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &graphSender{client: graphsync.NewClient(tokens, t.opts)}, nil
+	opts := t.opts
+	opts.Account = credentials.AccountID
+	return &graphSender{client: graphsync.NewClient(tokens, opts)}, nil
 }
 
 type graphSender struct{ client *graphsync.Client }
@@ -122,7 +124,7 @@ func (s *graphSender) Send(ctx context.Context, message api.OutgoingMessage, raw
 	if err != nil {
 		return err
 	}
-	return graphsync.Send(ctx, s.client, marked, message.Recipients)
+	return graphsync.Send(ctx, s.client, marked, message.Recipients, providersend.OutgoingMarker(message.ID, message.MessageID))
 }
 
 func (s *graphSender) OpenSent(ctx context.Context) (SentStore, error) {

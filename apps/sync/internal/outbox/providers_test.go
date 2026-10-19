@@ -29,6 +29,7 @@ var messageIDHeader = regexp.MustCompile(`(?m)^Message-ID: <([^>]+)>`)
 type providerMailbox struct {
 	mu      sync.Mutex
 	drafts  map[string]string   // provider draft id -> Message-ID
+	props   map[string]string   // provider draft id -> Tresso extended property value (Graph)
 	folders map[string][]string // message id -> labels, or the one parent folder
 	nextID  int
 	ops     []string
@@ -53,7 +54,7 @@ func (p *providerMailbox) refused(w http.ResponseWriter, r *http.Request, gmail 
 }
 
 func newProviderMailbox() *providerMailbox {
-	return &providerMailbox{drafts: map[string]string{}, folders: map[string][]string{}}
+	return &providerMailbox{drafts: map[string]string{}, folders: map[string][]string{}, props: map[string]string{}}
 }
 
 func (p *providerMailbox) log(op string) { p.ops = append(p.ops, op) }
@@ -159,14 +160,41 @@ func fakeGraphAPI(t *testing.T, box *providerMailbox) *httptest.Server {
 			writeJSONResponse(w, map[string]string{"id": box.createDraft(raw)})
 		case r.Method == http.MethodGet && path == "/mailFolders/drafts/messages":
 			filter := r.URL.Query().Get("$filter")
-			messageID := strings.TrimSuffix(strings.TrimPrefix(filter, "internetMessageId eq '<"), ">'")
-			var out []map[string]string
-			for _, id := range box.draftsWith(messageID) {
-				out = append(out, map[string]string{"id": id})
+			var out []map[string]any
+			if marker, ok := strings.CutPrefix(filter, "singleValueExtendedProperties/Any(ep: ep/id eq '"); ok {
+				_, value, _ := strings.Cut(marker, "' and ep/value eq '")
+				value = strings.TrimSuffix(value, "')")
+				for id, v := range box.props {
+					if v == value {
+						out = append(out, map[string]any{"id": id, "isDraft": true})
+					}
+				}
+			} else if strings.HasPrefix(filter, "internetMessageId") {
+				messageID := strings.TrimSuffix(strings.TrimPrefix(filter, "internetMessageId eq '<"), ">'")
+				for _, id := range box.draftsWith(messageID) {
+					out = append(out, map[string]any{"id": id})
+				}
 			}
 			writeJSONResponse(w, map[string]any{"value": out})
 		case strings.HasPrefix(path, "/messages/"):
 			id, action, _ := strings.Cut(strings.TrimPrefix(path, "/messages/"), "/")
+			if _, isDraft := box.drafts[id]; isDraft && r.Method == http.MethodPatch {
+				var patch struct {
+					Properties []struct{ ID, Value string } `json:"singleValueExtendedProperties"`
+				}
+				_ = json.Unmarshal(body, &patch)
+				for _, p := range patch.Properties {
+					box.props[id] = p.Value
+				}
+				writeJSONResponse(w, map[string]string{"id": id})
+				return
+			}
+			if _, isDraft := box.drafts[id]; isDraft && action == "send" {
+				box.log("send " + box.drafts[id])
+				delete(box.drafts, id)
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
 			if action == "permanentDelete" {
 				if _, ok := box.drafts[id]; !ok {
 					http.Error(w, `{"error":{"code":"ErrorItemNotFound"}}`, http.StatusNotFound)
@@ -419,6 +447,9 @@ func TestLostAccessReportsNothingAndSendsStayQueued(t *testing.T) {
 				attempts := 1
 				if status == http.StatusUnauthorized {
 					attempts = 2
+				}
+				if provider == "microsoft" {
+					attempts *= 2 // the send also starts by creating a draft (POST /me/messages)
 				}
 				if got := slices.Index(box.ops, "refused "+createDraft); got < 0 || countOps(box.ops, "refused "+createDraft) != attempts {
 					t.Errorf("draft creations tried %d times, want %d: %v", countOps(box.ops, "refused "+createDraft), attempts, box.ops)

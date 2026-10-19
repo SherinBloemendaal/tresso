@@ -3,6 +3,8 @@ package providersend
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -37,3 +39,11 @@ func UUIDv7Time(id string) (time.Time, bool) {
 	}
 	return time.UnixMilli(int64(ms)).UTC(), true
 }
+
+// ErrNotDecided means a duplicate check cannot tell yet whether an earlier attempt sent the message (a draft the
+// provider may still be sending, or a leftover it could not clean up): the outbox tries again later, without sending.
+var ErrNotDecided = errors.New("not decided yet whether an earlier attempt sent the message")
+
+// ErrMaybeSending is ErrNotDecided because an earlier attempt's copy may still be on its way (in the Outbox, or a draft
+// whose send the provider accepted moments ago): it could still be delivered.
+var ErrMaybeSending = fmt.Errorf("%w: an earlier attempt may still be sending", ErrNotDecided)

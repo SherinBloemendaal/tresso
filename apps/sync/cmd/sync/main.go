@@ -81,7 +81,7 @@ func run(logger *slog.Logger) error {
 	transports := map[string]outbox.Transport{
 		"imap":      outbox.IMAPTransport(dialer),
 		"gmail":     outbox.GmailTransport(client, cfg.WorkerID, gmailsync.DefaultClientOptions()),
-		"microsoft": outbox.GraphTransport(client, cfg.WorkerID, graphsync.DefaultClientOptions()),
+		"microsoft": outbox.GraphTransport(client, cfg.WorkerID, graphOutboxOptions(workerLogger)),
 	}
 	dispatcher := outbox.NewDispatcher(client, store, transports, cfg.WorkerID, workerLogger)
 	manager.OnOutbox(func(ctx context.Context, accountIDs []string) {
@@ -130,4 +130,11 @@ func healthHandler(manager *lease.Manager) http.Handler {
 		_ = json.NewEncoder(w).Encode(body)
 	})
 	return mux
+}
+
+// graphOutboxOptions are the Graph client options of the outbox, logging through the worker's logger.
+func graphOutboxOptions(logger *slog.Logger) graphsync.ClientOptions {
+	opts := graphsync.DefaultClientOptions()
+	opts.Logger = logger
+	return opts
 }
