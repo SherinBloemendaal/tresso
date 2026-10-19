@@ -68,6 +68,7 @@ func (f *fakeServer) remove(path string) {
 func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	user, password, ok := r.BasicAuth()
 	if !ok || user != "kim@company.example" || password != "app-password" {
+		w.Header().Set("WWW-Authenticate", `Basic realm="calendars"`)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}

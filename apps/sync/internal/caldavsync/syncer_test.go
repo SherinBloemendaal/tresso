@@ -19,7 +19,7 @@ func event(uid, summary string) string {
 func openRun(t *testing.T, server *fakeServer, fake *fakeAPI) *run {
 	t.Helper()
 	syncer := New(fake, plainDialer{}, "w1", Options{AllowHTTP: true}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	client := caldav.New(plainDialer{}, "kim@company.example", "app-password", true)
+	client := caldav.New(plainDialer{}, "kim@company.example", "app-password", true, caldav.NewTrust("", server.server.URL))
 	account, err := client.Open(context.Background(), server.server.URL+"/dav/")
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -157,7 +157,7 @@ func TestWritesCreatesUpdatesAndDeletes(t *testing.T) {
 
 func TestAWrongPasswordIsReported(t *testing.T) {
 	server := newFakeServer(t, true)
-	client := caldav.New(plainDialer{}, "kim@company.example", "wrong", true)
+	client := caldav.New(plainDialer{}, "kim@company.example", "wrong", true, caldav.NewTrust("", server.server.URL))
 
 	if _, err := client.Open(context.Background(), server.server.URL+"/dav/"); err != caldav.ErrUnauthorized {
 		t.Fatalf("want ErrUnauthorized, got %v", err)

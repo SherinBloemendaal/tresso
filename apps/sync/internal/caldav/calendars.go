@@ -279,11 +279,28 @@ func truncate(s string, max int) string {
 	return string(runes[:max])
 }
 
-// Discover finds the CalDAV context URL for an address (RFC 6764): SRV and TXT records of the address's domain, its
-// .well-known/caldav, then known providers by the IMAP host. The first candidate that answers as CalDAV wins.
+// ConfirmError means discovery found a server that wants the login but is not trusted with it (the web host of the
+// mail domain, a host named in DNS): the user has to confirm its address first.
+type ConfirmError struct {
+	URL string
+}
+
+func (e *ConfirmError) Error() string {
+	return "a calendar server was found at " + e.URL + "; its address needs to be confirmed"
+}
+
+// Discover finds the CalDAV context URL for an address (RFC 6764): known providers by the IMAP host, SRV and TXT
+// records of the address's domain, its .well-known/caldav, then the IMAP host's. The first candidate that answers as
+// CalDAV wins. Candidates the account does not trust never get the login; when one of them asks for it and no
+// trusted one works, the result is a *ConfirmError naming it.
 func (c *Client) Discover(ctx context.Context, emailAddress, imapHost string, resolver *net.Resolver) (Account, error) {
+	return c.discover(ctx, Candidates(ctx, emailAddress, imapHost, resolver))
+}
+
+func (c *Client) discover(ctx context.Context, candidates []string) (Account, error) {
 	var lastErr error = ErrNotCalDAV
-	for _, candidate := range Candidates(ctx, emailAddress, imapHost, resolver) {
+	var unconfirmed string
+	for _, candidate := range candidates {
 		account, err := c.Open(ctx, candidate)
 		if err == nil {
 			return account, nil
@@ -292,10 +309,17 @@ func (c *Client) Discover(ctx context.Context, emailAddress, imapHost string, re
 			// The right server, the wrong password (or an app password is required): no use trying others.
 			return Account{}, err
 		}
+		var untrusted *UntrustedError
+		if errors.As(err, &untrusted) && unconfirmed == "" {
+			unconfirmed = candidate
+		}
 		if ctx.Err() != nil {
 			return Account{}, ctx.Err()
 		}
 		lastErr = err
+	}
+	if unconfirmed != "" {
+		return Account{}, &ConfirmError{URL: unconfirmed}
 	}
 	return Account{}, fmt.Errorf("%w (%v)", ErrNotCalDAV, lastErr)
 }

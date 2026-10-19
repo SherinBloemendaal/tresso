@@ -130,6 +130,8 @@ const (
 	CalendarUnsupported = "unsupported"
 	CalendarAuthFailed  = "auth_failed"
 	CalendarError       = "error"
+	// CalendarUnconfirmed: a server was found that the user has to confirm before it gets the password.
+	CalendarUnconfirmed = "unconfirmed"
 )
 
 func (c *Client) CalendarStatus(ctx context.Context, accountID, workerID, status, detail string) error {
