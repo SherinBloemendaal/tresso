@@ -136,6 +136,12 @@ class Message
         return $this->thread;
     }
 
+    /** Used when two partial threads turn out to be one conversation. */
+    public function moveToThread(Thread $thread): void
+    {
+        $this->thread = $thread;
+    }
+
     public function getMessageIdHeader(): ?string
     {
         return $this->messageIdHeader;
