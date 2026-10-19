@@ -20,7 +20,7 @@ final readonly class MailHtmlSanitizer
     /** Large newsletters exceed the sanitizer's default limit of 20 000 characters by far. */
     private const int MAX_INPUT_BYTES = 8_000_000;
 
-    private const array PRESENTATIONAL_ATTRIBUTES = [
+    public const array PRESENTATIONAL_ATTRIBUTES = [
         'align', 'valign', 'bgcolor', 'background', 'width', 'height', 'border', 'cellpadding', 'cellspacing',
         'color', 'face', 'size', 'dir', 'lang', 'colspan', 'rowspan', 'nowrap', 'title', 'alt', 'role', 'class', 'id',
     ];

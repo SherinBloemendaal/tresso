@@ -36,7 +36,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
 
         [$until, $hasMore] = $this->boundary($userId, $since, $limit);
         if ($until === $since) {
-            return new SyncChanges($since, false, [], [], [], [], [], []);
+            return new SyncChanges($since, false, [], [], [], [], [], [], []);
         }
 
         $range = ['user' => $userId, 'since' => $since, 'until' => $until];
@@ -49,6 +49,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             $this->threads($range),
             $this->messages($range),
             $this->outgoingMessages($range),
+            $this->signatures($range),
             $this->deleted($range),
         );
     }
@@ -73,6 +74,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 SELECT m.change_seq, COUNT(*) FROM message m JOIN mail_account a ON a.id = m.mail_account_id WHERE a.owner_id = :user AND m.change_seq > :since GROUP BY m.change_seq
                 UNION ALL
                 SELECT o.change_seq, COUNT(*) FROM outgoing_message o JOIN mail_account a ON a.id = o.mail_account_id WHERE a.owner_id = :user AND o.change_seq > :since GROUP BY o.change_seq
+                UNION ALL
+                SELECT g.change_seq, COUNT(*) FROM signature g WHERE g.owner_id = :user AND g.change_seq > :since GROUP BY g.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -105,7 +108,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private function mailAccounts(array $range): array
     {
         $rows = $this->connection->fetchAllAssociative(
-            'SELECT a.id, a.email_address, a.display_name, a.provider, a.status, a.status_detail, a.last_synced_at
+            'SELECT a.id, a.email_address, a.display_name, a.provider, a.status, a.status_detail, a.last_synced_at, a.default_signature_id
              FROM mail_account a WHERE a.owner_id = :user AND a.change_seq > :since AND a.change_seq <= :until ORDER BY a.change_seq',
             $range,
         );
@@ -118,6 +121,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'status' => $r['status'],
             'statusDetail' => $r['status_detail'],
             'lastSyncedAt' => self::date($r['last_synced_at']),
+            'defaultSignatureId' => $r['default_signature_id'],
         ], $rows);
     }
 
@@ -229,6 +233,27 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'sentAt' => self::date($r['sent_at']),
             'lastError' => $r['last_error'],
             'inReplyToMessageId' => $r['in_reply_to_id'],
+        ], $rows);
+    }
+
+    /**
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function signatures(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT g.id, g.name, g.html, g.updated_at
+             FROM signature g WHERE g.owner_id = :user AND g.change_seq > :since AND g.change_seq <= :until ORDER BY g.change_seq',
+            $range,
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'name' => $r['name'],
+            'html' => $r['html'],
+            'updatedAt' => self::date($r['updated_at']),
         ], $rows);
     }
 

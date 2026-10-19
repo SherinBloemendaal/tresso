@@ -32,6 +32,8 @@ enum Scope: string
     public const string ROLE_MAIL_SEND = 'ROLE_OAUTH2_MAIL:SEND';
     public const string ROLE_SETTINGS_READ = 'ROLE_OAUTH2_SETTINGS:READ';
     public const string ROLE_SETTINGS_WRITE = 'ROLE_OAUTH2_SETTINGS:WRITE';
+    public const string ROLE_SIGNATURES_READ = 'ROLE_OAUTH2_SIGNATURES:READ';
+    public const string ROLE_SIGNATURES_WRITE = 'ROLE_OAUTH2_SIGNATURES:WRITE';
     public const string ROLE_SYNC_LEASE = 'ROLE_OAUTH2_SYNC:LEASE';
     public const string ROLE_SYNC_INGEST = 'ROLE_OAUTH2_SYNC:INGEST';
     public const string ROLE_SYNC_CREDENTIALS = 'ROLE_OAUTH2_SYNC:CREDENTIALS';

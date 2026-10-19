@@ -4,38 +4,37 @@ declare(strict_types=1);
 
 namespace App\Entity;
 
+use App\Repository\SignatureRepository;
+use App\Sync\Change\TracksChanges;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * HTML signature. When $mailAccount is set and $isDefault is true it is inserted for that account automatically.
+ * HTML signature, sanitized before it is stored. Mail accounts point at the one they insert by default
+ * ({@see MailAccount::getDefaultSignature()}), so one signature can be the default of several accounts.
  */
-#[ORM\Entity]
-#[ORM\Index(columns: ['owner_id'])]
-class Signature
+#[ORM\Entity(repositoryClass: SignatureRepository::class)]
+#[ORM\Index(columns: ['owner_id', 'change_seq'])]
+class Signature implements TracksChanges
 {
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
     private Uuid $id;
 
+    #[ORM\Column(type: Types::BIGINT, options: ['default' => 0])]
+    private int $changeSeq = 0;
+
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(nullable: false, onDelete: 'CASCADE')]
     private User $owner;
-
-    #[ORM\ManyToOne]
-    #[ORM\JoinColumn(onDelete: 'SET NULL')]
-    private ?MailAccount $mailAccount = null;
 
     #[ORM\Column(length: 120)]
     private string $name;
 
     #[ORM\Column(type: Types::TEXT)]
     private string $html;
-
-    #[ORM\Column]
-    private bool $isDefault = false;
 
     #[ORM\Column]
     private \DateTimeImmutable $updatedAt;
@@ -59,11 +58,6 @@ class Signature
         return $this->owner;
     }
 
-    public function getMailAccount(): ?MailAccount
-    {
-        return $this->mailAccount;
-    }
-
     public function getName(): string
     {
         return $this->name;
@@ -74,22 +68,44 @@ class Signature
         return $this->html;
     }
 
-    public function isDefault(): bool
+    public function update(string $name, string $html): void
     {
-        return $this->isDefault;
-    }
+        if ($name === $this->name && $html === $this->html) {
+            return;
+        }
 
-    public function update(string $name, string $html, ?MailAccount $mailAccount, bool $isDefault): void
-    {
         $this->name = $name;
         $this->html = $html;
-        $this->mailAccount = $mailAccount;
-        $this->isDefault = $isDefault;
         $this->updatedAt = new \DateTimeImmutable();
     }
 
     public function getUpdatedAt(): \DateTimeImmutable
     {
         return $this->updatedAt;
+    }
+
+    public function getChangeOwner(): User
+    {
+        return $this->owner;
+    }
+
+    public static function clientFields(): ?array
+    {
+        return ['name', 'html', 'updatedAt'];
+    }
+
+    public static function changeType(): string
+    {
+        return 'signature';
+    }
+
+    public function getChangeSeq(): int
+    {
+        return $this->changeSeq;
+    }
+
+    public function setChangeSeq(int $changeSeq): void
+    {
+        $this->changeSeq = $changeSeq;
     }
 }

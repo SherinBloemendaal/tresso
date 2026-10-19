@@ -78,6 +78,8 @@ final class MailAccountResource
         public ServerSettings $smtp,
         public ?\DateTimeImmutable $lastSyncedAt,
         public \DateTimeImmutable $createdAt,
+        /** Set through the signature's "defaultFor" (/api/v1/signatures). */
+        public ?string $defaultSignatureId,
     ) {
     }
 
@@ -95,6 +97,7 @@ final class MailAccountResource
             $account->getSmtp(),
             $account->getLastSyncedAt(),
             $account->getCreatedAt(),
+            $account->getDefaultSignature()?->getId()->toRfc4122(),
         );
     }
 }

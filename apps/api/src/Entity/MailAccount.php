@@ -70,6 +70,11 @@ class MailAccount implements TracksChanges
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $lastSyncedAt = null;
 
+    /** Inserted into new messages from this account. Always one of the owner's own signatures. */
+    #[ORM\ManyToOne]
+    #[ORM\JoinColumn(onDelete: 'SET NULL')]
+    private ?Signature $defaultSignature = null;
+
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
@@ -199,6 +204,20 @@ class MailAccount implements TracksChanges
         $this->lastSyncedAt = $at;
     }
 
+    public function getDefaultSignature(): ?Signature
+    {
+        return $this->defaultSignature;
+    }
+
+    public function setDefaultSignature(?Signature $signature): void
+    {
+        if (null !== $signature && $signature->getOwner() !== $this->owner) {
+            throw new \InvalidArgumentException('A mail account can only use a signature of its own owner.');
+        }
+
+        $this->defaultSignature = $signature;
+    }
+
     public function getCreatedAt(): \DateTimeImmutable
     {
         return $this->createdAt;
@@ -211,7 +230,7 @@ class MailAccount implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        return ['emailAddress', 'displayName', 'provider', 'status', 'statusDetail', 'lastSyncedAt'];
+        return ['emailAddress', 'displayName', 'provider', 'status', 'statusDetail', 'lastSyncedAt', 'defaultSignature'];
     }
 
     public static function changeType(): string

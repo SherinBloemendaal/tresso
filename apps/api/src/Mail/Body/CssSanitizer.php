@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Mail\Body;
 
 /**
- * Makes a message's CSS safe to render: every url() goes through the {@see MediaUrlPolicy}, imports and the old
+ * Makes CSS safe to render: every url() goes through a {@see MediaUrlResolver}, imports and the old
  * script-capable extensions are disabled, and the result can never close the style element it is placed in.
  *
  * CSS escapes are resolved first, so an escaped name such as "u\72l(" cannot slip past the checks; escapes that
@@ -17,7 +17,7 @@ final class CssSanitizer
     /** Characters an escape may not turn into, because they change the structure of the CSS. */
     private const string STRUCTURAL = "\"'\\()<>;:{}/\n\r\f\t ";
 
-    public function sanitize(string $css, MediaUrlPolicy $policy): string
+    public function sanitize(string $css, MediaUrlResolver $policy): string
     {
         $css = (string) preg_replace('~/\*.*?(?:\*/|$)~s', '', $css);
         $css = $this->resolveEscapes($css);
