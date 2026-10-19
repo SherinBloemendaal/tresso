@@ -5,6 +5,13 @@ import * as SecureStore from 'expo-secure-store'
 import {
   type AppliedAction,
   type ChangePage,
+  type Contact,
+  type DraftSync,
+  type SendMessageRequest,
+  type SqliteMailStore,
+  type SyncedDraft,
+  type SyncedOutgoingMessage,
+  type SyncedSignature,
   type ConversationSummary,
   type MessageAction,
   type MessageBody,
@@ -35,6 +42,20 @@ interface Mail extends Omit<MailState, 'userId'> {
   thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null>
   body(messageId: string, allowRemoteContent: boolean): Promise<MessageBody>
   syncNow(): Promise<void>
+  /** The open copy, for writing mail; null while none is open. */
+  store(): SqliteMailStore | null
+  drafts: DraftSync
+  signatures(): Promise<SyncedSignature[]>
+  /** People the user exchanged mail with, whose address or name starts with the query. */
+  suggestContacts(query: string): Promise<Contact[]>
+  /** POST /api/v1/outgoing-messages */
+  send(request: SendMessageRequest): Promise<SyncedOutgoingMessage>
+  /** Stops a message that has not gone out yet. */
+  cancelOutgoing(id: string): Promise<SyncedOutgoingMessage>
+}
+
+function json(method: string, body?: unknown): RequestInit {
+  return body === undefined ? { method } : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
 }
 
 const MailContext = createContext<Mail | null>(null)
@@ -55,7 +76,15 @@ export function MailProvider({ children }: { children: ReactNode }) {
         fetchPage: (since, limit) => auth.session.api<ChangePage>(`/api/v1/sync/changes?since=${since}&limit=${limit}`),
         fetchAccess: () => auth.session.api<RealtimeAccess>('/api/v1/realtime/token'),
         postAction: async (request) => {
-          await auth.session.api('/api/v1/message-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) })
+          await auth.session.api('/api/v1/message-actions', json('POST', request))
+        },
+        drafts: {
+          create: (id, request) => auth.session.api<SyncedDraft>('/api/v1/drafts', json('POST', { ...request, draftId: id })),
+          update: (id, request, expectedVersion) => auth.session.api<SyncedDraft>(`/api/v1/drafts/${encodeURIComponent(id)}`, json('PUT', { ...request, expectedVersion })),
+          get: (id) => auth.session.api<SyncedDraft>(`/api/v1/drafts/${encodeURIComponent(id)}`),
+          remove: async (id) => {
+            await auth.session.api(`/api/v1/drafts/${encodeURIComponent(id)}`, json('DELETE'))
+          },
         },
         // expo/fetch streams response bodies, which the realtime connection reads.
         fetch: streamingFetch as unknown as typeof fetch,
@@ -133,10 +162,37 @@ export function MailProvider({ children }: { children: ReactNode }) {
     [auth.session],
   )
   const syncNow = useCallback(() => session.syncNow(), [session])
+  const store = useCallback(() => session.database, [session])
+  const signatures = useCallback(async () => (await session.database?.signatures()) ?? [], [session])
+  const suggestContacts = useCallback(async (query: string) => (await session.database?.suggestContacts(query, 8)) ?? [], [session])
+  const send = useCallback((request: SendMessageRequest) => auth.session.api<SyncedOutgoingMessage>('/api/v1/outgoing-messages', json('POST', request)), [auth.session])
+  const cancelOutgoing = useCallback(
+    (id: string) => auth.session.api<SyncedOutgoingMessage>(`/api/v1/outgoing-messages/${encodeURIComponent(id)}/cancel`, json('POST', {})),
+    [auth.session],
+  )
   const { ready, version, syncState, syncError, live } = state
   const mail = useMemo<Mail>(
-    () => ({ ready, version, syncState, syncError: syncError ?? lookupError, live, mailAccounts, folders, act, inbox, thread, body, syncNow }),
-    [ready, version, syncState, syncError, lookupError, live, mailAccounts, folders, act, inbox, thread, body, syncNow],
+    () => ({
+      ready,
+      version,
+      syncState,
+      syncError: syncError ?? lookupError,
+      live,
+      mailAccounts,
+      folders,
+      act,
+      inbox,
+      thread,
+      body,
+      syncNow,
+      store,
+      drafts: session.drafts,
+      signatures,
+      suggestContacts,
+      send,
+      cancelOutgoing,
+    }),
+    [ready, version, syncState, syncError, lookupError, live, mailAccounts, folders, act, inbox, thread, body, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>

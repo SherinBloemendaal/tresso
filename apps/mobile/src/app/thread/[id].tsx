@@ -4,6 +4,7 @@ import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-rou
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { SyncedFolder, SyncedMessage, SyncedThread } from '@tresso/core'
 import { MessageBodyView } from '@/components/MessageBodyView'
+import { useComposer } from '@/compose/ComposerProvider'
 import { useMail } from '@/mail/MailProvider'
 import { useNotices } from '@/components/Notices'
 import { useMessageActions } from '@/mail/useMessageActions'
@@ -33,6 +34,7 @@ export default function ThreadScreen() {
   const read = useRef<string | null>(null)
   const mounted = useRef(true)
   const notices = useNotices()
+  const { composer } = useComposer()
 
   useEffect(() => {
     mounted.current = true
@@ -182,6 +184,13 @@ export default function ThreadScreen() {
                     <Text style={styles.muted}>{shortTime(Date.parse(message.receivedAt))}</Text>
                   </Pressable>
                   {open && <MessageBodyView messageId={message.id} />}
+                  {open && (
+                    <View style={styles.replies} accessibilityRole="toolbar" accessibilityLabel={`Answer ${senderName(message.from)}`}>
+                      <ReplyButton label="Reply" onPress={() => void composer.openReply(message, 'reply')} styles={styles} />
+                      <ReplyButton label="Reply all" onPress={() => void composer.openReply(message, 'replyAll')} styles={styles} />
+                      <ReplyButton label="Forward" onPress={() => void composer.openReply(message, 'forward')} styles={styles} />
+                    </View>
+                  )}
                 </View>
               )
             })}
@@ -197,6 +206,14 @@ export default function ThreadScreen() {
         </View>
       )}
     </>
+  )
+}
+
+function ReplyButton({ label, styles, onPress }: { label: string; styles: ReturnType<typeof makeStyles>; onPress: () => void }) {
+  return (
+    <Pressable style={({ pressed }) => [styles.reply, pressed && styles.replyPressed]} onPress={onPress} accessibilityRole="button">
+      <Text style={styles.replyLabel}>{label}</Text>
+    </Pressable>
   )
 }
 
@@ -219,6 +236,10 @@ function makeStyles(theme: Theme) {
     screen: { flex: 1, backgroundColor: theme.surface },
     content: { padding: 20, gap: 16 },
     subject: { color: theme.ink, fontSize: 24, lineHeight: 30, fontWeight: '700' },
+    replies: { flexDirection: 'row', gap: 8, paddingTop: 4 },
+    reply: { minHeight: 40, paddingHorizontal: 14, borderRadius: 999, borderWidth: 1, borderColor: theme.lineStrong, justifyContent: 'center' },
+    replyPressed: { backgroundColor: theme.ground },
+    replyLabel: { fontSize: 14, fontWeight: '600', color: theme.ink },
     message: { gap: 12, paddingBottom: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: theme.line },
     head: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44 },
     avatar: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.ground },

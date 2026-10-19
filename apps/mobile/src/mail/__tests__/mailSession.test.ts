@@ -58,6 +58,12 @@ function session(
     fetchPage,
     fetchAccess: () => Promise.reject(new Error('no realtime in this test')),
     postAction,
+    drafts: {
+      create: () => Promise.reject(new Error('no drafts in this test')),
+      update: () => Promise.reject(new Error('no drafts in this test')),
+      get: () => Promise.reject(new Error('no drafts in this test')),
+      remove: () => Promise.reject(new Error('no drafts in this test')),
+    },
     onState: (state) => states.push(state),
   })
   return { mail, states, last: () => states[states.length - 1]! }
