@@ -1,0 +1,422 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Tests\Functional;
+
+use App\Entity\Attachment;
+use App\Entity\Message;
+use App\Entity\MessageLocation;
+use App\Entity\Thread;
+use Doctrine\ORM\EntityManagerInterface;
+
+final class SyncIngestTest extends DatabaseTestCase
+{
+    use AuthenticatesUsers;
+
+    private string $accountId;
+
+    /** @var array<string, string> */
+    private array $worker;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->bootstrapOAuthClients();
+        $this->createUser('kim@example.test', 'Kim Visser');
+
+        $this->client->jsonRequest('POST', '/api/v1/mail-accounts', [
+            'emailAddress' => 'kim@company.example',
+            'displayName' => 'Work',
+            'username' => 'kim@company.example',
+            'password' => 'app-password-1',
+            'imap' => ['host' => 'imap.company.example', 'port' => 993, 'security' => 'tls'],
+            'smtp' => ['host' => 'smtp.company.example', 'port' => 465, 'security' => 'tls'],
+        ], $this->userHeaders('kim@example.test', ['settings:write']));
+        $this->accountId = $this->responseString('id');
+
+        $this->worker = $this->workerHeaders('sync:lease sync:ingest');
+        $this->client->jsonRequest('POST', '/internal/sync/leases', ['workerId' => 'w1'], $this->worker);
+        self::assertResponseIsSuccessful();
+    }
+
+    public function testFolderListReturnsStoredCursors(): void
+    {
+        $states = $this->folders(['INBOX' => 1, 'Sent' => 1]);
+        self::assertSame([
+            ['remoteName' => 'INBOX', 'uidValidity' => 1, 'cursor' => null, 'reset' => false],
+            ['remoteName' => 'Sent', 'uidValidity' => 1, 'cursor' => null, 'reset' => false],
+        ], $states);
+
+        $this->messages('INBOX', [$this->message('1')], 'uidnext=2');
+
+        self::assertSame('uidnext=2', $this->folders(['INBOX' => 1, 'Sent' => 1])[0]['cursor'] ?? null);
+    }
+
+    public function testUidValidityChangeResetsFolderAndDropsItsMessages(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $this->messages('INBOX', [$this->message('1')], 'c1');
+
+        $states = $this->folders(['INBOX' => 2]);
+
+        self::assertSame([['remoteName' => 'INBOX', 'uidValidity' => 2, 'cursor' => null, 'reset' => true]], $states);
+        self::assertSame(0, $this->rows(Message::class));
+    }
+
+    public function testDeletedFolderTakesOnlyMessagesThatAreNowhereElse(): void
+    {
+        $this->folders(['INBOX' => 1, 'Projects' => 1]);
+        $this->messages('INBOX', [$this->message('1', ['messageId' => '<shared@x>'])]);
+        $this->messages('Projects', [$this->message('7', ['messageId' => '<shared@x>']), $this->message('8', ['messageId' => '<only-here@x>'])]);
+        self::assertSame(2, $this->rows(Message::class));
+
+        $this->folders(['INBOX' => 1]);
+
+        self::assertSame(1, $this->rows(Message::class));
+        self::assertSame(1, $this->rows(MessageLocation::class));
+    }
+
+    public function testStoresMessageWithRecipientsAttachmentsAndFlags(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $shaA = hash('sha256', 'a');
+        $shaB = hash('sha256', 'b');
+
+        $result = $this->messages('INBOX', [$this->message('42', [
+            'messageId' => '<budget-1@finance.example>',
+            'subject' => 'Q4 budget, revised',
+            'from' => ['address' => 'Anna@Finance.example', 'name' => 'Anna de Vries'],
+            'to' => [['address' => 'kim@company.example', 'name' => 'Kim']],
+            'cc' => [['address' => 'pieter@company.example']],
+            'snippet' => 'Could you approve the revised numbers before Friday?',
+            'flags' => ['seen' => true, 'flagged' => true, 'answered' => false, 'draft' => false],
+            'attachments' => [
+                ['filename' => 'budget.xlsx', 'contentType' => 'application/vnd.ms-excel', 'size' => 48000, 'sha256' => $shaA],
+                ['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => 1200, 'sha256' => $shaB, 'contentId' => 'logo@x', 'inline' => true],
+            ],
+        ])]);
+
+        self::assertSame(['stored' => 1, 'linked' => 0, 'updated' => 0], $result);
+        $message = $this->onlyMessage();
+        self::assertSame('budget-1@finance.example', $message->getMessageIdHeader());
+        self::assertSame('anna@finance.example', $message->getFromAddress());
+        self::assertSame('Anna de Vries', $message->getFromName());
+        self::assertSame([['address' => 'kim@company.example', 'name' => 'Kim']], $message->getRecipients()['to']);
+        self::assertSame([['address' => 'pieter@company.example', 'name' => null]], $message->getRecipients()['cc']);
+        self::assertTrue($message->isSeen());
+        self::assertTrue($message->isFlagged());
+        self::assertTrue($message->hasAttachments());
+        self::assertSame('Q4 budget, revised', $message->getThread()->getSubject());
+        self::assertSame(1, $message->getThread()->getMessageCount());
+
+        $attachments = $this->entityManager()->getRepository(Attachment::class)->findBy(['message' => $message], ['filename' => 'ASC']);
+        self::assertCount(2, $attachments);
+        self::assertFalse($attachments[0]->isInline());
+        self::assertTrue($attachments[1]->isInline());
+        self::assertSame('attachments/'.substr($shaA, 0, 2).'/'.$shaA, $attachments[0]->getObjectKey());
+    }
+
+    public function testOnlyInlineAttachmentsDoNotCountAsAttachments(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $sha = hash('sha256', 'logo');
+
+        $this->messages('INBOX', [$this->message('1', [
+            'attachments' => [['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => 10, 'sha256' => $sha, 'contentId' => 'logo', 'inline' => true]],
+        ])]);
+
+        self::assertFalse($this->onlyMessage()->hasAttachments());
+    }
+
+    public function testResendingABatchChangesNothing(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $batch = [$this->message('1', ['messageId' => '<a@x>']), $this->message('2', ['messageId' => '<b@x>'])];
+
+        self::assertSame(['stored' => 2, 'linked' => 0, 'updated' => 0], $this->messages('INBOX', $batch));
+        self::assertSame(['stored' => 0, 'linked' => 0, 'updated' => 2], $this->messages('INBOX', $batch));
+        self::assertSame(2, $this->rows(Message::class));
+        self::assertSame(2, $this->rows(MessageLocation::class));
+    }
+
+    public function testSameMessageInTwoFoldersIsStoredOnce(): void
+    {
+        $this->folders(['INBOX' => 1, 'Archive' => 1]);
+
+        $this->messages('INBOX', [$this->message('1', ['messageId' => '<same@x>'])]);
+        $result = $this->messages('Archive', [$this->message('900', ['messageId' => 'same@x'])]);
+
+        self::assertSame(['stored' => 0, 'linked' => 1, 'updated' => 0], $result);
+        self::assertSame(1, $this->rows(Message::class));
+        self::assertSame(2, $this->rows(MessageLocation::class));
+    }
+
+    public function testMessageWithoutMessageIdIsMatchedByRawContent(): void
+    {
+        $this->folders(['INBOX' => 1, 'Archive' => 1]);
+        $raw = $this->rawKey('no-message-id');
+
+        $this->messages('INBOX', [$this->message('1', ['messageId' => null, 'rawObjectKey' => $raw])]);
+        $this->messages('Archive', [$this->message('2', ['messageId' => null, 'rawObjectKey' => $raw])]);
+
+        self::assertSame(1, $this->rows(Message::class));
+    }
+
+    public function testRepliesJoinTheirParentsThread(): void
+    {
+        $this->folders(['INBOX' => 1]);
+
+        $this->messages('INBOX', [
+            $this->message('1', ['messageId' => '<root@x>', 'subject' => 'Offsite']),
+            $this->message('2', ['messageId' => '<reply@x>', 'subject' => 'Re: Offsite', 'inReplyTo' => '<root@x>', 'references' => ['<root@x>']]),
+        ]);
+
+        self::assertSame(1, $this->rows(Thread::class));
+        self::assertSame(2, $this->onlyThread()->getMessageCount());
+    }
+
+    public function testReplyThatArrivesFirstIsJoinedByItsParent(): void
+    {
+        $this->folders(['INBOX' => 1]);
+
+        $this->messages('INBOX', [$this->message('2', ['messageId' => '<reply@x>', 'subject' => 'Re: Offsite', 'inReplyTo' => '<root@x>'])]);
+        $this->messages('INBOX', [$this->message('1', ['messageId' => '<root@x>', 'subject' => 'Offsite'])]);
+
+        self::assertSame(1, $this->rows(Thread::class));
+    }
+
+    public function testMissingMiddleMessageMergesTwoThreads(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $this->messages('INBOX', [
+            $this->message('1', ['messageId' => '<a@x>', 'subject' => 'Plan']),
+            $this->message('3', ['messageId' => '<c@x>', 'subject' => 'Re: Plan', 'inReplyTo' => '<b@x>', 'references' => ['<b@x>']]),
+        ]);
+        self::assertSame(2, $this->rows(Thread::class));
+
+        $this->messages('INBOX', [$this->message('2', ['messageId' => '<b@x>', 'subject' => 'Re: Plan', 'inReplyTo' => '<a@x>', 'references' => ['<a@x>']])]);
+
+        self::assertSame(1, $this->rows(Thread::class));
+        self::assertSame(3, $this->onlyThread()->getMessageCount());
+    }
+
+    public function testSubjectFallbackNeedsASharedParticipantAndRecentThread(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $anna = ['address' => 'anna@finance.example'];
+
+        $this->messages('INBOX', [
+            $this->message('1', ['messageId' => '<s1@x>', 'subject' => 'Budget', 'from' => $anna, 'receivedAt' => '2026-10-01T09:00:00+00:00']),
+            $this->message('2', ['messageId' => '<s2@x>', 'subject' => 'RE: Budget', 'from' => $anna, 'receivedAt' => '2026-10-02T09:00:00+00:00']),
+            $this->message('3', ['messageId' => '<s3@x>', 'subject' => 'Budget', 'from' => ['address' => 'stranger@other.example'], 'to' => [['address' => 'kim@company.example']], 'receivedAt' => '2026-10-03T09:00:00+00:00']),
+            $this->message('4', ['messageId' => '<s4@x>', 'subject' => 'Fwd: Budget', 'from' => $anna, 'receivedAt' => '2026-12-01T09:00:00+00:00']),
+        ]);
+
+        $threads = $this->entityManager()->getRepository(Thread::class)->findBy([], ['lastMessageAt' => 'ASC']);
+        self::assertCount(3, $threads, 'Same sender joins; a stranger and a much later mail start their own threads.');
+        self::assertSame([2, 1, 1], array_map(static fn (Thread $t): int => $t->getMessageCount(), $threads));
+    }
+
+    public function testChangesUpdateFlagsAndRemoveMessages(): void
+    {
+        $this->folders(['INBOX' => 1, 'Archive' => 1]);
+        $this->messages('INBOX', [
+            $this->message('1', ['messageId' => '<keep@x>']),
+            $this->message('2', ['messageId' => '<gone@x>', 'subject' => 'Re: x', 'inReplyTo' => '<keep@x>']),
+            $this->message('3', ['messageId' => '<moved@x>']),
+        ]);
+        $this->messages('Archive', [$this->message('50', ['messageId' => '<moved@x>'])]);
+
+        $result = $this->changes('INBOX', [
+            'flags' => [['remoteUid' => '1', 'modSeq' => 9, 'flags' => ['seen' => true, 'flagged' => false, 'answered' => true, 'draft' => false]], ['remoteUid' => '99', 'flags' => ['seen' => true]]],
+            'vanished' => ['2', '3'],
+            'cursor' => 'modseq=9',
+        ]);
+
+        self::assertSame(['updated' => 1, 'removed' => 2, 'unknown' => 1, 'deleted' => 1], $result);
+        $keep = $this->entityManager()->getRepository(Message::class)->findOneBy(['messageIdHeader' => 'keep@x']);
+        self::assertInstanceOf(Message::class, $keep);
+        self::assertTrue($keep->isSeen());
+        self::assertTrue($keep->isAnswered());
+        self::assertSame(1, $keep->getThread()->getMessageCount(), 'The thread is recounted after its reply was deleted.');
+        self::assertNotNull($this->entityManager()->getRepository(Message::class)->findOneBy(['messageIdHeader' => 'moved@x']), 'Still in Archive.');
+        self::assertSame('modseq=9', $this->folders(['INBOX' => 1, 'Archive' => 1])[0]['cursor'] ?? null);
+    }
+
+    public function testUnknownFolderIsRejected(): void
+    {
+        $this->folders(['INBOX' => 1]);
+
+        $this->client->jsonRequest('POST', $this->url('messages'), ['workerId' => 'w1', 'folder' => 'Nope', 'messages' => [$this->message('1')]], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+    }
+
+    public function testInvalidMessageIsRejected(): void
+    {
+        $this->folders(['INBOX' => 1]);
+
+        $this->client->jsonRequest('POST', $this->url('messages'), ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [$this->message('1', ['rawObjectKey' => '../../etc/passwd'])]], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertStringContainsString('rawObjectKey', (string) $this->client->getResponse()->getContent());
+    }
+
+    public function testDuplicateFolderNamesAreRejected(): void
+    {
+        $this->client->jsonRequest('POST', $this->url('folders'), ['workerId' => 'w1', 'folders' => [
+            ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox'],
+            ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox'],
+        ]], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+    }
+
+    public function testRequiresLease(): void
+    {
+        $this->client->jsonRequest('POST', $this->url('folders'), ['workerId' => 'w2', 'folders' => []], $this->worker);
+
+        self::assertResponseStatusCodeSame(404);
+    }
+
+    public function testRequiresIngestScope(): void
+    {
+        $leaseOnly = $this->workerHeaders('sync:lease');
+
+        $this->client->jsonRequest('POST', $this->url('folders'), ['workerId' => 'w1', 'folders' => []], $leaseOnly);
+
+        self::assertResponseStatusCodeSame(403);
+    }
+
+    public function testStatusReportIsVisibleToTheUser(): void
+    {
+        $this->client->jsonRequest('POST', $this->url('status'), ['workerId' => 'w1', 'status' => 'auth_failed', 'detail' => 'The server rejected the password.'], $this->worker);
+        self::assertResponseIsSuccessful();
+        self::assertSame(['status' => 'auth_failed'], $this->decodedResponse());
+
+        $user = $this->userHeaders('kim@example.test', ['settings:read']);
+        $this->client->request('GET', '/api/v1/mail-accounts/'.$this->accountId, server: $user);
+        $account = $this->decodedResponse();
+        self::assertSame('auth_failed', $account['status'] ?? null);
+        self::assertSame('The server rejected the password.', $account['statusDetail'] ?? null);
+    }
+
+    public function testWorkerCannotPauseAnAccount(): void
+    {
+        $this->client->jsonRequest('POST', $this->url('status'), ['workerId' => 'w1', 'status' => 'paused'], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+    }
+
+    /**
+     * @param array<string, int> $folders remote name => UIDVALIDITY
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function folders(array $folders): array
+    {
+        $payload = [];
+        foreach ($folders as $name => $uidValidity) {
+            $payload[] = ['remoteName' => $name, 'displayName' => $name, 'role' => 'INBOX' === $name ? 'inbox' : 'custom', 'uidValidity' => $uidValidity];
+        }
+        $this->client->jsonRequest('POST', $this->url('folders'), ['workerId' => 'w1', 'folders' => $payload], $this->worker);
+        self::assertResponseIsSuccessful();
+
+        /** @var list<array<string, mixed>> */
+        return $this->decodedResponse()['folders'] ?? [];
+    }
+
+    /**
+     * @param list<array<string, mixed>> $messages
+     *
+     * @return array<mixed>
+     */
+    private function messages(string $folder, array $messages, ?string $cursor = null): array
+    {
+        $this->client->jsonRequest('POST', $this->url('messages'), ['workerId' => 'w1', 'folder' => $folder, 'cursor' => $cursor, 'messages' => $messages], $this->worker);
+        self::assertResponseIsSuccessful();
+
+        return $this->decodedResponse();
+    }
+
+    /**
+     * @param array<string, mixed> $changes
+     *
+     * @return array<mixed>
+     */
+    private function changes(string $folder, array $changes): array
+    {
+        $this->client->jsonRequest('POST', $this->url('changes'), ['workerId' => 'w1', 'folder' => $folder] + $changes, $this->worker);
+        self::assertResponseIsSuccessful();
+
+        return $this->decodedResponse();
+    }
+
+    /**
+     * @param array<string, mixed> $override
+     *
+     * @return array<string, mixed>
+     */
+    private function message(string $uid, array $override = []): array
+    {
+        return $override + [
+            'remoteUid' => $uid,
+            'modSeq' => 1,
+            'rawObjectKey' => $this->rawKey('message-'.$uid.'-'.json_encode($override)),
+            'size' => 2048,
+            'receivedAt' => '2026-10-19T08:00:00+00:00',
+            'sentAt' => '2026-10-19T07:59:00+00:00',
+            'flags' => ['seen' => false, 'flagged' => false, 'answered' => false, 'draft' => false],
+            'messageId' => '<msg-'.$uid.'@test.example>',
+            'subject' => 'Message '.$uid,
+            'from' => ['address' => 'sender@test.example', 'name' => 'Sender'],
+            'to' => [['address' => 'kim@company.example']],
+            'snippet' => 'Hello',
+        ];
+    }
+
+    private function rawKey(string $seed): string
+    {
+        $sha = hash('sha256', $seed);
+
+        return 'raw/'.substr($sha, 0, 2).'/'.$sha;
+    }
+
+    private function url(string $action): string
+    {
+        return '/internal/sync/accounts/'.$this->accountId.'/'.$action;
+    }
+
+    /**
+     * @param class-string $class
+     */
+    private function rows(string $class): int
+    {
+        return $this->entityManager()->getRepository($class)->count([]);
+    }
+
+    private function onlyMessage(): Message
+    {
+        $messages = $this->entityManager()->getRepository(Message::class)->findAll();
+        self::assertCount(1, $messages);
+
+        return $messages[0];
+    }
+
+    private function onlyThread(): Thread
+    {
+        $threads = $this->entityManager()->getRepository(Thread::class)->findAll();
+        self::assertCount(1, $threads);
+
+        return $threads[0];
+    }
+
+    private function entityManager(): EntityManagerInterface
+    {
+        $entityManager = static::getContainer()->get(EntityManagerInterface::class);
+        $entityManager->clear();
+
+        return $entityManager;
+    }
+}

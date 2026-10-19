@@ -93,7 +93,13 @@ trait AuthenticatesUsers
         return $this->bearerHeaders($this->decodedResponse()['access_token'] ?? null);
     }
 
-    /** @return array<mixed> */
+    /**
+     * The body of the last response; changes with every request.
+     *
+     * @phpstan-impure
+     *
+     * @return array<mixed>
+     */
     protected function decodedResponse(): array
     {
         $decoded = json_decode((string) $this->client->getResponse()->getContent(), true, flags: \JSON_THROW_ON_ERROR);
@@ -102,6 +108,9 @@ trait AuthenticatesUsers
         return $decoded;
     }
 
+    /**
+     * @phpstan-impure
+     */
     protected function responseString(string $field): string
     {
         $value = $this->decodedResponse()[$field] ?? null;
