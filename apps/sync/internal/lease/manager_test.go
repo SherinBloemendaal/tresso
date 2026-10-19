@@ -16,6 +16,7 @@ import (
 type fakeLeaser struct {
 	mu       sync.Mutex
 	accounts []api.Account
+	outbox   []string
 	err      error
 	released bool
 }
@@ -26,7 +27,7 @@ func (f *fakeLeaser) Lease(context.Context, string, int) (api.LeaseResponse, err
 	if f.err != nil {
 		return api.LeaseResponse{}, f.err
 	}
-	return api.LeaseResponse{LeaseSeconds: 90, Accounts: slices.Clone(f.accounts)}, nil
+	return api.LeaseResponse{LeaseSeconds: 90, Accounts: slices.Clone(f.accounts), Outbox: slices.Clone(f.outbox)}, nil
 }
 
 func (f *fakeLeaser) Release(context.Context, string) error {
@@ -191,5 +192,30 @@ func TestAccountThatGaveUpStartsAgainWhenLeasedAgain(t *testing.T) {
 	}
 	if got := manager.Running(); !slices.Equal(got, []string{"a1"}) {
 		t.Errorf("running = %v", got)
+	}
+}
+
+func TestHeartbeatHandsAccountsWithMailToSendToTheOutbox(t *testing.T) {
+	leaser := &fakeLeaser{accounts: []api.Account{{ID: "a1", Provider: "imap"}}}
+	leaser.outbox = []string{"a1"}
+	stopped := make(chan string, 1)
+	manager := newTestManager(leaser, stopped)
+	var got []string
+	manager.OnOutbox(func(_ context.Context, ids []string) {
+		got = ids
+		if !manager.Holds("a1") {
+			t.Error("the account is not held while its outbox is handled")
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		cancel()
+		manager.shutdown()
+	}()
+
+	manager.Heartbeat(ctx)
+
+	if !slices.Equal(got, []string{"a1"}) {
+		t.Errorf("outbox = %v", got)
 	}
 }

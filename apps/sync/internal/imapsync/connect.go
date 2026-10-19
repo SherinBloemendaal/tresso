@@ -18,13 +18,14 @@ import (
 // ErrAuth means the server refused the credentials; retrying will not help until the user changes them.
 var ErrAuth = errors.New("authentication failed")
 
-type dialer interface {
+// Dialer opens connections; the netguard dialer refuses private addresses.
+type Dialer interface {
 	DialContext(ctx context.Context, address string) (net.Conn, error)
 }
 
 // connect dials through the guarded dialer, sets up TLS or STARTTLS, waits for the greeting and logs in. updates
 // receives a signal whenever the server reports something unasked (new mail, expunges, flag changes).
-func connect(ctx context.Context, d dialer, server api.ServerSettings, username, password string, updates chan<- struct{}) (*imapclient.Client, error) {
+func connect(ctx context.Context, d Dialer, server api.ServerSettings, username, password string, updates chan<- struct{}) (*imapclient.Client, error) {
 	conn, err := d.DialContext(ctx, net.JoinHostPort(server.Host, strconv.Itoa(server.Port)))
 	if err != nil {
 		return nil, err

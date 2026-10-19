@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"sync"
 
@@ -20,6 +21,17 @@ import (
 type Store interface {
 	PutIfAbsent(ctx context.Context, key string, data []byte, contentType string) error
 }
+
+// Reader reads a blob, such as an outgoing message the API stored.
+type Reader interface {
+	Get(ctx context.Context, key string) ([]byte, error)
+}
+
+// ErrNotFound means there is no object with that key.
+var ErrNotFound = errors.New("object not found")
+
+// maxObjectBytes bounds what is read into memory: far above any message a mail server accepts.
+const maxObjectBytes = 100 << 20
 
 func SHA256(data []byte) string {
 	sum := sha256.Sum256(data)
@@ -90,6 +102,26 @@ func (s *S3) PutIfAbsent(ctx context.Context, key string, data []byte, contentTy
 	return nil
 }
 
+func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
+	object, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get %s: %w", key, err)
+	}
+	defer object.Close()
+	data, err := io.ReadAll(io.LimitReader(object, maxObjectBytes+1))
+	if err != nil {
+		var response minio.ErrorResponse
+		if errors.As(err, &response) && response.Code == minio.NoSuchKey {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
+		}
+		return nil, fmt.Errorf("read %s: %w", key, err)
+	}
+	if len(data) > maxObjectBytes {
+		return nil, fmt.Errorf("object %s is larger than %d bytes", key, maxObjectBytes)
+	}
+	return data, nil
+}
+
 // Memory is an in-process Store for tests.
 type Memory struct {
 	mu      sync.Mutex
@@ -110,6 +142,16 @@ func (m *Memory) PutIfAbsent(_ context.Context, key string, data []byte, _ strin
 	m.Objects[key] = append([]byte(nil), data...)
 	m.Puts++
 	return nil
+}
+
+func (m *Memory) Get(_ context.Context, key string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, ok := m.Objects[key]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
+	}
+	return append([]byte(nil), data...), nil
 }
 
 func (m *Memory) Len() int {
