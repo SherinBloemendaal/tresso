@@ -1,7 +1,8 @@
 import type { AppliedAction, MessageAction } from '../actions'
-import type { ConversationSummary } from '../sync/conversation'
+import type { Verdict } from '../domain'
+import type { ConversationSummary, ListScope } from '../sync/conversation'
 import type { SyncStore } from '../sync/engine'
-import type { Address, DraftAttachment, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedThread } from '../sync/types'
+import type { Address, DraftAttachment, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread } from '../sync/types'
 
 /** Someone the user exchanged mail with, for recipient suggestions. */
 export interface Contact {
@@ -94,24 +95,37 @@ export interface MailStore extends SyncStore {
   folders(): Promise<SyncedFolder[]>
   /** By name. */
   signatures(): Promise<SyncedSignature[]>
+  /** In sidebar order. */
+  smartInboxes(): Promise<SyncedSmartInbox[]>
   /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
   inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]>
+  /** The threads of a list (an inbox or a smart inbox), newest first. */
+  list(scope: ListScope, limit: number): Promise<ConversationSummary[]>
   /**
-   * Inbox threads (of one account, or of all) matching a test, newest first, however many there are: for selecting
-   * beyond the part of the list that is loaded.
+   * Threads of a list matching a test, newest first, however many there are: for selecting beyond the part of the list
+   * that is loaded.
    */
-  inboxThreadIds(mailAccountId: string | null, matches: (conversation: ConversationSummary) => boolean): Promise<string[]>
+  listThreadIds(scope: ListScope, matches: (conversation: ConversationSummary) => boolean): Promise<string[]>
   /**
-   * What a selection of threads holds now: the ones still in the inbox on screen (of one account, or of all), and
-   * their accounts and senders (lower-case addresses).
+   * What a selection of threads holds now: the ones still in the list on screen, and their accounts and senders
+   * (lower-case addresses).
    */
-  describeThreads(mailAccountId: string | null, threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }>
+  describeThreads(scope: ListScope, threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }>
   /** The messages of these threads, for acting on whole conversations. */
   messageIdsOfThreads(threadIds: string[]): Promise<string[]>
   /** The messages of each thread. */
   messagesByThread(threadIds: string[]): Promise<Map<string, string[]>>
   /** Inbox threads with unread mail, per account; every account is listed, with 0 when it has none. */
   unreadInboxCounts(): Promise<Map<string, number>>
+  /** Threads with unread mail per smart inbox, among those it lists; every smart inbox is listed. */
+  unreadSmartInboxCounts(): Promise<Map<string, number>>
+  /**
+   * Shows the user's choice at once, before the server confirms it: the thread moves to the smart inbox with the
+   * verdict. Returns the thread as it was, for {@link restoreThread} when the server refuses; null when it is gone.
+   */
+  classifyThread(threadId: string, smartInboxId: string, verdict: Verdict): Promise<SyncedThread | null>
+  /** Puts a thread back as it was before {@link classifyThread}, unless the delta changed it since. */
+  restoreThread(previous: SyncedThread, optimistic: { smartInboxId: string; verdict: Verdict }): Promise<void>
   /** Outgoing mail that is not settled: scheduled, on its way, or failed. Newest first. */
   outbox(): Promise<SyncedOutgoingMessage[]>
   outgoing(id: string): Promise<SyncedOutgoingMessage | null>

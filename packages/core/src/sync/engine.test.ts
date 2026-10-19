@@ -8,11 +8,21 @@ function page(cursor: number, hasMore = false, ids: string[] = []): ChangePage {
     hasMore,
     mailAccounts: [],
     folders: [],
-    threads: ids.map((id) => ({ id, mailAccountId: 'a', subject: id, messageCount: 1, lastMessageAt: '2026-10-19T08:00:00+00:00' })),
+    threads: ids.map((id) => ({
+      id,
+      mailAccountId: 'a',
+      subject: id,
+      messageCount: 1,
+      lastMessageAt: '2026-10-19T08:00:00+00:00',
+      smartInboxId: null,
+      verdict: null,
+      classificationReason: null,
+    })),
     messages: [],
     outgoingMessages: [],
     signatures: [],
     drafts: [],
+    smartInboxes: [],
     deleted: [],
   }
 }

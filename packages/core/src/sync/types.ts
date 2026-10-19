@@ -1,5 +1,7 @@
 /** Wire format of GET /api/v1/sync/changes and GET /api/v1/realtime/token. */
 
+import type { BuiltinCategory, Verdict } from '../domain'
+
 export type FolderRole = 'inbox' | 'sent' | 'drafts' | 'trash' | 'spam' | 'archive' | 'all' | 'custom'
 
 export type MailAccountStatus = 'active' | 'paused' | 'auth_failed' | 'error'
@@ -42,6 +44,11 @@ export interface SyncedThread {
   subject: string
   messageCount: number
   lastMessageAt: string
+  /** The smart inbox the conversation is in; null until its first incoming message was classified. */
+  smartInboxId: string | null
+  verdict: Verdict | null
+  /** Why it is there (see `ClassificationReason`); `user` when the user put it there. */
+  classificationReason: string | null
 }
 
 export interface MessageFlags {
@@ -64,8 +71,9 @@ export interface SyncedMessage {
   receivedAt: string
   flags: MessageFlags
   hasAttachments: boolean
-  categoryId: string | null
-  verdict: 'do' | 'delegate' | 'know' | 'none' | null
+  /** The smart inbox and verdict this message got; the conversation takes those of its newest incoming message. */
+  smartInboxId: string | null
+  verdict: Verdict | null
   summary: string | null
 }
 
@@ -98,7 +106,23 @@ export interface SyncedSignature {
   updatedAt: string
 }
 
-export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage' | 'signature' | 'draft'
+/** A smart inbox: one of the five built-in ones, or one of the user's own (`builtin` null). */
+export interface SyncedSmartInbox {
+  id: string
+  builtin: BuiltinCategory | null
+  name: string
+  /** What belongs here in plain words, for AI classification (an add-on). */
+  instructions: string
+  /** Addresses or `@domain`s whose mail always lands here. */
+  includeSenders: string[]
+  /** Addresses or `@domain`s whose mail never lands here; wins over everything else. */
+  excludeSenders: string[]
+  verdict: Verdict
+  /** Sidebar order. */
+  position: number
+}
+
+export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage' | 'signature' | 'draft' | 'smartInbox'
 
 export type DraftKind = 'new' | 'reply' | 'replyAll' | 'forward'
 
@@ -156,6 +180,7 @@ export interface ChangePage {
   outgoingMessages: SyncedOutgoingMessage[]
   signatures: SyncedSignature[]
   drafts: SyncedDraft[]
+  smartInboxes: SyncedSmartInbox[]
   deleted: Deleted[]
 }
 

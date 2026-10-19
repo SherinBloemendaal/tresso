@@ -21,7 +21,7 @@ function message(overrides: Partial<SyncedMessage> = {}): SyncedMessage {
     receivedAt: '2026-10-19T08:00:00+00:00',
     flags: { seen: true, flagged: false, answered: false, draft: false },
     hasAttachments: false,
-    categoryId: null,
+    smartInboxId: null,
     verdict: null,
     summary: null,
     ...overrides,

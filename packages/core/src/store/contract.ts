@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MissingFolderError } from '../actions'
-import type { ChangePage, SyncedMessage, SyncedOutgoingMessage } from '../sync/types'
+import type { ChangePage, SyncedMessage, SyncedOutgoingMessage, SyncedSmartInbox, SyncedThread } from '../sync/types'
 import type { Draft, MailStore } from './mailStore'
 
 /** Test data for the mail stores. */
 export function page(changes: Partial<ChangePage> & { cursor: number }): ChangePage {
-  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], deleted: [], ...changes }
+  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [], ...changes }
 }
 
 export const accounts = [
@@ -23,8 +23,12 @@ export function signature(id: string, name: string) {
   return { id, name, html: `<p>${name}</p>`, updatedAt: '2026-10-19T08:00:00+00:00' }
 }
 
-export function thread(id: string, mailAccountId: string) {
-  return { id, mailAccountId, subject: `Subject ${id}`, messageCount: 1, lastMessageAt: '2026-10-19T08:00:00+00:00' }
+export function thread(id: string, mailAccountId: string, classification: Partial<Pick<SyncedThread, 'smartInboxId' | 'verdict' | 'classificationReason'>> = {}): SyncedThread {
+  return { id, mailAccountId, subject: `Subject ${id}`, messageCount: 1, lastMessageAt: '2026-10-19T08:00:00+00:00', smartInboxId: null, verdict: null, classificationReason: null, ...classification }
+}
+
+export function smartInbox(id: string, builtin: SyncedSmartInbox['builtin'], position: number, verdict: SyncedSmartInbox['verdict'] = 'know'): SyncedSmartInbox {
+  return { id, builtin, name: id, instructions: '', includeSenders: [], excludeSenders: [], verdict, position }
 }
 
 export function message(id: string, threadId: string, mailAccountId: string, folderIds: string[], receivedAt: string, extra: Partial<SyncedMessage> = {}): SyncedMessage {
@@ -41,7 +45,7 @@ export function message(id: string, threadId: string, mailAccountId: string, fol
     receivedAt,
     flags: { seen: false, flagged: false, answered: false, draft: false },
     hasAttachments: false,
-    categoryId: null,
+    smartInboxId: null,
     verdict: null,
     summary: null,
     ...extra,
@@ -186,15 +190,15 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
     })
 
     it('finds inbox threads beyond the loaded list, and what a selection holds', async () => {
-      expect(await db.inboxThreadIds(null, () => true)).toEqual(['t1', 't3'])
-      expect(await db.inboxThreadIds('work', (c) => c.unreadCount > 0)).toEqual(['t1'])
+      expect(await db.listThreadIds({ kind: 'inbox', mailAccountId: null }, () => true)).toEqual(['t1', 't3'])
+      expect(await db.listThreadIds({ kind: 'inbox', mailAccountId: 'work' }, (c) => c.unreadCount > 0)).toEqual(['t1'])
 
-      expect(await db.describeThreads(null, ['t1', 't2', 't3', 'gone'])).toEqual({
+      expect(await db.describeThreads({ kind: 'inbox', mailAccountId: null }, ['t1', 't2', 't3', 'gone'])).toEqual({
         present: ['t1', 't3'],
         accounts: ['work', 'home'],
         senders: ['m1@sender.example', 'm2@sender.example', 'm4@sender.example'],
       })
-      expect((await db.describeThreads('home', ['t1', 't3'])).present).toEqual(['t3'])
+      expect((await db.describeThreads({ kind: 'inbox', mailAccountId: 'home' }, ['t1', 't3'])).present).toEqual(['t3'])
     })
 
     it('lists the messages of threads', async () => {
@@ -221,7 +225,7 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
       await db.saveDraft(draft('db', { updatedAt: 5 }))
 
       expect((await db.inbox(null, 2)).map((c) => c.threadId)).toEqual(['tb', 'ta'])
-      expect((await db.inboxThreadIds('work', () => true)).slice(0, 2)).toEqual(['tb', 'ta'])
+      expect((await db.listThreadIds({ kind: 'inbox', mailAccountId: 'work' }, () => true)).slice(0, 2)).toEqual(['tb', 'ta'])
       expect((await db.drafts()).map((d) => d.id)).toEqual(['db', 'da'])
       expect((await db.suggestContacts('m', 2)).map((c) => c.key)).toEqual(['mb@sender.example', 'ma@sender.example'])
     })
@@ -425,6 +429,89 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
 
     it('lists accounts by name', async () => {
       expect((await db.mailAccounts()).map((a) => a.displayName)).toEqual(['Personal', 'Work'])
+    })
+
+    describe('smart inboxes', () => {
+      beforeEach(async () => {
+        await db.apply(
+          page({
+            cursor: 20,
+            folders: [{ id: 'work-junk', mailAccountId: 'work', name: 'Junk', displayName: 'Junk', role: 'spam' }],
+            smartInboxes: [smartInbox('spam', 'spam', 4, 'none'), smartInbox('todo', 'todo', 0, 'do'), smartInbox('news', 'advertise', 3)],
+            threads: [
+              thread('t1', 'work', { smartInboxId: 'todo', verdict: 'do', classificationReason: 'direct' }),
+              thread('t2', 'work', { smartInboxId: 'news', verdict: 'know', classificationReason: 'bulk' }),
+              thread('t3', 'home', { smartInboxId: 'spam', verdict: 'none', classificationReason: 'server_spam' }),
+              thread('t5', 'work', { smartInboxId: 'spam', verdict: 'none', classificationReason: 'server_spam' }),
+              thread('t6', 'work', { smartInboxId: 'news', verdict: 'know', classificationReason: 'bulk' }),
+            ],
+            messages: [
+              message('m5', 't5', 'work', ['work-junk'], '2026-10-19T11:00:00+00:00'),
+              message('m6', 't6', 'work', ['work-inbox'], '2026-10-19T12:00:00+00:00', { flags: { seen: true, flagged: false, answered: false, draft: false } }),
+            ],
+          }),
+        )
+      })
+
+      it('keeps them in sidebar order and drops deleted ones', async () => {
+        expect((await db.smartInboxes()).map((s) => s.id)).toEqual(['todo', 'news', 'spam'])
+
+        await db.apply(page({ cursor: 21, deleted: [{ type: 'smartInbox', id: 'news' }] }))
+        expect((await db.smartInboxes()).map((s) => s.id)).toEqual(['todo', 'spam'])
+      })
+
+      it('lists a smart inbox across accounts, newest first, without archived conversations', async () => {
+        expect((await db.list({ kind: 'smartInbox', smartInboxId: 'news' }, 10)).map((c) => c.threadId)).toEqual(['t6'])
+        expect((await db.list({ kind: 'smartInbox', smartInboxId: 'spam' }, 1)).map((c) => c.threadId)).toEqual(['t5'])
+      })
+
+      it('shows spam from inboxes and junk folders in the Spam smart inbox only', async () => {
+        expect((await db.list({ kind: 'smartInbox', smartInboxId: 'spam' }, 10)).map((c) => c.threadId)).toEqual(['t5', 't3'])
+        expect((await db.inbox(null, 10)).map((c) => c.threadId)).toEqual(['t6', 't1'])
+        expect(Object.fromEntries(await db.unreadInboxCounts())).toEqual({ work: 1, home: 0 })
+      })
+
+      it('counts unread conversations per smart inbox', async () => {
+        expect(Object.fromEntries(await db.unreadSmartInboxCounts())).toEqual({ todo: 1, news: 0, spam: 1 })
+      })
+
+      it('carries the classification on the conversation', async () => {
+        expect((await db.inbox(null, 10)).find((c) => c.threadId === 't1')).toMatchObject({ smartInboxId: 'todo', verdict: 'do', classificationReason: 'direct', inbox: true, active: true })
+      })
+
+      it('finds and describes the conversations of a smart inbox for selections', async () => {
+        const scope = { kind: 'smartInbox' as const, smartInboxId: 'spam' }
+
+        expect(await db.listThreadIds(scope, () => true)).toEqual(['t5', 't3'])
+        expect(await db.describeThreads(scope, ['t1', 't3', 't5'])).toEqual({ present: ['t3', 't5'], accounts: ['home', 'work'], senders: ['m4@sender.example', 'm5@sender.example'] })
+      })
+
+      it('moves a conversation at once when the user classifies it, and puts it back when that fails', async () => {
+        const previous = await db.classifyThread('t3', 'todo', 'delegate')
+
+        expect((await db.list({ kind: 'smartInbox', smartInboxId: 'todo' }, 10)).map((c) => [c.threadId, c.verdict, c.classificationReason])).toEqual([
+          ['t1', 'do', 'direct'],
+          ['t3', 'delegate', 'user'],
+        ])
+        expect((await db.inbox(null, 10)).map((c) => c.threadId)).toContain('t3')
+
+        await db.restoreThread(previous!, { smartInboxId: 'todo', verdict: 'delegate' })
+        expect((await db.thread('t3'))?.thread).toMatchObject({ smartInboxId: 'spam', classificationReason: 'server_spam' })
+        expect((await db.inbox(null, 10)).map((c) => c.threadId)).not.toContain('t3')
+      })
+
+      it('does not put back a conversation the delta changed since', async () => {
+        const previous = await db.classifyThread('t2', 'todo', 'do')
+        await db.apply(page({ cursor: 21, threads: [thread('t2', 'work', { smartInboxId: 'news', verdict: 'know', classificationReason: 'sender_rule' })] }))
+
+        await db.restoreThread(previous!, { smartInboxId: 'todo', verdict: 'do' })
+
+        expect((await db.thread('t2'))?.thread).toMatchObject({ smartInboxId: 'news', classificationReason: 'sender_rule' })
+      })
+
+      it('says when the conversation to classify is gone', async () => {
+        expect(await db.classifyThread('gone', 'todo', 'do')).toBeNull()
+      })
     })
   })
 }
