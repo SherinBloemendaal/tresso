@@ -1,10 +1,14 @@
 /** Wire format of GET /api/v1/sync/changes and GET /api/v1/realtime/token. */
 
 import type { BuiltinCategory, Verdict } from '../domain'
+import type { SyncedCalendar, SyncedCalendarEvent } from '../calendar/types'
 
 export type FolderRole = 'inbox' | 'sent' | 'drafts' | 'trash' | 'spam' | 'archive' | 'all' | 'custom'
 
 export type MailAccountStatus = 'active' | 'paused' | 'auth_failed' | 'error'
+
+/** How syncing an account's calendars goes, apart from its mail. */
+export type CalendarSyncStatus = 'unknown' | 'active' | 'unsupported' | 'auth_failed' | 'error'
 
 export interface Address {
   address: string
@@ -28,6 +32,8 @@ export interface SyncedMailAccount {
   lastSyncedAt: string | null
   /** The signature inserted into new messages from this account. */
   defaultSignatureId: string | null
+  calendarStatus: CalendarSyncStatus
+  calendarStatusDetail: string | null
 }
 
 export interface SyncedFolder {
@@ -75,6 +81,8 @@ export interface SyncedMessage {
   smartInboxId: string | null
   verdict: Verdict | null
   summary: string | null
+  /** The iTIP method of the calendar object the message carries (REQUEST, CANCEL, REPLY, ...), or null. */
+  calendarMethod: string | null
 }
 
 
@@ -122,7 +130,7 @@ export interface SyncedSmartInbox {
   position: number
 }
 
-export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage' | 'signature' | 'draft' | 'smartInbox'
+export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage' | 'signature' | 'draft' | 'smartInbox' | 'calendar' | 'calendarEvent'
 
 export type DraftKind = 'new' | 'reply' | 'replyAll' | 'forward'
 
@@ -181,6 +189,8 @@ export interface ChangePage {
   signatures: SyncedSignature[]
   drafts: SyncedDraft[]
   smartInboxes: SyncedSmartInbox[]
+  calendars: SyncedCalendar[]
+  calendarEvents: SyncedCalendarEvent[]
   deleted: Deleted[]
 }
 

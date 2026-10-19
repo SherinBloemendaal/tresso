@@ -1,6 +1,6 @@
 /** Wire format of /api/v1/mail-accounts, /api/v1/mail-server-settings and the provider sign-in endpoints. */
 
-import type { MailAccountStatus } from './sync/types'
+import type { CalendarSyncStatus, MailAccountStatus } from './sync/types'
 
 export type ConnectionSecurity = 'tls' | 'starttls' | 'none'
 
@@ -24,6 +24,8 @@ export interface MailAccount {
   smtp: ServerSettings | null
   /** CalDAV address of the account's calendars, set by the user or found by the sync worker. */
   calendarUrl: string | null
+  calendarStatus: CalendarSyncStatus
+  calendarStatusDetail: string | null
   lastSyncedAt: string | null
   createdAt: string
   /** Changed through the signature's `defaultFor`. */

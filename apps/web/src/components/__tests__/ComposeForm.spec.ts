@@ -18,7 +18,7 @@ async function settle(): Promise<void> {
 function setup(initial: Draft) {
   setActivePinia(createPinia())
   const mail = useMailStore()
-  mail.accounts = [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }]
+  mail.accounts = [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }]
   const compose = useComposeStore()
   const send = vi.fn<(sendAt?: Date) => Promise<void>>(async () => {})
   compose.send = send
