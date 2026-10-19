@@ -38,7 +38,8 @@ Delivered in steps, each its own pull request:
   kept on the device until a message is confirmed sent
 - [x] 1.5d Search: Meilisearch index kept in step with sync changes, from:, to:, in:, has:attachment and date filters,
   results with highlights in the web client
-- [ ] 1.5e Drafts synced across devices and filed in the account's Drafts folder
+- [x] 1.5e Drafts synced across devices and filed in the account's Drafts folder, with conflicts between devices
+  settled by the user
 - [ ] 1.6 Gmail and Microsoft 365: OAuth connection, Gmail API and Microsoft Graph sync
 
 ## Phase 2: Do, hand over, know
