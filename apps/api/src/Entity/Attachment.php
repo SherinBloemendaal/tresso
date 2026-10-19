@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Entity;
 
 use App\Enum\ScanStatus;
+use App\Repository\AttachmentRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
@@ -13,7 +14,7 @@ use Symfony\Component\Uid\Uuid;
 /**
  * Attachment metadata. Content is stored once per SHA-256 in object storage.
  */
-#[ORM\Entity]
+#[ORM\Entity(repositoryClass: AttachmentRepository::class)]
 #[ORM\Index(columns: ['message_id'])]
 #[ORM\Index(columns: ['sha256'])]
 class Attachment
@@ -54,7 +55,11 @@ class Attachment
     #[ORM\Column(length: 255, nullable: true)]
     private ?string $scanSignature = null;
 
-    public function __construct(Message $message, string $filename, string $contentType, int $size, string $sha256)
+    /**
+     * @param ?string $contentId the part's Content-ID, by which the HTML body can reference it (cid:), whatever its
+     *                           disposition
+     */
+    public function __construct(Message $message, string $filename, string $contentType, int $size, string $sha256, ?string $contentId = null)
     {
         $this->id = Uuid::v7();
         $this->mailAccount = $message->getMailAccount();
@@ -63,6 +68,7 @@ class Attachment
         $this->contentType = $contentType;
         $this->size = $size;
         $this->sha256 = $sha256;
+        $this->contentId = '' === $contentId ? null : $contentId;
     }
 
     public function getId(): Uuid
@@ -116,10 +122,15 @@ class Attachment
         return $this->inline;
     }
 
-    public function markInline(string $contentId): void
+    /**
+     * Marks the part as shown inside the body rather than as a file. Only parts with a Content-ID can be referenced.
+     */
+    public function markInline(): void
     {
+        if (null === $this->contentId) {
+            throw new \LogicException('Only attachments with a Content-ID can be shown inline.');
+        }
         $this->inline = true;
-        $this->contentId = $contentId;
     }
 
     public function getScanStatus(): ScanStatus

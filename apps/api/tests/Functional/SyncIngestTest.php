@@ -9,6 +9,7 @@ use App\Entity\Folder;
 use App\Entity\Message;
 use App\Entity\MessageLocation;
 use App\Entity\Thread;
+use App\Repository\AttachmentRepository;
 use Doctrine\ORM\EntityManagerInterface;
 
 final class SyncIngestTest extends DatabaseTestCase
@@ -128,6 +129,22 @@ final class SyncIngestTest extends DatabaseTestCase
         ])]);
 
         self::assertFalse($this->onlyMessage()->hasAttachments());
+    }
+
+    public function testRegularAttachmentsKeepTheirContentId(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $sha = hash('sha256', 'photo');
+
+        $this->messages('INBOX', [$this->message('1', [
+            'attachments' => [['filename' => 'photo.png', 'contentType' => 'image/png', 'size' => 10, 'sha256' => $sha, 'contentId' => 'photo@x', 'inline' => false]],
+        ])]);
+
+        $attachment = static::getContainer()->get(AttachmentRepository::class)->findOneBy(['sha256' => $sha]);
+        self::assertInstanceOf(Attachment::class, $attachment);
+        self::assertSame('photo@x', $attachment->getContentId());
+        self::assertFalse($attachment->isInline());
+        self::assertTrue($this->onlyMessage()->hasAttachments());
     }
 
     public function testResendingABatchChangesNothing(): void
