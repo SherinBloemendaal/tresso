@@ -4,6 +4,7 @@
   "license": "AGPL-3.0-only",
   "main": "expo-router/entry",
   "dependencies": {
+    "@react-native-community/datetimepicker": "9.2.1",
     "@tresso/core": "*",
     "expo": "~58.0.14",
     "expo-auth-session": "~58.0.13",
@@ -19,13 +20,19 @@
     "react-native": "0.88.0",
     "react-native-safe-area-context": "~5.10.1",
     "react-native-screens": "~4.30.0",
+    "react-native-svg": "15.16.0",
     "react-native-webview": "14.0.1"
   },
   "devDependencies": {
+    "@tiptap/core": "^3.32.0",
+    "@tiptap/extension-link": "^3.32.0",
+    "@tiptap/extension-placeholder": "^3.32.0",
+    "@tiptap/starter-kit": "^3.32.0",
     "@types/react": "~19.3.0",
     "@types/sql.js": "^1.4.11",
     "eslint": "^9.39.5",
     "eslint-config-expo": "~58.0.4",
+    "rolldown": "^1.2.14",
     "sql.js": "^1.15.0",
     "typescript": "~6.0.3",
     "vitest": "^4.1.12"
@@ -37,7 +44,8 @@
     "web": "expo start --web",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "build:editor": "node scripts/build-editor.mjs"
   },
   "private": true
 }

@@ -11,7 +11,9 @@ import {
   type RealtimeAccess,
   type Sql,
   CopyClosingError,
+  DraftSync,
   SqliteMailStore,
+  type DraftApi,
 } from '@tresso/core'
 
 const PAGE_SIZE = 500
@@ -38,6 +40,8 @@ export interface MailSessionDeps {
   fetchAccess(): Promise<RealtimeAccess>
   /** POST /api/v1/message-actions */
   postAction(request: MessageActionRequest): Promise<void>
+  /** /api/v1/drafts */
+  drafts: DraftApi
   fetch?: typeof fetch
   onState(state: MailState): void
   /** Whether the app is in front when the session starts (it can be launched in the background). */
@@ -68,9 +72,12 @@ export class MailSession {
   private wanted = 0
   private open: Open | null = null
   private foreground: boolean
+  /** Brings drafts written on the phone to the server, for whichever copy is open. */
+  readonly drafts: DraftSync
 
   constructor(private readonly deps: MailSessionDeps) {
     this.foreground = deps.foreground ?? true
+    this.drafts = new DraftSync(() => this.database, deps.drafts, () => this.changed())
   }
 
   get database(): SqliteMailStore | null {
@@ -230,6 +237,8 @@ export class MailSession {
     this.update({ userId, ready: true, version: this.state.version + 1, syncError: null })
     // Not awaited: the copy on the device shows right away, and a switch (a sign-out) does not wait for the pull.
     void this.pull(opened, () => engine.sync())
+    // Drafts written while offline (or before the app was closed) go up now.
+    void this.drafts.uploadPending()
     if (this.foreground) {
       opened.realtime.start()
     }

@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
+import { useRouter } from 'expo-router'
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useAuth } from '@/auth/AuthProvider'
+import { Icon } from '@/components/Icon'
 import { InboxList } from '@/components/InboxList'
+import { useComposer } from '@/compose/ComposerProvider'
 import { useMail } from '@/mail/MailProvider'
 import { useTheme, type Theme } from '@/theme'
 
@@ -76,16 +79,21 @@ function SignIn({ styles }: { styles: Styles }) {
 function SignedIn({ styles }: { styles: Styles }) {
   const auth = useAuth()
   const mail = useMail()
+  const { composer } = useComposer()
+  const router = useRouter()
+  const theme = useTheme()
   const [accounts, setAccounts] = useState(0)
-  const { mailAccounts, version } = mail
+  const [drafts, setDrafts] = useState(0)
+  const { mailAccounts, store, version } = mail
 
   useEffect(() => {
     let current = true
     void mailAccounts().then((list) => current && setAccounts(list.length))
+    void (store()?.drafts() ?? Promise.resolve([])).then((list) => current && setDrafts(list.filter((draft) => draft.outgoingId === null).length))
     return () => {
       current = false
     }
-  }, [mailAccounts, version])
+  }, [mailAccounts, store, version])
 
   return (
     <View style={styles.fill}>
@@ -101,12 +109,23 @@ function SignedIn({ styles }: { styles: Styles }) {
                 {mail.live ? '' : ' · not live'}
               </Text>
             </View>
+            {drafts > 0 && (
+              <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => router.push('/drafts')} accessibilityRole="button" accessibilityLabel={`Drafts, ${drafts}`}>
+                <Text style={styles.secondaryLabel}>Drafts {drafts}</Text>
+              </Pressable>
+            )}
             <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => void auth.signOut()} accessibilityRole="button">
               <Text style={styles.secondaryLabel}>Sign out</Text>
             </Pressable>
           </View>
         }
       />
+      {accounts > 0 && (
+        <Pressable style={({ pressed }) => [styles.compose, pressed && styles.pressed]} onPress={() => composer.openNew()} accessibilityRole="button" accessibilityLabel="Compose">
+          <Icon name="pen" size={18} color={theme.surface} />
+          <Text style={styles.composeLabel}>Compose</Text>
+        </Pressable>
+      )}
     </View>
   )
 }
@@ -127,6 +146,24 @@ function makeStyles(theme: Theme) {
     secondary: { minHeight: 44, paddingHorizontal: 20, borderRadius: 6, justifyContent: 'center', borderWidth: 1, borderColor: theme.line, backgroundColor: theme.surface },
     secondaryLabel: { color: theme.ink, fontSize: 15, fontWeight: '500' },
     pressed: { opacity: 0.7 },
+    compose: {
+      position: 'absolute',
+      right: 20,
+      bottom: 24,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      height: 52,
+      paddingHorizontal: 20,
+      borderRadius: 999,
+      backgroundColor: theme.ink,
+      shadowColor: '#16181d',
+      shadowOpacity: 0.2,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 8 },
+      elevation: 6,
+    },
+    composeLabel: { color: theme.surface, fontSize: 15, fontWeight: '600' },
     error: { color: theme.danger, fontSize: 14, textAlign: 'center', marginTop: 16 },
   })
 }
