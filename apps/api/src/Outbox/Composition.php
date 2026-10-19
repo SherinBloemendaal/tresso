@@ -16,6 +16,7 @@ final readonly class Composition
      * @param list<array{address: string, name: ?string}> $to
      * @param list<array{address: string, name: ?string}> $cc
      * @param list<array{address: string, name: ?string}> $bcc
+     * @param list<OutgoingAttachment>                     $attachments
      */
     public function __construct(
         public MailAccount $account,
@@ -26,6 +27,7 @@ final readonly class Composition
         public string $html,
         public ?Message $inReplyTo,
         public \DateTimeImmutable $sendAt,
+        public array $attachments = [],
     ) {
     }
 }

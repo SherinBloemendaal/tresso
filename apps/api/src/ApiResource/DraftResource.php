@@ -11,8 +11,11 @@ use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\Post;
 use ApiPlatform\Metadata\Put;
 use App\ApiResource\Input\Draft\DraftInput;
+use App\ApiResource\Output\DraftAttachmentOutput;
 use App\Entity\Draft;
+use App\Entity\DraftAttachment;
 use App\Enum\DraftKind;
+use App\Mail\Body\AttachmentUrls;
 use App\Security\Scope;
 use App\State\DraftProcessor;
 use App\State\DraftProvider;
@@ -61,6 +64,7 @@ final readonly class DraftResource
      * @param list<array{address: string, name: ?string}> $to
      * @param list<array{address: string, name: ?string}> $cc
      * @param list<array{address: string, name: ?string}> $bcc
+     * @param list<DraftAttachmentOutput>                  $attachments
      */
     public function __construct(
         #[ApiProperty(identifier: true)]
@@ -77,10 +81,11 @@ final readonly class DraftResource
         public ?string $inReplyToMessageId,
         public int $version,
         public \DateTimeImmutable $updatedAt,
+        public array $attachments,
     ) {
     }
 
-    public static function fromEntity(Draft $draft): self
+    public static function fromEntity(Draft $draft, AttachmentUrls $urls): self
     {
         $recipients = $draft->getRecipients();
 
@@ -98,6 +103,7 @@ final readonly class DraftResource
             $draft->getInReplyTo()?->getId()->toRfc4122(),
             $draft->getVersion(),
             $draft->getUpdatedAt(),
+            array_map(static fn (DraftAttachment $attachment): DraftAttachmentOutput => DraftAttachmentOutput::fromEntity($attachment, $urls->forDraft($attachment)), $draft->getAttachments()),
         );
     }
 }

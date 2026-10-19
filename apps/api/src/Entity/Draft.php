@@ -6,7 +6,10 @@ namespace App\Entity;
 
 use App\Enum\DraftKind;
 use App\Repository\DraftRepository;
+use App\Sync\Change\HidesFromClients;
 use App\Sync\Change\TracksChanges;
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
@@ -16,11 +19,14 @@ use Symfony\Component\Uid\Uuid;
  * A message being written, the same on every device. Each save raises the version; a save based on an older version
  * is refused, so two devices never silently overwrite each other. The worker that leases the account files a copy
  * in its Drafts folder (filing state below is internal), so other mail apps see the draft too.
+ *
+ * Sending keeps the draft, out of sight of the clients, until the message went out: an undo or a failure brings it
+ * back as it was, attachments included.
  */
 #[ORM\Entity(repositoryClass: DraftRepository::class)]
 #[ORM\Index(columns: ['owner_id', 'change_seq'])]
 #[ORM\Index(columns: ['mail_account_id', 'filed_version'])]
-class Draft implements TracksChanges
+class Draft implements TracksChanges, HidesFromClients
 {
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
@@ -86,6 +92,16 @@ class Draft implements TracksChanges
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $filingClaimedUntil = null;
 
+    /** The message this draft is being sent as; set until it went out (then the draft goes) or came back. */
+    #[ORM\ManyToOne]
+    #[ORM\JoinColumn(onDelete: 'SET NULL')]
+    private ?OutgoingMessage $sendingAs = null;
+
+    /** @var Collection<int, DraftAttachment> */
+    #[ORM\OneToMany(targetEntity: DraftAttachment::class, mappedBy: 'draft')]
+    #[ORM\OrderBy(['position' => 'ASC'])]
+    private Collection $attachments;
+
     public function __construct(Uuid $id, User $owner, ?MailAccount $mailAccount, DraftKind $kind, \DateTimeImmutable $now)
     {
         if (null !== $mailAccount && !$mailAccount->getOwner()->getId()->equals($owner->getId())) {
@@ -96,6 +112,7 @@ class Draft implements TracksChanges
         $this->mailAccount = $mailAccount;
         $this->kind = $kind;
         $this->updatedAt = $now;
+        $this->attachments = new ArrayCollection();
     }
 
     public function getId(): Uuid
@@ -214,6 +231,69 @@ class Draft implements TracksChanges
     }
 
     /** The account changed: the copy filed in the old account's Drafts folder is someone else's job now. */
+    /** @return list<DraftAttachment> */
+    public function getAttachments(): array
+    {
+        return array_values($this->attachments->toArray());
+    }
+
+    /** Called by DraftAttachment's creator, so the draft's own list stays current in this unit of work. */
+    public function attach(DraftAttachment $attachment): void
+    {
+        if ($attachment->getDraft() !== $this) {
+            throw new \LogicException('An attachment belongs to the draft it was made for.');
+        }
+        $this->attachments->add($attachment);
+    }
+
+    public function detach(DraftAttachment $attachment): void
+    {
+        $this->attachments->removeElement($attachment);
+    }
+
+    /** The position after the last attachment. */
+    public function nextAttachmentPosition(): int
+    {
+        $last = 0;
+        foreach ($this->attachments as $attachment) {
+            $last = max($last, $attachment->getPosition());
+        }
+
+        return $last + 1;
+    }
+
+    public function getSendingAs(): ?OutgoingMessage
+    {
+        return $this->sendingAs;
+    }
+
+    public function isSending(): bool
+    {
+        return null !== $this->sendingAs;
+    }
+
+    /** The draft goes out as this message: clients no longer see it, and its copy leaves the Drafts folder. */
+    public function markSending(OutgoingMessage $message): void
+    {
+        if (null !== $this->sendingAs) {
+            throw new \LogicException('This draft is being sent already.');
+        }
+        $this->sendingAs = $message;
+        $this->forgetFiledCopy();
+    }
+
+    /** The message was cancelled or failed: the draft is back as it was, and is filed again. */
+    public function restoreFromSending(): void
+    {
+        $this->sendingAs = null;
+        $this->forgetFiledCopy();
+    }
+
+    public function isHiddenFromClients(): bool
+    {
+        return $this->isSending();
+    }
+
     public function forgetFiledCopy(): void
     {
         $this->filedVersion = 0;
@@ -257,7 +337,7 @@ class Draft implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        return ['mailAccount', 'kind', 'recipients', 'subject', 'html', 'signature', 'quoteHtml', 'inReplyTo', 'version', 'updatedAt'];
+        return ['mailAccount', 'kind', 'recipients', 'subject', 'html', 'signature', 'quoteHtml', 'inReplyTo', 'version', 'updatedAt', 'sendingAs'];
     }
 
     public static function changeType(): string

@@ -8,6 +8,7 @@ use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProviderInterface;
 use App\ApiResource\DraftResource;
 use App\Entity\Draft;
+use App\Mail\Body\AttachmentUrls;
 use App\Repository\DraftRepository;
 use App\Security\CurrentUser;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
@@ -20,6 +21,7 @@ final readonly class DraftProvider implements ProviderInterface
     public function __construct(
         private DraftRepository $drafts,
         private CurrentUser $currentUser,
+        private AttachmentUrls $urls,
     ) {
     }
 
@@ -31,6 +33,6 @@ final readonly class DraftProvider implements ProviderInterface
             throw new NotFoundHttpException('Draft not found.');
         }
 
-        return DraftResource::fromEntity($draft);
+        return DraftResource::fromEntity($draft, $this->urls);
     }
 }

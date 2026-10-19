@@ -25,4 +25,7 @@ interface ObjectStorage
 
     /** Stores the object; content-addressed keys make writing it twice harmless. */
     public function write(string $key, string $content, string $contentType): void;
+
+    /** Removes the object; one that is gone already is fine. */
+    public function delete(string $key): void;
 }

@@ -7,17 +7,20 @@ namespace App\Outbox;
 use App\Entity\Draft;
 use App\Entity\DraftCopyRemoval;
 use App\Entity\MailAccount;
+use App\Entity\OutgoingMessage;
 use App\Realtime\RealtimeNotifier;
 use App\Repository\DraftCopyRemovalRepository;
 use App\Repository\DraftRepository;
 use App\Storage\ObjectStorage;
 use Doctrine\ORM\EntityManagerInterface;
+use Psr\Log\LoggerInterface;
 
 /**
  * Keeps each account's Drafts folder in step with the user's drafts. A draft is filed once it rested a little after
  * the last edit, so typing does not write a new copy every second; the worker appends the new copy and removes the
- * one before it. Copies of drafts that were sent, deleted or moved to another account are removed. Every method runs
- * inside the caller's transaction.
+ * one before it. Copies of drafts that were sent, deleted or moved to another account are removed. A draft being sent
+ * stays (out of the clients' sight) until its message went out, so an undo or a failure brings it back whole. Every
+ * method runs inside the caller's transaction.
  */
 final readonly class DraftFiling
 {
@@ -33,6 +36,8 @@ final readonly class DraftFiling
         private MimeComposer $composer,
         private ObjectStorage $storage,
         private RealtimeNotifier $notifier,
+        private UploadCollector $uploads,
+        private LoggerInterface $logger,
     ) {
     }
 
@@ -44,7 +49,14 @@ final readonly class DraftFiling
         $until = $now->add(new \DateInterval(self::CLAIM_TTL));
         $files = [];
         foreach ($this->drafts->lockFilable($account, $now, $now->sub(new \DateInterval(self::REST)), self::CLAIM_BATCH) as $draft) {
-            $composed = $this->composer->composeDraft($this->composition($draft, $account, $now), $draft->getId(), $draft->getVersion());
+            try {
+                $composed = $this->composer->composeDraft($this->composition($draft, $account, $now), $draft->getId(), $draft->getVersion());
+            } catch (MissingAttachment $exception) {
+                // One draft whose file is gone must not hold up the others; it is filed once the user fixed it.
+                $this->logger->warning('A draft could not be filed: {reason}', ['reason' => $exception->getMessage(), 'draft' => $draft->getId()->toRfc4122()]);
+                $draft->claimFiling($workerId, $until);
+                continue;
+            }
             $sha = hash('sha256', $composed->raw);
             $key = 'drafts/'.substr($sha, 0, 2).'/'.$sha;
             $this->storage->write($key, $composed->raw, 'message/rfc822');
@@ -82,14 +94,37 @@ final readonly class DraftFiling
         $draft->forgetFiledCopy();
     }
 
-    /** The draft was sent or deleted: its copy goes too. */
+    /** The draft was deleted (or its message went out): it goes, with its copy and its attachments. */
     public function discard(Draft $draft): void
     {
         $account = $draft->getMailAccount();
         if (null !== $account) {
             $this->removeCopy($draft, $account);
         }
+        $this->uploads->releaseAll($draft->getAttachments());
+        foreach ($draft->getAttachments() as $attachment) {
+            $draft->detach($attachment);
+            $this->entityManager->remove($attachment);
+        }
         $this->entityManager->remove($draft);
+        $this->entityManager->flush();
+    }
+
+    /** The draft goes out as $message: its copy leaves the Drafts folder, and clients no longer see it. */
+    public function sending(Draft $draft, OutgoingMessage $message): void
+    {
+        $account = $draft->getMailAccount();
+        if (null !== $account) {
+            $this->removeCopy($draft, $account);
+        }
+        $draft->markSending($message);
+        $this->entityManager->flush();
+    }
+
+    /** The message $draft was sent as was cancelled or failed: the draft is back as it was, and is filed again. */
+    public function restore(Draft $draft): void
+    {
+        $draft->restoreFromSending();
         $this->entityManager->flush();
     }
 
@@ -116,6 +151,7 @@ final readonly class DraftFiling
             DraftBody::compose($draft->getHtml(), $draft->getSignature()?->getHtml(), $draft->getQuoteHtml()),
             $draft->getInReplyTo(),
             $now,
+            array_map(OutgoingAttachment::fromDraft(...), $draft->getAttachments()),
         );
     }
 }
