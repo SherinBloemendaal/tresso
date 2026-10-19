@@ -124,18 +124,21 @@ export class MailSession {
     } catch (error) {
       // Earlier batches went through; only the rest goes back. A copy closing meanwhile is about to be removed, so
       // there is nothing to put back; either way the user hears why the action failed, not why the undo did.
-      let undoFailed = false
+      let resyncing = false
       try {
         await database.revertAction(appliedFor(applied, new Set(messageIds.slice(accepted))))
       } catch (revertError) {
         if (!(revertError instanceof CopyClosingError)) {
           // The phone still shows a change the server never made, and no page of the delta would mention those
-          // messages: the copy syncs from the start, which puts them right.
-          undoFailed = true
-          await database.resyncFromStart().catch(() => {})
+          // messages: the copy syncs from the start, which puts them right. If even that cannot be asked for, the
+          // user hears only why the action failed.
+          resyncing = await database.resyncFromStart().then(
+            () => true,
+            () => false,
+          )
         }
       }
-      const failure = undoFailed ? new Error(`${message(error)} This phone shows the change until it has synced your mail again.`) : error
+      const failure = resyncing ? new Error(`${message(error)} This phone shows the change until it has synced your mail again.`) : error
       this.changed()
       void this.syncNow()
       if (accepted > 0) {

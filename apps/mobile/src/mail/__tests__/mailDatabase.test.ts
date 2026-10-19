@@ -171,6 +171,19 @@ describe('MailDatabase on the device', () => {
     await expect(db.apply(page({ cursor: 12 }))).rejects.toBeInstanceOf(CopyClosingError)
   })
 
+  it('syncs from the start after a resync, even when a pull under way stores a page meanwhile, and after a restart', async () => {
+    // A pull that began from the stored cursor, before the resync was asked for.
+    expect(await db.cursor()).toBe(10)
+    await db.resyncFromStart()
+    await db.apply(page({ cursor: 11 }))
+
+    expect(await (await MailDatabase.open(sql)).cursor()).toBe(0)
+    expect(await db.cursor()).toBe(0)
+    await db.apply(page({ cursor: 11, hasMore: true }))
+    expect(await db.cursor()).toBe(11)
+    expect(await (await MailDatabase.open(sql)).cursor()).toBe(11)
+  })
+
   it('rebuilds a copy made by another version, so it syncs again from the start and has the current shape', async () => {
     await sql.run("UPDATE meta SET value = '0' WHERE key = 'schema'")
     // An older shape of a table.
