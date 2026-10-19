@@ -336,6 +336,12 @@ draft). Edits made here are never overwritten by the delta: when another device 
 window asks whether to keep this version or take the other one. Drafts written before they were synced are
 uploaded after the update.
 
+Message actions in the web client: opening a conversation reads it; the conversation's toolbar archives, trashes,
+marks unread, flags and moves it (shortcuts E, #, U and S), and archiving, trashing or moving goes back to the list
+with an undo that puts every message back in the folder it came from. Each action changes the local copy first
+(`MailDatabase.applyAction`), so lists update at once, and is put back when the server refuses it, except on
+messages the delta updated since.
+
 Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
 addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is
 sent with a `sendAt` a few seconds ahead, so "Undo" can cancel it; "Send later" picks a time. The draft is saved in
