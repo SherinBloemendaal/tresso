@@ -5,7 +5,8 @@ type On = 'reader' | 'writer'
 
 /**
  * A mail copy in the desktop shell's SQLite (see `apps/desktop/src-tauri/src/sql.rs`). Reads outside a transaction
- * go to a connection of their own, so the lists stay responsive while a page of the delta is stored.
+ * go to a connection of their own, which sees the last committed state, so they need not wait for a page of the delta
+ * being stored.
  */
 export async function openDesktopSql(name: string): Promise<Sql> {
   const handle = await invoke<number>('sql_open', { name })
@@ -25,13 +26,14 @@ export async function openDesktopSql(name: string): Promise<Sql> {
     ...queries('reader'),
     // The store queues its writes, so only one transaction is ever open on the writer.
     transaction: async (task) => {
-      await invoke('sql_exec', { handle, source: 'BEGIN IMMEDIATE' })
+      await invoke('sql_begin', { handle })
       try {
         await task({ ...queries('writer'), transaction: nested, close: nested })
-        await invoke('sql_exec', { handle, source: 'COMMIT' })
+        await invoke('sql_commit', { handle })
       } catch (error) {
-        // A failed COMMIT leaves the transaction open too. The original error is what the caller hears.
-        await invoke('sql_exec', { handle, source: 'ROLLBACK' }).catch(() => {})
+        // A failed COMMIT leaves the transaction open too. The caller hears the original error; a rollback that fails
+        // as well is logged, and the next transaction rolls back what is left before it begins.
+        await invoke('sql_rollback', { handle }).catch((rollbackError: unknown) => console.error('Undoing a failed write failed', rollbackError))
         throw error
       }
     },

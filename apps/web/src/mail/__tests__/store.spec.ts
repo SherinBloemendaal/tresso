@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SqliteMailStore, type Sql } from '@tresso/core'
+import { SqliteMailStore, type Draft, type Sql } from '@tresso/core'
 import { draft } from '@tresso/core/testing'
 import { memorySql } from '@tresso/core/testing/sql'
 import { databaseName, deleteMailDatabase, IndexedDbMailStore } from '../db'
@@ -76,6 +76,36 @@ describe('openMailStore', () => {
 
     expect(await store.draft('d1')).toMatchObject({ subject: 'Newer' })
     await store.close()
+  })
+
+  it('does not bring back a moved draft when moving stops halfway', async () => {
+    const old = await IndexedDbMailStore.open('kim')
+    await old.saveDraft(draft('first', { pendingSave: true, updatedAt: 2 }))
+    await old.saveDraft(draft('second', { pendingSave: true, updatedAt: 1 }))
+    await old.close()
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const saveDraft = SqliteMailStore.prototype.saveDraft
+    let calls = 0
+    const saving = vi.spyOn(SqliteMailStore.prototype, 'saveDraft').mockImplementation(async function (this: SqliteMailStore, value: Draft) {
+      calls += 1
+      if (calls === 2) {
+        throw new Error('disk full')
+      }
+      return saveDraft.call(this, value)
+    })
+
+    const store = await openMailStore('kim')
+    // The first draft moved; the user deletes it here before moving is tried again.
+    expect(logged).toHaveBeenCalled()
+    await store.deleteDraft('first')
+    await store.close()
+    saving.mockRestore()
+    const again = await openMailStore('kim')
+
+    expect((await again.drafts()).map((d) => d.id)).toEqual(['second'])
+    expect(await indexedDbExists('kim')).toBe(false)
+    await again.close()
+    logged.mockRestore()
   })
 
   it('removes both copies on sign-out', async () => {

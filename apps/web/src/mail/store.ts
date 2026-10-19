@@ -41,6 +41,9 @@ async function moveIndexedDbDrafts(userId: string, store: MailStore): Promise<vo
       if ((await store.draft(draft.id)) === null) {
         await store.saveDraft(draft)
       }
+      // Gone from the old copy once moved: if moving stops halfway, a draft the user sent or deleted since is not
+      // brought back by the next attempt.
+      await old.deleteDraft(draft.id)
     }
   } finally {
     await old.close()

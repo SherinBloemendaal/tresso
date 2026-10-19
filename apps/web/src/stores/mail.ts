@@ -71,18 +71,31 @@ export const useMailStore = defineStore('mail', () => {
    * arrived while the app was closed) does not pop up all at once. null until then.
    */
   let notifyingSince: number | null = null
+  /**
+   * Raised by every start and stop. A start overtaken while it waited (by a stop, or by another start) gives up, so it
+   * never overwrites a newer session's state; the copy it opened is closed again.
+   */
+  let generation = 0
 
   async function start(forUserId: string): Promise<void> {
     if (userId === forUserId) {
       return
     }
     await stop()
+    const mine = ++generation
     userId = forUserId
-    db.value = await openMailStore(forUserId)
+    const database = await openMailStore(forUserId)
+    if (mine !== generation) {
+      await database.close()
+      return
+    }
+    db.value = database
     await refresh()
+    if (mine !== generation) {
+      return
+    }
     ready.value = true
 
-    const database = db.value
     engine = new SyncEngine({
       store: database,
       pageSize: PAGE_SIZE,
@@ -104,6 +117,9 @@ export const useMailStore = defineStore('mail', () => {
       },
     })
     await pull(() => engine?.sync())
+    if (mine !== generation) {
+      return
+    }
     await refresh()
     void uploadPendingDrafts()
     realtime.start()
@@ -153,14 +169,15 @@ export const useMailStore = defineStore('mail', () => {
     }
   }
 
+  /** Everything is cleared before the first wait, so a start that runs meanwhile begins from a clean state. */
   async function stop(): Promise<void> {
-    await realtime?.stop()
+    generation += 1
+    const stopping = realtime
+    const database = db.value
     realtime = null
     engine = null
     notifyingSince = null
-    const database = db.value
     db.value = null
-    await database?.close()
     userId = null
     live.value = false
     ready.value = false
@@ -170,6 +187,8 @@ export const useMailStore = defineStore('mail', () => {
     conversations.value = []
     unreadCounts.value = new Map()
     outbox.value = []
+    await stopping?.stop()
+    await database?.close()
   }
 
   /** Stops syncing and removes the local copy, so nothing stays behind on a shared computer. */
