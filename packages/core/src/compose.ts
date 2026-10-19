@@ -11,6 +11,24 @@ export interface SendMessageRequest {
   inReplyToMessageId?: string
   /** ISO 8601; omitted sends right away. */
   sendAt?: string
+  /** The draft it was written in; the server removes it once the message is queued. */
+  draftId?: string
+}
+
+/** POST /api/v1/drafts (with `draftId`) and PUT /api/v1/drafts/{id} (with `expectedVersion`). */
+export interface DraftRequest {
+  draftId?: string
+  expectedVersion?: number
+  mailAccountId: string | null
+  kind: 'new' | 'reply' | 'replyAll' | 'forward'
+  to: Address[]
+  cc: Address[]
+  bcc: Address[]
+  subject: string
+  html: string
+  signatureId: string | null
+  quoteHtml: string
+  inReplyToMessageId: string | null
 }
 
 const REPLY_PREFIX = /^\s*((re|aw|sv|antw|vs|r)\s*(\[\d+\])?\s*:\s*)+/i
