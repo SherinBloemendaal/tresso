@@ -10,11 +10,13 @@ package outbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -49,6 +51,23 @@ type integrationAPI struct {
 	drafts      api.DraftWork
 	filed       []string
 	removed     []string
+	changes     []api.MailboxChange
+	changed     []mailboxReport
+}
+
+func (a *integrationAPI) ClaimMailbox(context.Context, string, string) ([]api.MailboxChange, error) {
+	claimed := a.changes
+	a.changes = nil
+	return claimed, nil
+}
+
+func (a *integrationAPI) ReportMailbox(_ context.Context, _, changeID, _, outcome, text, remoteUID string) error {
+	a.changed = append(a.changed, mailboxReport{changeID, outcome, text, remoteUID})
+	return nil
+}
+
+func noMailbox(context.Context, api.Credentials) (MailboxStore, error) {
+	return nil, errors.New("no changes to messages in this test")
 }
 
 func (a *integrationAPI) Credentials(context.Context, string, string) (api.Credentials, error) {
@@ -140,7 +159,7 @@ func TestSendsFilesAndNeverSendsTwice(t *testing.T) {
 	openDrafts := func(ctx context.Context, credentials api.Credentials) (DraftsStore, error) {
 		return imapsync.OpenDrafts(ctx, dialer, credentials)
 	}
-	dispatcher := NewDispatcher(client, store, send, openSent, openDrafts, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	dispatcher := NewDispatcher(client, store, send, openSent, openDrafts, noMailbox, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	message := api.OutgoingMessage{ID: "m1", RawObjectKey: "outgoing/aa/m1", EnvelopeFrom: sender, Recipients: []string{sender}, MessageID: messageID, Attempt: 1}
 
 	client.messages = []api.OutgoingMessage{message}
@@ -209,7 +228,7 @@ func TestKeepsTheDraftsFolderInStep(t *testing.T) {
 	}
 	noSend := func(context.Context, api.ServerSettings, string, string, smtpsend.Envelope, []byte) error { return nil }
 	noSent := func(context.Context, api.Credentials) (SentStore, error) { return nil, imapsync.ErrNoSentFolder }
-	dispatcher := NewDispatcher(client, store, noSend, noSent, openDrafts, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	dispatcher := NewDispatcher(client, store, noSend, noSent, openDrafts, noMailbox, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	run := func() {
 		dispatcher.Trigger(context.Background(), "acc")
 		dispatcher.Wait()
@@ -234,5 +253,102 @@ func TestKeepsTheDraftsFolderInStep(t *testing.T) {
 	}
 	if len(client.filed) != 2 || len(client.removed) != 1 {
 		t.Errorf("filed %v, removed %v", client.filed, client.removed)
+	}
+}
+
+func TestMakesTheUsersChangesOnTheServer(t *testing.T) {
+	host := os.Getenv("GREENMAIL_HOST")
+	if host == "" {
+		t.Skip("GREENMAIL_HOST is not set")
+	}
+	check := imapClient(t, host)
+	_ = check.Create("Archive", nil).Wait()
+	messageID := fmt.Sprintf("changes-%d@tresso.test", time.Now().UnixNano())
+	raw := "From: Anna <anna@finance.example>\r\nTo: Lisa <lisa@tresso.test>\r\nSubject: Changes\r\nMessage-ID: <" + messageID + ">\r\n\r\nPlan.\r\n"
+	appended := check.Append("INBOX", int64(len(raw)), nil)
+	if _, err := appended.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if err := appended.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := appended.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := check.Select("INBOX", nil).Wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, err := check.UIDSearch(&imap.SearchCriteria{Header: []imap.SearchCriteriaHeaderField{{Key: "Message-ID", Value: "<" + messageID + ">"}}}, nil).Wait()
+	if err != nil || len(found.AllUIDs()) != 1 {
+		t.Fatalf("the test message is not in INBOX: %v", err)
+	}
+	uid := strconv.FormatUint(uint64(found.AllUIDs()[0]), 10)
+	validity := inbox.UIDValidity
+	wrongValidity := validity + 1
+	yes, no := true, false
+	source := api.MailboxLocation{Folder: "INBOX", UIDValidity: &validity, RemoteUID: uid}
+
+	dialer := netguard.New(true)
+	client := &integrationAPI{
+		credentials: api.Credentials{
+			AccountID:  "acc",
+			Connection: api.Connection{IMAP: api.ServerSettings{Host: host, Port: port("GREENMAIL_IMAP_PORT", 3143), Security: "none"}, Username: sender},
+			Secrets:    map[string]string{"type": "password", "password": password},
+		},
+		changes: []api.MailboxChange{
+			{ID: "c1", Kind: api.MailboxFlags, Seen: &yes, Flagged: &yes, Locations: []api.MailboxLocation{source}},
+			{ID: "c2", Kind: api.MailboxFlags, Flagged: &no, Locations: []api.MailboxLocation{{Folder: "INBOX", UIDValidity: &wrongValidity, RemoteUID: uid}}},
+			{ID: "c3", Kind: api.MailboxMove, Source: &source, Target: &api.MailboxTarget{Folder: "Archive"}},
+			{ID: "c4", Kind: api.MailboxMove, Source: &source, Target: &api.MailboxTarget{Folder: "Archive"}},
+		},
+	}
+	openMailbox := func(ctx context.Context, credentials api.Credentials) (MailboxStore, error) {
+		return imapsync.OpenMailbox(ctx, dialer, credentials)
+	}
+	noSend := func(context.Context, api.ServerSettings, string, string, smtpsend.Envelope, []byte) error { return nil }
+	noSent := func(context.Context, api.Credentials) (SentStore, error) { return nil, imapsync.ErrNoSentFolder }
+	noDrafts := func(context.Context, api.Credentials) (DraftsStore, error) {
+		return nil, errors.New("no drafts in this test")
+	}
+	dispatcher := NewDispatcher(client, storage.NewMemory(), noSend, noSent, noDrafts, openMailbox, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	dispatcher.Trigger(context.Background(), "acc")
+	dispatcher.Wait()
+
+	if len(client.changed) != 4 {
+		t.Fatalf("reports = %+v", client.changed)
+	}
+	if got := client.changed[0]; got.outcome != api.MailboxDone {
+		t.Errorf("flags: %+v", got)
+	}
+	if got := client.changed[1]; got.outcome != api.OutcomeRetry {
+		t.Errorf("flags in a reset folder are tried again once the sync relearnt the uids: %+v", got)
+	}
+	if got := client.changed[2]; got.outcome != api.MailboxDone {
+		t.Errorf("move: %+v", got)
+	}
+	if got := client.changed[3]; got.outcome != api.OutcomeFailed {
+		t.Errorf("moving a copy that is gone is refused: %+v", got)
+	}
+
+	if n := count(t, check, "INBOX", messageID); n != 0 {
+		t.Errorf("INBOX still has %d copies", n)
+	}
+	if n := count(t, check, "Archive", messageID); n != 1 {
+		t.Fatalf("Archive has %d copies", n)
+	}
+	archived, err := check.UIDSearch(&imap.SearchCriteria{Header: []imap.SearchCriteriaHeaderField{{Key: "Message-ID", Value: "<" + messageID + ">"}}}, nil).Wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved := client.changed[2].remoteUID; moved != "" && moved != strconv.FormatUint(uint64(archived.AllUIDs()[0]), 10) {
+		t.Errorf("reported uid %s, the copy has %d", moved, archived.AllUIDs()[0])
+	}
+	flags, err := check.Fetch(imap.UIDSetNum(archived.AllUIDs()...), &imap.FetchOptions{Flags: true}).Collect()
+	if err != nil || len(flags) != 1 {
+		t.Fatalf("fetch flags: %v", err)
+	}
+	if !slices.Contains(flags[0].Flags, imap.FlagSeen) || !slices.Contains(flags[0].Flags, imap.FlagFlagged) {
+		t.Errorf("flags = %v, want \\Seen and \\Flagged to travel with the move", flags[0].Flags)
 	}
 }
