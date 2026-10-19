@@ -60,8 +60,10 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         </span>
         <span v-if="(unreadCounts.get(account.id) ?? 0) > 0" class="count">{{ unreadCounts.get(account.id) }}<span class="visually-hidden"> unread</span></span>
       </RouterLink>
-      <p v-if="accounts.length === 0" class="empty">No mail accounts yet.</p>
+      <RouterLink :to="{ name: 'settings-accounts-new' }" class="add">+ Add account</RouterLink>
     </div>
+
+    <RouterLink :to="{ name: 'settings-accounts' }" class="item settings">Settings</RouterLink>
 
     <p class="live" :class="{ on: live }" role="status">{{ live ? 'Up to date' : 'Connecting…' }}</p>
   </nav>
@@ -155,14 +157,21 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
   font-size: 12px;
   color: var(--ink-2);
 }
-.empty {
-  margin: 0;
-  padding: 4px 10px;
-  color: var(--ink-3);
+.add {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 10px;
+  color: var(--ink-2);
   font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.settings {
+  margin-top: auto;
 }
 .live {
-  margin: auto 0 0;
+  margin: 0;
   padding: 0 10px;
   font-size: 12px;
   color: var(--ink-3);

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, watch } from 'vue'
 import { useRoute, type RouteLocationRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useMailStore } from '@/stores/mail'
@@ -10,7 +10,6 @@ import ReadingPane from '@/components/ReadingPane.vue'
 const auth = useAuthStore()
 const mail = useMailStore()
 const route = useRoute()
-const error = ref<string | null>(null)
 
 const accountId = computed(() => (typeof route.params.accountId === 'string' ? route.params.accountId : null))
 const threadId = computed(() => (typeof route.params.threadId === 'string' ? route.params.threadId : null))
@@ -24,17 +23,6 @@ function linkTo(id: string): RouteLocationRaw {
 }
 
 watch(accountId, (id) => void mail.showMailbox(id), { immediate: true })
-
-onMounted(async () => {
-  try {
-    await auth.loadMe()
-    if (auth.me) {
-      await mail.start(auth.me.id)
-    }
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-  }
-})
 
 function signOut(): void {
   auth.signOut()
@@ -63,6 +51,7 @@ function signOut(): void {
       :selected-thread-id="threadId"
       :has-more="mail.hasMore"
       :loading="!mail.ready || mail.syncState === 'syncing'"
+      :has-accounts="mail.accounts.length > 0"
       :link-to="linkTo"
       @show-more="mail.showMore()"
     />
@@ -71,10 +60,6 @@ function signOut(): void {
     <div v-else class="reading-pane placeholder">
       <p>Select a conversation to read it.</p>
     </div>
-
-    <p v-if="error || mail.syncState === 'error'" class="problem" role="alert">
-      {{ error ?? `Sync stopped: ${mail.syncError}` }}
-    </p>
   </div>
 </template>
 
@@ -102,18 +87,6 @@ function signOut(): void {
   justify-content: center;
   background: var(--surface);
   color: var(--ink-3);
-}
-.problem {
-  position: fixed;
-  left: 50%;
-  bottom: 16px;
-  transform: translateX(-50%);
-  margin: 0;
-  padding: 10px 16px;
-  border-radius: var(--radius-card);
-  background: var(--ink);
-  color: var(--surface);
-  box-shadow: var(--raised);
 }
 
 @media (max-width: 1100px) {
