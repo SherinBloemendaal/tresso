@@ -78,6 +78,8 @@ export class SqliteMailStore implements MailStore {
   private queue: Promise<void> = Promise.resolve()
   /** Collected by {@link apply}, handed out by {@link takeArrivals}. */
   private arrivals: Arrival[] = []
+  /** Threads classified on this device whose server version has not arrived yet; see {@link restoreThread}. */
+  private readonly unconfirmed = new Set<string>()
   /** Set while the copy must sync from the start (see resyncFromStart); kept in the database too, so it holds after a restart. */
   private resyncing: boolean
   /** Counts the resyncs asked for, so one asked for while a pull from the start is finishing is not lost. */
@@ -257,6 +259,7 @@ export class SqliteMailStore implements MailStore {
       for (const thread of page.threads) {
         await writeThread(tx, thread)
         affected.add(thread.id)
+        this.unconfirmed.delete(thread.id)
       }
       const inboxFolders = await inboxFolderIds(tx)
       for (const message of page.messages) {
@@ -445,6 +448,7 @@ export class SqliteMailStore implements MailStore {
         }
         previous = parse<SyncedThread>(row)
         await writeThread(tx, classifiedByUser(previous, smartInboxId, verdict))
+        this.unconfirmed.add(threadId)
         await refreshConversation(tx, threadId, await listFoldersOf(tx))
       })
       return previous
@@ -455,7 +459,8 @@ export class SqliteMailStore implements MailStore {
     return this.write(() =>
       this.sql.transaction(async (tx) => {
         const row = await tx.first<JsonRow>('SELECT json FROM threads WHERE id = ?', [previous.id])
-        if (stillAsClassified(row === null ? null : parse<SyncedThread>(row), optimistic)) {
+        // Once the server's version arrived it stays, also when it is the same placement: the request went through.
+        if (this.unconfirmed.delete(previous.id) && stillAsClassified(row === null ? null : parse<SyncedThread>(row), optimistic)) {
           await writeThread(tx, previous)
           await refreshConversation(tx, previous.id, await listFoldersOf(tx))
         }

@@ -46,24 +46,33 @@ const first: ChangePage = {
 describe('classifying a conversation', () => {
   const requests: { method: string; path: string; body: unknown }[] = []
   let refuse: boolean
+  /** The PUT goes through on the server, but its answer never arrives. */
+  let loseAnswer: boolean
 
   beforeEach(async () => {
     sessionStorage.setItem('auth.tokens', JSON.stringify({ accessToken: 'token', refreshToken: null, expiresAt: Date.now() + 3_600_000 }))
     setActivePinia(createPinia())
     requests.length = 0
     refuse = false
+    loseAnswer = false
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input))
         if (url.pathname === '/api/v1/sync/changes') {
           const since = Number(url.searchParams.get('since'))
-          return new Response(JSON.stringify(since === 0 ? first : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [], smartInboxes: [] }))
+          const later = loseAnswer
+            ? { ...first, cursor: since + 1, mailAccounts: [], folders: [], messages: [], smartInboxes: [], threads: [{ ...first.threads[0]!, smartInboxId: 'todo', verdict: 'do', classificationReason: 'user' }] }
+            : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [], smartInboxes: [] }
+          return new Response(JSON.stringify(since === 0 ? first : later))
         }
         if (!url.pathname.startsWith('/api/v1/threads/')) {
           return new Response('{}', { status: 404 })
         }
         requests.push({ method: init?.method ?? 'GET', path: url.pathname, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+        if (loseAnswer) {
+          throw new TypeError('Failed to fetch')
+        }
         if (refuse) {
           return new Response(JSON.stringify({ detail: 'This smart inbox does not exist.' }), { status: 422 })
         }
@@ -105,5 +114,14 @@ describe('classifying a conversation', () => {
     await expect(mail.classifyThread('t1', 'todo')).rejects.toThrow('This smart inbox does not exist.')
 
     expect(mail.conversations.map((c) => [c.threadId, c.smartInboxId, c.verdict])).toEqual([['t1', 'info', 'know']])
+  })
+
+  it('keeps a placement the server made when only its answer was lost', async () => {
+    const mail = useMailStore()
+    await mail.showSmartInbox('todo')
+    loseAnswer = true
+
+    await expect(mail.classifyThread('t1', 'todo')).rejects.toThrow('Failed to fetch')
+    await vi.waitFor(() => expect(mail.conversations.map((c) => [c.threadId, c.smartInboxId, c.classificationReason])).toEqual([['t1', 'todo', 'user']]))
   })
 })

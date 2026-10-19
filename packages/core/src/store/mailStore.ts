@@ -124,7 +124,10 @@ export interface MailStore extends SyncStore {
    * verdict. Returns the thread as it was, for {@link restoreThread} when the server refuses; null when it is gone.
    */
   classifyThread(threadId: string, smartInboxId: string, verdict: Verdict): Promise<SyncedThread | null>
-  /** Puts a thread back as it was before {@link classifyThread}, unless the delta changed it since. */
+  /**
+   * Puts a thread back as it was before {@link classifyThread}, unless the delta brought the server's version since,
+   * even one with the same placement (the request went through and only its answer was lost).
+   */
   restoreThread(previous: SyncedThread, optimistic: { smartInboxId: string; verdict: Verdict }): Promise<void>
   /** Outgoing mail that is not settled: scheduled, on its way, or failed. Newest first. */
   outbox(): Promise<SyncedOutgoingMessage[]>
