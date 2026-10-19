@@ -141,6 +141,25 @@ services:
       - "8025:8025"
       - "1025:1025"
 
+  # Local IMAP/SMTP test server with two fixed mailboxes; never a real mailbox in development or CI.
+  # In the app: host "greenmail", IMAP 3143 / SMTP 3025 with security "none", or IMAPS 3993 / SMTPS 3465 with "tls"
+  # (self-signed). Log in with the full email address.
+  greenmail:
+    image: greenmail/standalone:2.1.14
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.all
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.users.login=email
+        -Dgreenmail.users=kim@tresso.test:dev-password-kim,lisa@tresso.test:dev-password-lisa
+        -Dgreenmail.verbose=false
+    ports:
+      - "3143:3143"
+      - "3993:3993"
+      - "3025:3025"
+      - "3465:3465"
+      - "18080:8080"
+
   # ClamAV needs about 1.5 GB of RAM, so it only starts with: docker compose --profile scan up
   clamav:
     image: clamav/clamav:1.5-debian13-slim
