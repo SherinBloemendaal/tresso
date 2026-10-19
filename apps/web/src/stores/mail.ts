@@ -244,11 +244,7 @@ export const useMailStore = defineStore('mail', () => {
 
   /** The messages of each thread, to tell which threads an action took completely. */
   async function messagesByThread(threadIds: string[]): Promise<Map<string, string[]>> {
-    const byThread = new Map<string, string[]>()
-    for (const threadId of threadIds) {
-      byThread.set(threadId, await messageIdsOf([threadId]))
-    }
-    return byThread
+    return (await db.value?.messagesByThread(threadIds)) ?? new Map()
   }
 
   async function folders(): Promise<SyncedFolder[]> {
