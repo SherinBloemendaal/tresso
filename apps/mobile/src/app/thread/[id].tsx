@@ -5,9 +5,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { SyncedFolder, SyncedMessage, SyncedThread } from '@tresso/core'
 import { MessageBodyView } from '@/components/MessageBodyView'
 import { useMail } from '@/mail/MailProvider'
+import { useNotices } from '@/components/Notices'
 import { useMessageActions } from '@/mail/useMessageActions'
 import { initials, senderName, shortTime } from '@/mail/format'
 import { useTheme, type Theme } from '@/theme'
+
+/** The action bar's height above the safe area. */
+const BAR_HEIGHT = 56
 
 /** A conversation: its messages oldest first; unread ones and the newest open, read history folded. */
 export default function ThreadScreen() {
@@ -25,11 +29,50 @@ export default function ThreadScreen() {
   const insets = useSafeAreaInsets()
   const actions = useMessageActions()
   const { after, run, exclusive, relocate, busy } = actions
-  const read = useRef(false)
+  /** The conversation that was read on open; another one (the screen reused for a link) is read again. */
+  const read = useRef<string | null>(null)
+  const mounted = useRef(true)
+  const notices = useNotices()
 
   useEffect(() => {
-    void loadFolders().then(setFolders)
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+
+  // The action bar stays clear of notices while this screen is open.
+  useEffect(() => {
+    notices.setBottomInset(BAR_HEIGHT)
+    return () => notices.setBottomInset(0)
+  }, [notices])
+
+  useEffect(() => {
+    let current = true
+    void loadFolders().then((list) => current && setFolders(list))
+    return () => {
+      current = false
+    }
   }, [loadFolders, version])
+
+  // Another conversation in the same screen starts with its own folding.
+  const [shownId, setShownId] = useState(id)
+  if (shownId !== id) {
+    setShownId(id)
+    setExpanded(null)
+  }
+
+  /** Back to the list, if this screen is still the one on screen; from a link with no history, to the inbox. */
+  function leave() {
+    if (!mounted.current) {
+      return
+    }
+    if (router.canGoBack()) {
+      router.back()
+    } else {
+      router.replace('/')
+    }
+  }
 
   useEffect(() => {
     let current = true
@@ -41,8 +84,8 @@ export default function ThreadScreen() {
       setThread(result?.thread ?? null)
       setMessages(result?.messages ?? [])
       // Opening a conversation reads it, once; actions taken meanwhile wait for that.
-      if (result !== null && !read.current) {
-        read.current = true
+      if (result !== null && read.current !== id) {
+        read.current = id
         const unread = result.messages.filter((m) => !m.flags.seen).map((m) => m.id)
         if (unread.length > 0) {
           after(run(unread, 'markRead'))
@@ -65,12 +108,13 @@ export default function ThreadScreen() {
     }
   }, [load, id, version, after, run])
 
+
   const flagged = messages.some((message) => message.flags.flagged)
 
   function relocateAll(action: 'archive' | 'trash') {
     void exclusive(async () => {
       if ((await relocate(messages.map((m) => m.id), action, folders)) !== null) {
-        router.back()
+        leave()
       }
     })
   }
@@ -79,7 +123,7 @@ export default function ThreadScreen() {
     void exclusive(async () => {
       const newest = messages[messages.length - 1]
       if (newest && (await run([newest.id], 'markUnread')) !== null) {
-        router.back()
+        leave()
       }
     })
   }
@@ -144,27 +188,28 @@ export default function ThreadScreen() {
         )}
       </ScrollView>
       {thread !== null && (
-        <View style={[styles.bar, { paddingBottom: insets.bottom + 8 }]} accessibilityRole="toolbar">
-          {[
-            { label: 'Archive', onPress: () => relocateAll('archive') },
-            { label: 'Trash', onPress: () => relocateAll('trash') },
-            { label: 'Unread', onPress: markUnread },
-            { label: flagged ? 'Unflag' : 'Flag', onPress: toggleFlag, selected: flagged },
-          ].map((button) => (
-            <Pressable
-              key={button.label}
-              style={({ pressed }) => [styles.action, (pressed || busy) && styles.pressed]}
-              onPress={button.onPress}
-              disabled={busy}
-              accessibilityRole="button"
-              accessibilityState={{ disabled: busy, selected: button.selected }}
-            >
-              <Text style={styles.actionLabel}>{button.label}</Text>
-            </Pressable>
-          ))}
+        <View style={[styles.bar, { height: BAR_HEIGHT + insets.bottom, paddingBottom: insets.bottom }]} accessibilityRole="toolbar">
+          <BarButton label="Archive" busy={busy} styles={styles} onPress={() => relocateAll('archive')} />
+          <BarButton label="Trash" busy={busy} styles={styles} onPress={() => relocateAll('trash')} />
+          <BarButton label="Unread" busy={busy} styles={styles} onPress={() => markUnread()} />
+          <BarButton label="Flag" busy={busy} styles={styles} checked={flagged} onPress={() => toggleFlag()} />
         </View>
       )}
     </>
+  )
+}
+
+function BarButton({ label, busy, checked, styles, onPress }: { label: string; busy: boolean; checked?: boolean; styles: ReturnType<typeof makeStyles>; onPress: () => void }) {
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.action, (pressed || busy) && styles.pressed]}
+      onPress={onPress}
+      disabled={busy}
+      accessibilityRole="button"
+      accessibilityState={{ disabled: busy, checked }}
+    >
+      <Text style={[styles.actionLabel, checked === true && styles.on]}>{label}</Text>
+    </Pressable>
   )
 }
 
@@ -181,7 +226,8 @@ function makeStyles(theme: Theme) {
     from: { color: theme.ink, fontSize: 16 },
     bold: { fontWeight: '600' },
     muted: { color: theme.ink2, fontSize: 13 },
-    bar: { flexDirection: 'row', justifyContent: 'space-around', paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.line, backgroundColor: theme.surface },
+    on: { color: theme.ink },
+    bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.line, backgroundColor: theme.surface },
     action: { minWidth: 64, minHeight: 44, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center', borderRadius: 6 },
     actionLabel: { color: theme.accent, fontSize: 15, fontWeight: '600' },
     pressed: { opacity: 0.5 },

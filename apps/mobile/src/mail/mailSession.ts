@@ -105,9 +105,12 @@ export class MailSession {
    * went through. Returns the messages before and after, for an undo.
    */
   async act(messageIds: string[], action: MessageAction, target: { folderId?: string; fromFolderId?: string } = {}): Promise<AppliedAction> {
-    const database = this.database
-    if (database === null || messageIds.length === 0) {
+    if (messageIds.length === 0) {
       return { before: [], after: [] }
+    }
+    const database = this.database
+    if (database === null) {
+      throw new Error('Your mail is not open on this phone yet.')
     }
     const applied = await database.applyAction(messageIds, action, target.folderId, target.fromFolderId)
     this.changed()
@@ -119,8 +122,13 @@ export class MailSession {
         accepted = start + request.messageIds.length
       }
     } catch (error) {
-      // Earlier batches went through; only the rest goes back.
-      await database.revertAction(appliedFor(applied, new Set(messageIds.slice(accepted))))
+      // Earlier batches went through; only the rest goes back. A copy closing meanwhile is about to be removed, so
+      // there is nothing to put back; either way the user hears why the action failed, not why the undo did.
+      try {
+        await database.revertAction(appliedFor(applied, new Set(messageIds.slice(accepted))))
+      } catch {
+        // The copy is closing; see above.
+      }
       this.changed()
       void this.syncNow()
       if (accepted > 0) {
