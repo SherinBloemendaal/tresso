@@ -2,6 +2,9 @@
 // color, privileges, ctag and sync-token, changes by sync-collection (RFC 6578) or etag listing, calendar-multiget, and
 // conditional writes. Objects stay raw iCalendar text both ways, so nothing is lost by re-encoding them; the API
 // parses them. Every connection goes through the guarded dialer.
+//
+// The mail password is sent only where it belongs: after a server asks for it (401), and only to a host the account
+// trusts (see Trust). Any other server that asks gets nothing and the request fails with an *UntrustedError.
 package caldav
 
 import (
@@ -16,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/publicsuffix"
@@ -34,6 +38,52 @@ var (
 	// ErrInvalidSyncToken means the server no longer knows the sync token; a full listing is needed.
 	ErrInvalidSyncToken = errors.New("the sync token is no longer valid")
 )
+
+// UntrustedError means a server asked for the login, but it is not a host the account trusts with its password.
+type UntrustedError struct {
+	URL string
+}
+
+func (e *UntrustedError) Error() string {
+	return "the calendar server at " + e.URL + " asked for the login, which is only sent to confirmed servers"
+}
+
+// Trust is where the mail password may go: exact hosts (the IMAP host, the CalDAV address the user entered or
+// confirmed) and the sites of known providers, whose CalDAV hosts vary (p42-caldav.icloud.com).
+type Trust struct {
+	hosts map[string]bool
+	sites map[string]bool
+}
+
+// NewTrust trusts the IMAP host, the host of the configured CalDAV address, and the site of the known provider
+// behind the IMAP host.
+func NewTrust(imapHost, calDAVURL string) Trust {
+	trust := Trust{hosts: map[string]bool{}, sites: map[string]bool{}}
+	if host := strings.ToLower(strings.TrimSuffix(imapHost, ".")); host != "" {
+		trust.hosts[host] = true
+		if server := knownServers[host]; server != "" {
+			if u, err := url.Parse(server); err == nil {
+				trust.hosts[strings.ToLower(u.Hostname())] = true
+				if site, err := siteOf(u.Hostname()); err == nil {
+					trust.sites[site] = true
+				}
+			}
+		}
+	}
+	if u, err := url.Parse(calDAVURL); err == nil && u.Hostname() != "" {
+		trust.hosts[strings.ToLower(u.Hostname())] = true
+	}
+	return trust
+}
+
+func (t Trust) allows(host string) bool {
+	host = strings.ToLower(host)
+	if t.hosts[host] {
+		return true
+	}
+	site, err := siteOf(host)
+	return err == nil && t.sites[site]
+}
 
 const (
 	maxMultistatus = 64 << 20
@@ -56,11 +106,16 @@ type Client struct {
 	http     *http.Client
 	username string
 	password string
+	trust    Trust
+
+	mu sync.Mutex
+	// authed holds the trusted hosts that asked for the login and took it; they get it right away from then on.
+	authed map[string]bool
 }
 
-// New returns a client that authenticates with Basic auth over TLS. allowHTTP permits plain HTTP, for local test
-// servers only.
-func New(dialer Dialer, username, password string, allowHTTP bool) *Client {
+// New returns a client that authenticates with Basic auth over TLS, to trusted hosts that ask for it. allowHTTP
+// permits plain HTTP, for local test servers only.
+func New(dialer Dialer, username, password string, allowHTTP bool, trust Trust) *Client {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
 			return dialer.DialContext(ctx, address)
@@ -74,26 +129,76 @@ func New(dialer Dialer, username, password string, allowHTTP bool) *Client {
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   2 * time.Minute,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return errors.New("too many redirects")
-			}
-			if req.URL.Scheme != "https" && !allowHTTP {
-				return fmt.Errorf("refusing a redirect to %s", req.URL.Scheme)
-			}
-			// http.Client drops credentials on a redirect to another host. A .well-known address usually redirects to
-			// a CalDAV host of the same provider (example.com to caldav.example.com, caldav.icloud.com to
-			// p42-caldav.icloud.com): only then are they sent again.
-			if sameSite(via[0].URL.Hostname(), req.URL.Hostname()) {
-				req.SetBasicAuth(username, password)
-			}
-			return nil
-		},
 	}
-	return &Client{http: client, username: username, password: password}
+	c := &Client{http: client, username: username, password: password, trust: trust, authed: map[string]bool{}}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many redirects")
+		}
+		if req.URL.Scheme != "https" && !allowHTTP {
+			return fmt.Errorf("refusing a redirect to %s", req.URL.Scheme)
+		}
+		// http.Client drops the login on a redirect to another host. It goes along only to a host that took it
+		// before; any other host asks first (see request).
+		if c.hasAuthed(req.URL.Hostname()) {
+			req.SetBasicAuth(username, password)
+		}
+		return nil
+	}
+	return c
 }
 
+func (c *Client) hasAuthed(host string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.authed[strings.ToLower(host)]
+}
+
+func (c *Client) markAuthed(host string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authed[strings.ToLower(host)] = true
+}
+
+// mayAuthenticate tells whether the login may go to a host that asked for it: a trusted host, or one a trusted host
+// redirected to on its own site (example.com/.well-known/caldav to caldav.example.com).
+func (c *Client) mayAuthenticate(origin, host string) bool {
+	return c.trust.allows(host) || (c.trust.allows(origin) && sameSite(origin, host))
+}
+
+// request sends a request with the login when the host took it before. When the server (after redirects) asks for
+// it, the request is sent once more with the login to where it ended up, if that host may have it.
 func (c *Client) request(ctx context.Context, method, target string, body []byte, header map[string]string) (*http.Response, error) {
+	origin, err := url.Parse(target)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.send(ctx, method, target, body, header, c.hasAuthed(origin.Hostname()))
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		return resp, err
+	}
+	drain(resp)
+	final := resp.Request.URL
+	if resp.Request.Header.Get("Authorization") != "" {
+		return nil, ErrUnauthorized
+	}
+	if !c.mayAuthenticate(origin.Hostname(), final.Hostname()) {
+		return nil, &UntrustedError{URL: final.String()}
+	}
+
+	resp, err = c.send(ctx, method, final.String(), body, header, true)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		drain(resp)
+		return nil, ErrUnauthorized
+	}
+	c.markAuthed(final.Hostname())
+	return resp, nil
+}
+
+func (c *Client) send(ctx context.Context, method, target string, body []byte, header map[string]string, authenticate bool) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -102,20 +207,14 @@ func (c *Client) request(ctx context.Context, method, target string, body []byte
 	if err != nil {
 		return nil, err
 	}
-	req.SetBasicAuth(c.username, c.password)
+	if authenticate {
+		req.SetBasicAuth(c.username, c.password)
+	}
 	req.Header.Set("User-Agent", "Tresso")
 	for key, value := range header {
 		req.Header.Set(key, value)
 	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		drain(resp)
-		return nil, ErrUnauthorized
-	}
-	return resp, nil
+	return c.http.Do(req)
 }
 
 // multistatusRequest sends PROPFIND or REPORT and parses the 207 answer.

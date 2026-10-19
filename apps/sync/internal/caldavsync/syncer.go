@@ -103,7 +103,19 @@ func (s *Syncer) Run(ctx context.Context, account api.Account) error {
 			return ctx.Err()
 		}
 		wait := backoff
+		var confirm *caldav.ConfirmError
+		var untrusted *caldav.UntrustedError
 		switch {
+		case errors.As(err, &confirm):
+			logger.Info("a calendar server needs the user's confirmation", "url", confirm.URL, "retryIn", s.opts.NotFoundRetry)
+			status.report(ctx, api.CalendarUnconfirmed, "A calendar server was found at "+confirm.URL+". To sync your calendars there, confirm this address in the account settings.")
+			wait = s.opts.NotFoundRetry
+			failures = 0
+		case errors.As(err, &untrusted):
+			logger.Warn("a calendar server outside the account asked for the login", "url", untrusted.URL, "retryIn", s.opts.MaxBackoff)
+			status.report(ctx, api.CalendarError, "The calendar server sent Tresso to "+untrusted.URL+", which does not get your password. Enter the right CalDAV address in the account settings.")
+			wait = s.opts.MaxBackoff
+			failures = 0
 		case errors.Is(err, caldav.ErrNotCalDAV), errors.Is(err, errNoServer):
 			logger.Info("no calendar server found for the account", "error", err, "retryIn", s.opts.NotFoundRetry)
 			status.report(ctx, api.CalendarUnsupported, "No calendar server was found for this account. If it has one, enter its CalDAV address in the account settings.")
@@ -173,7 +185,7 @@ func (s *Syncer) session(ctx context.Context, account api.Account, wake <-chan s
 	if err != nil {
 		return fmt.Errorf("%w: %v", errNoServer, err)
 	}
-	client := caldav.New(s.dialer, credentials.Connection.Username, password, s.opts.AllowHTTP)
+	client := caldav.New(s.dialer, credentials.Connection.Username, password, s.opts.AllowHTTP, caldav.NewTrust(credentials.Connection.IMAP.Host, credentials.Connection.CalDAV))
 
 	var server caldav.Account
 	if credentials.Connection.CalDAV != "" {
