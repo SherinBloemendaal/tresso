@@ -330,7 +330,10 @@ time. The last signed-in user is remembered, so their copy opens before the serv
 offline. A copy made by another schema version is dropped and rebuilt. The storage runs behind a small `Sql` interface,
 so its tests run the same SQL on sql.js. Message bodies show in a web view with the same Content-Security-Policy as
 the web client's frame; only links the reader taps open, in the browser, and remote images load only when the
-reader asks. Outgoing mail,
+reader asks. Opening a conversation on the phone reads it, and its action bar archives, trashes, marks unread and
+flags it, with the same exact undo as the web client: the way an action changes messages (`actionResult`) and how to
+undo it (`undoPlan`) live in `packages/core`, and `MailSession.act` applies it to the copy first and puts back what
+the server did not take. Outgoing mail,
 drafts and signatures are not kept on the phone yet; when they are, its schema version goes up and the copy syncs
 again from the start.
 
