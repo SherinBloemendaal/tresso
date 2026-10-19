@@ -70,6 +70,7 @@ func buildMessage(ctx context.Context, store storage.Store, buf *imapclient.Fetc
 		Bcc:          addresses(parsed.Bcc, 1000),
 		ReplyTo:      addresses(parsed.ReplyTo, 100),
 		Snippet:      parsed.Snippet,
+		BodyText:     parsed.BodyText,
 		Attachments:  attachments,
 	}
 	if condStore && buf.ModSeq > 0 {

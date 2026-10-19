@@ -367,7 +367,7 @@ func TestSyncsMailboxFollowsNewMailFlagsAndDeletions(t *testing.T) {
 		t.Errorf("reply = %+v flags %+v", reply, replyFlags)
 	}
 	invoice, _, _ := fake.bySubject("INBOX", "Invoice")
-	if len(invoice.Attachments) != 1 || invoice.Attachments[0].Filename != "invoice.pdf" || invoice.Snippet != "Invoice attached." {
+	if len(invoice.Attachments) != 1 || invoice.Attachments[0].Filename != "invoice.pdf" || invoice.Snippet != "Invoice attached." || invoice.BodyText != "Invoice attached." {
 		t.Errorf("invoice = %+v", invoice)
 	}
 	if _, ok := store.Objects[invoice.RawObjectKey]; !ok {

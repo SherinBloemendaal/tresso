@@ -90,6 +90,9 @@ SGVsbG8gd29ybGQ=
 	if msg.Snippet != "Hi Kim, Could you approve the revised numbers before Friday?" {
 		t.Errorf("snippet = %q (quoted lines must be dropped, plain text preferred)", msg.Snippet)
 	}
+	if msg.BodyText != "Hi Kim, Could you approve the revised numbers before Friday?" {
+		t.Errorf("body text = %q (quoted lines must be dropped, plain text preferred)", msg.BodyText)
+	}
 
 	if len(msg.Attachments) != 2 {
 		t.Fatalf("attachments = %d", len(msg.Attachments))
@@ -118,6 +121,9 @@ Content-Type: text/html; charset=utf-8
 	}
 	if msg.Snippet != "Big & small offers" {
 		t.Errorf("snippet = %q", msg.Snippet)
+	}
+	if msg.BodyText != "Big & small offers" {
+		t.Errorf("body text = %q", msg.BodyText)
 	}
 }
 
@@ -205,6 +211,41 @@ func TestSnippetIsShortenedAtAWordBoundary(t *testing.T) {
 	snippet := Snippet(strings.Repeat("word ", 200))
 	if !strings.HasSuffix(snippet, "word…") || len([]rune(snippet)) > snippetLength+1 {
 		t.Errorf("snippet = %q", snippet)
+	}
+}
+
+func TestBodyTextKeepsTheWholeTextUpToTheLimit(t *testing.T) {
+	long := strings.Repeat("budget ", 2000)
+	if text := BodyText(long); text != strings.TrimSpace(long) {
+		t.Errorf("body text was cut below the limit: %d characters", len([]rune(text)))
+	}
+
+	tooLong := strings.Repeat("überweisung ", 4000)
+	text := BodyText(tooLong)
+	if n := len([]rune(text)); n > bodyTextLength || n < bodyTextLength-len("überweisung ") {
+		t.Errorf("body text has %d characters, want at most %d", n, bodyTextLength)
+	}
+	if !strings.HasSuffix(text, "überweisung") {
+		t.Errorf("body text is not cut at a word boundary: %q", text[len(text)-20:])
+	}
+}
+
+func TestBodyTextOfAMessageWithoutTextIsEmpty(t *testing.T) {
+	raw := crlf(`
+From: kim@company.example
+Subject: Scan
+Content-Type: application/pdf; name="scan.pdf"
+Content-Disposition: attachment; filename="scan.pdf"
+Content-Transfer-Encoding: base64
+
+SGVsbG8gd29ybGQ=
+`)
+	msg, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.BodyText != "" || msg.Snippet != "" {
+		t.Errorf("body text %q, snippet %q", msg.BodyText, msg.Snippet)
 	}
 }
 
