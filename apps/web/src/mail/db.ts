@@ -120,7 +120,29 @@ export function deleteMailDatabase(userId: string): Promise<void> {
   return deleteDB(databaseName(userId))
 }
 
+/**
+ * A message that needs the user and is new to them: unread, in an inbox, and judged `do` or `delegate` for the first
+ * time, either when it arrived or when it was classified later.
+ */
+export interface Arrival {
+  messageId: string
+  threadId: string
+  mailAccountId: string
+  from: SyncedMessage['from']
+  subject: string
+  snippet: string
+  receivedAt: string
+  verdict: 'do' | 'delegate'
+}
+
+function needsTheUser(message: SyncedMessage | undefined): boolean {
+  return message?.verdict === 'do' || message?.verdict === 'delegate'
+}
+
 export class MailDatabase implements SyncStore {
+  /** Collected by {@link apply}, handed out by {@link takeArrivals}. */
+  private arrivals: Arrival[] = []
+
   private constructor(private readonly db: IDBPDatabase<MailSchema>) {}
 
   static async open(userId: string): Promise<MailDatabase> {
@@ -234,6 +256,10 @@ export class MailDatabase implements SyncStore {
       await tx.objectStore('threads').put(thread)
       affected.add(thread.id)
     }
+    const inboxFolders = new Set(
+      (await tx.objectStore('folders').getAll()).filter((folder) => folder.role === 'inbox').map((folder) => folder.id),
+    )
+    const arrivals: Arrival[] = []
     for (const message of page.messages) {
       const previous = await tx.objectStore('messages').get(message.id)
       if (previous !== undefined && previous.threadId !== message.threadId) {
@@ -244,6 +270,23 @@ export class MailDatabase implements SyncStore {
       if (previous === undefined) {
         await rememberContacts(tx, message)
       }
+      if (
+        (message.verdict === 'do' || message.verdict === 'delegate') &&
+        !needsTheUser(previous) &&
+        !message.flags.seen &&
+        message.folderIds.some((id) => inboxFolders.has(id))
+      ) {
+        arrivals.push({
+          messageId: message.id,
+          threadId: message.threadId,
+          mailAccountId: message.mailAccountId,
+          from: message.from,
+          subject: message.subject,
+          snippet: message.snippet,
+          receivedAt: message.receivedAt,
+          verdict: message.verdict,
+        })
+      }
     }
     for (const outgoing of page.outgoingMessages) {
       await tx.objectStore('outgoing').put(outgoing)
@@ -252,15 +295,20 @@ export class MailDatabase implements SyncStore {
       await applyDraft(tx, draft)
     }
 
-    const inboxFolders = new Set(
-      (await tx.objectStore('folders').getAll()).filter((folder) => folder.role === 'inbox').map((folder) => folder.id),
-    )
     for (const threadId of affected) {
       await refreshConversation(tx, threadId, inboxFolders)
     }
 
     await tx.objectStore('meta').put(page.cursor, 'cursor')
     await tx.done
+    this.arrivals.push(...arrivals)
+  }
+
+  /** The arrivals of the pages applied since the last call, oldest first. */
+  takeArrivals(): Arrival[] {
+    const taken = this.arrivals
+    this.arrivals = []
+    return taken
   }
 
   async mailAccounts(): Promise<SyncedMailAccount[]> {

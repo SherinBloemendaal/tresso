@@ -5,6 +5,7 @@ pub fn run() {
   single_instance(tauri::Builder::default())
     .plugin(tauri_plugin_deep_link::init())
     .plugin(tauri_plugin_opener::init())
+    .plugin(tauri_plugin_notification::init())
     .invoke_handler(tauri::generate_handler![tokens::load_tokens, tokens::save_tokens, tokens::clear_tokens])
     .setup(|app| {
       if cfg!(debug_assertions) {
