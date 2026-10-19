@@ -63,6 +63,34 @@ export const useComposeStore = defineStore('compose', () => {
   const violations = computed(() => state.value.violations)
   const conflict = computed(() => state.value.conflict)
   const undoable = computed(() => state.value.undoable)
+  const attaching = computed(() => state.value.attaching)
+
+  /** Attaches files the user picked or dropped. */
+  function attach(files: File[]): Promise<void> {
+    return composer.attach(files.map((file) => ({ name: file.name, type: file.type, size: file.size, body: file })))
+  }
+
+  /** Opens one of the draft's files in a new tab, through a fresh link. */
+  async function openAttachment(attachmentId: string): Promise<void> {
+    // Opened at once, in the click, so the browser does not block it; the link follows.
+    const opened = window.open('about:blank', '_blank', 'noopener,noreferrer')
+    try {
+      const url = await composer.attachmentLink(attachmentId)
+      if (url === null) {
+        opened?.close()
+        notify({ text: 'This file is blocked: it contains malware.', tone: 'error' })
+        return
+      }
+      if (opened === null) {
+        window.location.assign(url)
+      } else {
+        opened.location.href = url
+      }
+    } catch (error) {
+      opened?.close()
+      notify({ text: `The file could not be opened: ${errorMessage(error)}`, tone: 'error' })
+    }
+  }
 
   /** Opening a draft brings the compose window up again; asking for one that is gone leaves it as it is. */
   async function open(run: () => void | Promise<void>): Promise<void> {
@@ -106,6 +134,10 @@ export const useComposeStore = defineStore('compose', () => {
     violations,
     notices,
     undoable,
+    attaching,
+    attach,
+    removeAttachment: (attachmentId: string) => composer.removeAttachment(attachmentId),
+    openAttachment,
     openNew,
     openReply,
     defaultSignature: (mailAccountId: string | null) => composer.defaultSignature(mailAccountId),

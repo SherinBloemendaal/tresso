@@ -1,16 +1,9 @@
 <script setup lang="ts">
-import type { MessageAttachment } from '@tresso/core'
-import { fileSize } from '@/mail/format'
+import { fileSize, SCAN_TEXT, type MessageAttachment } from '@tresso/core'
 import AppIcon from '@/components/AppIcon.vue'
 
 defineProps<{ attachments: MessageAttachment[] }>()
 
-const scanText: Record<MessageAttachment['scanStatus'], string> = {
-  pending: 'not scanned yet',
-  clean: 'scanned, clean',
-  infected: 'blocked: contains malware',
-  failed: 'could not be scanned',
-}
 </script>
 
 <template>
@@ -22,7 +15,7 @@ const scanText: Record<MessageAttachment['scanStatus'], string> = {
       <span class="text">
         <a v-if="attachment.url" :href="attachment.url" class="name" target="_blank" rel="noopener noreferrer">{{ attachment.filename }}</a>
         <span v-else class="name">{{ attachment.filename }}</span>
-        <span class="detail">{{ fileSize(attachment.size) }}, {{ scanText[attachment.scanStatus] }}</span>
+        <span class="detail">{{ fileSize(attachment.size) }}, {{ SCAN_TEXT[attachment.scanStatus] }}</span>
       </span>
       <AppIcon v-if="attachment.url" name="download" class="download" />
     </li>

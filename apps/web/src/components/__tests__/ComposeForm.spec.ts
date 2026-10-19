@@ -6,7 +6,7 @@ import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import ComposeForm from '../ComposeForm.vue'
 
-const draft: Draft = { id: 'd1', mailAccountId: 'work', to: [], cc: [], bcc: [], subject: 'Hello', html: '<p>Hi</p>', signatureId: null, quoteHtml: '', inReplyToMessageId: null, kind: 'new', version: 0, pendingSave: false, remoteVersion: null, outgoingId: null, noticedStatus: null, updatedAt: 1 }
+const draft: Draft = { id: 'd1', mailAccountId: 'work', to: [], cc: [], bcc: [], subject: 'Hello', html: '<p>Hi</p>', signatureId: null, quoteHtml: '', inReplyToMessageId: null, kind: 'new', version: 0, pendingSave: false, remoteVersion: null, outgoingId: null, noticedStatus: null, updatedAt: 1, attachments: [] }
 
 async function settle(): Promise<void> {
   for (let i = 0; i < 5; i++) {

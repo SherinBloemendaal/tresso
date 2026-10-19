@@ -6,6 +6,7 @@ import {
   deletedDraft,
   mergeContact,
   peopleOn,
+  storedDraft,
   summarizeConversation,
   syncedDraft,
   type AppliedAction,
@@ -450,11 +451,12 @@ export class IndexedDbMailStore implements MailStore {
   }
 
   async drafts(): Promise<Draft[]> {
-    return (await this.db.getAllFromIndex('drafts', 'byUpdatedAt')).reverse()
+    return (await this.db.getAllFromIndex('drafts', 'byUpdatedAt')).reverse().map(storedDraft)
   }
 
   async draft(id: string): Promise<Draft | null> {
-    return (await this.db.get('drafts', id)) ?? null
+    const draft = await this.db.get('drafts', id)
+    return draft === undefined ? null : storedDraft(draft)
   }
 
   async deleteDraft(id: string): Promise<void> {
@@ -507,7 +509,8 @@ async function deleteAccount(tx: WriteTx, accountId: string): Promise<void> {
 }
 
 async function applyDraft(tx: WriteTx, draft: SyncedDraft): Promise<void> {
-  const next = syncedDraft(await tx.objectStore('drafts').get(draft.id), draft)
+  const local = await tx.objectStore('drafts').get(draft.id)
+  const next = syncedDraft(local === undefined ? undefined : storedDraft(local), draft)
   if (next !== null) {
     await tx.objectStore('drafts').put(next)
   }
