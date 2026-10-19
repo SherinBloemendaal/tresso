@@ -1,20 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SendMessageRequest } from './compose'
 import { Composer, type ComposerNotice } from './composer'
-import { DraftSync, type DraftApi } from './drafts'
+import { DraftSync } from './drafts'
+import { ApiFailure, FakeDraftApi } from './drafts.fake'
 import { accounts, message, page, signature } from './store/contract'
 import { memorySql } from './store/memorySql'
 import { SqliteMailStore } from './store/sqlite'
-import type { SyncedDraft, SyncedOutgoingMessage } from './sync/types'
-
-class ApiFailure extends Error {
-  constructor(
-    readonly status: number,
-    readonly violations: Record<string, string> = {},
-  ) {
-    super(`HTTP ${status}`)
-  }
-}
+import type { MessageAttachment, SyncedOutgoingMessage } from './sync/types'
 
 function outgoing(status: SyncedOutgoingMessage['status'], lastError: string | null = null): SyncedOutgoingMessage {
   return { id: 'o1', mailAccountId: 'work', status, subject: 'Re: Budget', recipients: { to: [], cc: [], bcc: [] }, sendAt: '2026-10-19T09:00:00Z', sentAt: null, lastError, inReplyToMessageId: 'm1' }
@@ -27,10 +19,9 @@ describe('Composer', () => {
   let sent: SendMessageRequest[]
   let cancelled: string[]
   let notices: ComposerNotice[]
-  let serverDrafts: Map<string, SyncedDraft>
+  let api: FakeDraftApi
+  let originalFiles: MessageAttachment[]
   let sendFails: unknown
-  let offline: boolean
-  let uploading: (() => Promise<void>) | null
   let currentStore: SqliteMailStore | null
   let changes: number
   let composer: Composer
@@ -42,47 +33,18 @@ describe('Composer', () => {
     sent = []
     cancelled = []
     notices = []
-    serverDrafts = new Map()
     sendFails = null
-    offline = false
-    uploading = null
     currentStore = store
     changes = 0
-    const api: DraftApi = {
-      // As the server answers: a second create of one id is refused, a stale update too.
-      create: async (id, request) => {
-        await uploading?.()
-        if (serverDrafts.has(id)) throw new ApiFailure(409)
-        const saved = { id, ...request, version: 1, updatedAt: '2026-10-19T08:00:00Z' }
-        serverDrafts.set(id, saved)
-        return saved
-      },
-      update: async (id, request, expectedVersion) => {
-        await uploading?.()
-        const current = serverDrafts.get(id)
-        if (current === undefined) throw new ApiFailure(404)
-        if (current.version !== expectedVersion) throw new ApiFailure(409)
-        const saved = { id, ...request, version: expectedVersion + 1, updatedAt: '2026-10-19T08:00:00Z' }
-        serverDrafts.set(id, saved)
-        return saved
-      },
-      get: async (id) => {
-        const current = serverDrafts.get(id)
-        if (current === undefined) throw new ApiFailure(404)
-        return current
-      },
-      remove: async (id) => {
-        if (offline) throw new Error('Network request failed')
-        if (!serverDrafts.delete(id)) throw new ApiFailure(404)
-      },
-    }
+    api = new FakeDraftApi()
+    originalFiles = []
     composer = new Composer({
       store: () => currentStore,
       drafts: new DraftSync(() => currentStore, api),
       accounts: () => accounts,
       signatures: () => [signature('sig-work', 'Work')],
       defaultAccount: () => 'work',
-      body: async () => ({ html: '<p>Numbers?</p>', text: null }),
+      body: async () => ({ html: '<p>Numbers?</p>', text: null, attachments: originalFiles }),
       send: async (request) => {
         if (sendFails !== null) throw sendFails
         sent.push(request)
@@ -232,7 +194,7 @@ describe('Composer', () => {
     await composer.openDraft(kept)
     await composer.discard()
     expect(await store.draft(kept)).toBeNull()
-    expect(serverDrafts.has(kept)).toBe(false)
+    expect(api.drafts.has(kept)).toBe(false)
   })
 
   it('sends a draft that was saved before with the draft, keeping the version the server knows', async () => {
@@ -240,14 +202,14 @@ describe('Composer', () => {
     composer.update({ subject: 'Saved first' })
     await vi.advanceTimersByTimeAsync(1000)
     const id = composer.state.draft!.id
-    expect(serverDrafts.get(id)?.version).toBe(1)
+    expect(api.drafts.get(id)?.version).toBe(1)
 
     await composer.send()
 
     expect(composer.state.error).toBeNull()
     expect(sent[0]?.draftId).toBe(id)
     // The edits on screen went up as version 2 on top of the saved version 1, not as a second create.
-    expect(serverDrafts.get(id)?.version).toBe(2)
+    expect(api.drafts.get(id)?.version).toBe(2)
     expect(await store.draft(id)).toMatchObject({ version: 2, outgoingId: 'o1' })
   })
 
@@ -278,23 +240,23 @@ describe('Composer', () => {
     const id = composer.state.draft!.id
     let release!: () => void
     const held = new Promise<void>((resolve) => (release = resolve))
-    uploading = () => held
+    api.during = () => held
     await vi.advanceTimersByTimeAsync(1000)
 
     const discarding = composer.discard()
-    uploading = null
+    api.during = null
     release()
     expect(await discarding).toBe(true)
 
     expect(await store.draft(id)).toBeNull()
-    expect(serverDrafts.has(id)).toBe(false)
+    expect(api.drafts.has(id)).toBe(false)
   })
 
   it('keeps a draft open, saying why, when it cannot be deleted from the server', async () => {
     composer.openNew()
     composer.update({ subject: 'Offline' })
     await vi.advanceTimersByTimeAsync(1000)
-    offline = true
+    api.offline = true
 
     expect(await composer.discard()).toBe(false)
 
@@ -336,7 +298,7 @@ describe('Composer', () => {
     composer.openNew([{ address: 'anna@example.test', name: null }])
     let release!: () => void
     const held = new Promise<void>((resolve) => (release = resolve))
-    uploading = () => held
+    api.during = () => held
     const sending = composer.send()
 
     composer.close()
@@ -364,7 +326,7 @@ describe('Composer', () => {
     const first = composer.state.draft!.id
     let release!: () => void
     const held = new Promise<void>((resolve) => (release = resolve))
-    uploading = () => held
+    api.during = () => held
     const sending = composer.send()
     composer.close()
     composer.openNew()
@@ -401,5 +363,74 @@ describe('Composer', () => {
     composer.close()
     await vi.advanceTimersByTimeAsync(10)
     expect(changes).toBe(afterFirst + 1)
+  })
+
+  it('puts the draft on the server before attaching files, and shows them as they arrive', async () => {
+    composer.openNew()
+    composer.update({ subject: 'With files' })
+    const id = composer.state.draft!.id
+
+    await composer.attach([
+      { name: 'notes.txt', type: 'text/plain', size: 10, body: 'blob-1' },
+      { name: 'plan.pdf', type: 'application/pdf', size: 20, body: 'blob-2' },
+    ])
+
+    expect(api.calls).toEqual([`create ${id}`, `attach ${id} notes.txt`, `attach ${id} plan.pdf`])
+    expect(composer.state.draft!.attachments.map((a) => a.filename)).toEqual(['notes.txt', 'plan.pdf'])
+    expect(composer.state.attaching).toEqual([])
+    expect((await store.draft(id))!.attachments.map((a) => a.filename)).toEqual(['notes.txt', 'plan.pdf'])
+    expect(await composer.attachmentLink(composer.state.draft!.attachments[0]!.id)).toMatch(/^https:/)
+  })
+
+  it('says a file could not be attached without a connection, keeping the draft', async () => {
+    composer.openNew()
+    api.offline = true
+
+    await composer.attach([{ name: 'notes.txt', type: 'text/plain', size: 10, body: 'blob' }])
+
+    expect(composer.state.error).toBe('Not attached. notes.txt: Attaching files needs a connection. Try again when you are online.')
+    expect(composer.state.draft!.attachments).toEqual([])
+  })
+
+  it('removes a file, also one the server lost already', async () => {
+    composer.openNew()
+    await composer.attach([{ name: 'notes.txt', type: 'text/plain', size: 10, body: 'blob' }])
+    const [file] = composer.state.draft!.attachments
+
+    await composer.removeAttachment(file!.id)
+
+    expect(composer.state.draft!.attachments).toEqual([])
+    expect(api.drafts.get(composer.state.draft!.id)!.attachments).toEqual([])
+    await composer.removeAttachment('gone')
+    expect(composer.state.error).toBeNull()
+  })
+
+  it("takes a forwarded message's files along, but not its inline images or malware", async () => {
+    const file = (id: string, extra: Partial<MessageAttachment> = {}): MessageAttachment => ({ id, filename: `${id}.pdf`, contentType: 'application/pdf', size: 100, inline: false, contentId: null, scanStatus: 'clean', url: null, ...extra })
+    originalFiles = [file('invoice'), file('logo', { inline: true }), file('virus', { scanStatus: 'infected' })]
+
+    await composer.openReply(original, 'forward')
+
+    expect(api.calls.filter((call) => call.startsWith('forward'))).toEqual([`forward ${composer.state.draft!.id} invoice`])
+    expect(composer.state.draft!.attachments.map((a) => a.filename)).toEqual(['invoice.pdf'])
+  })
+
+  it('does not send while files are on their way, nor without the draft that has them', async () => {
+    composer.openNew([{ address: 'anna@example.test', name: null }])
+    let release!: () => void
+    api.duringFile = () => new Promise<void>((resolve) => (release = resolve))
+    const attaching = composer.attach([{ name: 'slow.bin', type: 'application/octet-stream', size: 10, body: 'blob' }])
+    await vi.waitFor(() => expect(composer.state.attaching).toEqual(['slow.bin']))
+
+    await composer.send()
+    expect(composer.state.error).toBe('Wait until the files are attached.')
+    api.duringFile = null
+    release()
+    await attaching
+
+    api.offline = true
+    await composer.send()
+    expect(composer.state.error).toBe('Attaching files needs a connection. Try again when you are online.')
+    expect(sent).toEqual([])
   })
 })

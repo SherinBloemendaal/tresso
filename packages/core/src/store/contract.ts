@@ -67,6 +67,7 @@ export function draft(id: string, extra: Partial<Draft> = {}): Draft {
     outgoingId: null,
     noticedStatus: null,
     updatedAt: 1,
+    attachments: [],
     ...extra,
   }
 }
@@ -291,7 +292,7 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
     })
 
     it('keeps a sent draft until its outcome is known, and leaves unsaved edits alone', async () => {
-      const synced = { id: 'd1', mailAccountId: 'work', kind: 'new' as const, to: [], cc: [], bcc: [], subject: 'Server', html: '', signatureId: null, quoteHtml: '', inReplyToMessageId: null, version: 3, updatedAt: '2026-10-19T08:00:00Z' }
+      const synced = { id: 'd1', mailAccountId: 'work', kind: 'new' as const, to: [], cc: [], bcc: [], subject: 'Server', html: '', signatureId: null, quoteHtml: '', inReplyToMessageId: null, version: 3, updatedAt: '2026-10-19T08:00:00Z', attachments: [] }
       await db.apply(page({ cursor: 11, drafts: [synced] }))
       expect(await db.draft('d1')).toMatchObject({ subject: 'Server', version: 3, pendingSave: false, updatedAt: Date.parse('2026-10-19T08:00:00Z') })
 
@@ -304,11 +305,30 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
 
       await db.saveDraft({ ...(await db.draft('d1'))!, pendingSave: false, outgoingId: 'o1' })
       await db.apply(page({ cursor: 14, deleted: [{ type: 'draft', id: 'd1' }] }))
-      expect(await db.draft('d1')).toMatchObject({ outgoingId: 'o1', version: 0 })
+      // The server keeps a draft being sent, version and all, so an undo can go on writing it.
+      expect(await db.draft('d1')).toMatchObject({ outgoingId: 'o1', version: 3, pendingSave: false })
 
       await db.saveDraft({ ...(await db.draft('d1'))!, outgoingId: null })
       await db.apply(page({ cursor: 15, deleted: [{ type: 'draft', id: 'd1' }] }))
       expect(await db.draft('d1')).toBeNull()
+    })
+
+    it("takes the server's files for a draft, also while its text has edits not uploaded yet", async () => {
+      const file = { id: 'f1', filename: 'notes.txt', contentType: 'text/plain', size: 10, scanStatus: 'pending' as const }
+      const synced = { id: 'd1', mailAccountId: 'work', kind: 'new' as const, to: [], cc: [], bcc: [], subject: 'Server', html: '', signatureId: null, quoteHtml: '', inReplyToMessageId: null, version: 2, updatedAt: '2026-10-19T08:00:00Z', attachments: [file] }
+      await db.saveDraft(draft('d1', { subject: 'Typed here', version: 2, pendingSave: true }))
+
+      await db.apply(page({ cursor: 11, drafts: [synced] }))
+
+      expect(await db.draft('d1')).toMatchObject({ subject: 'Typed here', pendingSave: true, remoteVersion: null, attachments: [file] })
+    })
+
+    it('reads drafts stored before they had files as having none', async () => {
+      const { attachments: _, ...old } = draft('d1')
+      await db.saveDraft(old as Draft)
+
+      expect((await db.draft('d1'))?.attachments).toEqual([])
+      expect((await db.drafts())[0]?.attachments).toEqual([])
     })
 
     it('hands out new unread inbox mail judged do or delegate, once', async () => {

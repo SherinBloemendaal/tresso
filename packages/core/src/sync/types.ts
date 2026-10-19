@@ -103,6 +103,20 @@ export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'out
 export type DraftKind = 'new' | 'reply' | 'replyAll' | 'forward'
 
 /** A message being written, the same on every device. `version` rises with every save. */
+/** A file attached to a draft. The delta carries it without a link; the draft's own endpoint has a fresh one. */
+export interface DraftAttachment {
+  id: string
+  filename: string
+  contentType: string
+  size: number
+  scanStatus: ScanStatus
+}
+
+/** A draft attachment with its download link: signed, valid for an hour, null while quarantined. */
+export interface DraftAttachmentLink extends DraftAttachment {
+  url: string | null
+}
+
 export interface SyncedDraft {
   id: string
   mailAccountId: string | null
@@ -118,6 +132,8 @@ export interface SyncedDraft {
   inReplyToMessageId: string | null
   version: number
   updatedAt: string
+  /** Kept by the server: added and removed through their own endpoints, never with a draft save. */
+  attachments: DraftAttachment[]
 }
 
 export interface Deleted {

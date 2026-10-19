@@ -1,7 +1,7 @@
 import { isPlausibleAddress, type SendMessageRequest } from './compose'
-import { defaultSignatureOf, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome, type DraftSync } from './drafts'
+import { AttachmentsNeedTheServer, defaultSignatureOf, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome, type AttachmentFile, type DraftSync } from './drafts'
 import { CopyClosingError, type Draft, type MailStore } from './store/mailStore'
-import type { Address, MessageBody, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature } from './sync/types'
+import type { Address, DraftAttachment, MessageAttachment, MessageBody, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature } from './sync/types'
 
 /** Seconds a sent message waits before it goes out, so "Undo" can still stop it. */
 export const UNDO_SECONDS = 5
@@ -20,12 +20,12 @@ export interface ComposerNotice {
 export interface ComposerDeps {
   store(): MailStore | null
   /** The parts of DraftSync writing mail uses. */
-  drafts: Pick<DraftSync, 'upload' | 'resolveConflict' | 'deleteEverywhere' | 'uploadForSending'>
+  drafts: Pick<DraftSync, 'upload' | 'resolveConflict' | 'deleteEverywhere' | 'uploadForSending' | 'attach' | 'forward' | 'detach' | 'links'>
   accounts(): SyncedMailAccount[]
   signatures(): SyncedSignature[]
   /** The account a new message is written from: the one on screen, or the first. */
   defaultAccount(): string | null
-  body(messageId: string): Promise<Pick<MessageBody, 'html' | 'text'>>
+  body(messageId: string): Promise<Pick<MessageBody, 'html' | 'text' | 'attachments'>>
   send(request: SendMessageRequest): Promise<SyncedOutgoingMessage>
   cancel(outgoingId: string): Promise<SyncedOutgoingMessage>
   notify(notice: ComposerNotice, ms: number): void
@@ -52,6 +52,8 @@ export interface ComposerState {
   conflict: boolean
   /** A message that can still be stopped, until `until` (epoch ms). */
   undoable: { outgoingId: string; draftId: string; until: number } | null
+  /** Files being attached to the open draft right now, by name. */
+  attaching: string[]
 }
 
 /**
@@ -60,7 +62,7 @@ export interface ComposerState {
  * "Undo" can stop it. Screens read `state` and are told of changes through `subscribe`.
  */
 export class Composer {
-  private current: ComposerState = { draft: null, revision: 0, savedAt: null, sending: false, error: null, violations: {}, conflict: false, undoable: null }
+  private current: ComposerState = { draft: null, revision: 0, savedAt: null, sending: false, error: null, violations: {}, conflict: false, undoable: null, attaching: [] }
   private readonly listeners = new Set<() => void>()
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private undoTimer: ReturnType<typeof setTimeout> | null = null
@@ -110,7 +112,7 @@ export class Composer {
       void this.save(this.current.draft)
     }
     this.openedIn = store
-    this.set({ draft: plain(draft), revision: this.current.revision + 1, error: null, violations: {}, savedAt: null, conflict: draft.remoteVersion !== null })
+    this.set({ draft: plain(draft), revision: this.current.revision + 1, error: null, violations: {}, savedAt: null, conflict: draft.remoteVersion !== null, attaching: [] })
   }
 
   /** The copy to write the open draft into, or null when it is no longer the one open (a sign-out, another user). */
@@ -130,7 +132,7 @@ export class Composer {
       this.undoTimer = null
     }
     this.openedIn = null
-    this.set({ draft: null, savedAt: null, sending: false, error: null, violations: {}, conflict: false, undoable: null })
+    this.set({ draft: null, savedAt: null, sending: false, error: null, violations: {}, conflict: false, undoable: null, attaching: [] })
   }
 
   openNew(to: Address[] = []): void {
@@ -139,8 +141,98 @@ export class Composer {
   }
 
   async openReply(message: SyncedMessage, kind: 'reply' | 'replyAll' | 'forward'): Promise<void> {
-    const body = await this.deps.body(message.id).catch(() => ({ html: null, text: message.snippet }))
-    this.open(replyDraft(message, body, kind, this.deps.accounts(), this.deps.signatures()))
+    const body = await this.deps.body(message.id).catch(() => ({ html: null, text: message.snippet, attachments: [] as MessageAttachment[] }))
+    const draft = replyDraft(message, body, kind, this.deps.accounts(), this.deps.signatures())
+    this.open(draft)
+    if (kind === 'forward') {
+      // A forward takes the original's files along, as other mail apps do; inline images are part of its text.
+      const files = body.attachments.filter((attachment) => !attachment.inline && attachment.scanStatus !== 'infected')
+      if (files.length > 0) {
+        // The files are kept with the server's copy of the draft, so the draft goes up first.
+        await this.save(this.current.draft)
+        await this.withFiles(
+          draft.id,
+          files.map((file) => file.filename),
+          files.map((file) => () => this.deps.drafts.forward(draft.id, file.id)),
+        )
+      }
+    }
+  }
+
+  /** Attaches files to the open draft, which goes to the server first if it is not there yet. */
+  async attach(files: AttachmentFile[]): Promise<void> {
+    const draft = this.current.draft
+    if (draft === null || files.length === 0 || this.storeOfDraft() === null) {
+      return
+    }
+    // Typed text goes up with the draft, so it is not lost if the files take long.
+    this.clearSaveTimer()
+    await this.save(draft)
+    await this.withFiles(
+      draft.id,
+      files.map((file) => file.name),
+      files.map((file) => () => this.deps.drafts.attach(draft.id, file)),
+    )
+  }
+
+  /** Removes a file from the open draft. */
+  async removeAttachment(attachmentId: string): Promise<void> {
+    const draft = this.current.draft
+    if (draft === null || this.storeOfDraft() === null) {
+      return
+    }
+    try {
+      await this.deps.drafts.detach(draft.id, attachmentId)
+      this.noteAttachments(draft.id, (attachments) => attachments.filter((attachment) => attachment.id !== attachmentId))
+    } catch (error) {
+      if (this.current.draft?.id === draft.id) {
+        this.set({ error: `The file could not be removed: ${this.deps.explain(error).message}` })
+      }
+    }
+  }
+
+  /** A fresh link to open one of the open draft's files, or null when it is quarantined or gone. */
+  async attachmentLink(attachmentId: string): Promise<string | null> {
+    const draft = this.current.draft
+    if (draft === null) {
+      return null
+    }
+    return (await this.deps.drafts.links(draft.id)).find((link) => link.id === attachmentId)?.url ?? null
+  }
+
+  /** Runs the attach requests one after another, showing which files are on their way and why one failed. */
+  private async withFiles(draftId: string, names: string[], requests: (() => Promise<DraftAttachment>)[]): Promise<void> {
+    this.set({ attaching: [...this.current.attaching, ...names] })
+    const failures: string[] = []
+    for (const [index, request] of requests.entries()) {
+      try {
+        const attachment = await request()
+        this.noteAttachments(draftId, (attachments) => [...attachments.filter((other) => other.id !== attachment.id), plainAttachment(attachment)])
+      } catch (error) {
+        const reason = error instanceof AttachmentsNeedTheServer ? error.message : this.deps.explain(error).message
+        failures.push(`${names[index]}: ${reason}`)
+      } finally {
+        const still = [...this.current.attaching]
+        still.splice(still.indexOf(names[index]!), 1)
+        this.set({ attaching: still })
+      }
+    }
+    if (failures.length > 0) {
+      const text = `Not attached. ${failures.join(' ')}`
+      if (this.current.draft?.id === draftId) {
+        this.set({ error: text })
+      } else {
+        this.deps.notify({ text, tone: 'error' }, 8000)
+      }
+    }
+  }
+
+  /** The open draft's files as the server has them now (they are not edits: nothing is saved for them). */
+  private noteAttachments(draftId: string, change: (attachments: DraftAttachment[]) => DraftAttachment[]): void {
+    const draft = this.current.draft
+    if (draft !== null && draft.id === draftId) {
+      this.set({ draft: { ...draft, attachments: change(draft.attachments) } })
+    }
   }
 
   async openDraft(id: string): Promise<void> {
@@ -300,7 +392,11 @@ export class Composer {
       this.set({ error: 'You were signed out. Sign in again to send this message.' })
       return
     }
-    const problem = this.current.conflict ? 'This draft was changed on another device. Choose which version to keep first.' : this.validate(draft)
+    const problem = this.current.conflict
+      ? 'This draft was changed on another device. Choose which version to keep first.'
+      : this.current.attaching.length > 0
+        ? 'Wait until the files are attached.'
+        : this.validate(draft)
     if (problem) {
       this.set({ error: problem })
       return
@@ -310,6 +406,10 @@ export class Composer {
     this.clearSaveTimer()
     try {
       const onServer = await this.deps.drafts.uploadForSending(draft)
+      if (!onServer && draft.attachments.length > 0) {
+        // The files are with the server's copy of the draft: sending without it would leave them out.
+        throw new AttachmentsNeedTheServer()
+      }
       // Worked out after the upload: the undo window is the time between queueing and sending.
       const at = sendAt ?? new Date(Date.now() + this.undoSeconds * 1000)
       const outgoing = await this.deps.send(sendRequest(draft, this.deps.signatures(), at, onServer))
@@ -437,4 +537,8 @@ export class Composer {
 /** A copy holding only plain data: what the caller hands in may be a framework's reactive proxy, which stores refuse. */
 function plain<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+function plainAttachment(attachment: DraftAttachment): DraftAttachment {
+  return { id: attachment.id, filename: attachment.filename, contentType: attachment.contentType, size: attachment.size, scanStatus: attachment.scanStatus }
 }
