@@ -42,3 +42,14 @@ when@test:
         App\Tests\Support\StaticMxResolver:
             public: true
         App\Mail\Autoconfig\MxResolver: '@App\Tests\Support\StaticMxResolver'
+        # Search tests run against a real Meilisearch, outside the mocked HTTP client.
+        search.test_http_client:
+            class: Symfony\Contracts\HttpClient\HttpClientInterface
+            factory: ['Symfony\Component\HttpClient\HttpClient', 'create']
+        App\Search\Meilisearch\MeilisearchClient:
+            autowire: true
+            arguments:
+                $httpClient: '@search.test_http_client'
+        App\Search\MessageIndex:
+            public: true
+            autowire: true
