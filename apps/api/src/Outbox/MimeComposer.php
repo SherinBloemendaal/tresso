@@ -6,15 +6,19 @@ namespace App\Outbox;
 
 use App\Entity\Message;
 use App\Entity\MessageReference;
+use App\Storage\ObjectNotFound;
+use App\Storage\ObjectStorage;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
 use Symfony\Component\Mime\Header\MailboxListHeader;
+use Symfony\Component\Mime\Part\DataPart;
 use Symfony\Component\Uid\Uuid;
 
 /**
  * Turns a {@see Composition} into the RFC 5322 message that is sent and filed in Sent. Replies carry In-Reply-To and
- * References so every client threads them. Bcc recipients are only on the envelope, never in the message.
+ * References so every client threads them. Bcc recipients are only on the envelope, never in the message. Attached
+ * files are read from object storage.
  */
 final readonly class MimeComposer
 {
@@ -24,6 +28,7 @@ final readonly class MimeComposer
     public function __construct(
         private OutgoingHtmlSanitizer $html,
         private EntityManagerInterface $entityManager,
+        private ObjectStorage $storage,
     ) {
     }
 
@@ -72,6 +77,14 @@ final readonly class MimeComposer
             ->date($composition->sendAt)
             ->text($this->html->toText($html), 'utf-8')
             ->html($html, 'utf-8');
+        foreach ($composition->attachments as $attachment) {
+            try {
+                $content = $this->storage->read($attachment->objectKey);
+            } catch (ObjectNotFound $exception) {
+                throw new MissingAttachment($attachment->filename, $exception);
+            }
+            $email->addPart(new DataPart($content, $attachment->filename, $attachment->contentType));
+        }
         $headers = $email->getHeaders();
         $headers->addIdHeader('Message-ID', $messageId);
         $headers->addTextHeader('User-Agent', 'Tresso');

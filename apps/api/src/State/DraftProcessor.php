@@ -12,6 +12,7 @@ use App\ApiResource\DraftResource;
 use App\ApiResource\Input\Draft\DraftInput;
 use App\ApiResource\Input\Draft\DraftRecipientInput;
 use App\Entity\Draft;
+use App\Mail\Body\AttachmentUrls;
 use App\Entity\MailAccount;
 use App\Entity\Message;
 use App\Entity\Signature;
@@ -43,6 +44,7 @@ final readonly class DraftProcessor implements ProcessorInterface
         private SignatureRepository $signatures,
         private MessageRepository $messages,
         private DraftFiling $filing,
+        private AttachmentUrls $urls,
     ) {
     }
 
@@ -99,7 +101,7 @@ final readonly class DraftProcessor implements ProcessorInterface
             return $draft;
         });
 
-        return DraftResource::fromEntity($draft);
+        return DraftResource::fromEntity($draft, $this->urls);
     }
 
     /**

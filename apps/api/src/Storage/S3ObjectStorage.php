@@ -56,6 +56,12 @@ final readonly class S3ObjectStorage implements ObjectStorage
         $this->client->putObject(['Bucket' => $this->bucket, 'Key' => $key, 'Body' => $content, 'ContentType' => $contentType])->resolve();
     }
 
+    public function delete(string $key): void
+    {
+        // S3 answers a delete of a missing key with success too.
+        $this->client->deleteObject(['Bucket' => $this->bucket, 'Key' => $key])->resolve();
+    }
+
     private function open(string $key): GetObjectOutput
     {
         $output = $this->client->getObject(['Bucket' => $this->bucket, 'Key' => $key]);

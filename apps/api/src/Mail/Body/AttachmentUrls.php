@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Mail\Body;
 
 use App\ApiResource\AttachmentContent;
+use App\ApiResource\DraftAttachmentContent;
 use App\Entity\Attachment;
+use App\Entity\DraftAttachment;
 use App\Enum\ScanStatus;
 use Symfony\Component\HttpFoundation\UriSigner;
 use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
@@ -32,6 +34,19 @@ final readonly class AttachmentUrls
 
         return $this->signer->sign(
             $this->urls->generate(AttachmentContent::ROUTE, ['id' => $attachment->getId()->toRfc4122()], UrlGeneratorInterface::ABSOLUTE_URL),
+            new \DateInterval(self::LIFETIME),
+        );
+    }
+
+    /** The same for a file attached to a draft. */
+    public function forDraft(DraftAttachment $attachment): ?string
+    {
+        if (ScanStatus::Infected === $attachment->getScanStatus()) {
+            return null;
+        }
+
+        return $this->signer->sign(
+            $this->urls->generate(DraftAttachmentContent::ROUTE, ['id' => $attachment->getId()->toRfc4122()], UrlGeneratorInterface::ABSOLUTE_URL),
             new \DateInterval(self::LIFETIME),
         );
     }

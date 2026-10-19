@@ -15,8 +15,12 @@ use App\Entity\MailAccount;
 use App\Entity\Message;
 use App\Entity\OutgoingMessage;
 use App\Enum\OutgoingStatus;
+use App\Enum\ScanStatus;
+use App\Outbox\AttachmentLimits;
 use App\Outbox\Composition;
 use App\Outbox\DraftFiling;
+use App\Outbox\MissingAttachment;
+use App\Outbox\OutgoingAttachment;
 use App\Outbox\Outbox;
 use App\Repository\DraftRepository;
 use App\Repository\MailAccountRepository;
@@ -44,6 +48,7 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
         private OutgoingMessageRepository $outgoing,
         private DraftRepository $drafts,
         private DraftFiling $filing,
+        private AttachmentLimits $limits,
     ) {
     }
 
@@ -75,21 +80,29 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
                 null === $data->sendAt || $data->sendAt < $now ? $now : $data->sendAt,
             );
 
-            $draft = null;
-            if (null !== $data->draftId) {
-                $draft = $this->drafts->findOneOwnedBy($user, $data->draftId);
-                if (!$draft instanceof Draft) {
-                    throw self::invalid('draftId', 'No draft with that id.', $data->draftId);
-                }
+            $draftId = $data->draftId;
+            if (null !== $draftId && !$this->drafts->findOneOwnedBy($user, $draftId) instanceof Draft) {
+                throw self::invalid('draftId', 'No draft with that id.', $draftId);
             }
 
-            return OutgoingMessageResource::fromEntity($this->entityManager->wrapInTransaction(function () use ($composition, $now, $draft): OutgoingMessage {
-                $queued = $this->outbox->queue($composition, $now);
-                if (null !== $draft) {
-                    $locked = $this->entityManager->find(Draft::class, $draft->getId(), LockMode::PESSIMISTIC_WRITE);
-                    if ($locked instanceof Draft) {
-                        $this->filing->discard($locked);
+            return OutgoingMessageResource::fromEntity($this->entityManager->wrapInTransaction(function () use ($composition, $now, $draftId, $user): OutgoingMessage {
+                // Locked before anything is built, so its attachments cannot change and it is sent once.
+                $draft = null;
+                if (null !== $draftId) {
+                    $owned = $this->drafts->findOneOwnedBy($user, $draftId);
+                    $draft = null === $owned ? null : $this->entityManager->find(Draft::class, $owned->getId(), LockMode::PESSIMISTIC_WRITE);
+                    if (!$draft instanceof Draft || $draft->isSending()) {
+                        throw new ConflictHttpException('This draft is being sent already.');
                     }
+                    $composition = $this->withAttachments($composition, $draft);
+                }
+                try {
+                    $queued = $this->outbox->queue($composition, $now);
+                } catch (MissingAttachment $exception) {
+                    throw self::invalid('draftId', $exception->getMessage().' Remove it and attach it again.', $draftId ?? '');
+                }
+                if (null !== $draft) {
+                    $this->filing->sending($draft, $queued);
                 }
 
                 return $queued;
@@ -114,6 +127,36 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
 
             return $message;
         }));
+    }
+
+    /**
+     * The draft's attachments go with the message: none may be infected, and together they must fit the size a mail
+     * server takes.
+     */
+    private function withAttachments(Composition $composition, Draft $draft): Composition
+    {
+        $total = 0;
+        foreach ($draft->getAttachments() as $attachment) {
+            if (ScanStatus::Infected === $attachment->getScanStatus()) {
+                throw self::invalid('draftId', \sprintf('"%s" contains malware. Remove it to send this message.', $attachment->getFilename()), $draft->getId()->toRfc4122());
+            }
+            $total += $attachment->getSize();
+        }
+        if ($total > $this->limits->maxAttachmentBytes) {
+            throw self::invalid('draftId', \sprintf('The attachments are too large together (at most %s).', AttachmentLimits::describe($this->limits->maxAttachmentBytes)), $draft->getId()->toRfc4122());
+        }
+
+        return new Composition(
+            $composition->account,
+            $composition->to,
+            $composition->cc,
+            $composition->bcc,
+            $composition->subject,
+            $composition->html,
+            $composition->inReplyTo,
+            $composition->sendAt,
+            array_map(OutgoingAttachment::fromDraft(...), $draft->getAttachments()),
+        );
     }
 
     private static function invalid(string $path, string $message, string $value): ValidationException

@@ -27,6 +27,11 @@ final class InMemoryObjectStorage implements ObjectStorage
         $this->objects[$key] = $content;
     }
 
+    public function delete(string $key): void
+    {
+        unset($this->objects[$key]);
+    }
+
     public function has(string $key): bool
     {
         return isset($this->objects[$key]);

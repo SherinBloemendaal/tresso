@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Sync\Change;
 
+use App\Entity\DraftAttachment;
 use App\Entity\MessageLocation;
 use Doctrine\Bundle\DoctrineBundle\Attribute\AsDoctrineListener;
 use Doctrine\ORM\Event\OnFlushEventArgs;
@@ -12,7 +13,9 @@ use Doctrine\ORM\Events;
 /**
  * Gives every flushed change to a synced entity its owner's next change number, and leaves tombstones for deletes.
  * A message also counts as changed when it gained or lost a folder (a MessageLocation), because clients show folder
- * membership. Changes made in bulk SQL bypass this listener and use ChangeSequencer directly.
+ * membership; a draft counts as changed when its attachments change. An entity that became hidden from clients (see
+ * HidesFromClients) leaves a tombstone, though it is kept. Changes made in bulk SQL bypass this listener and use
+ * ChangeSequencer directly.
  */
 #[AsDoctrineListener(event: Events::onFlush)]
 final readonly class ChangeTrackingListener
@@ -41,6 +44,11 @@ final readonly class ChangeTrackingListener
         foreach ([...$unitOfWork->getScheduledEntityInsertions(), ...$unitOfWork->getScheduledEntityDeletions()] as $entity) {
             if ($entity instanceof MessageLocation && !$unitOfWork->isScheduledForDelete($entity->getMessage())) {
                 $changed[spl_object_id($entity->getMessage())] = $entity->getMessage();
+            }
+        }
+        foreach ([...$unitOfWork->getScheduledEntityInsertions(), ...$unitOfWork->getScheduledEntityUpdates(), ...$unitOfWork->getScheduledEntityDeletions()] as $entity) {
+            if ($entity instanceof DraftAttachment && !$unitOfWork->isScheduledForDelete($entity->getDraft())) {
+                $changed[spl_object_id($entity->getDraft())] = $entity->getDraft();
             }
         }
 
@@ -72,6 +80,10 @@ final readonly class ChangeTrackingListener
 
         foreach ($changed as $entity) {
             $entity->setChangeSeq($seqFor($entity));
+            if ($entity instanceof HidesFromClients && $entity->isHiddenFromClients()) {
+                // Clients drop it now; when it shows again, its next change brings it back whole.
+                $this->sequencer->tombstones($entity->getChangeOwner()->getId(), $entity::changeType(), [$entity->getId()->toRfc4122()], $entity->getChangeSeq());
+            }
             $metadata = $entityManager->getClassMetadata($entity::class);
             if ($unitOfWork->isScheduledForInsert($entity) || $unitOfWork->isScheduledForUpdate($entity)) {
                 $unitOfWork->recomputeSingleEntityChangeSet($metadata, $entity);

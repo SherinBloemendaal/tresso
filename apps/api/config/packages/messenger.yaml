@@ -22,6 +22,7 @@ framework:
         routing:
             App\Outbox\ReleaseOutgoingMessage: async
             App\Search\IndexUserMail: search
+            App\Outbox\CollectUpload: async
 
 when@test:
     framework:

@@ -9,6 +9,7 @@ use App\Entity\OutgoingMessage;
 use App\Enum\OutgoingStatus;
 use App\Realtime\AfterCommitDispatcher;
 use App\Realtime\RealtimeNotifier;
+use App\Repository\DraftRepository;
 use App\Repository\OutgoingMessageRepository;
 use App\Storage\ObjectStorage;
 use Doctrine\ORM\EntityManagerInterface;
@@ -33,6 +34,8 @@ final readonly class Outbox
         private RealtimeNotifier $notifier,
         private AfterCommitDispatcher $afterCommit,
         private OutgoingMessageRepository $messages,
+        private DraftRepository $drafts,
+        private DraftFiling $filing,
     ) {
     }
 
@@ -65,6 +68,7 @@ final readonly class Outbox
     {
         $message->cancel();
         $this->entityManager->flush();
+        $this->settleDraft($message);
     }
 
     /** Called at the send time: a scheduled message whose time has come becomes due. */
@@ -111,12 +115,14 @@ final readonly class Outbox
     {
         $message->markSent($now, $copiedToSent ? null : 'Sent, but its copy could not be saved in the Sent folder.');
         $this->entityManager->flush();
+        $this->settleDraft($message);
     }
 
     public function reportFailed(OutgoingMessage $message, string $error): void
     {
         $message->markFailed($error);
         $this->entityManager->flush();
+        $this->settleDraft($message);
     }
 
     /** A temporary failure (server busy, connection lost): try again later, or give up after too many attempts. */
@@ -125,7 +131,25 @@ final readonly class Outbox
         $delay = self::RETRY_DELAYS[min($message->getAttempts(), \count(self::RETRY_DELAYS)) - 1] ?? self::RETRY_DELAYS[0];
         $message->retryAt($now->add(new \DateInterval($delay)), $error);
         $this->entityManager->flush();
+        $this->settleDraft($message);
         $this->announce($message);
+    }
+
+    /**
+     * The draft a message was sent from follows what became of it: back as it was when the message was cancelled or
+     * failed, gone once it went out. While it is on its way the draft stays out of sight.
+     */
+    private function settleDraft(OutgoingMessage $message): void
+    {
+        $draft = $this->drafts->findSendingAs($message);
+        if (null === $draft) {
+            return;
+        }
+        match ($message->getStatus()) {
+            OutgoingStatus::Cancelled, OutgoingStatus::Failed => $this->filing->restore($draft),
+            OutgoingStatus::Sent => $this->filing->discard($draft),
+            default => null,
+        };
     }
 
     private function announce(OutgoingMessage $message): void

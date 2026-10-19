@@ -78,7 +78,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 UNION ALL
                 SELECT g.change_seq, COUNT(*) FROM signature g WHERE g.owner_id = :user AND g.change_seq > :since GROUP BY g.change_seq
                 UNION ALL
-                SELECT d.change_seq, COUNT(*) FROM draft d WHERE d.owner_id = :user AND d.change_seq > :since GROUP BY d.change_seq
+                SELECT d.change_seq, COUNT(*) FROM draft d WHERE d.owner_id = :user AND d.change_seq > :since AND d.sending_as_id IS NULL GROUP BY d.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -269,11 +269,28 @@ final readonly class SyncChangesProvider implements ProviderInterface
     {
         $rows = $this->connection->fetchAllAssociative(
             'SELECT d.id, d.mail_account_id, d.kind, d.recipients, d.subject, d.html, d.signature_id, d.quote_html, d.in_reply_to_id, d.version, d.updated_at
-             FROM draft d WHERE d.owner_id = :user AND d.change_seq > :since AND d.change_seq <= :until ORDER BY d.change_seq',
+             FROM draft d WHERE d.owner_id = :user AND d.change_seq > :since AND d.change_seq <= :until AND d.sending_as_id IS NULL ORDER BY d.change_seq',
             $range,
         );
+        // The files without links: links expire, and the copy on a device lasts. GET /drafts/{id} has fresh ones.
+        $attachments = [];
+        if ([] !== $rows) {
+            foreach ($this->connection->fetchAllAssociative(
+                'SELECT a.draft_id, a.id, a.filename, a.content_type, a.size, a.scan_status FROM draft_attachment a
+                 WHERE a.draft_id = ANY(CAST(:drafts AS UUID[])) ORDER BY a.draft_id, a.position',
+                ['drafts' => '{'.implode(',', array_map(static fn (array $r): string => self::text($r['id']), $rows)).'}'],
+            ) as $a) {
+                $attachments[self::text($a['draft_id'])][] = [
+                    'id' => $a['id'],
+                    'filename' => $a['filename'],
+                    'contentType' => $a['content_type'],
+                    'size' => self::int($a['size']),
+                    'scanStatus' => $a['scan_status'],
+                ];
+            }
+        }
 
-        return array_map(static function (array $r): array {
+        return array_map(static function (array $r) use ($attachments): array {
             /** @var array{to?: list<array{address: string, name: ?string}>, cc?: list<array{address: string, name: ?string}>, bcc?: list<array{address: string, name: ?string}>} $recipients */
             $recipients = json_decode(\is_string($r['recipients']) ? $r['recipients'] : '{}', true, flags: \JSON_THROW_ON_ERROR);
 
@@ -291,6 +308,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 'inReplyToMessageId' => $r['in_reply_to_id'],
                 'version' => self::int($r['version']),
                 'updatedAt' => self::date($r['updated_at']),
+                'attachments' => $attachments[self::text($r['id'])] ?? [],
             ];
         }, $rows);
     }
@@ -310,6 +328,11 @@ final readonly class SyncChangesProvider implements ProviderInterface
         );
 
         return array_map(static fn (array $r): array => ['type' => $r['entity_type'], 'id' => $r['entity_id']], $rows);
+    }
+
+    private static function text(mixed $value): string
+    {
+        return \is_string($value) ? $value : throw new \UnexpectedValueException('Expected a text column.');
     }
 
     private static function int(mixed $value): int
