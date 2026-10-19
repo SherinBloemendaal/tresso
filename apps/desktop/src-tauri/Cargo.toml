@@ -28,3 +28,8 @@ keyring = "4.2.0"
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 tauri-plugin-single-instance = { version = "2.5.4", features = ["deep-link"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Not used directly: rust-ini 0.21.2 added fields to `ParseOption`, which tauri-plugin-deep-link 2.6.2 builds without
+# them on Linux, so it no longer compiles there. Drop this pin once the plugin sets the new fields.
+rust-ini = "=0.21.1"
