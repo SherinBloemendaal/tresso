@@ -86,8 +86,9 @@ Tresso Cloud: AI classification with feedback learning, automatic todo extractio
 - [x] 3.1 Desktop sign-in: the system browser signs in, `tresso://auth/callback` brings the result back, tokens in the
   OS keychain
 - [ ] 3.2 Tauri desktop with local SQLite cache and native notifications
-- [ ] 3.3 Expo mobile app with push (only `do` and `delegate` by default), signing in through
-  `tresso://auth/callback` with tokens in the OS keychain
+- [x] 3.3 Mobile sign-in: Expo Router app shell, the system's authentication browser signs in through
+  `tresso://auth/callback`, tokens in the OS secure store
+- [ ] 3.4 Expo mobile mail with push (only `do` and `delegate` by default)
 
 Tresso Cloud: teams, shared inboxes, assignments, internal comments, delegation rules, workload.
 

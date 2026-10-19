@@ -151,8 +151,8 @@ Then run the checks for the part you changed:
 | Sync worker against GreenMail | `docker run --rm --network tresso_default -e GREENMAIL_HOST=greenmail -v "$PWD/apps/sync":/src -w /src golang:1.27 go test -race -tags integration ./...` |
 | Shared core | `npm test --workspace @tresso/core` |
 | Web | `npm run test:unit --workspace @tresso/web` and `npm run type-check --workspace @tresso/web` |
-| Mobile | `npm run type-check --workspace @tresso/mobile` |
 | Desktop | `cargo check` in `apps/desktop/src-tauri` |
+| Mobile | `npx vitest run`, `npx tsc --noEmit` and `npx expo lint` in `apps/mobile` |
 
 Every push and pull request runs all of these in [CI](.github/workflows/ci.yml).
 
@@ -175,6 +175,10 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/) with
   brings the result back to the app. Windows and Linux register the scheme when `npm run dev:desktop` starts; macOS
   only takes it from an app bundle, so to sign in there build one with
   `npm run tauri --workspace @tresso/desktop -- build --debug --bundles app` and open the `.app` it reports.
+- The mobile app signs in only from a development build (`npx expo run:ios` or `npx expo run:android` in
+  `apps/mobile`): Expo Go would need an `exp://` redirect, which the authorization server does not accept. The iOS
+  simulator reaches the API on `localhost`; for the Android emulator or a phone set `EXPO_PUBLIC_API_URL` in
+  `apps/mobile/.env.local` (`http://10.0.2.2:8080`, or the computer's address on the network).
 
 ## Documentation
 
