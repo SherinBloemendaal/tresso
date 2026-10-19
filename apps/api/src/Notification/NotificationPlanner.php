@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace App\Notification;
 
 use App\Calendar\ICalendar\CalendarDocument;
+use App\Calendar\ICalendar\InvalidCalendarData;
+use App\Calendar\ICalendar\Occurrences;
 use App\Calendar\ICalendar\RecurrenceKey;
+use App\Calendar\OccurrenceExpander;
 use App\Calendar\SelfAddresses;
 use App\Entity\CalendarEvent;
 use App\Entity\CalendarObject;
@@ -114,20 +117,18 @@ final readonly class NotificationPlanner
         $wanted = [];
         if ($object->getCalendar()->isVisible()) {
             try {
-                $expanded = CalendarDocument::parse($object->getIcal())->expand($now->modify('-1 day'), $until, $context->zone);
-            } catch (MaxInstancesExceededException|\Sabre\VObject\InvalidDataException $e) {
+                foreach (Occurrences::instances(CalendarDocument::parse($object->getIcal()), $now->modify('-1 day'), $until, $context->zone, OccurrenceExpander::MAX_PER_SERIES) as $instance) {
+                    $key = CalendarDocument::recurrenceKey($instance);
+                    $row = $rows[$key] ?? $rows[''] ?? null;
+                    if (null === $row) {
+                        continue;
+                    }
+                    foreach ($this->plansFor($row, $key, $instance, $context, $now) as $plan) {
+                        $wanted[$plan->key($row)] = [$row, $plan];
+                    }
+                }
+            } catch (MaxInstancesExceededException|\Sabre\VObject\InvalidDataException|InvalidCalendarData $e) {
                 $this->logger->warning('Notifications could not be planned', ['object' => $object->getId()->toRfc4122(), 'error' => $e->getMessage()]);
-                $expanded = null;
-            }
-            foreach (null === $expanded ? [] : CalendarDocument::events($expanded) as $instance) {
-                $key = CalendarDocument::recurrenceKey($instance);
-                $row = $rows[$key] ?? $rows[''] ?? null;
-                if (null === $row) {
-                    continue;
-                }
-                foreach ($this->plansFor($row, $key, $instance, $context, $now) as $plan) {
-                    $wanted[$plan->key($row)] = [$row, $plan];
-                }
             }
         }
 
