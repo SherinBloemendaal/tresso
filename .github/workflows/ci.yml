@@ -84,7 +84,7 @@ jobs:
           GREENMAIL_OPTS: >-
             -Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users.login=email
             -Dgreenmail.users=kim@tresso.test:dev-password-kim,lisa@tresso.test:dev-password-lisa
-        ports: ['3143:3143']
+        ports: ['3143:3143', '3025:3025']
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
