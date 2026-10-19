@@ -12,7 +12,8 @@ use App\State\SyncRemoteUidsProvider;
 
 /**
  * The remote uids the API stores for one folder of a leased account, ascending by byte order, a page at a time
- * (`?workerId=&folder=<remote name>&after=<next of the previous page>&limit=1..5000`).
+ * (`?workerId=&folder=<remote name>&after=<next of the previous page>&limit=1..5000`). Placeholder copies of moves
+ * that have not landed yet (`pending:<change id>`) are left out.
  *
  * Gmail and Microsoft Graph report deletions through their history and delta feeds. When those expire, the worker
  * lists the folder at the provider, compares it with this list and reports what is gone. Internal: scope sync:ingest.

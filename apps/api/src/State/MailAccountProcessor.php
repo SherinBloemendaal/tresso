@@ -20,6 +20,7 @@ use App\Enum\OAuthProvider;
 use App\ProviderAuth\ProviderAccessTokens;
 use App\ProviderAuth\ProviderClient;
 use App\Repository\MailAccountRepository;
+use App\Repository\ProviderGrantRepository;
 use App\Security\CurrentUser;
 use App\Security\Crypto\CredentialVault;
 use Doctrine\ORM\EntityManagerInterface;
@@ -43,6 +44,7 @@ final readonly class MailAccountProcessor implements ProcessorInterface
         private EntityManagerInterface $entityManager,
         private ProviderAccessTokens $providerTokens,
         private ProviderClient $providerClient,
+        private ProviderGrantRepository $grants,
     ) {
     }
 
@@ -98,7 +100,9 @@ final readonly class MailAccountProcessor implements ProcessorInterface
                 $refreshToken = $this->providerTokens->refreshToken($grant);
                 $this->entityManager->remove($grant);
                 $this->entityManager->flush();
-                if (null !== $refreshToken) {
+                // Revoking at the provider ends the app's access to that provider account for every Tresso user who
+                // connected it; only our own tokens go while someone else still uses it.
+                if (null !== $refreshToken && !$this->grants->existsForSubject($grant->getProvider(), $grant->getSubject())) {
                     $endedGrants[] = [$grant->getProvider(), $refreshToken];
                 }
             }

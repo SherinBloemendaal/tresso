@@ -148,8 +148,10 @@ final readonly class ProviderClient
 
         if (200 !== $status) {
             $error = \is_string($data['error'] ?? null) ? $data['error'] : 'unknown';
-            if ('invalid_grant' === $error) {
-                throw new GrantRejected(\sprintf('%s refused the grant.', $provider->label()));
+            // Microsoft also answers interaction_required (multi-factor or conditional access now asks for the user) and
+            // consent_required (consent was withdrawn): only a new sign-in helps there too.
+            if (\in_array($error, ['invalid_grant', 'interaction_required', 'consent_required'], true)) {
+                throw new GrantRejected(\sprintf('%s refused the grant (%s).', $provider->label(), $error));
             }
             // invalid_client and friends mean this installation's OAuth app is misconfigured, not the user's grant.
             $this->logger->error('A provider token request failed.', ['provider' => $provider->value, 'status' => $status, 'error' => $error]);

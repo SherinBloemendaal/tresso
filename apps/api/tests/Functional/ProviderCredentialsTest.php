@@ -118,6 +118,20 @@ final class ProviderCredentialsTest extends DatabaseTestCase
         self::assertSame([], $this->decodedResponse()['accounts'] ?? null, 'A failed account is no longer leased.');
     }
 
+    public function testMicrosoftAskingForTheUserNeedsANewSignIn(): void
+    {
+        $account = $this->connectMicrosoft();
+        $this->sealTokens($account, accessTokenExpiresAt: time() + 60);
+        $this->lease();
+        $this->router()->respondOnce(self::MICROSOFT_TOKEN, '{"error":"interaction_required","error_description":"AADSTS50076: multi-factor authentication is required."}', 400);
+
+        $this->client->request('GET', $this->credentialsUrl($account), server: $this->worker);
+
+        self::assertResponseStatusCodeSame(409);
+        $this->entityManager()->clear();
+        self::assertSame('auth_failed', $this->onlyAccount()->getStatus()->value);
+    }
+
     public function testARevokedGrantIsRefusedWithoutAskingTheProvider(): void
     {
         $account = $this->connectGoogle();
