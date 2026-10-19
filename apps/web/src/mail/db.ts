@@ -53,7 +53,12 @@ export interface Draft {
   cc: Address[]
   bcc: Address[]
   subject: string
+  /** What the user writes, without signature and quote. */
   html: string
+  /** The signature added below the text; null for none. */
+  signatureId: string | null
+  /** The original a reply or forward quotes, kept apart from the text. */
+  quoteHtml: string
   inReplyToMessageId: string | null
   kind: 'new' | 'reply' | 'replyAll' | 'forward'
   /** Set once sent: the draft stays until the message is confirmed sent, so a failure can be edited and resent. */

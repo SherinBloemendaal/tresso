@@ -182,7 +182,7 @@ describe('MailDatabase', () => {
   })
 
   it('keeps drafts on this device', async () => {
-    const draft = { id: 'd1', mailAccountId: 'work', to: [], cc: [], bcc: [], subject: 'Hi', html: '<p>Hi</p>', inReplyToMessageId: null, kind: 'new' as const, outgoingId: null, noticedStatus: null, updatedAt: 1 }
+    const draft = { id: 'd1', mailAccountId: 'work', to: [], cc: [], bcc: [], subject: 'Hi', html: '<p>Hi</p>', signatureId: null, quoteHtml: '', inReplyToMessageId: null, kind: 'new' as const, outgoingId: null, noticedStatus: null, updatedAt: 1 }
     await db.saveDraft(draft)
     await db.saveDraft({ ...draft, id: 'd2', updatedAt: 2 })
 
@@ -220,7 +220,7 @@ describe('MailDatabase upgrade', () => {
     await deleteMailDatabase(USER)
   })
 
-  it('adds signatures to a copy stored before they existed', async () => {
+  it('adds signatures to a copy stored before they existed and syncs it again from the start', async () => {
     const old = await openDB(databaseName(USER), 1, {
       upgrade(database) {
         database.createObjectStore('meta')
@@ -244,12 +244,15 @@ describe('MailDatabase upgrade', () => {
     old.close()
 
     const db = await MailDatabase.open(USER)
-
-    expect(await db.cursor()).toBe(7)
-    expect(await db.signatures()).toEqual([])
-    expect(await db.mailAccounts()).toEqual([{ ...withoutDefault, defaultSignatureId: null }])
-    await db.apply(page({ cursor: 8, signatures: [signature('sig-work', 'Work')] }))
-    expect((await db.signatures()).map((s) => s.id)).toEqual(['sig-work'])
-    db.close()
+    try {
+      // Outgoing mail, contacts and signatures only arrive through the delta, so the copy starts over.
+      expect(await db.cursor()).toBe(0)
+      expect(await db.signatures()).toEqual([])
+      expect(await db.mailAccounts()).toEqual([{ ...withoutDefault, defaultSignatureId: null }])
+      await db.apply(page({ cursor: 8, signatures: [signature('sig-work', 'Work')] }))
+      expect((await db.signatures()).map((s) => s.id)).toEqual(['sig-work'])
+    } finally {
+      db.close()
+    }
   })
 })

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import FieldLabel from '@/forms/FieldLabel.vue'
+import { provideRequiredFields } from '@/forms/required'
 import { computed, ref, watch } from 'vue'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
@@ -8,8 +10,13 @@ import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import RecipientField from '@/components/RecipientField.vue'
 import RichEditor from '@/components/RichEditor.vue'
+import MessageFrame from '@/components/MessageFrame.vue'
+import SignaturePreview from '@/components/SignaturePreview.vue'
+import { RouterLink } from 'vue-router'
 
 const props = defineProps<{ draft: Draft }>()
+
+provideRequiredFields(composeSchema)
 
 const compose = useComposeStore()
 const mail = useMailStore()
@@ -27,6 +34,7 @@ const { defineField, handleSubmit, errors, values, setErrors } = useForm<Compose
     bcc: props.draft.bcc,
     subject: props.draft.subject,
     html: props.draft.html,
+    signatureId: props.draft.signatureId,
   },
 })
 const [mailAccountId] = defineField('mailAccountId')
@@ -35,6 +43,16 @@ const [cc] = defineField('cc')
 const [bcc] = defineField('bcc')
 const [subject] = defineField('subject')
 const [html] = defineField('html')
+const [signatureId] = defineField('signatureId')
+const showQuote = ref(false)
+const signature = computed(() => mail.signatures.find((s) => s.id === signatureId.value) ?? null)
+
+// Switching the account swaps the signature, unless the user picked one by hand.
+watch(mailAccountId, (account, previous) => {
+  if ((signatureId.value ?? null) === compose.defaultSignature(previous ?? null)) {
+    signatureId.value = compose.defaultSignature(account ?? null)
+  }
+})
 
 // Every edit goes back to the draft, which saves itself on this device.
 watch(
@@ -47,6 +65,7 @@ watch(
       bcc: current.bcc ?? [],
       subject: current.subject ?? '',
       html: current.html ?? '',
+      signatureId: current.signatureId ?? null,
     })
   },
   { deep: true },
@@ -112,7 +131,7 @@ function keydown(event: KeyboardEvent): void {
 <template>
   <form class="body" novalidate @submit.prevent="send" @keydown="keydown">
     <div class="field-row" :class="{ invalid: errors.mailAccountId }">
-      <label for="compose-from" class="label">From</label>
+      <FieldLabel tag="label" for="compose-from" name="mailAccountId" class="label">From</FieldLabel>
       <select id="compose-from" v-model="mailAccountId">
         <option v-if="!mailAccountId" value="">Choose an account</option>
         <option v-for="account in mail.accounts" :key="account.id" :value="account.id">{{ account.displayName }} &lt;{{ account.emailAddress }}&gt;</option>
@@ -133,6 +152,23 @@ function keydown(event: KeyboardEvent): void {
 
     <RichEditor v-model="html" @submit="send" />
     <small v-if="errors.html" class="field-error">{{ errors.html }}</small>
+
+    <div class="signature">
+      <label for="compose-signature" class="label">Signature</label>
+      <select id="compose-signature" v-model="signatureId">
+        <option :value="null">No signature</option>
+        <option v-for="option in mail.signatures" :key="option.id" :value="option.id">{{ option.name }}</option>
+      </select>
+      <RouterLink :to="{ name: 'settings-signatures' }" class="edit">Edit</RouterLink>
+    </div>
+    <SignaturePreview v-if="signature" :html="signature.html" background="light" />
+
+    <div v-if="draft.quoteHtml" class="quote">
+      <button type="button" class="toggle" :aria-expanded="showQuote" @click="showQuote = !showQuote">
+        {{ showQuote ? 'Hide' : 'Show' }} {{ draft.kind === 'forward' ? 'forwarded message' : 'quoted text' }}
+      </button>
+      <MessageFrame v-if="showQuote" :html="draft.quoteHtml" :allow-remote-content="false" />
+    </div>
 
     <p v-if="compose.error" class="form-error" role="alert">{{ compose.error }}</p>
 
@@ -200,6 +236,36 @@ select,
   padding: 2px 0 2px 62px;
   color: var(--danger);
   font-size: 12px;
+}
+.signature {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0 4px;
+  border-top: 1px solid var(--line);
+}
+.signature select {
+  flex: 0 1 auto;
+}
+.edit {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.quote {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+}
+.toggle {
+  align-self: flex-start;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
 .copies {
   align-self: flex-start;

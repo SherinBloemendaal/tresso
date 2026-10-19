@@ -29,7 +29,7 @@ function outgoing(status: SyncedOutgoingMessage['status'], lastError: string | n
 }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], deleted: [], ...extra }
 }
 
 describe('compose store', () => {
@@ -42,7 +42,10 @@ describe('compose store', () => {
     requests.length = 0
     pages = [
       page(1, {
-        mailAccounts: [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null }],
+        mailAccounts: [
+          { id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: 's1' },
+        ],
+        signatures: [{ id: 's1', name: 'Work', html: '<p>Kim Visser</p>', updatedAt: '2026-10-19T08:00:00Z' }],
       }),
     ]
     vi.stubGlobal(
@@ -81,7 +84,23 @@ describe('compose store', () => {
     expect(compose.draft).toMatchObject({ kind: 'replyAll', mailAccountId: 'work', subject: 'Re: Q4 budget', inReplyToMessageId: 'm1' })
     expect(compose.draft?.to.map((a) => a.address)).toEqual(['anna@finance.example'])
     expect(compose.draft?.cc.map((a) => a.address)).toEqual(['pieter@company.example'])
-    expect(compose.draft?.html).toContain('<blockquote><p>Can you approve?</p></blockquote>')
+    expect(compose.draft?.html).toBe('')
+    expect(compose.draft?.quoteHtml).toContain('<blockquote><p>Can you approve?</p></blockquote>')
+  })
+
+  it('sends the text, then the default signature, then the quote', async () => {
+    const compose = useComposeStore()
+    await compose.openReply(original, 'reply')
+    expect(compose.draft?.signatureId).toBe('s1')
+    compose.update({ html: '<p>Approved.</p>' })
+
+    await compose.send()
+
+    const post = requests.find((r) => r.method === 'POST' && r.path === '/api/v1/outgoing-messages')
+    const html = (post?.body as { html?: string } | undefined)?.html ?? ''
+    expect(html.indexOf('<p>Approved.</p>')).toBe(0)
+    expect(html.indexOf('<p>Kim Visser</p>')).toBeGreaterThan(0)
+    expect(html.indexOf('<p>Kim Visser</p>')).toBeLessThan(html.indexOf('<blockquote>'))
   })
 
   it('refuses to send without recipients', async () => {
