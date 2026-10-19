@@ -13,6 +13,7 @@
   --do: #2341d6;
   --do-soft: #e8ecfc;
   --selected: #f5f7fe;
+  --match: #fff1c2;
   --delegate: #a44a06;
   --delegate-soft: #fceee2;
   --know: #256b5d;
@@ -46,6 +47,7 @@
     --do: #8fa2ff;
     --do-soft: #1f2645;
     --selected: #1c2133;
+    --match: #5a4a12;
     --delegate: #f29a55;
     --delegate-soft: #3a2616;
     --know: #6cc7b2;

@@ -13,6 +13,8 @@ const paths = {
   reply: ['M9 14L4 9l5-5', 'M4 9h10a6 6 0 016 6v4'],
   replyAll: ['M7 14L2 9l5-5', 'M12 14L7 9l5-5', 'M7 9h7a6 6 0 016 6v4'],
   forward: ['M15 14l5-5-5-5', 'M20 9H10a6 6 0 00-6 6v4'],
+  search: ['M11 4a7 7 0 100 14 7 7 0 000-14z', 'M20 20l-3.5-3.5'],
+  close: ['M6 6l12 12', 'M18 6L6 18'],
 } as const
 
 defineProps<{ name: keyof typeof paths; size?: number; label?: string }>()
