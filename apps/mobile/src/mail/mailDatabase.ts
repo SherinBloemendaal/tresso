@@ -45,7 +45,18 @@ const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_fold
  * version goes up and the copy syncs again from the start.
  */
 export class MailDatabase implements SyncStore {
+  /** Set once the copy is being closed: pages that arrive later are refused. */
+  private shutting = false
+  /** Pages being stored, which closing waits for. */
+  private readonly writing = new Set<Promise<void>>()
+
   private constructor(private readonly sql: Sql) {}
+
+  /** Refuses further pages and resolves once the ones being stored are in, so the database can be closed. */
+  async shut(): Promise<void> {
+    this.shutting = true
+    await Promise.allSettled([...this.writing])
+  }
 
   static async open(sql: Sql): Promise<MailDatabase> {
     await sql.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)')
@@ -69,6 +80,19 @@ export class MailDatabase implements SyncStore {
   }
 
   async apply(page: ChangePage): Promise<void> {
+    if (this.shutting) {
+      throw new Error('The mail copy is closing.')
+    }
+    const writing = this.store(page)
+    this.writing.add(writing)
+    try {
+      await writing
+    } finally {
+      this.writing.delete(writing)
+    }
+  }
+
+  private async store(page: ChangePage): Promise<void> {
     await this.sql.transaction(async (tx) => {
       const affected = new Set<string>()
 
