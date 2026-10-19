@@ -26,3 +26,6 @@ when@test:
     services:
         App\Tests\Support\RecordingMercureHub:
             public: true
+        App\Tests\Support\InMemoryObjectStorage:
+            public: true
+        App\Storage\ObjectStorage: '@App\Tests\Support\InMemoryObjectStorage'

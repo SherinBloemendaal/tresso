@@ -18,6 +18,10 @@ security:
         oauth_token:
             pattern: ^/oauth/token$
             security: false
+        # Attachment content behind signed, expiring URLs (rendered mail cannot send access tokens).
+        content:
+            pattern: ^/content/
+            security: false
         # Bearer tokens issued by our own OAuth2 server: clients, sync workers, third parties.
         api:
             pattern: ^/(api|internal)/

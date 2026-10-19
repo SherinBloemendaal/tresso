@@ -13,6 +13,7 @@
         "ext-sodium": "*",
         "api-platform/doctrine-orm": "^5.0",
         "api-platform/symfony": "^5.0",
+        "async-aws/s3": "^3.5",
         "doctrine/doctrine-bundle": "^3.3",
         "doctrine/doctrine-migrations-bundle": "^4.0",
         "doctrine/orm": "^3.7",
@@ -25,6 +26,7 @@
         "symfony/expression-language": "8.1.*",
         "symfony/flex": "^2",
         "symfony/framework-bundle": "8.1.*",
+        "symfony/html-sanitizer": "8.1.*",
         "symfony/http-client": "8.1.*",
         "symfony/mailer": "8.1.*",
         "symfony/messenger": "8.1.*",
@@ -38,7 +40,8 @@
         "symfony/twig-bundle": "8.1.*",
         "symfony/uid": "8.1.*",
         "symfony/validator": "8.1.*",
-        "symfony/yaml": "8.1.*"
+        "symfony/yaml": "8.1.*",
+        "zbateson/mail-mime-parser": "^4.0"
     },
     "require-dev": {
         "dama/doctrine-test-bundle": "^8.7",
