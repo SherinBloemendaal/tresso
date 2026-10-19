@@ -23,6 +23,8 @@ const mail = useMailStore()
 const open = ref(false)
 const busy = ref(false)
 const error = ref<string | null>(null)
+/** Set when the choice is remembered for a sender whose mail fails authentication, so the rule cannot help it. */
+const notice = ref<string | null>(null)
 const menu = ref<HTMLElement | null>(null)
 const button = ref<HTMLButtonElement | null>(null)
 
@@ -50,8 +52,12 @@ async function choose(smartInboxId: string, verdict?: Verdict): Promise<void> {
   open.value = false
   busy.value = true
   error.value = null
+  notice.value = null
   try {
-    await mail.classifyThread(props.threadId, smartInboxId, verdict)
+    const result = await mail.classifyThread(props.threadId, smartInboxId, verdict)
+    if (result.senderRule?.failsAuthentication) {
+      notice.value = `Moved. New mail from ${result.senderRule.sender} still goes to Spam: it fails the checks that prove who sent it.`
+    }
   } catch (e) {
     error.value = `Could not move it: ${errorMessage(e)}`
   } finally {
@@ -157,6 +163,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', outside))
       <p class="note">Mail from this sender goes the same way from now on.</p>
     </div>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <p v-if="notice" class="notice" role="status">{{ notice }}</p>
   </div>
 </template>
 
@@ -264,5 +271,11 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', outside))
   margin: 4px 0 0;
   font-size: 12px;
   color: var(--danger);
+}
+.notice {
+  max-width: 280px;
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--ink-2);
 }
 </style>
