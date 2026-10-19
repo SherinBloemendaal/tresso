@@ -28,7 +28,17 @@ export interface ThreadClassification {
   verdict: Verdict
   reason: string
   /** The sender rule the choice was remembered as; null for a conversation with only the user's own mail. */
-  senderRule: { id: string; sender: string; verdict: Verdict | null } | null
+  senderRule: {
+    id: string
+    sender: string
+    verdict: Verdict | null
+    /**
+     * The sender's mail fails authentication (DMARC with a reject or quarantine policy), so the rule does not apply to
+     * it: such mail keeps going to Spam, because anyone could have written that From address. This conversation stays
+     * where the user put it.
+     */
+    failsAuthentication: boolean
+  } | null
 }
 
 /** A correction remembered for a sender: their mail goes to the smart inbox, with the verdict when set. */
