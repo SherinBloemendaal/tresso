@@ -79,6 +79,7 @@ final class MailAccountResource
         public ?string $username,
         public ?ServerSettings $imap,
         public ?ServerSettings $smtp,
+        public ?string $calendarUrl,
         public ?\DateTimeImmutable $lastSyncedAt,
         public \DateTimeImmutable $createdAt,
         /** Set through the signature's "defaultFor" (/api/v1/signatures). */
@@ -98,6 +99,7 @@ final class MailAccountResource
             $account->getUsername(),
             $account->getImap(),
             $account->getSmtp(),
+            $account->getCalendarServer(),
             $account->getLastSyncedAt(),
             $account->getCreatedAt(),
             $account->getDefaultSignature()?->getId()->toRfc4122(),

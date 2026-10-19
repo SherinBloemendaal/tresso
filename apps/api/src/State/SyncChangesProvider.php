@@ -8,6 +8,7 @@ use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProviderInterface;
 use App\ApiResource\SyncChanges;
 use App\Classification\BuiltinSmartInboxes;
+use App\Entity\Calendar;
 use App\Security\CurrentUser;
 use Doctrine\DBAL\Connection;
 use Symfony\Component\HttpFoundation\RequestStack;
@@ -44,7 +45,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
 
         [$until, $hasMore] = $this->boundary($userId, $since, $limit);
         if ($until === $since) {
-            return new SyncChanges($since, false, [], [], [], [], [], [], [], [], []);
+            return new SyncChanges($since, false, [], [], [], [], [], [], [], [], [], [], []);
         }
 
         $range = ['user' => $userId, 'since' => $since, 'until' => $until];
@@ -60,6 +61,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
             $this->signatures($range),
             $this->drafts($range),
             $this->smartInboxes($range),
+            $this->calendars($range),
+            $this->calendarEvents($range),
             $this->deleted($range),
         );
     }
@@ -91,12 +94,17 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 UNION ALL
                 SELECT c.change_seq, COUNT(*) FROM category c WHERE c.owner_id = :user AND c.change_seq > :since GROUP BY c.change_seq
                 UNION ALL
+                SELECT c.change_seq, COUNT(*) FROM calendar c WHERE c.owner_id = :user AND c.change_seq > :since GROUP BY c.change_seq
+                UNION ALL
+                SELECT e.change_seq, COUNT(*) FROM calendar_event e JOIN calendar c ON c.id = e.calendar_id
+                    WHERE c.owner_id = :user AND e.change_seq > :since AND (e.series_ends_at IS NULL OR e.series_ends_at > :window) GROUP BY e.change_seq
+                UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
             GROUP BY change_seq
             ORDER BY change_seq
             LIMIT :groups',
-            ['user' => $userId, 'since' => $since, 'groups' => $limit + 1],
+            ['user' => $userId, 'since' => $since, 'groups' => $limit + 1, 'window' => self::eventWindow()],
         );
 
         // Every change number has at least one row, so $limit + 1 groups always reach past a full page.
@@ -199,6 +207,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             "SELECT m.id, m.mail_account_id, m.thread_id, m.subject, m.from_address, m.from_name, m.recipients, m.snippet,
                     m.sent_at, m.received_at, m.seen, m.flagged, m.answered, m.draft, m.has_attachments,
                     m.category_id, m.verdict, m.summary,
+                    (SELECT i.method FROM calendar_invitation i WHERE i.message_id = m.id ORDER BY i.id LIMIT 1) AS calendar_method,
                     COALESCE((SELECT json_agg(l.folder_id ORDER BY l.folder_id) FROM message_location l WHERE l.message_id = m.id), '[]') AS folder_ids
              FROM message m JOIN mail_account a ON a.id = m.mail_account_id
              WHERE a.owner_id = :user AND m.change_seq > :since AND m.change_seq <= :until ORDER BY m.change_seq",
@@ -221,6 +230,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'smartInboxId' => $r['category_id'],
             'verdict' => $r['verdict'],
             'summary' => $r['summary'],
+            'calendarMethod' => $r['calendar_method'],
         ], $rows);
     }
 
@@ -352,6 +362,97 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'verdict' => $r['verdict'],
             'position' => self::int($r['position']),
         ], $rows);
+    }
+
+    /**
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function calendars(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT c.id, c.mail_account_id, c.source, c.name, c.color, c.user_color, c.time_zone, c.writable, c.is_default,
+                    c.visible, c.provider_schedules, c.position
+             FROM calendar c WHERE c.owner_id = :user AND c.change_seq > :since AND c.change_seq <= :until ORDER BY c.change_seq',
+            $range,
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'mailAccountId' => $r['mail_account_id'],
+            'source' => $r['source'],
+            'name' => $r['name'],
+            'color' => $r['user_color'] ?? $r['color'] ?? Calendar::DEFAULT_COLOR,
+            'timeZone' => $r['time_zone'],
+            'writable' => (bool) $r['writable'],
+            'isDefault' => (bool) $r['is_default'],
+            'visible' => (bool) $r['visible'],
+            'providerSchedules' => (bool) $r['provider_schedules'],
+            'position' => self::int($r['position']),
+        ], $rows);
+    }
+
+    /**
+     * Events as stored (single events, series and overrides), limited to those that matter now: their series ends
+     * after the event window start. Older history is read through the occurrences endpoint.
+     *
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function calendarEvents(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT e.id, e.calendar_id, e.uid, e.recurrence_key, e.sequence, e.status, e.summary, e.description, e.location, e.url,
+                    e.transparency, e.visibility, e.all_day, e.start_value, e.start_time_zone, e.end_value, e.end_time_zone,
+                    e.rrule, e.rdates, e.exdates, e.organizer, e.attendees, e.self_partstat, e.reminders, e.conference,
+                    e.message_id, e.sync_error
+             FROM calendar_event e JOIN calendar c ON c.id = e.calendar_id
+             WHERE c.owner_id = :user AND e.change_seq > :since AND e.change_seq <= :until
+               AND (e.series_ends_at IS NULL OR e.series_ends_at > :window)
+             ORDER BY e.change_seq',
+            [...$range, 'window' => self::eventWindow()],
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'calendarId' => $r['calendar_id'],
+            'uid' => $r['uid'],
+            'recurrenceId' => '' === $r['recurrence_key'] ? null : $r['recurrence_key'],
+            'sequence' => self::int($r['sequence']),
+            'status' => $r['status'],
+            'summary' => $r['summary'],
+            'description' => $r['description'],
+            'location' => $r['location'],
+            'url' => $r['url'],
+            'transparency' => $r['transparency'],
+            'visibility' => $r['visibility'],
+            'allDay' => (bool) $r['all_day'],
+            'start' => (bool) $r['all_day'] ? ['date' => $r['start_value']] : ['dateTime' => $r['start_value'], 'timeZone' => $r['start_time_zone']],
+            'end' => (bool) $r['all_day'] ? ['date' => $r['end_value']] : ['dateTime' => $r['end_value'], 'timeZone' => $r['end_time_zone']],
+            'recurrence' => $r['rrule'],
+            'rdates' => self::json($r['rdates'], '[]'),
+            'exdates' => self::json($r['exdates'], '[]'),
+            'organizer' => self::json($r['organizer'], 'null'),
+            'attendees' => self::json($r['attendees'], '[]'),
+            'selfResponse' => $r['self_partstat'],
+            'reminders' => self::json($r['reminders'], '[]'),
+            'conference' => self::json($r['conference'], 'null'),
+            'messageId' => $r['message_id'],
+            'syncError' => $r['sync_error'],
+        ], $rows);
+    }
+
+    /** The delta carries events whose series ends after this. */
+    private static function eventWindow(): string
+    {
+        return new \DateTimeImmutable('-2 years')->format('Y-m-d H:i:s');
+    }
+
+    private static function json(mixed $value, string $empty): mixed
+    {
+        return json_decode(\is_string($value) ? $value : $empty, true, flags: \JSON_THROW_ON_ERROR);
     }
 
     /**

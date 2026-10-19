@@ -1,0 +1,262 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Tests\Functional\Calendar;
+
+use App\Tests\Functional\AuthenticatesUsers;
+use App\Tests\Functional\DatabaseTestCase;
+
+final class SyncCalendarTest extends DatabaseTestCase
+{
+    use AuthenticatesUsers;
+    use CalendarTestHelpers;
+
+    private const string HOME = 'https://caldav.company.example/dav/calendars/kim/home/';
+    private const string HOLIDAYS = 'https://caldav.company.example/dav/calendars/kim/holidays/';
+
+    /** @var array<string, string> */
+    private array $kim;
+
+    /** @var array<string, string> */
+    private array $worker;
+
+    private string $accountId;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->bootstrapOAuthClients();
+        $this->createUser('kim@example.test', 'Kim');
+        $this->kim = $this->userHeaders('kim@example.test', ['mail:read', 'calendar:read', 'calendar:write', 'settings:read', 'settings:write']);
+        $this->client->jsonRequest('POST', '/api/v1/mail-accounts', [
+            'emailAddress' => 'kim@company.example',
+            'displayName' => 'Kim Visser',
+            'username' => 'kim@company.example',
+            'password' => 'app-password-1',
+            'imap' => ['host' => 'imap.company.example', 'port' => 993, 'security' => 'tls'],
+            'smtp' => ['host' => 'smtp.company.example', 'port' => 465, 'security' => 'tls'],
+        ], $this->kim);
+        $this->accountId = $this->responseString('id');
+        $this->worker = $this->workerHeaders('sync:lease sync:ingest');
+        $this->client->jsonRequest('POST', '/internal/sync/leases', ['workerId' => 'w1'], $this->worker);
+        self::assertResponseIsSuccessful();
+    }
+
+    public function testReportsCalendarsAndChoosesTheProviderDefault(): void
+    {
+        $calendars = $this->reportCalendars();
+
+        self::assertSame([self::HOME, self::HOLIDAYS], array_column($calendars, 'remoteId'));
+        self::assertSame([null, null], array_column($calendars, 'cursor'));
+
+        $listed = array_values(array_filter($this->getJson('/api/v1/calendars', $this->kim), static fn (mixed $c): bool => \is_array($c) && null !== $c['mailAccountId']));
+        self::assertSame(['Home', 'Holidays'], array_column($listed, 'name'));
+        self::assertSame([true, false], array_column($listed, 'isDefault'));
+        self::assertSame([true, false], array_column($listed, 'writable'));
+        self::assertSame(['caldav', 'caldav'], array_column($listed, 'source'));
+        self::assertSame('https://caldav.company.example/dav/', $this->getJson('/api/v1/mail-accounts/'.$this->accountId, $this->kim)['calendarUrl']);
+    }
+
+    public function testRemovesCalendarsTheProviderNoLongerHas(): void
+    {
+        $this->reportCalendars();
+        $this->client->jsonRequest('POST', $this->base().'/calendars', ['workerId' => 'w1', 'calendars' => [['remoteId' => self::HOME, 'name' => 'Home']]], $this->worker);
+        self::assertResponseIsSuccessful();
+
+        $names = array_column(array_filter($this->getJson('/api/v1/calendars', $this->kim), static fn (mixed $c): bool => \is_array($c) && null !== $c['mailAccountId']), 'name');
+        self::assertSame(['Home'], $names);
+    }
+
+    public function testStoresChangedObjectsKeepsTheCursorAndRemovesDeletedOnes(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$home.'/objects', ['workerId' => 'w1', 'cursor' => 'sync-token-1', 'changed' => [
+            ['remoteId' => self::HOME.'standup.ics', 'etag' => '"1"', 'ical' => self::object('standup@company.example', 'Standup')],
+            ['remoteId' => self::HOME.'todo.ics', 'etag' => '"1"', 'ical' => "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:x\r\nBEGIN:VTODO\r\nUID:t\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"],
+        ]], $this->worker);
+        self::assertResponseIsSuccessful();
+        self::assertSame(['stored' => 1, 'removed' => 0, 'skipped' => 1], $this->decodedResponse());
+
+        $occurrences = $this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00');
+        self::assertSame(['Standup'], array_column($occurrences, 'summary'));
+        self::assertSame('sync-token-1', $this->reportCalendars()[0]['cursor']);
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$home.'/objects', ['workerId' => 'w1', 'cursor' => 'sync-token-2', 'removed' => [self::HOME.'standup.ics']], $this->worker);
+        self::assertSame(['stored' => 0, 'removed' => 1, 'skipped' => 0], $this->decodedResponse());
+        self::assertSame([], $this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00'));
+    }
+
+    public function testInventoryNamesWhatToFetchAndRemovesWhatIsGone(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->storeObject($home, 'a.ics', '"1"', 'a@company.example', 'A');
+        $this->storeObject($home, 'b.ics', '"1"', 'b@company.example', 'B');
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$home.'/inventory', ['workerId' => 'w1', 'objects' => [
+            ['remoteId' => self::HOME.'a.ics', 'etag' => '"1"'],
+            ['remoteId' => self::HOME.'c.ics', 'etag' => '"1"'],
+        ]], $this->worker);
+        self::assertResponseIsSuccessful();
+        self::assertSame(['fetch' => [self::HOME.'c.ics'], 'removed' => 1], $this->decodedResponse());
+        self::assertSame(['A'], array_column($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00'), 'summary'));
+    }
+
+    public function testUserEditsAreWrittenByTheLeasingWorker(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->storeObject($home, 'standup.ics', '"1"', 'standup@company.example', 'Standup');
+        $eventId = self::string($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($home, ['summary' => 'Standup (short)']), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        $this->client->jsonRequest('POST', '/internal/sync/leases', ['workerId' => 'w1'], $this->worker);
+        self::assertSame([$this->accountId], $this->decodedResponse()['outbox']);
+
+        $operations = $this->claim();
+        self::assertCount(1, $operations);
+        self::assertSame('put', $operations[0]['kind']);
+        self::assertSame(self::HOME, $operations[0]['calendarRemoteId']);
+        self::assertSame(self::HOME.'standup.ics', $operations[0]['remoteId']);
+        self::assertSame('"1"', $operations[0]['ifMatch']);
+        self::assertIsString($operations[0]['ical']);
+        self::assertStringContainsString('SUMMARY:Standup (short)', $operations[0]['ical']);
+        self::assertStringContainsString('X-PROVIDER-PRIVATE:kept', $operations[0]['ical'], 'Properties Tresso does not model survive an edit.');
+        self::assertSame([], $this->claim(), 'A claimed operation is not handed out twice.');
+
+        $this->report($operations[0]['id'], ['outcome' => 'done', 'etag' => '"2"']);
+        self::assertSame(['status' => 'done'], $this->decodedResponse());
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$home.'/inventory', ['workerId' => 'w1', 'objects' => [['remoteId' => self::HOME.'standup.ics', 'etag' => '"2"']]], $this->worker);
+        self::assertSame([], $this->decodedResponse()['fetch'], 'The stored version is the one the provider confirmed.');
+    }
+
+    public function testNewEventsAndDeletesReachTheProvider(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events', self::event($home), $this->kim);
+        self::assertResponseStatusCodeSame(201);
+        $eventId = self::string($this->decodedResponse()['id'] ?? null);
+
+        $operations = $this->claim();
+        self::assertNull($operations[0]['remoteId']);
+        self::assertNull($operations[0]['ifMatch']);
+        $this->report($operations[0]['id'], ['outcome' => 'done', 'remoteId' => self::HOME.'new.ics', 'etag' => '"1"']);
+
+        $this->client->request('DELETE', '/api/v1/calendar-events/'.$eventId, server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+
+        $operations = $this->claim();
+        self::assertSame('delete', $operations[0]['kind']);
+        self::assertSame(self::HOME.'new.ics', $operations[0]['remoteId']);
+        self::assertSame('"1"', $operations[0]['ifMatch']);
+        self::assertNull($operations[0]['ical']);
+    }
+
+    public function testAConflictKeepsTheProviderVersionAndTellsTheUser(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->storeObject($home, 'standup.ics', '"1"', 'standup@company.example', 'Standup');
+        $eventId = self::string($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($home, ['summary' => 'Mine']), $this->kim);
+
+        $operation = $this->claim()[0];
+        $this->report($operation['id'], ['outcome' => 'conflict', 'current' => ['remoteId' => self::HOME.'standup.ics', 'etag' => '"3"', 'ical' => self::object('standup@company.example', 'Theirs')]]);
+        self::assertSame(['status' => 'failed'], $this->decodedResponse());
+
+        $event = $this->getJson('/api/v1/calendar-events/'.$eventId, $this->kim);
+        self::assertSame('Theirs', $event['summary']);
+        self::assertSame('This event was changed elsewhere at the same time; that version was kept.', $event['syncError']);
+    }
+
+    public function testProviderChangesWaitForAPendingWrite(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->storeObject($home, 'standup.ics', '"1"', 'standup@company.example', 'Standup');
+        $eventId = self::string($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($home, ['summary' => 'Mine']), $this->kim);
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$home.'/objects', ['workerId' => 'w1', 'changed' => [['remoteId' => self::HOME.'standup.ics', 'etag' => '"2"', 'ical' => self::object('standup@company.example', 'Theirs')]]], $this->worker);
+        self::assertSame(['stored' => 0, 'removed' => 0, 'skipped' => 1], $this->decodedResponse());
+        self::assertSame('Mine', $this->getJson('/api/v1/calendar-events/'.$eventId, $this->kim)['summary']);
+    }
+
+    public function testOnlyTheLeasingWorkerMayReport(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$home.'/objects', ['workerId' => 'w2', 'changed' => []], $this->worker);
+        self::assertResponseStatusCodeSame(404);
+        $this->client->jsonRequest('POST', $this->base().'/calendar-operations/claim', ['workerId' => 'w2'], $this->worker);
+        self::assertResponseStatusCodeSame(404);
+    }
+
+    private function base(): string
+    {
+        return '/internal/sync/accounts/'.$this->accountId;
+    }
+
+    /**
+     * @return list<array{remoteId: string, id: string, cursor: ?string}>
+     */
+    private function reportCalendars(): array
+    {
+        $this->client->jsonRequest('POST', $this->base().'/calendars', [
+            'workerId' => 'w1',
+            'serverUrl' => 'https://caldav.company.example/dav/',
+            'calendars' => [
+                ['remoteId' => self::HOME, 'name' => 'Home', 'color' => '#2E7D32', 'timeZone' => 'Europe/Amsterdam', 'isDefault' => true],
+                ['remoteId' => self::HOLIDAYS, 'name' => 'Holidays', 'writable' => false],
+            ],
+        ], $this->worker);
+        self::assertResponseIsSuccessful();
+        $calendars = $this->decodedResponse()['calendars'] ?? null;
+        self::assertIsArray($calendars);
+
+        /** @var list<array{remoteId: string, id: string, cursor: ?string}> */
+        return $calendars;
+    }
+
+    private function storeObject(string $calendarId, string $name, string $etag, string $uid, string $summary): void
+    {
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$calendarId.'/objects', ['workerId' => 'w1', 'changed' => [
+            ['remoteId' => self::HOME.$name, 'etag' => $etag, 'ical' => self::object($uid, $summary)],
+        ]], $this->worker);
+        self::assertResponseIsSuccessful();
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function claim(): array
+    {
+        $this->client->jsonRequest('POST', $this->base().'/calendar-operations/claim', ['workerId' => 'w1'], $this->worker);
+        self::assertResponseIsSuccessful();
+        $operations = $this->decodedResponse()['operations'] ?? null;
+        self::assertIsArray($operations);
+
+        /** @var list<array<string, mixed>> */
+        return $operations;
+    }
+
+    /**
+     * @param array<string, mixed> $result
+     */
+    private function report(mixed $operationId, array $result): void
+    {
+        self::assertIsString($operationId);
+        $this->client->jsonRequest('POST', $this->base().'/calendar-operations/'.$operationId.'/result', ['workerId' => 'w1', ...$result], $this->worker);
+        self::assertResponseIsSuccessful();
+    }
+
+    private static function object(string $uid, string $summary): string
+    {
+        return implode("\r\n", [
+            'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Provider//EN', 'BEGIN:VEVENT', 'UID:'.$uid, 'DTSTAMP:20261018T080000Z',
+            'DTSTART;TZID=Europe/Amsterdam:20261019T090000', 'DTEND;TZID=Europe/Amsterdam:20261019T091500',
+            'SUMMARY:'.$summary, 'X-PROVIDER-PRIVATE:kept', 'END:VEVENT', 'END:VCALENDAR', '',
+        ]);
+    }
+}

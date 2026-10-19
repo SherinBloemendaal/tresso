@@ -36,4 +36,9 @@ final class CreateMailAccount
     #[Assert\NotNull]
     #[Assert\Valid]
     public ?ServerSettings $smtp = null;
+
+    /** The CalDAV address of the account's calendars; found automatically when omitted. */
+    #[Assert\Url(protocols: ['https'], requireTld: true)]
+    #[Assert\Length(max: 2048)]
+    public ?string $calendarUrl = null;
 }

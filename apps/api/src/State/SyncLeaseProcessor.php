@@ -12,6 +12,7 @@ use App\Outbox\Outbox;
 use App\Repository\DraftCopyRemovalRepository;
 use App\Repository\MailboxChangeRepository;
 use App\Repository\DraftRepository;
+use App\Repository\CalendarOperationRepository;
 use App\Repository\OutgoingMessageRepository;
 use App\Sync\AccountLeaser;
 use App\Sync\LeaseResult;
@@ -27,6 +28,7 @@ final readonly class SyncLeaseProcessor implements ProcessorInterface
         private AccountLeaser $leaser,
         private Outbox $outbox,
         private OutgoingMessageRepository $outgoing,
+        private CalendarOperationRepository $calendarOperations,
         private EntityManagerInterface $entityManager,
         private DraftRepository $drafts,
         private DraftCopyRemovalRepository $removals,
@@ -43,16 +45,18 @@ final readonly class SyncLeaseProcessor implements ProcessorInterface
         $accountIds = array_map(static fn (LeasedAccount $account): string => $account->id, $accounts);
 
         // Every heartbeat also releases scheduled mail whose time has come, in case its release message got lost, and
-        // tells the worker which accounts have mail to send, in case it missed the realtime notification.
+        // tells the worker which accounts have outbound work, in case it missed the realtime notification.
         $now = new \DateTimeImmutable();
         $this->entityManager->wrapInTransaction(fn () => $this->outbox->releaseDue($accountIds, $now));
 
-        // Mail to send, drafts to file or remove, and changes to messages are all handled by the worker's outbox run.
+        // Mail to send, drafts to file or remove, changes to messages and calendar changes to write are all handled
+        // when the worker hears the account has outbound work.
         $work = array_values(array_unique([
             ...$this->outgoing->accountsWithClaimable($accountIds, $now),
             ...$this->drafts->accountsWithFiling($accountIds, $now, $now->sub(new \DateInterval(DraftFiling::REST))),
             ...$this->removals->accountsWithRemovals($accountIds, $now),
             ...$this->mailboxChanges->accountsWithDueChanges($accountIds, $now),
+            ...$this->calendarOperations->accountsWithClaimable($accountIds, $now),
         ]));
 
         return new LeaseResult(AccountLeaser::LEASE_SECONDS, $accounts, $work);

@@ -8,6 +8,7 @@ use App\ApiResource\Input\Sync\AddressInput;
 use App\Classification\ClassificationScheduler;
 use App\ApiResource\Input\Sync\MessageBatchInput;
 use App\ApiResource\Input\Sync\MessageInput;
+use App\Calendar\Invitation\InvitationRecorder;
 use App\Entity\Attachment;
 use App\Entity\Folder;
 use App\Entity\MailAccount;
@@ -33,6 +34,7 @@ final readonly class MessageIngestor
         private MailboxChangeRepository $mailboxChanges,
         private MailboxChanges $changes,
         private ClassificationScheduler $classification,
+        private InvitationRecorder $invitations,
     ) {
     }
 
@@ -128,6 +130,10 @@ final readonly class MessageIngestor
             $this->entityManager->persist($attachment);
         }
         $message->setHasAttachments($hasAttachments);
+
+        foreach ($input->calendarParts as $part) {
+            $this->invitations->record($message, $part->method, $part->ical);
+        }
 
         $this->addLocation($message, $folder, $input);
 

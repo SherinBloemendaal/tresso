@@ -44,6 +44,7 @@ final class SyncCredentialsTest extends DatabaseTestCase
                 'imap' => ['host' => 'imap.company.example', 'port' => 993, 'security' => 'tls'],
                 'smtp' => ['host' => 'smtp.company.example', 'port' => 465, 'security' => 'tls'],
                 'username' => 'kim@company.example',
+                'caldav' => null,
             ],
             'credentials' => ['type' => 'password', 'password' => 'app-password-1'],
         ], $this->decodedResponse());

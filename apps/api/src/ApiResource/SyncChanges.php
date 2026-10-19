@@ -16,7 +16,9 @@ use Symfony\Component\Validator\Constraints as Assert;
  *
  * Start with since=0, store the returned cursor, and call again with since=cursor while hasMore is true. A page never
  * splits the changes of one change number. "deleted" lists removed entities; a removed mail account means everything
- * under it (folders, threads, messages, outgoing messages) is gone too.
+ * under it (folders, threads, messages, outgoing messages, calendars) is gone too, and a removed calendar means its
+ * events are gone. Calendar events come as stored (series with their rule, overrides with their recurrenceId), for
+ * series that end after two years ago.
  */
 #[ApiResource(
     shortName: 'SyncChanges',
@@ -54,6 +56,8 @@ final readonly class SyncChanges
      * @param list<array<string, mixed>>                $signatures
      * @param list<array<string, mixed>>                $drafts
      * @param list<array<string, mixed>>                $smartInboxes
+     * @param list<array<string, mixed>>                $calendars
+     * @param list<array<string, mixed>>                $calendarEvents
      * @param list<array{type: string, id: string}> $deleted
      */
     public function __construct(
@@ -67,6 +71,8 @@ final readonly class SyncChanges
         public array $signatures,
         public array $drafts,
         public array $smartInboxes,
+        public array $calendars,
+        public array $calendarEvents,
         public array $deleted,
     ) {
     }

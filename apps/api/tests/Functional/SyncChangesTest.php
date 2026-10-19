@@ -226,10 +226,13 @@ final class SyncChangesTest extends DatabaseTestCase
         self::assertResponseIsSuccessful();
         /** @var array{cursor: int, mailAccounts: list<mixed>, folders: list<mixed>, threads: list<mixed>, messages: list<mixed>, smartInboxes: list<array<string, mixed>>} $page */
         $page = $this->decodedResponse();
-        self::assertSame(1, $page['cursor'], 'Only the built-in smart inboxes Lisa got with her account.');
+        self::assertSame(1, $page['cursor'], 'Only the built-in smart inboxes and the calendar Lisa got with her account.');
         self::assertSame([], [...$page['mailAccounts'], ...$page['folders'], ...$page['threads'], ...$page['messages']]);
         $lisasSmartInboxes = $this->connection()->fetchFirstColumn("SELECT c.id FROM category c JOIN app_user u ON u.id = c.owner_id WHERE u.email = 'lisa@example.test'");
         self::assertEqualsCanonicalizing($lisasSmartInboxes, array_column($page['smartInboxes'], 'id'));
+        $calendars = $this->decodedResponse()['calendars'];
+        self::assertIsArray($calendars);
+        self::assertSame(['Tresso'], array_column($calendars, 'name'), 'Only her own local calendar.');
     }
 
     public function testSmartInboxesReachClients(): void

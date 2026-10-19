@@ -28,6 +28,8 @@ final readonly class Composition
         public ?Message $inReplyTo,
         public \DateTimeImmutable $sendAt,
         public array $attachments = [],
+        /** An invitation, cancellation or reply that goes with the message. */
+        public ?CalendarPart $calendar = null,
     ) {
     }
 }

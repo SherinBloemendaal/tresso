@@ -42,7 +42,7 @@ class MailAccount implements TracksChanges
     private MailProvider $provider;
 
     /**
-     * Server settings without secrets: {"imap": {...}, "smtp": {...}, "username": "..."}.
+     * Server settings without secrets: {"imap": {...}, "smtp": {...}, "username": "...", "caldav": "https://..."|null}.
      *
      * @var array<string, mixed>
      */
@@ -127,7 +127,20 @@ class MailAccount implements TracksChanges
 
     public function configureServers(ServerSettings $imap, ServerSettings $smtp, string $username): void
     {
-        $this->connection = ['imap' => $imap->toArray(), 'smtp' => $smtp->toArray(), 'username' => $username];
+        $this->connection = ['imap' => $imap->toArray(), 'smtp' => $smtp->toArray(), 'username' => $username, 'caldav' => $this->getCalendarServer()];
+    }
+
+    /** The CalDAV URL of the account's calendars: set by the user, or found by the worker. Null to discover it. */
+    public function getCalendarServer(): ?string
+    {
+        $url = $this->connection['caldav'] ?? null;
+
+        return \is_string($url) ? $url : null;
+    }
+
+    public function setCalendarServer(?string $url): void
+    {
+        $this->connection = [...$this->connection, 'caldav' => $url];
     }
 
     /** IMAP and SMTP settings exist only for IMAP accounts; Gmail and Microsoft 365 sync through their APIs. */
