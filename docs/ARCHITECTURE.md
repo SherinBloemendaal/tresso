@@ -425,32 +425,41 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   conversations and messages out of it in the same transaction (so clients see them change) and lets classification
   place them again.
 - Classification sits behind `App\Classification\Classifier`. The open edition's `RuleBasedClassifier` decides, in
-  this order: a sender rule (a correction the user made earlier, by address, then domain and parent domains), the
-  include lists (the user's own smart inboxes first), then signals in the message, each pointing at a built-in smart
-  inbox: the server's spam verdict (junk folder, `$Junk` keyword, `X-Spam-Flag`, `X-Spam-Status`) and DMARC failing a
-  reject or quarantine policy (spam), `Auto-Submitted` or `Precedence: auto_reply` (notification), marketing senders
-  (`newsletter@`, `news.` and similar) and bulk headers (`Precedence: bulk`, `List-Unsubscribe` with `Feedback-ID`)
-  (advertise), addresses that take no replies (`noreply@`, `notifications@`, `alerts.`) (notification), an
-  unsubscribe link (advertise), a mailing list (informational), and finally mail from a person: to the user directly
-  is something to do (todo), a copy is informational. A smart inbox whose exclude list covers the sender is skipped
-  at every step. The verdict is the smart inbox's unless a sender rule sets one. The `instructions` field is for AI
-  classifiers such as the one in Tresso Cloud, which decorates the `Classifier` service and should keep sender rules
-  and lists in charge.
+  this order: spam that no From-based rule may overrule, because a From address is easy to forge (DMARC failing a
+  reject or quarantine policy, and the server's spam verdict on mail whose sender did not pass DMARC); a sender rule (a
+  correction the user made earlier, by address, then domain and parent domains); the include lists (the user's own
+  smart inboxes first); then signals in the message, each pointing at a built-in smart inbox: the server's spam
+  verdict (junk folder, `$Junk` keyword, `X-Spam-Flag`, `X-Spam-Status`) (spam), `Auto-Submitted` or `Precedence:
+  auto_reply` (notification), marketing senders (`newsletter@`, `promo.` and similar, never for a reply) and bulk
+  headers (`Precedence: bulk`, `List-Unsubscribe` with `Feedback-ID`) (advertise), addresses that take no replies
+  (`noreply@`, `notifications@`, `alerts.`) (notification), a mailing list (`List-Id`; checked before the unsubscribe
+  link, which discussion lists carry too) (informational), an unsubscribe link (advertise), and finally mail from a
+  person: something to do (todo) unless the user is only in Cc (informational); Bcc and addresses of the user Tresso
+  does not know count as direct. A smart inbox whose exclude list covers the sender is skipped at every step. The
+  verdict is the smart inbox's unless a sender rule sets one. The `instructions` field is for AI classifiers such as
+  the one in Tresso Cloud, which decorates the `Classifier` service and should keep sender rules and lists in charge.
 - The sync worker sends the headers the rules read (`headers`) and the junk keyword (`junk`) with each message; the
-  API keeps them in `message_signals`, apart from the message row and only for messages that have any.
-- Classification runs after the ingest commits, on its own Messenger transport (`classify`), in batches of 200 per
-  transaction, with runs for one user taking turns on an advisory lock. Each incoming message gets a smart inbox and
-  verdict (clients notify on `do` and `delegate`); its conversation takes those of its newest incoming message. The
-  user's own mail is never classified. A message waits with `classified_at` empty, so a lost run is caught up by the
-  next one.
-- Corrections: `PUT /api/v1/threads/{id}/classification` (scope `mail:write`) with a smart inbox and optionally a
-  verdict puts the conversation and its newest incoming message there for good (reason `user`; automatic
-  classification leaves it alone from then on), remembers the choice for the sender as a sender rule, takes the
-  sender off that smart inbox's exclude list, and classifies the last 30 days again so earlier mail from the sender
-  follows. `GET /api/v1/sender-rules` and `DELETE /api/v1/sender-rules/{id}` (scopes `settings:read`,
-  `settings:write`) list and forget them.
-- Every change to the smart inboxes or sender rules classifies the last 30 days again after the commit.
-  `app:classification:rerun --user=<email>` or `--all`, with `--days` (0 for all mail), does it by hand.
+  API keeps them in `message_signals`, apart from the message row and only for messages that have any. A junk keyword
+  set or cleared after ingest is not read again (flag changes carry only seen, flagged, answered and draft).
+- Classification runs after the ingest commits, on its own Messenger transport (`classify`) with its own consumer
+  (`classifier` in Compose), so a first sync never holds up sending. It goes in batches of 200 per transaction, ten
+  per job; a longer run queues the rest as a new job. Runs for one user take turns on an advisory lock. Each incoming
+  message gets a smart inbox and verdict (clients notify on `do` and `delegate`); its conversation takes those of its
+  newest incoming message. An unchanged outcome is not written, so classifying again resends nothing that did not
+  move. The user's own mail is never classified: mail from their accounts' addresses, and mail filed only in Sent or
+  Drafts (an alias). A message waits with `classified_at` empty, so a lost run is caught up by the next one.
+- Corrections: `PUT /api/v1/threads/{id}/classification` (scopes `mail:write` and `settings:write`, because it
+  remembers a rule) with a smart inbox and optionally a verdict takes the user's classification lock, puts the
+  conversation and its newest incoming message there for good (reason `user`; automatic classification leaves it
+  alone from then on), remembers the choice for the sender as a sender rule (one per sender), takes the sender's
+  address off that smart inbox's exclude list, and classifies again the last 30 days of mail from that sender. When a
+  domain entry on that exclude list covers the sender the correction is refused (422): the rule would never apply.
+  `GET /api/v1/sender-rules` and `DELETE /api/v1/sender-rules/{id}` (scopes `settings:read`, `settings:write`) list
+  and forget them; forgetting one classifies that sender's recent mail again.
+- Every change to the smart inboxes classifies the last 30 days again after the commit; writes to one user's smart
+  inboxes take turns, so the name and count checks hold. `app:classification:rerun --user=<email>` or `--all`, with
+  `--days` (0 for all mail), does it by hand. Smart inboxes created before they synced get a change number on a sync
+  from the start.
 - Each conversation carries why it is where it is (`classificationReason`: `user`, `sender_rule`, `include_list`,
   `server_spam`, `authentication_failed`, `automated`, `marketing_sender`, `bulk`, `notification_sender`,
   `unsubscribe_link`, `mailing_list`, `direct`, `copied`, or a reason of an add-on), which clients explain.
