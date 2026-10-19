@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Entity;
 
 use App\Enum\Verdict;
+use App\Repository\MessageRepository;
 use Doctrine\DBAL\Types\Types;
 use App\Sync\Change\TracksChanges;
 use Doctrine\ORM\Mapping as ORM;
@@ -16,7 +17,7 @@ use Symfony\Component\Uid\Uuid;
  *
  * A message can live in several folders at once (Gmail labels, IMAP copies); see MessageLocation.
  */
-#[ORM\Entity]
+#[ORM\Entity(repositoryClass: MessageRepository::class)]
 #[ORM\Index(columns: ['mail_account_id', 'received_at'])]
 #[ORM\Index(columns: ['mail_account_id', 'message_id_header'])]
 #[ORM\Index(columns: ['thread_id'])]
