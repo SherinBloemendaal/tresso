@@ -137,8 +137,13 @@ export class RealtimeClient {
     }
   }
 
+  /** Waits before the next attempt; stop() ends the wait, also when it came just before the wait began. */
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => {
+      if (this.stopped) {
+        resolve()
+        return
+      }
       const controller = new AbortController()
       this.controller = controller
       const timer = setTimeout(resolve, ms)
