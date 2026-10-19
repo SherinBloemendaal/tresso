@@ -1,5 +1,5 @@
-// Package outbox sends the mail users queue: for each account this worker leases, it claims what is due, delivers it
-// over SMTP, files a copy in the Sent folder and reports the outcome.
+// Package outbox does the account work users wait for: for each account this worker leases, it sends the mail that is
+// due (SMTP, a copy in Sent, the outcome reported) and keeps the Drafts folder in step with the user's drafts.
 package outbox
 
 import (
@@ -20,6 +20,9 @@ type API interface {
 	Credentials(ctx context.Context, accountID, workerID string) (api.Credentials, error)
 	ClaimOutbox(ctx context.Context, accountID, workerID string) ([]api.OutgoingMessage, error)
 	ReportOutbox(ctx context.Context, accountID, messageID, workerID, outcome, errorText string, copiedToSent bool) error
+	ClaimDrafts(ctx context.Context, accountID, workerID string) (api.DraftWork, error)
+	ReportDraftFiled(ctx context.Context, accountID, draftID, workerID string, version int, messageID string) error
+	ReportDraftRemoved(ctx context.Context, accountID, removalID, workerID string) error
 }
 
 // SentStore is the account's Sent folder.
@@ -29,6 +32,16 @@ type SentStore interface {
 	Close()
 }
 
+// DraftsStore is the account's Drafts folder.
+type DraftsStore interface {
+	AppendDraft(raw []byte, at time.Time) error
+	Remove(messageID string) error
+	Close()
+}
+
+// OpenDraftsFunc opens the account's Drafts folder, creating it when there is none.
+type OpenDraftsFunc func(ctx context.Context, credentials api.Credentials) (DraftsStore, error)
+
 // SendFunc delivers one message; smtpsend.Send in production.
 type SendFunc func(ctx context.Context, server api.ServerSettings, username, password string, envelope smtpsend.Envelope, raw []byte) error
 
@@ -36,12 +49,13 @@ type SendFunc func(ctx context.Context, server api.ServerSettings, username, pas
 type OpenSentFunc func(ctx context.Context, credentials api.Credentials) (SentStore, error)
 
 type Dispatcher struct {
-	api      API
-	store    storage.Reader
-	send     SendFunc
-	openSent OpenSentFunc
-	workerID string
-	logger   *slog.Logger
+	api        API
+	store      storage.Reader
+	send       SendFunc
+	openSent   OpenSentFunc
+	openDrafts OpenDraftsFunc
+	workerID   string
+	logger     *slog.Logger
 
 	mu      sync.Mutex
 	running map[string]*run
@@ -50,8 +64,8 @@ type Dispatcher struct {
 
 type run struct{ again bool }
 
-func NewDispatcher(client API, store storage.Reader, send SendFunc, openSent OpenSentFunc, workerID string, logger *slog.Logger) *Dispatcher {
-	return &Dispatcher{api: client, store: store, send: send, openSent: openSent, workerID: workerID, logger: logger, running: map[string]*run{}}
+func NewDispatcher(client API, store storage.Reader, send SendFunc, openSent OpenSentFunc, openDrafts OpenDraftsFunc, workerID string, logger *slog.Logger) *Dispatcher {
+	return &Dispatcher{api: client, store: store, send: send, openSent: openSent, openDrafts: openDrafts, workerID: workerID, logger: logger, running: map[string]*run{}}
 }
 
 // Trigger makes the account's due mail go out. Runs for one account never overlap: a trigger during a run makes that
@@ -100,20 +114,76 @@ func (d *Dispatcher) process(ctx context.Context, accountID string) {
 		logger.Error("account has no password to send with", "error", err)
 		return
 	}
-	messages, err := d.api.ClaimOutbox(ctx, accountID, d.workerID)
+	d.sendOutbox(ctx, logger, credentials, password)
+	d.fileDrafts(ctx, logger, credentials)
+}
+
+func (d *Dispatcher) sendOutbox(ctx context.Context, logger *slog.Logger, credentials api.Credentials, password string) {
+	messages, err := d.api.ClaimOutbox(ctx, credentials.AccountID, d.workerID)
 	if err != nil {
 		logger.Warn("claiming outgoing mail failed", "error", err)
 		return
 	}
 
-	sent := &lazySent{open: func() (SentStore, error) { return d.openSent(ctx, credentials) }}
+	sent := &lazy[SentStore]{open: func() (SentStore, error) { return d.openSent(ctx, credentials) }}
 	defer sent.close()
 	for _, message := range messages {
 		d.deliver(ctx, logger.With("outgoing", message.ID), credentials, password, sent, message)
 	}
 }
 
-func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, credentials api.Credentials, password string, sent *lazySent, message api.OutgoingMessage) {
+// fileDrafts appends the newest copy of each draft and only then removes the copy it replaces, so a failure halfway
+// leaves an extra copy rather than none. A failed step is not reported: the claim expires and the work comes back.
+func (d *Dispatcher) fileDrafts(ctx context.Context, logger *slog.Logger, credentials api.Credentials) {
+	work, err := d.api.ClaimDrafts(ctx, credentials.AccountID, d.workerID)
+	if err != nil {
+		logger.Warn("claiming draft work failed", "error", err)
+		return
+	}
+	if len(work.Files) == 0 && len(work.Removals) == 0 {
+		return
+	}
+	folder := &lazy[DraftsStore]{open: func() (DraftsStore, error) { return d.openDrafts(ctx, credentials) }}
+	defer folder.close()
+	drafts, err := folder.get()
+	if err != nil {
+		logger.Warn("opening the Drafts folder failed", "error", err)
+		return
+	}
+
+	for _, file := range work.Files {
+		fileLogger := logger.With("draft", file.DraftID, "version", file.Version)
+		raw, err := d.store.Get(ctx, file.RawObjectKey)
+		if err != nil {
+			fileLogger.Warn("reading the draft copy failed", "error", err)
+			continue
+		}
+		if err := drafts.AppendDraft(raw, time.Now()); err != nil {
+			fileLogger.Warn("filing the draft failed", "error", err)
+			continue
+		}
+		if file.PreviousMessageID != nil {
+			if err := drafts.Remove(*file.PreviousMessageID); err != nil {
+				fileLogger.Warn("removing the previous draft copy failed; it is removed with the next version", "error", err)
+				continue
+			}
+		}
+		if err := d.api.ReportDraftFiled(ctx, credentials.AccountID, file.DraftID, d.workerID, file.Version, file.MessageID); err != nil {
+			fileLogger.Warn("reporting the filed draft failed", "error", err)
+		}
+	}
+	for _, removal := range work.Removals {
+		if err := drafts.Remove(removal.MessageID); err != nil {
+			logger.Warn("removing a draft copy failed", "removal", removal.ID, "error", err)
+			continue
+		}
+		if err := d.api.ReportDraftRemoved(ctx, credentials.AccountID, removal.ID, d.workerID); err != nil {
+			logger.Warn("reporting the removed draft copy failed", "removal", removal.ID, "error", err)
+		}
+	}
+}
+
+func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, credentials api.Credentials, password string, sent *lazy[SentStore], message api.OutgoingMessage) {
 	raw, err := d.store.Get(ctx, message.RawObjectKey)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -186,15 +256,15 @@ func AutoSavesSent(smtpHost string) bool {
 	return false
 }
 
-// lazySent opens the Sent folder only when a message needs it, once per run.
-type lazySent struct {
-	open   func() (SentStore, error)
-	store  SentStore
+// lazy opens a folder only when something needs it, once per run.
+type lazy[T interface{ Close() }] struct {
+	open   func() (T, error)
+	store  T
 	err    error
 	opened bool
 }
 
-func (l *lazySent) get() (SentStore, error) {
+func (l *lazy[T]) get() (T, error) {
 	if !l.opened {
 		l.store, l.err = l.open()
 		l.opened = true
@@ -202,8 +272,8 @@ func (l *lazySent) get() (SentStore, error) {
 	return l.store, l.err
 }
 
-func (l *lazySent) close() {
-	if l.store != nil {
+func (l *lazy[T]) close() {
+	if l.opened && l.err == nil {
 		l.store.Close()
 	}
 }

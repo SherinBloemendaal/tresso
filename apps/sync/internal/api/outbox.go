@@ -53,11 +53,7 @@ func (c *Client) ReportOutbox(ctx context.Context, accountID, messageID, workerI
 		body["error"] = errorText
 	}
 	err := c.post(ctx, "/internal/sync/accounts/"+url.PathEscape(accountID)+"/outbox/"+url.PathEscape(messageID)+"/result", body, nil)
-	var status *HTTPError
-	if errors.As(err, &status) && status.Status == http.StatusConflict {
-		return errors.Join(ErrClaimLost, err)
-	}
-	return err
+	return claimError(err)
 }
 
 // RealtimeToken returns access to the outbox topic.
