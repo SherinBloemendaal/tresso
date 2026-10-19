@@ -149,6 +149,8 @@ final readonly class CalendarEventResource
         public ?array $conference,
         public ?string $messageId,
         public ?string $syncError,
+        public ?int $travelMinutes,
+        public bool $defaultReminders,
     ) {
     }
 
@@ -180,6 +182,8 @@ final readonly class CalendarEventResource
             $event->getConference(),
             $event->getMessage()?->getId()->toRfc4122(),
             $event->getSyncError(),
+            $event->getTravelMinutes(),
+            $event->usesDefaultReminders(),
         );
     }
 }

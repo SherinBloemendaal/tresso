@@ -49,7 +49,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
 
         [$until, $hasMore] = $this->boundary($userId, $since, $limit);
         if ($until === $since) {
-            return new SyncChanges($since, false, [], [], [], [], [], [], [], [], [], [], []);
+            return new SyncChanges($since, false, [], [], [], [], [], [], [], [], [], [], [], [], []);
         }
 
         $range = ['user' => $userId, 'since' => $since, 'until' => $until];
@@ -67,6 +67,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
             $this->smartInboxes($range),
             $this->calendars($range),
             $this->calendarEvents($range),
+            $this->notifications($range),
+            $this->eventNotes($range),
             $this->deleted($range),
         );
     }
@@ -102,6 +104,10 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 UNION ALL
                 SELECT e.change_seq, COUNT(*) FROM calendar_event e JOIN calendar c ON c.id = e.calendar_id
                     WHERE c.owner_id = :user AND e.change_seq > :since GROUP BY e.change_seq
+                UNION ALL
+                SELECT n.change_seq, COUNT(*) FROM scheduled_notification n WHERE n.user_id = :user AND n.change_seq > :since GROUP BY n.change_seq
+                UNION ALL
+                SELECT o.change_seq, COUNT(*) FROM event_note o WHERE o.user_id = :user AND o.change_seq > :since GROUP BY o.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -414,7 +420,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'SELECT e.id, e.calendar_id, e.uid, e.recurrence_key, e.sequence, e.status, e.summary, e.description, e.location, e.url,
                     e.transparency, e.visibility, e.all_day, e.start_value, e.start_time_zone, e.end_value, e.end_time_zone,
                     e.rrule, e.rdates, e.exdates, e.organizer, e.attendees, e.self_partstat, e.reminders, e.conference,
-                    e.message_id, e.sync_error
+                    e.message_id, e.sync_error, e.travel_minutes, e.default_reminders
              FROM calendar_event e JOIN calendar c ON c.id = e.calendar_id
              WHERE c.owner_id = :user AND e.change_seq > :since AND e.change_seq <= :until
                AND (e.series_ends_at IS NULL OR e.series_ends_at > :window)
@@ -448,6 +454,62 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'conference' => self::json($r['conference'], 'null'),
             'messageId' => $r['message_id'],
             'syncError' => $r['sync_error'],
+            'travelMinutes' => null === $r['travel_minutes'] ? null : self::int($r['travel_minutes']),
+            'defaultReminders' => (bool) $r['default_reminders'],
+        ], $rows);
+    }
+
+    /**
+     * Delivered notifications of the last week; planned ones are no business of clients until they are delivered.
+     *
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function notifications(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT n.id, n.kind, n.event_id, n.occurrence_key, n.title, n.body, n.occurrence_starts_at, n.delivered_at, n.dismissed_at, n.silent, n.round
+             FROM scheduled_notification n
+             WHERE n.user_id = :user AND n.change_seq > :since AND n.change_seq <= :until AND n.delivered_at > :recent
+             ORDER BY n.change_seq',
+            [...$range, 'recent' => new \DateTimeImmutable('-7 days')->format('Y-m-d H:i:s')],
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'kind' => $r['kind'],
+            'eventId' => $r['event_id'],
+            'recurrenceId' => '' === $r['occurrence_key'] ? null : $r['occurrence_key'],
+            'title' => $r['title'],
+            'body' => $r['body'],
+            'occurrenceStartsAt' => self::date($r['occurrence_starts_at']),
+            'deliveredAt' => self::date($r['delivered_at']),
+            'dismissedAt' => self::date($r['dismissed_at']),
+            'silent' => (bool) $r['silent'],
+            'round' => self::int($r['round']),
+        ], $rows);
+    }
+
+    /**
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function eventNotes(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT o.id, o.event_id, o.occurrence_key, o.text, o.updated_at FROM event_note o
+             WHERE o.user_id = :user AND o.change_seq > :since AND o.change_seq <= :until ORDER BY o.change_seq',
+            $range,
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'eventId' => $r['event_id'],
+            'recurrenceId' => '' === $r['occurrence_key'] ? null : $r['occurrence_key'],
+            'text' => $r['text'],
+            'updatedAt' => self::date($r['updated_at']),
         ], $rows);
     }
 

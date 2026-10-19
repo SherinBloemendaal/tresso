@@ -269,6 +269,7 @@ final readonly class EventEditor
         Props::set($event, 'CLASS', $changes->visibility->toICalendar());
         $this->writeAttendees($event, $changes, $self);
         self::writeReminders($event, $changes);
+        self::writeTravel($event, $changes->travelMinutes);
         self::writeConference($event, $changes->conferenceUrl);
 
         self::touch($event, self::significantState($event) !== $before);
@@ -321,6 +322,11 @@ final readonly class EventEditor
     }
 
 
+    /**
+     * The alarms the editor shows (relative to the start) are replaced; other clients' alarms stay. With the defaults
+     * the event has none of its own, so the user's rules apply; otherwise exactly the given ones, and an explicit
+     * marker when that is none.
+     */
     private static function writeReminders(VEvent $event, EventChanges $changes): void
     {
         foreach (Props::components($event, 'VALARM') as $alarm) {
@@ -330,12 +336,35 @@ final readonly class EventEditor
                 $event->remove($alarm);
             }
         }
-        foreach (array_values(array_unique($changes->reminders)) as $minutes) {
+        $event->remove(EventReader::DEFAULT_REMINDERS);
+        if ($changes->useDefaultReminders) {
+            return;
+        }
+
+        $seen = [];
+        foreach ($changes->reminders as $reminder) {
+            $minutes = $reminder['minutesBefore'];
+            if (isset($seen[$minutes])) {
+                continue;
+            }
+            $seen[$minutes] = true;
             $event->add('VALARM', [
                 'ACTION' => 'DISPLAY',
                 'DESCRIPTION' => '' === $changes->summary ? 'Reminder' : $changes->summary,
                 'TRIGGER' => 0 === $minutes ? 'PT0S' : \sprintf('-PT%dM', $minutes),
+                EventReader::CHANNELS => implode(',', $reminder['channels']),
             ]);
+        }
+        if ([] === $changes->reminders) {
+            $event->add(EventReader::DEFAULT_REMINDERS, 'FALSE');
+        }
+    }
+
+    private static function writeTravel(VEvent $event, ?int $minutes): void
+    {
+        $event->remove(EventReader::TRAVEL);
+        if (null !== $minutes) {
+            $event->add(EventReader::TRAVEL, (string) $minutes);
         }
     }
 
@@ -405,6 +434,7 @@ final readonly class EventEditor
         $this->write($master, new EventChanges(
             $changes->summary, $changes->description, $changes->location, $changes->url, $newStart, $newEnd, $changes->rrule,
             $changes->status, $changes->transparency, $changes->visibility, $changes->attendees, $changes->reminders, $changes->conferenceUrl,
+            $changes->useDefaultReminders, $changes->travelMinutes,
         ), $vcalendar, true, $self);
     }
 
@@ -473,6 +503,7 @@ final readonly class EventEditor
         $this->write($newMaster, new EventChanges(
             $changes->summary, $changes->description, $changes->location, $changes->url, $changes->start, $changes->end, $rule,
             $changes->status, $changes->transparency, $changes->visibility, $changes->attendees, $changes->reminders, $changes->conferenceUrl,
+            $changes->useDefaultReminders, $changes->travelMinutes,
         ), $next, true, $self);
         self::withOrganizer($next, $object->getCalendar(), $organizer);
 

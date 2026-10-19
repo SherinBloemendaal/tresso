@@ -16,7 +16,7 @@ final readonly class EventChanges
 {
     /**
      * @param list<array{address: string, name: ?string, role: string}> $attendees
-     * @param list<int>                                                 $reminders minutes before the start
+     * @param list<array{minutesBefore: int, channels: list<string>}>  $reminders ignored when the defaults apply
      */
     public function __construct(
         public string $summary,
@@ -32,6 +32,8 @@ final readonly class EventChanges
         public array $attendees,
         public array $reminders,
         public ?string $conferenceUrl,
+        public bool $useDefaultReminders = true,
+        public ?int $travelMinutes = null,
     ) {
         if ($start->isDate !== $end->isDate) {
             throw new \InvalidArgumentException('Start and end must both be dates or both be date-times.');

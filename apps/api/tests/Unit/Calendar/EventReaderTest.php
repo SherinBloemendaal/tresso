@@ -118,8 +118,8 @@ final class EventReaderTest extends TestCase
         self::assertSame(EventStatus::Cancelled, $data->status);
         self::assertSame(Transparency::Free, $data->transparency);
         self::assertSame([
-            ['action' => 'display', 'trigger' => '-PT5M', 'relatedTo' => 'end', 'at' => null],
-            ['action' => 'email', 'trigger' => null, 'relatedTo' => 'start', 'at' => '20261018T120000Z'],
+            ['action' => 'display', 'trigger' => '-PT5M', 'relatedTo' => 'end', 'at' => null, 'channels' => ['push']],
+            ['action' => 'email', 'trigger' => null, 'relatedTo' => 'start', 'at' => '20261018T120000Z', 'channels' => ['email']],
         ], $data->reminders);
     }
 
@@ -145,6 +145,18 @@ final class EventReaderTest extends TestCase
         yield 'Teams property' => [['X-MICROSOFT-SKYPETEAMSMEETINGURL:https://teams.microsoft.com/l/meetup-join/19%3ameeting'], 'teams', 'https://teams.microsoft.com/l/meetup-join/19%3ameeting'];
         yield 'RFC 7986' => [['CONFERENCE;VALUE=URI;FEATURE=VIDEO:https://example.zoom.us/j/123456'], 'zoom', 'https://example.zoom.us/j/123456'];
         yield 'link in the description' => [['DESCRIPTION:Join: https://company.webex.com/meet/kim or call'], 'webex', 'https://company.webex.com/meet/kim'];
+    }
+
+    public function testReadsTressoChannelsTravelTimeAndTheDefaults(): void
+    {
+        $own = self::read(['DTSTART:20261019T090000Z', 'X-TRESSO-TRAVEL-MINUTES:25', 'BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT30M', 'X-TRESSO-CHANNELS:push,email', 'END:VALARM']);
+        self::assertSame(['push', 'email'], $own->reminders[0]['channels']);
+        self::assertSame(25, $own->travelMinutes);
+        self::assertFalse($own->defaultReminders);
+
+        self::assertTrue(self::read(['DTSTART:20261019T090000Z'])->defaultReminders);
+        self::assertFalse(self::read(['DTSTART:20261019T090000Z', 'X-TRESSO-DEFAULT-REMINDERS:FALSE'])->defaultReminders);
+        self::assertSame(45, self::read(['DTSTART:20261019T090000Z', 'X-APPLE-TRAVEL-DURATION;VALUE=DURATION:PT45M'])->travelMinutes);
     }
 
     public function testRefusesEventsWithoutUid(): void

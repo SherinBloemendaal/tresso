@@ -12,6 +12,8 @@ use App\Entity\CalendarEvent;
 use App\Entity\CalendarOperation;
 use App\Entity\CalendarObject;
 use App\Enum\CalendarOperationKind;
+use App\Notification\PlanCalendarObject;
+use App\Realtime\AfterCommitDispatcher;
 use App\Realtime\RealtimeNotifier;
 use App\Repository\CalendarOperationRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -29,6 +31,7 @@ final readonly class CalendarStore
         private EventProjector $projector,
         private CalendarOperationRepository $operations,
         private RealtimeNotifier $notifier,
+        private AfterCommitDispatcher $afterCommit,
     ) {
     }
 
@@ -55,6 +58,7 @@ final readonly class CalendarStore
         }
         $rows = $this->projector->project($object, $calendar);
         $this->entityManager->flush();
+        $this->planNotifications($object);
 
         if (!$fromProvider && !$object->getCalendar()->isLocal()) {
             $this->queuePut($object);
@@ -85,9 +89,16 @@ final readonly class CalendarStore
             $this->announce($calendar);
         }
 
+        $this->planNotifications($object);
         $this->projector->remove($object);
         $this->entityManager->remove($object);
         $this->entityManager->flush();
+    }
+
+    /** The object's reminders follow its change, once the change is committed. */
+    private function planNotifications(CalendarObject $object): void
+    {
+        $this->afterCommit->dispatch(new PlanCalendarObject($object->getId()->toRfc4122(), $object->getCalendar()->getOwner()->getId()->toRfc4122()));
     }
 
     /** Marks the rows of a resource with the reason its last change did not reach the provider (or clears it). */
