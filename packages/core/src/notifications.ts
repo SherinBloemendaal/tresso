@@ -74,6 +74,41 @@ export interface NotificationSettings {
   effectiveEmailAddress: string
   /** The user's channels per kind of notification; a kind missing here uses its default. */
   channelsByKind: Record<string, NotificationChannel[]>
+  /** ISO days (1 is Monday) with working hours, from workStart to workEnd (HH:MM). */
+  workDays: number[]
+  workStart: string
+  workEnd: string
+  /** Early reminders of work calendars come at the end of the working day before. */
+  shiftEarlyReminders: boolean
+  /** Work calendars notify within working hours only, except leave-now and important events. */
+  workCalendarsQuiet: boolean
+  /** Notifications wait for the end of a focus block; meetings with others and leave-now come through. */
+  holdDuringFocus: boolean
+  /** Mail notifications wait while the user is in a meeting. */
+  holdMailInMeetings: boolean
+  /** Leave-now reminders for events with a place. */
+  leaveNow: boolean
+  travelMode: TravelMode
+  /** Minutes added to the travel time. */
+  extraTravelMinutes: number
+  /** The snooze choices a reminder offers, in order. */
+  snoozeChoices: SnoozeChoice[]
+}
+
+export type TravelMode = 'walk' | 'bike' | 'transit' | 'car'
+
+export type SnoozeChoice = 'minutes_5' | 'minutes_10' | 'minutes_15' | 'before_start' | 'start' | 'meeting_end'
+
+/** POST /api/v1/calendar-events/{id}/leave-estimate: the phone's position, for one estimate only. */
+export interface LeaveEstimateRequest {
+  latitude: number
+  longitude: number
+  recurrenceId: string | null
+}
+
+export interface LeaveEstimate {
+  minutes: number | null
+  leaveAt: string | null
 }
 
 export type RuleRole = 'any' | 'organized' | 'invited'
