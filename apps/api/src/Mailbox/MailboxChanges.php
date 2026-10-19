@@ -11,9 +11,11 @@ use App\Entity\Message;
 use App\Entity\MessageLocation;
 use App\Enum\MailboxChangeKind;
 use App\Repository\MailboxChangeRepository;
+use App\Sync\Ingest\MessageJanitor;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Uid\Uuid;
+use Symfony\Component\Uid\UuidV7;
 
 /**
  * The worker's side of {@see MailboxChange}: it takes the changes it can make now, oldest first, and reports each.
@@ -26,50 +28,65 @@ final readonly class MailboxChanges
     public const int CLAIM_BATCH = 100;
     /** Attempts before a change that keeps failing is given up and undone. */
     public const int MAX_ATTEMPTS = 6;
+    /**
+     * How long a placeholder copy may wait for its move to land once that move is done. The folder sync normally finds
+     * the copy within minutes; one that is still missing after this was moved on or deleted elsewhere.
+     */
+    public const string PLACEHOLDER_TTL = 'PT1H';
     /** Wait before the next attempt, by attempts made so far. */
     private const array BACKOFF = ['PT30S', 'PT2M', 'PT10M', 'PT30M', 'PT2H'];
 
     public function __construct(
         private EntityManagerInterface $entityManager,
         private MailboxChangeRepository $changes,
+        private MessageJanitor $janitor,
         private LoggerInterface $logger,
     ) {
     }
 
     /**
      * The changes the worker can make now, in the order the user made them. A message's later changes wait while an
-     * earlier one cannot be made yet: it is waiting for a retry, claimed by another worker, a flag change on a copy
-     * that is still being moved, or a move of such a copy.
+     * earlier one cannot be made yet: it is waiting for a retry, claimed, a flag change on a copy that is still being
+     * moved, or a move of such a copy. Changes that wait never keep other messages' changes from being taken.
      *
      * @return list<MailboxChange>
      */
     public function claim(MailAccount $account, string $workerId, \DateTimeImmutable $now): array
     {
+        $this->expirePlaceholders($account, $now);
+
         $until = $now->add(new \DateInterval(self::CLAIM_TTL));
         $claimed = [];
-        /** @var array<string, true> $waiting messages with an earlier change that cannot be made yet */
-        $waiting = [];
-
-        foreach ($this->changes->lockPending($account, self::CLAIM_BATCH * 2) as $change) {
-            $messageId = $change->getMessage()->getId()->toRfc4122();
-            if (isset($waiting[$messageId])) {
-                continue;
-            }
-            if (MailboxChangeKind::Move === $change->getKind() && (null === $change->getSourceFolder() || null === $change->getTargetFolder())) {
-                $this->undo($change, 'The folder is gone from the server.');
-                continue;
-            }
-            if (!$this->canMakeNow($change, $now)) {
-                $waiting[$messageId] = true;
-                continue;
-            }
-            $change->claim($workerId, $until);
-            $claimed[] = $change;
-            if (\count($claimed) >= self::CLAIM_BATCH) {
+        $waiting = $this->changes->messagesWithChangesInProgress($account, $now);
+        $after = null;
+        while (\count($claimed) < self::CLAIM_BATCH) {
+            $page = $this->changes->lockAvailable($account, $now, $after, self::CLAIM_BATCH);
+            if ([] === $page) {
                 break;
+            }
+            foreach ($page as $change) {
+                $after = $change->getId();
+                $messageId = $change->getMessage()->getId()->toRfc4122();
+                if (isset($waiting[$messageId])) {
+                    continue;
+                }
+                if (MailboxChangeKind::Move === $change->getKind() && (null === $change->getSourceFolder() || null === $change->getTargetFolder())) {
+                    $this->undo($change, 'The folder is gone from the server.');
+                    continue;
+                }
+                if (!$this->canMakeNow($change)) {
+                    $waiting[$messageId] = true;
+                    continue;
+                }
+                $change->claim($workerId, $until);
+                $claimed[] = $change;
+                if (\count($claimed) >= self::CLAIM_BATCH) {
+                    break;
+                }
             }
         }
         $this->entityManager->flush();
+        $this->janitor->removeOrphans($account);
 
         return $claimed;
     }
@@ -90,7 +107,7 @@ final readonly class MailboxChanges
         }
         foreach ($this->pendingMoves($change) as $move) {
             $source = $move->getSourceFolder();
-            if (null !== $source && !str_starts_with((string) $move->getSourceRemoteUid(), MailboxChange::PLACEHOLDER_PREFIX)) {
+            if (null !== $source && !self::isPlaceholderUid($move->getSourceRemoteUid())) {
                 $locations[] = ['folder' => $source->getRemoteName(), 'uidValidity' => $move->getSourceUidValidity(), 'remoteUid' => (string) $move->getSourceRemoteUid()];
             }
         }
@@ -99,8 +116,8 @@ final readonly class MailboxChanges
     }
 
     /**
-     * The server made the change. For a move, $remoteUid is the copy's uid in the target folder when the server
-     * reported it (UIDPLUS); otherwise the folder sync finds the copy later.
+     * The server made the change. For a move, $remoteUid is the copy's uid in the target folder when the worker learnt
+     * it; otherwise the folder sync finds the copy later.
      */
     public function done(MailboxChange $change, ?string $remoteUid): void
     {
@@ -117,23 +134,55 @@ final readonly class MailboxChanges
         $this->entityManager->flush();
     }
 
-    public function failed(MailboxChange $change, string $error, bool $permanent, \DateTimeImmutable $now): void
+    /**
+     * The copy a move was to take is no longer in its folder: it was moved or deleted on the server already (by this
+     * move in an attempt that never got reported, by Gmail taking every label away with the first copy that went to
+     * Trash, or by another mail app). Nothing is put back; the folder sync shows the copy wherever it is now. When
+     * the placeholder is the message's only copy in Tresso, it stays until then (or until it expires), so the message
+     * keeps its identity instead of being deleted and found again.
+     */
+    public function gone(MailboxChange $change): void
+    {
+        if (MailboxChangeKind::Move !== $change->getKind()) {
+            throw new \LogicException('Only a move can find its copy gone.');
+        }
+        foreach ($this->changes->findBy(['sourceRemoteUid' => $change->placeholderUid()]) as $later) {
+            $this->undo($later, 'The copy it was to move was not where it was expected.');
+        }
+        $placeholder = $this->placeholder($change);
+        $copies = $this->entityManager->getRepository(MessageLocation::class)->findBy(['message' => $change->getMessage()]);
+        if (null !== $placeholder && \count($copies) > 1) {
+            $this->entityManager->remove($placeholder);
+        }
+        $this->entityManager->remove($change);
+        $this->entityManager->flush();
+        $this->janitor->removeOrphans($change->getMailAccount());
+    }
+
+    public function failed(MailboxChange $change, string $workerId, string $error, bool $permanent, \DateTimeImmutable $now): void
     {
         if ($permanent || $change->getAttempts() + 1 >= self::MAX_ATTEMPTS) {
             $this->undo($change, $error);
             $this->entityManager->flush();
+            $this->janitor->removeOrphans($change->getMailAccount());
 
             return;
         }
         $wait = self::BACKOFF[min($change->getAttempts(), \count(self::BACKOFF) - 1)];
         $change->retryLater($error, $now->add(new \DateInterval($wait)));
+        // The message's later changes this worker holds wait for this one again, in order.
+        foreach ($this->changes->findBy(['message' => $change->getMessage()], ['id' => 'ASC']) as $later) {
+            if (strcmp($later->getId()->toRfc4122(), $change->getId()->toRfc4122()) > 0 && $later->isClaimedBy($workerId, $now)) {
+                $later->release();
+            }
+        }
         $this->entityManager->flush();
     }
 
     /**
-     * The folder sync found a copy of $message in $folder that it did not know. Returns whether that copy is one a move
-     * from Tresso put there: then it takes the placeholder's place, or, when the user moved it on meanwhile, becomes
-     * the source of that next move instead of showing up here again.
+     * The folder sync found a copy of $message in $folder that it did not know. Returns whether that copy belongs to a
+     * move from Tresso: then it takes the placeholder's place, or, when the user moved it on meanwhile, becomes the
+     * source of that next move instead of showing up here again.
      */
     public function arrived(Message $message, Folder $folder, string $remoteUid, ?int $modSeq): bool
     {
@@ -144,13 +193,17 @@ final readonly class MailboxChanges
                 return true;
             }
         }
-        foreach ($this->changes->findBy(['message' => $message, 'sourceFolder' => $folder]) as $later) {
-            $source = (string) $later->getSourceRemoteUid();
-            if (!str_starts_with($source, MailboxChange::PLACEHOLDER_PREFIX)) {
+        foreach ($this->changes->findBy(['message' => $message, 'sourceFolder' => $folder, 'kind' => MailboxChangeKind::Move]) as $later) {
+            $source = $later->getSourceRemoteUid();
+            if ($source === $remoteUid) {
+                return true;
+            }
+            if (!self::isPlaceholderUid($source)) {
                 continue;
             }
-            $origin = substr($source, \strlen(MailboxChange::PLACEHOLDER_PREFIX));
-            if (!Uuid::isValid($origin) || null === $this->entityManager->find(MailboxChange::class, Uuid::fromString($origin))) {
+            // The move it waits on put the copy here, whether or not that move has been reported yet.
+            $origin = $this->origin((string) $source);
+            if (null === $origin || $origin->getTargetFolder() === $folder) {
                 $later->sourceLanded($remoteUid, $folder->getUidValidity());
 
                 return true;
@@ -176,6 +229,18 @@ final readonly class MailboxChanges
         $this->sourceLanded($placeholderUid, $remoteUid, $placeholder->getFolder()->getUidValidity());
     }
 
+    /**
+     * The folder is gone from the server: moves into it can no longer happen, so the messages go back where they
+     * were before their placeholder copies go with the folder.
+     */
+    public function folderRemoved(Folder $folder): void
+    {
+        foreach ($this->changes->findBy(['targetFolder' => $folder]) as $move) {
+            $this->undo($move, 'The folder is gone from the server.');
+        }
+        $this->entityManager->flush();
+    }
+
     private function sourceLanded(string $placeholderUid, string $remoteUid, ?int $uidValidity): void
     {
         foreach ($this->changes->findBy(['sourceRemoteUid' => $placeholderUid]) as $later) {
@@ -183,20 +248,15 @@ final readonly class MailboxChanges
         }
     }
 
-    private function canMakeNow(MailboxChange $change, \DateTimeImmutable $now): bool
+    private function canMakeNow(MailboxChange $change): bool
     {
-        if (!$change->isAvailable($now)) {
-            return false;
-        }
-
         if (MailboxChangeKind::Move === $change->getKind()) {
-            return !str_starts_with((string) $change->getSourceRemoteUid(), MailboxChange::PLACEHOLDER_PREFIX);
+            return !self::isPlaceholderUid($change->getSourceRemoteUid());
         }
 
         // Flags go on copies the server has; while a copy is still on its way, its uid is not known yet.
         foreach ($this->pendingMoves($change) as $move) {
-            if (strcmp($move->getId()->toRfc4122(), $change->getId()->toRfc4122()) < 0
-                || str_starts_with((string) $move->getSourceRemoteUid(), MailboxChange::PLACEHOLDER_PREFIX)) {
+            if (strcmp($move->getId()->toRfc4122(), $change->getId()->toRfc4122()) < 0 || self::isPlaceholderUid($move->getSourceRemoteUid())) {
                 return false;
             }
         }
@@ -207,6 +267,38 @@ final readonly class MailboxChanges
         }
 
         return true;
+    }
+
+    /**
+     * Drops placeholder copies whose move is done but that never landed: the copy was moved on or deleted elsewhere
+     * before the folder sync saw it. Moves of such a copy are given up; the folder sync shows the copy where it is.
+     */
+    private function expirePlaceholders(MailAccount $account, \DateTimeImmutable $now): void
+    {
+        $oldest = $now->sub(new \DateInterval(self::PLACEHOLDER_TTL));
+        $placeholders = $this->entityManager->createQueryBuilder()
+            ->select('l')
+            ->from(MessageLocation::class, 'l')
+            ->where('l.mailAccount = :account')
+            ->andWhere('l.remoteUid LIKE :prefix')
+            ->setParameter('account', $account->getId(), 'uuid')
+            ->setParameter('prefix', MailboxChange::PLACEHOLDER_PREFIX.'%')
+            ->getQuery()
+            ->getResult();
+        foreach ($placeholders as $placeholder) {
+            $id = substr($placeholder->getRemoteUid(), \strlen(MailboxChange::PLACEHOLDER_PREFIX));
+            if (!Uuid::isValid($id) || null !== $this->origin($placeholder->getRemoteUid())) {
+                continue;
+            }
+            $uuid = Uuid::fromString($id);
+            if ($uuid instanceof UuidV7 && $uuid->getDateTime() > $oldest) {
+                continue;
+            }
+            foreach ($this->changes->findBy(['sourceRemoteUid' => $placeholder->getRemoteUid()]) as $later) {
+                $this->undo($later, 'The copy it was to move never showed up.');
+            }
+            $this->entityManager->remove($placeholder);
+        }
     }
 
     /**
@@ -235,9 +327,20 @@ final readonly class MailboxChanges
         ]);
 
         if (MailboxChangeKind::Flags === $change->getKind()) {
-            // Only what this change set goes back, and only while nothing changed it since.
-            $seen = null !== $change->getSeen() && $message->isSeen() === $change->getSeen() ? !$change->getSeen() : $message->isSeen();
-            $flagged = null !== $change->getFlagged() && $message->isFlagged() === $change->getFlagged() ? !$change->getFlagged() : $message->isFlagged();
+            // Only what this change set goes back: not while nothing changed it since, and not what a later change sets.
+            $later = array_filter(
+                $this->changes->findBy(['message' => $message, 'kind' => MailboxChangeKind::Flags]),
+                static fn (MailboxChange $other): bool => strcmp($other->getId()->toRfc4122(), $change->getId()->toRfc4122()) > 0,
+            );
+            $setLater = static fn (callable $flag): bool => [] !== array_filter($later, static fn (MailboxChange $other): bool => null !== $flag($other));
+            $seen = $message->isSeen();
+            if (null !== $change->getSeen() && $seen === $change->getSeen() && !$setLater(static fn (MailboxChange $c): ?bool => $c->getSeen())) {
+                $seen = !$seen;
+            }
+            $flagged = $message->isFlagged();
+            if (null !== $change->getFlagged() && $flagged === $change->getFlagged() && !$setLater(static fn (MailboxChange $c): ?bool => $c->getFlagged())) {
+                $flagged = !$flagged;
+            }
             $message->updateFlags($seen, $flagged, $message->isAnswered(), $message->isDraft());
             $this->entityManager->remove($change);
 
@@ -247,7 +350,7 @@ final readonly class MailboxChanges
         $placeholder = $this->placeholder($change);
         $source = $change->getSourceFolder();
         $sourceUid = (string) $change->getSourceRemoteUid();
-        if (null !== $source && !str_starts_with($sourceUid, MailboxChange::PLACEHOLDER_PREFIX)
+        if (null !== $source && !self::isPlaceholderUid($sourceUid)
             && $source->getUidValidity() === $change->getSourceUidValidity()
             && null === $this->entityManager->getRepository(MessageLocation::class)->findOneBy(['folder' => $source, 'remoteUid' => $sourceUid])) {
             $restored = new MessageLocation($message, $source, $sourceUid);
@@ -269,5 +372,18 @@ final readonly class MailboxChanges
         $target = $change->getTargetFolder();
 
         return null === $target ? null : $this->entityManager->getRepository(MessageLocation::class)->findOneBy(['folder' => $target, 'remoteUid' => $change->placeholderUid()]);
+    }
+
+    /** The move that left the placeholder with this uid, while it is not confirmed yet. */
+    private function origin(string $placeholderUid): ?MailboxChange
+    {
+        $id = substr($placeholderUid, \strlen(MailboxChange::PLACEHOLDER_PREFIX));
+
+        return Uuid::isValid($id) ? $this->entityManager->find(MailboxChange::class, Uuid::fromString($id)) : null;
+    }
+
+    private static function isPlaceholderUid(?string $remoteUid): bool
+    {
+        return null !== $remoteUid && str_starts_with($remoteUid, MailboxChange::PLACEHOLDER_PREFIX);
     }
 }
