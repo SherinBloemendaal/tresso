@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 )
 
@@ -64,20 +66,67 @@ func (c Credentials) Password() (string, error) {
 type Client struct {
 	baseURL string
 	http    *http.Client
+	tokens  *resettableTokens
 }
 
-// New returns a client that authenticates with the OAuth2 client credentials grant and refreshes tokens itself.
+// New returns a client that authenticates with the OAuth2 client credentials grant. Tokens are cached until they
+// expire; a 401 drops the cached token and retries once, so a revoked token (key rotation, revocation, a restored
+// database) never blocks the worker until expiry.
 func New(ctx context.Context, baseURL, tokenURL, clientID, clientSecret string) *Client {
-	cc := clientcredentials.Config{
+	tokens := &resettableTokens{ctx: ctx, config: &clientcredentials.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		TokenURL:     tokenURL,
 		Scopes:       Scopes,
-	}
-	httpClient := cc.Client(ctx)
-	httpClient.Timeout = 15 * time.Second
+	}}
+	tokens.Reset()
 
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: httpClient}
+	// oauth2.Transport directly: oauth2.NewClient would add a second token cache that Reset cannot clear.
+	httpClient := &http.Client{Transport: &oauth2.Transport{Source: tokens, Base: http.DefaultTransport}, Timeout: 15 * time.Second}
+
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: httpClient, tokens: tokens}
+}
+
+type resettableTokens struct {
+	ctx    context.Context
+	config *clientcredentials.Config
+	mu     sync.Mutex
+	source oauth2.TokenSource
+}
+
+func (r *resettableTokens) Token() (*oauth2.Token, error) {
+	r.mu.Lock()
+	source := r.source
+	r.mu.Unlock()
+	return source.Token()
+}
+
+// Reset forgets the cached token; the next request fetches a new one.
+func (r *resettableTokens) Reset() {
+	r.mu.Lock()
+	r.source = r.config.TokenSource(r.ctx)
+	r.mu.Unlock()
+}
+
+func (c *Client) send(ctx context.Context, method, path string, payload []byte) (*http.Response, error) {
+	var reader io.Reader
+	if payload != nil {
+		reader = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	if err != nil {
+		return nil, err
+	}
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	return resp, nil
 }
 
 // NewWithHTTPClient is used in tests and when the caller manages authentication.
@@ -110,27 +159,25 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
-	var reader io.Reader
+	var payload []byte
 	if body != nil {
-		payload, err := json.Marshal(body)
-		if err != nil {
+		var err error
+		if payload, err = json.Marshal(body); err != nil {
 			return fmt.Errorf("encode request: %w", err)
 		}
-		reader = bytes.NewReader(payload)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	resp, err := c.send(ctx, method, path, payload)
 	if err != nil {
 		return err
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+	if resp.StatusCode == http.StatusUnauthorized && c.tokens != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		c.tokens.Reset()
+		if resp, err = c.send(ctx, method, path, payload); err != nil {
+			return err
+		}
 	}
 	defer resp.Body.Close()
 
