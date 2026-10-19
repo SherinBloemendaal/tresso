@@ -156,7 +156,20 @@ final readonly class NotificationPlanner
                     // The phone's estimate stays until it sends another.
                     $plan = new Plan($plan->occurrenceKey, $plan->kind, $plan->slot, self::leaveAt($plan->startsAt, $estimate, $context), $plan->startsAt, $plan->title, self::leaveBody($estimate, trim($row->getLocation())), $plan->channels);
                 }
-                if (!$notification->isDelivered() && $notification->replan($plan->fireAt, $plan->startsAt, $plan->title, $plan->body, $plan->channels)) {
+                if ($notification->isDelivered()) {
+                    // The occurrence moved after its notification came: a new round for the new time, if still ahead.
+                    if ($plan->startsAt != $notification->getOccurrenceStartsAt() && $plan->fireAt > $now) {
+                        $notification->restart($plan->fireAt, $plan->startsAt, $plan->title, $plan->body, $plan->channels);
+                        $this->announce($notification);
+                    }
+                    continue;
+                }
+                if ($notification->replan($plan->fireAt, $plan->startsAt, $plan->title, $plan->body, $plan->channels)) {
+                    if ($notification->getFireAt() < $tooLate) {
+                        // Moved into the past: too late to matter, as a new plan would be.
+                        $this->entityManager->remove($notification);
+                        continue;
+                    }
                     $this->announce($notification);
                 }
                 continue;

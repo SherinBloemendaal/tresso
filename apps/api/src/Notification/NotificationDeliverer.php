@@ -25,6 +25,10 @@ final readonly class NotificationDeliverer
 {
     /** A notification is only delivered this close to its fire time; a later one is waiting for its own message. */
     private const int EARLY_SECONDS = 30;
+    /** A notification this late is not delivered any more, nor sent again after a failure. */
+    public const string MAX_LATE = '2 hours';
+    /** A reminder (not a follow-up) this long after its event started (or its own later time) is not delivered any more. */
+    private const string LATE_AFTER_START = '+15 minutes';
     /** How long push services keep trying. */
     private const string EXPIRES = '+2 hours';
     /** The silent push that asks a phone for a leave-now estimate. */
@@ -82,8 +86,14 @@ final readonly class NotificationDeliverer
     private function prepare(Uuid $id, \DateTimeImmutable $now): array
     {
         $notification = $this->entityManager->find(ScheduledNotification::class, $id, LockMode::PESSIMISTIC_WRITE);
-        if (null === $notification || $notification->isDelivered() || null !== $notification->getDismissedAt()) {
+        if (null === $notification || null !== $notification->getDismissedAt()) {
             return [null, null];
+        }
+        if ($notification->isDelivered()) {
+            // Delivered in this round: send again what failed or got stuck; the dispatcher leaves what went out alone.
+            $recent = $notification->getDeliveredAt() > $now->modify('-'.self::MAX_LATE);
+
+            return [$recent ? $notification : null, null];
         }
         $event = $notification->getEvent();
         if (null === $event) {
@@ -93,6 +103,13 @@ final readonly class NotificationDeliverer
             return [null, null];
         }
         if ($notification->getFireAt()->getTimestamp() > $now->getTimestamp() + self::EARLY_SECONDS) {
+            return [null, null];
+        }
+        if (self::isStale($notification, $now)) {
+            // After an outage, or for an event already under way: a late reminder is noise.
+            $this->entityManager->remove($notification);
+            $this->entityManager->flush();
+
             return [null, null];
         }
 
@@ -137,12 +154,16 @@ final readonly class NotificationDeliverer
             }
             $silent = true;
         }
-        // Meetings with others starting and leave-now come through a focus block; the rest waits for its end.
+        // Meetings with others starting and leave-now come through a focus block; the rest waits for its end, or comes
+        // silently when the event starts before the block ends.
         $comesThrough = $important || NotificationKind::LeaveNow === $notification->getKind() || (NotificationKind::Reminder === $notification->getKind() && [] !== $event->getAttendees());
         if (!$comesThrough && $preferences->isHoldDuringFocus()) {
             $focusEnd = $this->focusBlockEnd($notification, $now);
             if (null !== $focusEnd) {
-                return $this->postpone($notification, $focusEnd);
+                if ($notification->getOccurrenceStartsAt() > $focusEnd || NotificationKind::FollowUp === $notification->getKind()) {
+                    return $this->postpone($notification, $focusEnd);
+                }
+                $silent = true;
             }
         }
         if (!$silent && !$important && $preferences->isFocusDuringBusy() && NotificationKind::LeaveNow !== $notification->getKind() && null !== $event->getSelfPartstat() && $this->inBusyEvent($notification, $now)) {
@@ -153,6 +174,18 @@ final readonly class NotificationDeliverer
         $this->entityManager->flush();
 
         return [$notification, null];
+    }
+
+    private static function isStale(ScheduledNotification $notification, \DateTimeImmutable $now): bool
+    {
+        if ($notification->getFireAt() < $now->modify('-'.self::MAX_LATE)) {
+            return true;
+        }
+
+        // Alarms set relative to the end, and snoozes, may come after the start on purpose.
+        $due = max($notification->getOccurrenceStartsAt(), $notification->getFireAt());
+
+        return NotificationKind::FollowUp !== $notification->getKind() && $now > $due->modify(self::LATE_AFTER_START);
     }
 
     /**

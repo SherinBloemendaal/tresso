@@ -43,6 +43,12 @@ final readonly class NotificationDeviceProcessor implements ProcessorInterface
             self::check($data, $kind);
 
             return NotificationDeviceResource::fromEntity($this->entityManager->wrapInTransaction(function () use ($user, $data, $kind, $now): NotificationDevice {
+                // A push endpoint is one browser or phone, so it belongs to whoever registered it last: someone who
+                // signed out there must not get their reminders on the next person's screen.
+                foreach ($this->devices->findOfOthersByEndpoint($user, $data->endpoint) as $previous) {
+                    $this->entityManager->remove($previous);
+                }
+                $this->entityManager->flush();
                 $device = $this->devices->findByEndpoint($user, $data->endpoint);
                 if (null === $device) {
                     $device = new NotificationDevice($user, $kind, $data->endpoint, trim($data->name));

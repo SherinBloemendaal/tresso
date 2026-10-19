@@ -6,6 +6,7 @@ namespace App\Tests\Functional\Notification;
 
 use App\Entity\ScheduledNotification;
 use App\Notification\NotificationDeliverer;
+use App\Notification\NotificationDispatcher;
 use App\Notification\NotificationHandlers;
 use App\Notification\PlanCalendarObject;
 use App\Notification\PlanUserNotifications;
@@ -127,8 +128,16 @@ final class NotificationTest extends DatabaseTestCase
     public function testRefusesUnknownChannels(): void
     {
         $this->client->request('PATCH', '/api/v1/notification-settings', server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['channelsByKind' => ['brief' => ['pager']]], \JSON_THROW_ON_ERROR));
-
         self::assertResponseStatusCodeSame(422);
+    }
+
+    public function testChannelsAreChosenOnlyForKindsThatUseThem(): void
+    {
+        // Reminders carry their own channels; an unknown kind would only pile up.
+        foreach (['reminder', 'anything_else'] as $kind) {
+            $this->client->request('PATCH', '/api/v1/notification-settings', server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['channelsByKind' => [$kind => ['phone']]], \JSON_THROW_ON_ERROR));
+            self::assertResponseStatusCodeSame(422, $kind);
+        }
     }
 
     public function testForgetsSubscriptionsThePushServiceNoLongerKnows(): void
@@ -377,6 +386,243 @@ final class NotificationTest extends DatabaseTestCase
         self::assertResponseStatusCodeSame(422, 'Not in a meeting now.');
     }
 
+    public function testASnoozeSurvivesAReplan(): void
+    {
+        $this->registerDevices();
+        $eventId = $this->createEvent($this->inMinutes(30), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 25, 'channels' => ['phone']]]]);
+        $id = $this->onlyNotificationId();
+        $this->fire($id);
+        $this->client->jsonRequest('POST', '/api/v1/notifications/'.$id.'/snooze', ['minutes' => 15], $this->kim);
+        $snoozedUntil = $this->atom($this->decodedResponse()['fireAt']);
+
+        // Any change of the event replans it (a provider sync does the same).
+        $this->updateEvent($eventId, $this->inMinutes(30), ['summary' => 'Standup, renamed', 'useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 25, 'channels' => ['phone']]]]);
+
+        $notification = $this->notifications()[0];
+        self::assertSame($snoozedUntil, $this->atom($notification['fireAt']), 'The replan does not pull the snooze back to the past fire time.');
+        self::assertNull($notification['deliveredAt']);
+    }
+
+    public function testAPostponementSurvivesAReplan(): void
+    {
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $this->patchSettings(['quietHoursEnabled' => true, 'quietDays' => [1, 2, 3, 4, 5, 6, 7], 'quietStart' => $now->modify('-1 hour')->format('H:i'), 'quietEnd' => $now->modify('+1 hour')->format('H:i')]);
+        $eventId = $this->createEvent($this->inMinutes(3 * 60), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 175, 'channels' => ['phone']]]]);
+        $this->fire($this->onlyNotificationId(), $now->modify('+5 minutes'));
+        $postponed = $this->atom($this->notifications()[0]['fireAt']);
+        self::assertSame($now->modify('+1 hour')->format('Y-m-d\TH:i'), substr($postponed, 0, 16));
+
+        $this->updateEvent($eventId, $this->inMinutes(3 * 60), ['summary' => 'Renamed', 'useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 175, 'channels' => ['phone']]]]);
+
+        self::assertSame($postponed, $this->atom($this->notifications()[0]['fireAt']));
+    }
+
+    public function testAnEventMovedAfterItsReminderGetsANewOne(): void
+    {
+        $this->registerDevices();
+        $eventId = $this->createEvent($this->inMinutes(8), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 5, 'channels' => ['phone']]]]);
+        $id = $this->onlyNotificationId();
+        $this->fire($id);
+
+        $later = $this->inMinutes(3 * 60);
+        $this->updateEvent($eventId, $later, ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 5, 'channels' => ['phone']]]]);
+
+        $notification = $this->notifications()[0];
+        self::assertSame($id, $notification['id']);
+        self::assertNull($notification['deliveredAt'], 'A new round for the new time.');
+        self::assertSame($later->modify('-5 minutes')->format(\DATE_ATOM), $this->atom($notification['fireAt']));
+        $this->fire($id);
+        self::assertCount(2, array_filter($this->http()->calls(), static fn (array $call): bool => str_starts_with($call['url'], 'https://exp.host/')), 'Delivered again for the new time.');
+    }
+
+    public function testAFailedSendIsTriedAgainAndASentOneNever(): void
+    {
+        $this->registerDevices();
+        $this->http()->respondOnce(self::PUSH_ENDPOINT, '', 500);
+        $this->createEvent($this->inMinutes(6), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 5, 'channels' => ['phone', 'desktop']]]]);
+        $id = $this->onlyNotificationId();
+        $this->fire($id);
+        self::assertSame(['failed', 'sent', 'sent'], $this->deliveryStatuses(), 'Web push failed; the phone and the desktop app got it.');
+
+        $this->sweep();
+        self::assertCount(1, $this->pushesTo(self::PUSH_ENDPOINT), 'Not again before the pause is over.');
+
+        $this->connection()->executeStatement("UPDATE notification_delivery SET updated_at = updated_at - INTERVAL '5 minutes'");
+        $this->sweep();
+
+        self::assertCount(2, $this->pushesTo(self::PUSH_ENDPOINT));
+        self::assertCount(1, array_filter($this->http()->calls(), static fn (array $call): bool => str_starts_with($call['url'], 'https://exp.host/')), 'What went out is never sent again.');
+        self::assertSame(['sent', 'sent', 'sent'], $this->deliveryStatuses());
+    }
+
+    public function testASendThatNeverReportedBackIsTriedAgain(): void
+    {
+        $this->registerDevices();
+        $this->createEvent($this->inMinutes(6), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 5, 'channels' => ['desktop']]]]);
+        $this->fire($this->onlyNotificationId());
+        // As after a crash between claiming and sending.
+        $this->connection()->executeStatement("UPDATE notification_delivery SET status = 'sending', updated_at = updated_at - INTERVAL '11 minutes'");
+
+        $this->sweep();
+
+        self::assertCount(2, $this->pushesTo(self::PUSH_ENDPOINT));
+        self::assertSame(['sent', 'sent'], $this->deliveryStatuses());
+    }
+
+    public function testStaleRemindersAreNotDelivered(): void
+    {
+        $this->registerDevices();
+        $start = $this->inMinutes(10);
+        $this->createEvent($start, ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 5, 'channels' => ['phone']]]]);
+
+        $this->fire($this->onlyNotificationId(), $start->modify('+30 minutes'));
+
+        self::assertSame([], $this->http()->calls(), 'The event started half an hour ago.');
+        self::assertSame([], $this->notifications());
+    }
+
+    public function testAFocusBlockNeverHoldsAReminderPastItsEvent(): void
+    {
+        $this->registerDevices();
+        $blockStart = $this->inMinutes(-10);
+        $this->createEvent($blockStart, ['summary' => 'Focus: budget', 'end' => ['dateTime' => $blockStart->modify('+60 minutes')->setTimezone(new \DateTimeZone('Europe/Amsterdam'))->format('Y-m-d\TH:i:s'), 'timeZone' => 'Europe/Amsterdam']]);
+        $this->createEvent($this->inMinutes(20), ['summary' => 'Call the bank', 'useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 15, 'channels' => ['phone']]]]);
+
+        $call = array_values(array_filter($this->notifications(), static fn (array $n): bool => 'Call the bank' === $n['title']));
+        $this->fire(self::string($call[0]['id']));
+
+        $call = array_values(array_filter($this->notifications(), static fn (array $n): bool => 'Call the bank' === $n['title']));
+        self::assertNotNull($call[0]['deliveredAt'], 'It starts before the block ends.');
+        self::assertTrue($call[0]['silent']);
+        $expo = array_values(array_filter($this->http()->calls(), static fn (array $c): bool => str_starts_with($c['url'], 'https://exp.host/')));
+        $body = json_decode($expo[0]['body'], true, flags: \JSON_THROW_ON_ERROR);
+        self::assertIsArray($body);
+        self::assertSame('reminders_silent', $body['channelId'], 'Silent on Android too.');
+    }
+
+    public function testASnoozeReachesTheOtherDevices(): void
+    {
+        $this->registerDevices();
+        $this->createEvent($this->inMinutes(30), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 25, 'channels' => ['phone']]]]);
+        $id = $this->onlyNotificationId();
+        $this->fire($id);
+        $cursor = $this->getJson('/api/v1/sync/changes?since=0', $this->kim)['cursor'];
+        self::assertIsInt($cursor);
+
+        $this->client->jsonRequest('POST', '/api/v1/notifications/'.$id.'/snooze', ['minutes' => 10], $this->kim);
+        $delta = $this->getJson('/api/v1/sync/changes?since='.$cursor, $this->kim);
+
+        self::assertIsArray($delta['notifications']);
+        self::assertSame([$id], array_column($delta['notifications'], 'id'));
+        $snoozed = $delta['notifications'][0];
+        self::assertIsArray($snoozed);
+        self::assertNull($snoozed['deliveredAt']);
+        self::assertIsString($snoozed['snoozedUntil']);
+    }
+
+    public function testAPushEndpointBelongsToTheLastUserWhoRegisteredIt(): void
+    {
+        $this->registerDevices();
+        $this->createUser('lisa@example.test', 'Lisa');
+        $lisa = $this->userHeaders('lisa@example.test', ['settings:read', 'settings:write']);
+
+        $this->client->jsonRequest('POST', '/api/v1/notification-devices', ['kind' => 'expo', 'endpoint' => self::EXPO_TOKEN, 'name' => 'Phone'], $lisa);
+        self::assertResponseIsSuccessful();
+
+        self::assertSame(['web_push', 'desktop'], array_column($this->getJson('/api/v1/notification-devices', $this->kim), 'kind'), 'Kim signed out on that phone.');
+        self::assertSame(['expo'], array_column($this->getJson('/api/v1/notification-devices', $lisa), 'kind'));
+    }
+
+    public function testEmailNotificationsGoOnlyToTheUsersOwnAddresses(): void
+    {
+        $this->client->request('PATCH', '/api/v1/notification-settings', server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['emailAddress' => 'victim@elsewhere.example'], \JSON_THROW_ON_ERROR));
+        self::assertResponseStatusCodeSame(422);
+
+        $this->patchSettings(['emailAddress' => 'Kim@Example.test']);
+        self::assertSame('kim@example.test', $this->getJson('/api/v1/notification-settings', $this->kim)['emailAddress']);
+    }
+
+    public function testFloatingTimesAreReadInTheUsersZone(): void
+    {
+        $this->patchSettings(['timeZone' => 'Europe/Amsterdam']);
+        $local = new \DateTimeImmutable('+2 days 10:00', new \DateTimeZone('Europe/Amsterdam'));
+        $calendar = static::getContainer()->get(\App\Repository\CalendarRepository::class)->findOneOwnedBy($this->user(), $this->calendarId);
+        self::assertNotNull($calendar);
+        $ical = implode("\r\n", ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Test//EN', 'BEGIN:VEVENT', 'UID:floating@test', 'DTSTAMP:20261019T080000Z',
+            'DTSTART:'.$local->format('Ymd\THis'), 'DURATION:PT30M', 'SUMMARY:Floating', 'BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT10M', 'END:VALARM', 'END:VEVENT', 'END:VCALENDAR', '']);
+        $entityManager = static::getContainer()->get(EntityManagerInterface::class);
+        $entityManager->wrapInTransaction(static fn () => static::getContainer()->get(\App\Calendar\CalendarStore::class)->save(new \App\Entity\CalendarObject($calendar, 'floating@test', ''), \App\Calendar\ICalendar\CalendarDocument::parse($ical)));
+        $this->runQueuedPlanning();
+
+        self::assertSame($local->modify('-10 minutes')->setTimezone(new \DateTimeZone('UTC'))->format(\DATE_ATOM), $this->atom($this->notifications()[0]['fireAt']));
+    }
+
+    public function testOneUserWhosePlanningFailsDoesNotStopTheSweep(): void
+    {
+        $this->createUser('lisa@example.test', 'Lisa');
+        $this->connection()->executeStatement("UPDATE notification_preferences SET time_zone = 'Mars/Olympus', planned_until = NULL FROM app_user u WHERE u.id = notification_preferences.user_id AND u.email = 'kim@example.test'");
+        $this->connection()->executeStatement("UPDATE notification_preferences SET planned_until = NULL FROM app_user u WHERE u.id = notification_preferences.user_id AND u.email = 'lisa@example.test'");
+
+        $this->sweep();
+
+        $plans = $this->connection()->fetchAllKeyValue("SELECT u.email, p.planned_until IS NOT NULL FROM notification_preferences p JOIN app_user u ON u.id = p.user_id ORDER BY u.email");
+        self::assertEquals(['kim@example.test' => false, 'lisa@example.test' => true], $plans, 'Lisa is planned although Kim fails.');
+        self::assertNotNull($this->connection()->fetchOne("SELECT p.plan_retry_at FROM notification_preferences p JOIN app_user u ON u.id = p.user_id WHERE u.email = 'kim@example.test'"), 'Kim waits before the next try.');
+    }
+
+    public function testExposReceiptsRemovePhonesThatAreGone(): void
+    {
+        $this->registerDevices();
+        $this->createEvent($this->inMinutes(6), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 5, 'channels' => ['phone']]]]);
+        $this->fire($this->onlyNotificationId());
+        $this->http()->respond('https://exp.host/--/api/v2/push/getReceipts', json_encode(['data' => ['ticket-1' => ['status' => 'error', 'message' => 'gone', 'details' => ['error' => 'DeviceNotRegistered']]]], \JSON_THROW_ON_ERROR));
+
+        static::getContainer()->get(NotificationDispatcher::class)->checkReceipts(new \DateTimeImmutable('+20 minutes'));
+
+        self::assertSame(['web_push', 'desktop'], array_column($this->getJson('/api/v1/notification-devices', $this->kim), 'kind'));
+        self::assertSame(0, $this->connection()->fetchOne('SELECT COUNT(*)::int FROM notification_delivery WHERE ticket IS NOT NULL'));
+    }
+
+    public function testOtherUsersNotificationsDevicesRulesNotesAndEstimatesDoNotExist(): void
+    {
+        $this->registerDevices();
+        $eventId = $this->createEvent($this->inMinutes(30), ['location' => 'Herengracht 1']);
+        $notificationId = $this->notifications()[0]['id'];
+        $devices = $this->getJson('/api/v1/notification-devices', $this->kim);
+        $rules = $this->getJson('/api/v1/reminder-rules', $this->kim);
+        self::assertIsArray($devices[0]);
+        self::assertIsArray($rules[0]);
+        $deviceId = $devices[0]['id'];
+        $ruleId = $rules[0]['id'];
+        self::assertIsString($notificationId);
+        self::assertIsString($deviceId);
+        self::assertIsString($ruleId);
+        $this->createUser('lisa@example.test', 'Lisa');
+        $lisa = $this->userHeaders('lisa@example.test', ['mail:read', 'calendar:read', 'calendar:write', 'settings:read', 'settings:write']);
+
+        foreach ([
+            ['POST', '/api/v1/notifications/'.$notificationId.'/dismiss', []],
+            ['POST', '/api/v1/notifications/'.$notificationId.'/snooze', ['minutes' => 5]],
+            ['PATCH', '/api/v1/notification-devices/'.$deviceId, ['enabled' => false]],
+            ['DELETE', '/api/v1/notification-devices/'.$deviceId, null],
+            ['PUT', '/api/v1/reminder-rules/'.$ruleId, ['name' => 'Taken', 'reminders' => []]],
+            ['DELETE', '/api/v1/reminder-rules/'.$ruleId, null],
+            ['PUT', '/api/v1/calendar-events/'.$eventId.'/note', ['text' => 'Mine now']],
+            ['POST', '/api/v1/calendar-events/'.$eventId.'/leave-estimate', ['latitude' => 52.37, 'longitude' => 4.89]],
+            ['GET', '/api/v1/calendar-events/'.$eventId.'/brief', null],
+        ] as [$method, $uri, $body]) {
+            if ('PATCH' === $method) {
+                $this->client->request($method, $uri, server: [...$lisa, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode($body, \JSON_THROW_ON_ERROR));
+            } elseif (null === $body) {
+                $this->client->request($method, $uri, server: $lisa);
+            } else {
+                $this->client->jsonRequest($method, $uri, $body, $lisa);
+            }
+            self::assertResponseStatusCodeSame(404, $method.' '.$uri);
+        }
+        self::assertSame([], $this->getJson('/api/v1/notifications', $lisa));
+    }
+
     public function testRemovingAnEventDropsItsPlannedNotifications(): void
     {
         $event = $this->createEvent($this->inMinutes(2 * 24 * 60));
@@ -465,6 +711,45 @@ final class NotificationTest extends DatabaseTestCase
         $entityManager = static::getContainer()->get(EntityManagerInterface::class);
         $entityManager->wrapInTransaction(static fn () => static::getContainer()->get(\App\Calendar\CalendarStore::class)->save(new \App\Entity\CalendarObject($calendar, $uid, ''), \App\Calendar\ICalendar\CalendarDocument::parse($ical)));
         $this->runQueuedPlanning();
+    }
+
+    /**
+     * @param array<string, mixed> $overrides
+     */
+    private function updateEvent(string $eventId, \DateTimeImmutable $start, array $overrides = []): void
+    {
+        $local = $start->setTimezone(new \DateTimeZone('Europe/Amsterdam'));
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($this->calendarId, [
+            'summary' => 'Standup',
+            'start' => ['dateTime' => $local->format('Y-m-d\TH:i:s'), 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => $local->modify('+30 minutes')->format('Y-m-d\TH:i:s'), 'timeZone' => 'Europe/Amsterdam'],
+            ...$overrides,
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+        $this->runQueuedPlanning();
+    }
+
+    /** @return list<string> statuses of the deliveries, sorted */
+    private function deliveryStatuses(): array
+    {
+        /** @var list<string> */
+        return $this->connection()->fetchFirstColumn('SELECT status FROM notification_delivery ORDER BY status');
+    }
+
+    /** @return list<array{method: string, url: string, body: string, headers: list<string>}> */
+    private function pushesTo(string $url): array
+    {
+        return array_values(array_filter($this->http()->calls(), static fn (array $call): bool => $url === $call['url']));
+    }
+
+    private function sweep(): void
+    {
+        static::getContainer()->get(NotificationHandlers::class)->sweep(new SweepNotifications());
+    }
+
+    private function user(): \App\Entity\User
+    {
+        return static::getContainer()->get(\App\Repository\UserRepository::class)->findOneBy(['email' => 'kim@example.test']) ?? self::fail('No user.');
     }
 
     private function markWork(): void

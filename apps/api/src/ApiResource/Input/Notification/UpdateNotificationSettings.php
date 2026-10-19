@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\ApiResource\Input\Notification;
 
 use App\Enum\NotificationChannel;
+use App\Enum\NotificationKind;
 use App\Enum\SnoozeChoice;
 use App\Enum\TravelMode;
 use Symfony\Component\Validator\Constraints as Assert;
@@ -30,7 +31,10 @@ final class UpdateNotificationSettings
 
     public ?bool $focusDuringBusy = null;
 
-    /** Where email notifications go; an empty string goes back to the sign-in address. */
+    /**
+     * Where email notifications go: the sign-in address or one of the user's mail accounts; an empty string goes back
+     * to the sign-in address.
+     */
     #[Assert\AtLeastOneOf([new Assert\Blank(), new Assert\Email(mode: Assert\Email::VALIDATION_MODE_STRICT)])]
     #[Assert\Length(max: 320)]
     public ?string $emailAddress = null;
@@ -67,8 +71,8 @@ final class UpdateNotificationSettings
     public ?array $snoozeChoices = null;
 
     /**
-     * Channels per kind of notification ("leave_now", "brief", ...): a list of channel names (empty: not sent), or null
-     * to go back to the default. Kinds left out stay as they are.
+     * Channels per kind of notification (NotificationKind::withChosenChannels()): a list of channel names (empty: not
+     * sent), or null to go back to the default. Kinds left out stay as they are.
      *
      * @var array<mixed>|null as sent; the callback below checks the shape
      */
@@ -78,8 +82,8 @@ final class UpdateNotificationSettings
     public function validateChannels(ExecutionContextInterface $context): void
     {
         foreach ($this->channelsByKind ?? [] as $kind => $channels) {
-            if (!\is_string($kind) || 1 !== preg_match('/^[a-z][a-z_]{0,31}$/', $kind)) {
-                $context->buildViolation('A kind of notification is a short lowercase name.')->atPath('channelsByKind')->addViolation();
+            if (!\is_string($kind) || !\in_array($kind, NotificationKind::withChosenChannels(), true)) {
+                $context->buildViolation(\sprintf('Channels can be chosen for %s.', implode(', ', NotificationKind::withChosenChannels())))->atPath('channelsByKind')->addViolation();
 
                 continue;
             }

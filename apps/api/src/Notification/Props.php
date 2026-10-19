@@ -8,7 +8,8 @@ use App\Calendar\ICalendar\Props as CalendarProps;
 use Sabre\VObject\Component\VEvent;
 
 /**
- * Moments of an expanded occurrence: dates are read as midnight in the user's zone.
+ * Moments of an expanded occurrence: dates are read as midnight in the user's zone, and floating date-times (no zone)
+ * as wall-clock times there too, as EventTime reads them.
  */
 final class Props
 {
@@ -23,7 +24,7 @@ final class Props
         $utc = new \DateTimeZone('UTC');
 
         return $property->hasTime()
-            ? $property->getDateTime($utc)->setTimezone($utc)
+            ? $property->getDateTime($zone)->setTimezone($utc)
             : new \DateTimeImmutable($property->getDateTime($zone)->format('Y-m-d'), $zone)->setTimezone($utc);
     }
 }

@@ -11,7 +11,8 @@ use Symfony\Component\Uid\Uuid;
 /**
  * One delivery of one notification to one target (a device, or email). The unique delivery key and target are what
  * make delivery idempotent: a retried message or a sweep never notifies a device twice. The key is chosen by the
- * feature that sends, e.g. "calendar:{notification}:{round}".
+ * feature that sends, e.g. "calendar:{notification}:{round}". A failed send is tried again with a growing pause, and
+ * one that never reported back (a crash) after a while; one that went out never is.
  */
 #[ORM\Entity]
 #[ORM\UniqueConstraint(columns: ['delivery_key', 'target'])]
@@ -43,6 +44,17 @@ class NotificationDelivery
     #[ORM\Column(length: 500, nullable: true)]
     private ?string $error = null;
 
+    /** Sends tried so far. */
+    #[ORM\Column]
+    private int $attempts = 1;
+
+    /** Expo's ticket for a send, until its receipt was read. */
+    #[ORM\Column(length: 64, nullable: true)]
+    private ?string $ticket = null;
+
+    #[ORM\Column]
+    private \DateTimeImmutable $updatedAt;
+
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
@@ -54,6 +66,7 @@ class NotificationDelivery
         $this->target = $target;
         $this->status = self::SENDING;
         $this->createdAt = new \DateTimeImmutable();
+        $this->updatedAt = $this->createdAt;
     }
 
     public function getId(): Uuid
@@ -84,5 +97,15 @@ class NotificationDelivery
     public function getError(): ?string
     {
         return $this->error;
+    }
+
+    public function getAttempts(): int
+    {
+        return $this->attempts;
+    }
+
+    public function getTicket(): ?string
+    {
+        return $this->ticket;
     }
 }
