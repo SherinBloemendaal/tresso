@@ -27,9 +27,19 @@ final class MessageActionInput
     #[Assert\Uuid]
     public ?string $folderId = null;
 
+    /**
+     * For `move`: only the copies in this folder move (an undo puts back exactly what moved); without it every copy
+     * outside the target does.
+     */
+    #[Assert\Uuid]
+    public ?string $fromFolderId = null;
+
     #[Assert\Callback]
     public function validateFolder(ExecutionContextInterface $context): void
     {
+        if (MessageAction::Move !== $this->action && null !== $this->fromFolderId) {
+            $context->buildViolation('Only a move takes a folder to move from.')->atPath('fromFolderId')->addViolation();
+        }
         if (MessageAction::Move === $this->action && null === $this->folderId) {
             $context->buildViolation('Choose the folder to move to.')->atPath('folderId')->addViolation();
         }

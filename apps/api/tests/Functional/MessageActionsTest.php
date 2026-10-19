@@ -431,6 +431,24 @@ final class MessageActionsTest extends DatabaseTestCase
         self::assertSame([$this->folderId('INBOX')], $this->message()['folderIds'], 'a refused selection changes nothing');
     }
 
+    public function testAMoveCanTakeOnlyTheCopiesInOneFolder(): void
+    {
+        $this->ingest($this->accountId, 'Projects', '3', '<plan@finance.example>');
+
+        $this->client->jsonRequest('POST', '/api/v1/message-actions', ['messageIds' => [$this->messageId], 'action' => 'move', 'folderId' => $this->folderId('Archive'), 'fromFolderId' => $this->folderId('INBOX')], $this->kim);
+        self::assertResponseIsSuccessful();
+
+        $folders = $this->message()['folderIds'];
+        sort($folders);
+        $expected = [$this->folderId('Archive'), $this->folderId('Projects')];
+        sort($expected);
+        self::assertSame($expected, $folders, 'the copy in Projects stays');
+        self::assertSame(['folder' => 'INBOX', 'uidValidity' => 1, 'remoteUid' => '1'], $this->claim()[0]['source']);
+
+        $this->client->jsonRequest('POST', '/api/v1/message-actions', ['messageIds' => [$this->messageId], 'action' => 'flag', 'fromFolderId' => $this->folderId('INBOX')], $this->kim);
+        self::assertResponseStatusCodeSame(422);
+    }
+
     public function testRefersOnlyToTheUsersOwnMessagesAndFolders(): void
     {
         $lisa = $this->userHeaders('lisa@example.test', ['mail:read', 'mail:write', 'settings:write']);

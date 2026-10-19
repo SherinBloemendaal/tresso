@@ -30,12 +30,13 @@ final readonly class MessageActions
     /**
      * @param list<Message> $messages the user's own messages
      * @param Folder|null   $target   the folder for {@see MessageAction::Move}, of the messages' account
+     * @param Folder|null   $from     for a move: only the copies in this folder move
      *
      * @return int how many messages changed
      *
      * @throws MissingFolder when an account has no Archive or Trash folder to move into; nothing changes then
      */
-    public function apply(array $messages, MessageAction $action, ?Folder $target, \DateTimeImmutable $now): int
+    public function apply(array $messages, MessageAction $action, ?Folder $target, \DateTimeImmutable $now, ?Folder $from = null): int
     {
         // Every account must have the folder before anything changes, so a mixed selection is all or nothing.
         $targets = [];
@@ -61,8 +62,9 @@ final readonly class MessageActions
                 MessageAction::Flag => $this->setFlags($message, null, true, $now),
                 MessageAction::Unflag => $this->setFlags($message, null, false, $now),
                 // Archiving takes the message out of the inbox; copies in other folders stay where they are.
-                MessageAction::Archive => $this->move($message, $folder, static fn (Folder $from): bool => FolderRole::Inbox === $from->getRole(), $now),
-                MessageAction::Trash, MessageAction::Move => $this->move($message, $folder, static fn (): bool => true, $now),
+                MessageAction::Archive => $this->move($message, $folder, static fn (Folder $copy): bool => FolderRole::Inbox === $copy->getRole(), $now),
+                MessageAction::Trash => $this->move($message, $folder, static fn (): bool => true, $now),
+                MessageAction::Move => $this->move($message, $folder, static fn (Folder $copy): bool => null === $from || $copy === $from, $now),
             };
             if ($did) {
                 ++$changed;
