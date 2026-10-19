@@ -26,6 +26,8 @@ const menuOpen = ref(false)
 const menu = ref<HTMLElement | null>(null)
 const menuButton = ref<HTMLButtonElement | null>(null)
 let unmounted = false
+/** Reading the conversation on open, while it is on its way. */
+let opening: Promise<void> = Promise.resolve()
 
 const flagged = computed(() => messages.value.some((message) => message.flags.flagged))
 // Folders the conversation can move to: its account's, except the ones mail apps manage themselves.
@@ -58,11 +60,9 @@ watch(
       open.add(newest.id)
     }
     expanded.value = open
-    // Opening a conversation reads it, as one of the conversation's actions, so a quick "unread" goes after it.
+    // Opening a conversation reads it; actions the user takes meanwhile wait for that, so a quick "unread" goes after.
     if (unread.length > 0) {
-      void exclusive(async () => {
-        await run(unread, 'markRead')
-      })
+      opening = run(unread, 'markRead').then(() => undefined)
     }
   },
   { immediate: true },
@@ -92,13 +92,17 @@ async function run(messageIds: string[], action: MessageAction, folderId?: strin
   }
 }
 
-/** Runs one action at a time: a second click or a held key waits for the first instead of acting on its result. */
+/**
+ * Runs one action at a time: a second click or a held key during an action is ignored rather than acting on its
+ * result. An action taken while the conversation is still being read on open waits for that and then runs.
+ */
 async function exclusive(task: () => Promise<void>): Promise<void> {
   if (busy.value) {
     return
   }
   busy.value = true
   try {
+    await opening
     await task()
   } finally {
     busy.value = false
