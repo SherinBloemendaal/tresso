@@ -10,12 +10,15 @@ use ApiPlatform\Validator\Exception\ValidationException;
 use App\ApiResource\Input\Outbox\RecipientInput;
 use App\ApiResource\Input\Outbox\SendMessageInput;
 use App\ApiResource\OutgoingMessageResource;
+use App\Entity\Draft;
 use App\Entity\MailAccount;
 use App\Entity\Message;
 use App\Entity\OutgoingMessage;
 use App\Enum\OutgoingStatus;
 use App\Outbox\Composition;
+use App\Outbox\DraftFiling;
 use App\Outbox\Outbox;
+use App\Repository\DraftRepository;
 use App\Repository\MailAccountRepository;
 use App\Repository\MessageRepository;
 use App\Repository\OutgoingMessageRepository;
@@ -39,6 +42,8 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
         private MailAccountRepository $accounts,
         private MessageRepository $messages,
         private OutgoingMessageRepository $outgoing,
+        private DraftRepository $drafts,
+        private DraftFiling $filing,
     ) {
     }
 
@@ -70,9 +75,25 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
                 null === $data->sendAt || $data->sendAt < $now ? $now : $data->sendAt,
             );
 
-            return OutgoingMessageResource::fromEntity($this->entityManager->wrapInTransaction(
-                fn (): OutgoingMessage => $this->outbox->queue($composition, $now),
-            ));
+            $draft = null;
+            if (null !== $data->draftId) {
+                $draft = $this->drafts->findOneOwnedBy($user, $data->draftId);
+                if (!$draft instanceof Draft) {
+                    throw self::invalid('draftId', 'No draft with that id.', $data->draftId);
+                }
+            }
+
+            return OutgoingMessageResource::fromEntity($this->entityManager->wrapInTransaction(function () use ($composition, $now, $draft): OutgoingMessage {
+                $queued = $this->outbox->queue($composition, $now);
+                if (null !== $draft) {
+                    $locked = $this->entityManager->find(Draft::class, $draft->getId(), LockMode::PESSIMISTIC_WRITE);
+                    if ($locked instanceof Draft) {
+                        $this->filing->discard($locked);
+                    }
+                }
+
+                return $queued;
+            }));
         }
 
         $id = $uriVariables['id'] ?? null;

@@ -36,7 +36,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
 
         [$until, $hasMore] = $this->boundary($userId, $since, $limit);
         if ($until === $since) {
-            return new SyncChanges($since, false, [], [], [], [], [], [], []);
+            return new SyncChanges($since, false, [], [], [], [], [], [], [], []);
         }
 
         $range = ['user' => $userId, 'since' => $since, 'until' => $until];
@@ -50,6 +50,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             $this->messages($range),
             $this->outgoingMessages($range),
             $this->signatures($range),
+            $this->drafts($range),
             $this->deleted($range),
         );
     }
@@ -76,6 +77,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 SELECT o.change_seq, COUNT(*) FROM outgoing_message o JOIN mail_account a ON a.id = o.mail_account_id WHERE a.owner_id = :user AND o.change_seq > :since GROUP BY o.change_seq
                 UNION ALL
                 SELECT g.change_seq, COUNT(*) FROM signature g WHERE g.owner_id = :user AND g.change_seq > :since GROUP BY g.change_seq
+                UNION ALL
+                SELECT d.change_seq, COUNT(*) FROM draft d WHERE d.owner_id = :user AND d.change_seq > :since GROUP BY d.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -255,6 +258,41 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'html' => $r['html'],
             'updatedAt' => self::date($r['updated_at']),
         ], $rows);
+    }
+
+    /**
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function drafts(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT d.id, d.mail_account_id, d.kind, d.recipients, d.subject, d.html, d.signature_id, d.quote_html, d.in_reply_to_id, d.version, d.updated_at
+             FROM draft d WHERE d.owner_id = :user AND d.change_seq > :since AND d.change_seq <= :until ORDER BY d.change_seq',
+            $range,
+        );
+
+        return array_map(static function (array $r): array {
+            /** @var array{to?: list<array{address: string, name: ?string}>, cc?: list<array{address: string, name: ?string}>, bcc?: list<array{address: string, name: ?string}>} $recipients */
+            $recipients = json_decode(\is_string($r['recipients']) ? $r['recipients'] : '{}', true, flags: \JSON_THROW_ON_ERROR);
+
+            return [
+                'id' => $r['id'],
+                'mailAccountId' => $r['mail_account_id'],
+                'kind' => $r['kind'],
+                'to' => $recipients['to'] ?? [],
+                'cc' => $recipients['cc'] ?? [],
+                'bcc' => $recipients['bcc'] ?? [],
+                'subject' => $r['subject'],
+                'html' => $r['html'],
+                'signatureId' => $r['signature_id'],
+                'quoteHtml' => $r['quote_html'],
+                'inReplyToMessageId' => $r['in_reply_to_id'],
+                'version' => self::int($r['version']),
+                'updatedAt' => self::date($r['updated_at']),
+            ];
+        }, $rows);
     }
 
     /**

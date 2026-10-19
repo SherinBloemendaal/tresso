@@ -11,6 +11,7 @@ use ApiPlatform\Validator\Exception\ValidationException;
 use App\ApiResource\Input\CreateSignature;
 use App\ApiResource\Input\UpdateSignature;
 use App\ApiResource\SignatureResource;
+use App\Entity\Draft;
 use App\Entity\MailAccount;
 use App\Entity\Signature;
 use App\Entity\User;
@@ -66,8 +67,11 @@ final readonly class SignatureProcessor implements ProcessorInterface
         $signature = $this->ownedSignature($owner, $uriVariables);
 
         if ($operation instanceof DeleteOperationInterface) {
-            // Cleared here rather than by the foreign key, so the accounts reach clients as changed.
+            // Cleared here rather than by the foreign key, so the accounts and drafts reach clients as changed.
             $this->useAsDefaultFor($signature, $accounts, [], $data);
+            foreach ($this->entityManager->getRepository(Draft::class)->findBy(['signature' => $signature]) as $draft) {
+                $draft->dropSignature();
+            }
             $this->entityManager->remove($signature);
             $this->entityManager->flush();
 

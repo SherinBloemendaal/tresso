@@ -44,6 +44,10 @@ final class SendMessageInput
 
     public ?\DateTimeImmutable $sendAt = null;
 
+    /** The draft this message was written in: it is removed, here and from the Drafts folder, once queued. */
+    #[Assert\Uuid]
+    public ?string $draftId = null;
+
     #[Assert\Callback]
     public function validateRecipients(ExecutionContextInterface $context): void
     {
