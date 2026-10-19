@@ -4,14 +4,13 @@ import { fetch as streamingFetch } from 'expo/fetch'
 import * as SecureStore from 'expo-secure-store'
 import type { ChangePage, ConversationSummary, MessageBody, RealtimeAccess, SyncedMailAccount, SyncedMessage, SyncedThread } from '@tresso/core'
 import { useAuth } from '@/auth/AuthProvider'
+import { LAST_USER } from '@/auth/secureTokenStore'
 import { MailSession, type MailState } from '@/mail/mailSession'
 import { deleteSql, openSql } from '@/mail/sql'
 
 const LIST_LIMIT = 200
 /** Wait before asking again who is signed in, after that failed (offline at start, server down). */
 const ME_RETRY_MS = 10_000
-/** Who was signed in last, so their copy opens before the server answers (or when it cannot: offline). */
-const LAST_USER = 'mail.lastUserId'
 
 interface Mail extends Omit<MailState, 'userId'> {
   mailAccounts(): Promise<SyncedMailAccount[]>
@@ -54,15 +53,17 @@ export function MailProvider({ children }: { children: ReactNode }) {
       return
     }
     if (!auth.isAuthenticated) {
+      // The token store forgets who was signed in together with the tokens.
       void session.switchTo(null)
-      void SecureStore.deleteItemAsync(LAST_USER).catch(() => {})
       return
     }
     let current = true
+    let answered = false
     let retry: ReturnType<typeof setTimeout> | undefined
     void SecureStore.getItemAsync(LAST_USER)
       .then((last) => {
-        if (current && last !== null) {
+        // Only until the server said who it is: its answer always wins.
+        if (current && !answered && last !== null) {
           void session.switchTo(last)
         }
       })
@@ -72,6 +73,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
         .me()
         .then((me) => {
           if (current) {
+            answered = true
             setLookupError(null)
             void session.switchTo(me.id)
             void SecureStore.setItemAsync(LAST_USER, me.id).catch(() => {})

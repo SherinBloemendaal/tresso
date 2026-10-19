@@ -138,6 +138,15 @@ describe('MailDatabase on the device', () => {
     expect((await db.thread('t1'))?.messages.map((m) => m.id)).toEqual(['m2', 'm1'])
   })
 
+  it('refuses pages once closing, after storing the one in progress', async () => {
+    const storing = db.apply(page({ cursor: 11, messages: [message('m5', 't1', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00')] }))
+    await db.shut()
+    await storing
+
+    expect(await db.cursor()).toBe(11)
+    await expect(db.apply(page({ cursor: 12 }))).rejects.toThrow('The mail copy is closing.')
+  })
+
   it('rebuilds a copy made by another version, so it syncs again from the start and has the current shape', async () => {
     await sql.run("UPDATE meta SET value = '0' WHERE key = 'schema'")
     // An older shape of a table.

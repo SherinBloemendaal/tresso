@@ -25,6 +25,10 @@ describe('nextBodyHeight', () => {
     expect(height).toBeLessThan(600)
   })
 
+  it('keeps content that loads in three equal steps', () => {
+    expect(settle([280, 480, 680])).toBe(680)
+  })
+
   it('caps very long mail', () => {
     expect(settle([5_000, 50_000])).toBe(MAX_BODY_HEIGHT)
   })

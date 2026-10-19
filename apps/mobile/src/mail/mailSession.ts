@@ -173,6 +173,8 @@ export class MailSession {
     }
     this.update({ userId: null, ready: false, live: false, syncState: 'idle' })
     await open.realtime.stop()
+    // Waits for a page being stored, not for one on its way over the network: that one is refused when it arrives.
+    await open.database.shut()
     await open.sql.close()
   }
 

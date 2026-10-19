@@ -7,6 +7,11 @@ import type { TokenStore } from '@/auth/session'
 const ACCESS_TOKEN = 'auth.accessToken'
 const REFRESH_TOKEN = 'auth.refreshToken'
 const EXPIRES_AT = 'auth.expiresAt'
+/**
+ * Who was signed in last, for opening their mail before the server answers (see MailProvider). It lives with the
+ * tokens and goes with them on sign-out, so it never outlasts the sign-in it belongs to.
+ */
+export const LAST_USER = 'auth.lastUserId'
 
 /** The OS secure store: the iOS Keychain, or values encrypted with the Android Keystore. */
 export const secureTokenStore: TokenStore = {
@@ -24,7 +29,7 @@ export const secureTokenStore: TokenStore = {
   },
   async save(tokens) {
     if (tokens === null) {
-      await Promise.all([ACCESS_TOKEN, REFRESH_TOKEN, EXPIRES_AT].map((key) => SecureStore.deleteItemAsync(key)))
+      await Promise.all([ACCESS_TOKEN, REFRESH_TOKEN, EXPIRES_AT, LAST_USER].map((key) => SecureStore.deleteItemAsync(key)))
       return
     }
     // The expiry goes last, so an interrupted save never pairs a new expiry with an old token.

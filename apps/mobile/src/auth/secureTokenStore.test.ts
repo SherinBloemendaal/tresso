@@ -38,8 +38,9 @@ describe('secureTokenStore', () => {
     expect(await secureTokenStore.load()).toBeNull()
   })
 
-  it('forgets everything on sign-out', async () => {
+  it('forgets everything on sign-out, also who was signed in', async () => {
     await secureTokenStore.save({ accessToken: 'access', refreshToken: 'refresh', expiresAt: 1 })
+    items.set('auth.lastUserId', 'u1')
     await secureTokenStore.save(null)
 
     expect(items.size).toBe(0)
