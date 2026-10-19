@@ -123,6 +123,22 @@ class Category implements TracksChanges
         return self::listMatches($this->excludeSenders, $address);
     }
 
+    /**
+     * The exclude list entry that covers this sender other than the address itself (a domain), or null. Such an entry
+     * outlives {@see stopExcluding()} of the address.
+     */
+    public function exclusionOtherThan(string $address): ?string
+    {
+        $address = SenderPattern::normalize($address);
+        foreach ($this->excludeSenders as $entry) {
+            if ($entry !== $address && SenderPattern::matches($entry, $address)) {
+                return $entry;
+            }
+        }
+
+        return null;
+    }
+
     /** Takes an exact entry off the exclude list, e.g. when the user moves mail from that sender here. */
     public function stopExcluding(string $pattern): void
     {

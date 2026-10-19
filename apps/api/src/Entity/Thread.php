@@ -144,6 +144,9 @@ class Thread implements TracksChanges
 
     public function classify(Category $category, Verdict $verdict, string $reason, \DateTimeImmutable $at): void
     {
+        if ($this->category === $category && $this->verdict === $verdict && $this->classificationReason === $reason) {
+            return;
+        }
         $this->category = $category;
         $this->verdict = $verdict;
         $this->classificationReason = $reason;

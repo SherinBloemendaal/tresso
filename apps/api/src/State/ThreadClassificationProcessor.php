@@ -57,7 +57,20 @@ final readonly class ThreadClassificationProcessor implements ProcessorInterface
             $explicitVerdict = null === $data->verdict ? null : Verdict::from($data->verdict);
             $verdict = $explicitVerdict ?? $smartInbox->getVerdict();
 
-            $message = $this->classification->placeByUser($thread, $smartInbox, $verdict);
+            // Corrections and classification runs of this user take turns, so neither overwrites the other, and two
+            // corrections for one sender never race for the same sender rule.
+            $this->classification->lock($owner->getId());
+            $message = $this->classification->newestIncoming($thread);
+            $blocking = null === $message ? null : $smartInbox->exclusionOtherThan($message->getFromAddress());
+            if (null !== $blocking) {
+                // A rule for the sender would never apply: the classifier skips smart inboxes that exclude the sender.
+                throw new ValidationException(new ConstraintViolationList([new ConstraintViolation(
+                    \sprintf('Mail from %s is on the Never include list of %s. Take it off that list first.', $blocking, $smartInbox->getName()),
+                    null, [], $data, 'smartInboxId', $data->smartInboxId,
+                )]));
+            }
+
+            $this->classification->placeByUser($thread, $message, $smartInbox, $verdict);
 
             $rule = null;
             if (null !== $message) {
@@ -72,7 +85,9 @@ final readonly class ThreadClassificationProcessor implements ProcessorInterface
                 $smartInbox->stopExcluding($sender);
             }
             $this->entityManager->flush();
-            $this->scheduler->rulesChanged($owner->getId());
+            if (null !== $rule) {
+                $this->scheduler->senderChanged($owner->getId(), $rule->getSender());
+            }
 
             return new ThreadClassificationResource(
                 $thread->getId()->toRfc4122(),

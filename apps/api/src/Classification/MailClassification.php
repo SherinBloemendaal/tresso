@@ -13,7 +13,6 @@ use App\Enum\Verdict;
 use App\Repository\CategoryRepository;
 use App\Repository\MailAccountRepository;
 use App\Repository\SenderRuleRepository;
-use App\Sync\Change\ChangeSequencer;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Uid\Uuid;
@@ -31,6 +30,13 @@ final readonly class MailClassification
 {
     private const int BATCH_SIZE = 200;
 
+    /**
+     * The message is only in Sent or Drafts: the user's own, also when sent from an address that is not one of their
+     * accounts (an alias).
+     */
+    private const string FILED_AS_SENT = "(EXISTS (SELECT 1 FROM message_location l WHERE l.message_id = m.id)
+        AND NOT EXISTS (SELECT 1 FROM message_location l JOIN folder f ON f.id = l.folder_id WHERE l.message_id = m.id AND f.role NOT IN ('sent', 'drafts')))";
+
     public function __construct(
         private EntityManagerInterface $entityManager,
         private Connection $connection,
@@ -39,31 +45,48 @@ final readonly class MailClassification
         private CategoryRepository $smartInboxes,
         private SenderRuleRepository $senderRules,
         private MailAccountRepository $accounts,
-        private ChangeSequencer $sequencer,
     ) {
     }
 
-    /** Classifies every message of the user that was not looked at yet. */
-    public function classifyNew(Uuid $userId): void
+    /**
+     * Classifies the messages of the user that were not looked at yet, at most $maxBatches batches (all when null).
+     *
+     * @return bool whether messages are left for another run
+     */
+    public function classifyNew(Uuid $userId, ?int $maxBatches = null): bool
     {
-        do {
+        for ($batch = 0; null === $maxBatches || $batch < $maxBatches; ++$batch) {
             $count = $this->entityManager->wrapInTransaction(fn (): int => $this->classifyNewBatch($userId));
             $this->entityManager->clear();
-        } while (self::BATCH_SIZE === $count);
+            if ($count < self::BATCH_SIZE) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
      * Classifies the user's conversations again: those with mail since $since (every one when null), and those that
-     * lost their smart inbox. Conversations the user placed themselves are left alone.
+     * lost their smart inbox; only those with mail from $sender (an address or `@domain`) when given. Conversations
+     * the user placed themselves are left alone. Runs at most $maxBatches batches (all when null) from thread id
+     * $after on.
+     *
+     * @return string|null the thread id to go on after, or null when done
      */
-    public function reclassify(Uuid $userId, ?\DateTimeImmutable $since): void
+    public function reclassify(Uuid $userId, ?\DateTimeImmutable $since, ?string $sender = null, ?string $after = null, ?int $maxBatches = null): ?string
     {
-        $after = '00000000-0000-0000-0000-000000000000';
-        do {
-            $threadIds = $this->entityManager->wrapInTransaction(fn (): array => $this->reclassifyBatch($userId, $since, $after));
+        $after ??= '00000000-0000-0000-0000-000000000000';
+        for ($batch = 0; null === $maxBatches || $batch < $maxBatches; ++$batch) {
+            $threadIds = $this->entityManager->wrapInTransaction(fn (): array => $this->reclassifyBatch($userId, $since, $sender, $after));
             $this->entityManager->clear();
-            $after = end($threadIds) ?: $after;
-        } while (self::BATCH_SIZE === \count($threadIds));
+            if (\count($threadIds) < self::BATCH_SIZE) {
+                return null;
+            }
+            $after = $threadIds[\count($threadIds) - 1];
+        }
+
+        return $after;
     }
 
     private function classifyNewBatch(Uuid $userId): int
@@ -103,7 +126,7 @@ final readonly class MailClassification
         foreach ($messages as $message) {
             $threads[$message->getThread()->getId()->toRfc4122()] = $message->getThread();
         }
-        $newest = $this->newestIncoming(array_keys($threads), $context);
+        $newest = $this->newestIncomingIds(array_keys($threads), $context);
         foreach ($threads as $threadId => $thread) {
             $messageId = $newest[$threadId] ?? null;
             if (null !== $messageId && isset($byMessage[$messageId]) && !$thread->isClassifiedByUser()) {
@@ -125,7 +148,7 @@ final readonly class MailClassification
     /**
      * @return list<string> the thread ids of the batch, in id order
      */
-    private function reclassifyBatch(Uuid $userId, ?\DateTimeImmutable $since, string $after): array
+    private function reclassifyBatch(Uuid $userId, ?\DateTimeImmutable $since, ?string $sender, string $after): array
     {
         $this->lock($userId);
         $user = $this->entityManager->find(User::class, $userId);
@@ -140,12 +163,16 @@ final readonly class MailClassification
                AND (t.classification_reason IS NULL OR t.classification_reason <> :byUser)
                AND (CAST(:since AS TIMESTAMP) IS NULL OR t.last_message_at >= CAST(:since AS TIMESTAMP)
                     OR (t.category_id IS NULL AND t.classified_at IS NOT NULL))
+               AND (CAST(:address AS TEXT) IS NULL OR EXISTS (
+                    SELECT 1 FROM message m WHERE m.thread_id = t.id
+                      AND (m.from_address = :address OR m.from_address LIKE :domain OR m.from_address LIKE :subdomain)))
              ORDER BY t.id LIMIT :limit",
             [
                 'user' => $userId->toRfc4122(),
                 'after' => $after,
                 'byUser' => ClassificationReason::USER,
                 'since' => $since?->format('Y-m-d H:i:s'),
+                ...self::senderParameters($sender),
                 'limit' => self::BATCH_SIZE,
             ],
         );
@@ -155,7 +182,7 @@ final readonly class MailClassification
 
         $context = $this->context($user);
         $now = new \DateTimeImmutable();
-        $newest = $this->newestIncoming($threadIds, $context);
+        $newest = $this->newestIncomingIds($threadIds, $context);
         $messages = $this->incomingMessages(array_values($newest), $context);
         foreach ($this->mailToClassify($messages) as $id => $mail) {
             $classification = $this->classifier->classify($mail, $context);
@@ -168,26 +195,47 @@ final readonly class MailClassification
         return $threadIds;
     }
 
-    /**
-     * Applies the user's choice to a conversation: it moves to the smart inbox with the verdict, now and for good, and
-     * so does its newest incoming message. Returns that message, whose sender the choice is remembered for, or null
-     * when the conversation has only the user's own messages.
-     */
-    public function placeByUser(Thread $thread, Category $smartInbox, Verdict $verdict): ?Message
+    /** The newest message of the conversation someone else sent; null when it has only the user's own mail. */
+    public function newestIncoming(Thread $thread): ?Message
     {
-        $user = $thread->getMailAccount()->getOwner();
-        $context = new ClassificationContext($this->ownAddresses($user), [], []);
-        $now = new \DateTimeImmutable();
+        $context = new ClassificationContext($this->ownAddresses($thread->getMailAccount()->getOwner()), [], []);
+        $messageId = $this->newestIncomingIds([$thread->getId()->toRfc4122()], $context)[$thread->getId()->toRfc4122()] ?? null;
 
-        $thread->classify($smartInbox, $verdict, ClassificationReason::USER, $now);
-        $messageId = $this->newestIncoming([$thread->getId()->toRfc4122()], $context)[$thread->getId()->toRfc4122()] ?? null;
-        $message = null === $messageId ? null : $this->entityManager->find(Message::class, Uuid::fromString($messageId));
-        $message?->classify($smartInbox, $verdict, $now);
-
-        return $message;
+        return null === $messageId ? null : $this->entityManager->find(Message::class, Uuid::fromString($messageId));
     }
 
-    private function lock(Uuid $userId): void
+    /**
+     * Applies the user's choice to a conversation: it moves to the smart inbox with the verdict, now and for good, and
+     * so does its newest incoming message (see {@see newestIncoming()}). The caller holds the user's lock.
+     */
+    public function placeByUser(Thread $thread, ?Message $newestIncoming, Category $smartInbox, Verdict $verdict): void
+    {
+        $now = new \DateTimeImmutable();
+        $thread->classify($smartInbox, $verdict, ClassificationReason::USER, $now);
+        $newestIncoming?->classify($smartInbox, $verdict, $now);
+    }
+
+    /**
+     * Matches the From address against a sender pattern in SQL: an address exactly, a domain with its subdomains, and
+     * everything when there is no pattern (address null).
+     *
+     * @return array{address: ?string, domain: ?string, subdomain: ?string}
+     */
+    private static function senderParameters(?string $sender): array
+    {
+        if (null === $sender) {
+            return ['address' => null, 'domain' => null, 'subdomain' => null];
+        }
+        $sender = SenderPattern::normalize($sender);
+        if (!SenderPattern::isDomain($sender)) {
+            return ['address' => $sender, 'domain' => null, 'subdomain' => null];
+        }
+        $domain = addcslashes(substr($sender, 1), '%_\\');
+
+        return ['address' => $sender, 'domain' => '%@'.$domain, 'subdomain' => '%.'.$domain];
+    }
+
+    public function lock(Uuid $userId): void
     {
         $this->connection->executeStatement(
             'SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))',
@@ -200,25 +248,9 @@ final readonly class MailClassification
         if ([] !== $this->builtinSmartInboxes->ensure($user)) {
             $this->entityManager->flush();
         }
-        $this->syncOlderSmartInboxes($user);
+        $this->builtinSmartInboxes->syncOlder($user);
 
         return new ClassificationContext($this->ownAddresses($user), $this->smartInboxes->findOwnedBy($user), $this->senderRules->findOwnedBy($user));
-    }
-
-    /**
-     * Smart inboxes created before clients synced them have no change number, so clients would never get them. They
-     * get one here, the first time the user's mail is classified.
-     */
-    private function syncOlderSmartInboxes(User $user): void
-    {
-        $params = ['user' => $user->getId()->toRfc4122()];
-        if (false === $this->connection->fetchOne('SELECT 1 FROM category WHERE owner_id = :user AND change_seq = 0 LIMIT 1', $params)) {
-            return;
-        }
-        $this->connection->executeStatement(
-            'UPDATE category SET change_seq = :seq WHERE owner_id = :user AND change_seq = 0',
-            [...$params, 'seq' => $this->sequencer->next($user->getId())],
-        );
     }
 
     /** @return list<string> */
@@ -239,7 +271,7 @@ final readonly class MailClassification
      *
      * @return array<string, string> thread id to message id
      */
-    private function newestIncoming(array $threadIds, ClassificationContext $context): array
+    private function newestIncomingIds(array $threadIds, ClassificationContext $context): array
     {
         if ([] === $threadIds) {
             return [];
@@ -249,6 +281,7 @@ final readonly class MailClassification
         $rows = $this->connection->fetchAllAssociative(
             'SELECT DISTINCT ON (m.thread_id) m.thread_id, m.id FROM message m
              WHERE m.thread_id = ANY(CAST(:threads AS UUID[])) AND NOT (m.from_address = ANY(CAST(:own AS TEXT[])))
+               AND NOT '.self::FILED_AS_SENT.'
              ORDER BY m.thread_id, m.received_at DESC, m.id DESC',
             ['threads' => '{'.implode(',', $threadIds).'}', 'own' => self::textArray($context->ownAddresses())],
         );
@@ -309,6 +342,11 @@ final readonly class MailClassification
             $headers = null === $row['headers'] ? [] : json_decode($row['headers'], true, flags: \JSON_THROW_ON_ERROR);
             /** @var list<string> $roles */
             $roles = json_decode($row['roles'], true, flags: \JSON_THROW_ON_ERROR);
+            $folderRoles = array_values(array_filter(array_map(FolderRole::tryFrom(...), $roles)));
+            if ([] !== $folderRoles && [] === array_diff(array_map(static fn (FolderRole $r): string => $r->value, $folderRoles), [FolderRole::Sent->value, FolderRole::Drafts->value])) {
+                // Filed only as sent: the user's own, from an address Tresso does not know as theirs.
+                continue;
+            }
             $recipients = $message->getRecipients();
 
             $result[$id] = new MailToClassify(
@@ -321,7 +359,8 @@ final readonly class MailClassification
                 $message->getSnippet(),
                 $headers,
                 (bool) $row['junk'],
-                array_values(array_filter(array_map(FolderRole::tryFrom(...), $roles))),
+                $folderRoles,
+                null !== $message->getInReplyTo(),
             );
         }
 

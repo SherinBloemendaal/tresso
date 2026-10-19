@@ -24,7 +24,8 @@ use App\State\ThreadClassificationProcessor;
         new Put(
             uriTemplate: '/threads/{threadId}/classification',
             status: 200,
-            security: "is_granted('".Scope::ROLE_MAIL_WRITE."')",
+            // It changes mail and remembers a rule (and may edit an exclude list): both scopes are needed.
+            security: "is_granted('".Scope::ROLE_MAIL_WRITE."') and is_granted('".Scope::ROLE_SETTINGS_WRITE."')",
             input: ThreadClassificationInput::class,
             read: false,
             processor: ThreadClassificationProcessor::class,

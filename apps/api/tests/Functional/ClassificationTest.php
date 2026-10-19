@@ -5,12 +5,16 @@ declare(strict_types=1);
 namespace App\Tests\Functional;
 
 use App\Classification\ClassifyNewMail;
+use App\Classification\MailClassification;
+use App\Classification\ReclassifyMail;
+use Doctrine\DBAL\DriverManager;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
 use Symfony\Component\Console\Tester\CommandTester;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Messenger\Stamp\ReceivedStamp;
 use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * Classification of ingested mail end to end: queued after the ingest commits, run the way the messenger worker runs
@@ -232,7 +236,7 @@ final class ClassificationTest extends DatabaseTestCase
         $threadId = $page['threads'][0]['id'];
         $inboxes = $this->builtinIds($page);
 
-        $lisa = $this->userHeaders('lisa@example.test', ['mail:write', 'settings:read']);
+        $lisa = $this->userHeaders('lisa@example.test', ['mail:write', 'settings:read', 'settings:write']);
         $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threadId.'/classification', ['smartInboxId' => $inboxes['spam']], $lisa);
         self::assertResponseStatusCodeSame(404);
 
@@ -242,15 +246,164 @@ final class ClassificationTest extends DatabaseTestCase
         self::assertResponseStatusCodeSame(422);
     }
 
-    public function testSmartInboxesFromBeforeTheSyncReachClientsOnceMailIsClassified(): void
+    public function testSmartInboxesFromBeforeTheSyncReachASyncFromTheStart(): void
     {
         $this->connection()->executeStatement("UPDATE category SET change_seq = 0 FROM app_user u WHERE u.id = category.owner_id AND u.email = 'kim@example.test'");
-        self::assertSame([], $this->changes(0)['smartInboxes']);
 
-        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $page = $this->changes(0);
+
+        self::assertCount(5, $page['smartInboxes']);
+        self::assertSame([], $this->changes($page['cursor'])['smartInboxes'], 'Only once.');
+    }
+
+    public function testRuleChangesDoNotResendMailWhoseClassificationStays(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget'), $this->message('2', 'Deals', ['from' => ['address' => 'newsletter@shop.example']])]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+
+        $this->client->request('PATCH', '/api/v1/smart-inboxes/'.$inboxes['informational'], server: $this->kim + ['CONTENT_TYPE' => 'application/merge-patch+json'], content: '{"instructions":"For my information"}');
+        self::assertResponseIsSuccessful();
         $this->runClassification();
 
-        self::assertCount(5, $this->changes(0)['smartInboxes']);
+        $page = $this->changes($first['cursor']);
+        self::assertSame([$inboxes['informational']], array_column($page['smartInboxes'], 'id'));
+        self::assertSame([], $page['threads']);
+        self::assertSame([], $page['messages']);
+    }
+
+    public function testCorrectionClassifiesAgainOnlyMailFromThatSender(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Invoice', ['from' => ['address' => 'billing@hosting.example']]), $this->message('2', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $threads = array_column($first['threads'], 'id', 'subject');
+
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threads['Invoice'].'/classification', ['smartInboxId' => $inboxes['notification']], $this->kim);
+        self::assertResponseIsSuccessful();
+
+        $queued = array_map(static fn (Envelope $envelope): object => $envelope->getMessage(), $this->takeQueued());
+        self::assertCount(1, $queued);
+        self::assertInstanceOf(ReclassifyMail::class, $queued[0]);
+        self::assertSame('billing@hosting.example', $queued[0]->sender);
+        self::assertNotNull($queued[0]->since);
+    }
+
+    public function testCorrectionIntoASmartInboxThatExcludesTheSendersDomainIsRefused(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $this->client->request('PATCH', '/api/v1/smart-inboxes/'.$inboxes['informational'], server: $this->kim + ['CONTENT_TYPE' => 'application/merge-patch+json'], content: '{"excludeSenders":["@partner.example"]}');
+        self::assertResponseIsSuccessful();
+
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$first['threads'][0]['id'].'/classification', ['smartInboxId' => $inboxes['informational']], $this->kim);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertStringContainsString('@partner.example', (string) $this->client->getResponse()->getContent());
+        $this->client->request('GET', '/api/v1/sender-rules', server: $this->kim);
+        self::assertSame([], $this->decodedResponse());
+        self::assertSame([$inboxes['todo'], 'do', 'direct'], $this->classificationOf($this->changes(0)['threads'][0]));
+    }
+
+    public function testCorrectionWaitsForARunningClassificationOfTheUser(): void
+    {
+        // Not classified first: in a test everything runs in one transaction, which would keep the lock of that run.
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $first = $this->changes(0);
+        $userId = $this->connection()->fetchOne("SELECT id FROM app_user WHERE email = 'kim@example.test'");
+        self::assertIsString($userId);
+
+        $running = DriverManager::getConnection($this->separateConnectionParams());
+        $running->executeStatement('SELECT pg_advisory_lock(hashtextextended(:key, 0))', ['key' => 'classify:'.$userId]);
+        $this->connection()->executeStatement("SET lock_timeout = '300ms'");
+        try {
+            $this->client->jsonRequest('PUT', '/api/v1/threads/'.$first['threads'][0]['id'].'/classification', ['smartInboxId' => $this->builtinIds($first)['informational']], $this->kim);
+
+            self::assertResponseStatusCodeSame(500, 'The correction waited for the lock of the running classification and gave up.');
+        } finally {
+            $this->connection()->executeStatement('RESET lock_timeout');
+            $running->executeStatement('SELECT pg_advisory_unlock_all()');
+            $running->close();
+        }
+    }
+
+    public function testCorrectionsNeedTheSettingsWriteScope(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$first['threads'][0]['id'].'/classification', ['smartInboxId' => $this->builtinIds($first)['informational']], $this->userHeaders('kim@example.test', ['mail:read', 'mail:write']));
+
+        self::assertResponseStatusCodeSame(403);
+    }
+
+    public function testOtherUsersCannotForgetASenderRule(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$first['threads'][0]['id'].'/classification', ['smartInboxId' => $this->builtinIds($first)['informational']], $this->kim);
+        $rule = $this->decodedResponse()['senderRule'] ?? null;
+        self::assertIsArray($rule);
+        $ruleId = $rule['id'] ?? null;
+        self::assertIsString($ruleId);
+
+        $this->client->request('DELETE', '/api/v1/sender-rules/'.$ruleId, server: $this->userHeaders('lisa@example.test', ['settings:read', 'settings:write']));
+        self::assertResponseStatusCodeSame(404);
+
+        $this->client->request('GET', '/api/v1/sender-rules', server: $this->kim);
+        self::assertCount(1, $this->decodedResponse());
+    }
+
+    public function testMailFiledOnlyAsSentIsTheUsersOwnEvenFromAnAlias(): void
+    {
+        $this->ingest('messages', ['folder' => 'Sent', 'messages' => [$this->message('1', 'From my alias', ['from' => ['address' => 'kim@alias.example'], 'to' => [['address' => 'anna@partner.example']]])]]);
+        $this->runClassification();
+
+        self::assertSame([null, null, null], $this->classificationOf($this->changes(0)['threads'][0]));
+    }
+
+    public function testLongRunsStopAfterTheirBatchesAndSayMoreIsLeft(): void
+    {
+        foreach ([1, 2] as $part) {
+            $this->ingest('messages', ['folder' => 'INBOX', 'messages' => array_map(fn (int $i): array => $this->message($part.'-'.$i, 'Mail '.$part.'-'.$i), range(1, 101))]);
+        }
+        $this->takeQueued();
+        $userId = $this->connection()->fetchOne("SELECT id FROM app_user WHERE email = 'kim@example.test'");
+        self::assertIsString($userId);
+        $classification = static::getContainer()->get(MailClassification::class);
+
+        self::assertTrue($classification->classifyNew(Uuid::fromString($userId), 1));
+        self::assertEquals(2, $this->connection()->fetchOne('SELECT COUNT(*) FROM message WHERE classified_at IS NULL'));
+        self::assertFalse($classification->classifyNew(Uuid::fromString($userId), 1));
+        self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM message WHERE classified_at IS NULL'));
+    }
+
+    /**
+     * Connection settings of the test database for a session outside the test transaction.
+     *
+     * @return array{driver: 'pdo_pgsql', host: string, port: int, user: string, password: string, dbname: string}
+     */
+    private function separateConnectionParams(): array
+    {
+        $params = $this->connection()->getParams();
+        $host = $params['host'] ?? null;
+        $user = $params['user'] ?? null;
+        $password = $params['password'] ?? null;
+        $dbname = $params['dbname'] ?? null;
+        $port = $params['port'] ?? 5432;
+        self::assertIsString($host);
+        self::assertIsString($user);
+        self::assertIsString($password);
+        self::assertIsString($dbname);
+        self::assertIsNumeric($port);
+
+        return ['driver' => 'pdo_pgsql', 'host' => $host, 'port' => (int) $port, 'user' => $user, 'password' => $password, 'dbname' => $dbname];
     }
 
     public function testCommandClassifiesAgain(): void

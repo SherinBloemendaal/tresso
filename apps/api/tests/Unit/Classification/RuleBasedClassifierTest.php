@@ -62,7 +62,11 @@ final class RuleBasedClassifierTest extends TestCase
         yield 'a notification subdomain' => [['from' => 'team@alerts.monitor.example'], BuiltinCategory::Notification, ClassificationReason::NOTIFICATION_SENDER];
         yield 'a notification address with an unsubscribe link stays a notification' => [['from' => 'notifications@forge.example', 'headers' => ['list-unsubscribe' => '<mailto:u@forge.example>']], BuiltinCategory::Notification, ClassificationReason::NOTIFICATION_SENDER];
         yield 'only an unsubscribe link' => [['from' => 'anna@shop.example', 'headers' => ['list-unsubscribe' => '<https://shop.example/u>']], BuiltinCategory::Advertise, ClassificationReason::UNSUBSCRIBE_LINK];
-        yield 'a mailing list' => [['to' => ['team@lists.example'], 'headers' => ['list-id' => '<team.lists.example>']], BuiltinCategory::Informational, ClassificationReason::MAILING_LIST];
+        yield 'a mailing list, with the unsubscribe link real lists add' => [['to' => ['team@lists.example'], 'headers' => ['list-id' => '<team.lists.example>', 'list-unsubscribe' => '<mailto:team-leave@lists.example>']], BuiltinCategory::Informational, ClassificationReason::MAILING_LIST];
+        yield 'a reply from a sales team is a person' => [['from' => 'sales@supplier.example', 'isReply' => true], BuiltinCategory::Todo, ClassificationReason::DIRECT];
+        yield 'a reply from a marketing address is a person' => [['from' => 'newsletter@shop.example', 'isReply' => true], BuiltinCategory::Todo, ClassificationReason::DIRECT];
+        yield 'news at a company is a person' => [['from' => 'news@company.example'], BuiltinCategory::Todo, ClassificationReason::DIRECT];
+        yield 'mail to an alias or in Bcc is for the user directly' => [['to' => ['team@company.example'], 'cc' => []], BuiltinCategory::Todo, ClassificationReason::DIRECT];
         yield 'a domain that is only news is a person' => [['from' => 'editor@news.example'], BuiltinCategory::Todo, ClassificationReason::DIRECT];
     }
 
@@ -96,9 +100,9 @@ final class RuleBasedClassifierTest extends TestCase
     {
         $invoices = new Category($this->user, 'Invoices', '', Verdict::Do);
         $invoices->setIncludeSenders(['@supplier.example']);
-        $invoices->setExcludeSenders(['news@supplier.example']);
+        $invoices->setExcludeSenders(['newsletter@supplier.example']);
 
-        $classification = new RuleBasedClassifier()->classify($this->mail(['from' => 'news@supplier.example']), $this->context([$invoices]));
+        $classification = new RuleBasedClassifier()->classify($this->mail(['from' => 'newsletter@supplier.example']), $this->context([$invoices]));
 
         self::assertSame($this->builtin['advertise'], $classification->smartInbox);
         self::assertSame(ClassificationReason::MARKETING_SENDER, $classification->reason);
@@ -159,15 +163,58 @@ final class RuleBasedClassifierTest extends TestCase
         self::assertSame($this->builtin['todo'], $classification->smartInbox);
     }
 
+    public function testForgedSenderFailingAuthenticationIsSpamDespiteASenderRule(): void
+    {
+        $rule = new SenderRule($this->user, 'ceo@company.example', $this->builtin['todo'], Verdict::Do);
+        $mail = $this->mail(['from' => 'ceo@company.example', 'headers' => ['authentication-results' => 'mx.example; dmarc=fail (p=QUARANTINE) header.from=company.example']]);
+
+        $classification = new RuleBasedClassifier()->classify($mail, $this->context([], [$rule]));
+
+        self::assertSame($this->builtin['spam'], $classification->smartInbox);
+        self::assertSame(ClassificationReason::AUTHENTICATION_FAILED, $classification->reason);
+    }
+
+    public function testJunkFromAnUnauthenticatedIncludedSenderStaysSpam(): void
+    {
+        $invoices = new Category($this->user, 'Invoices', '', Verdict::Do);
+        $invoices->setIncludeSenders(['@supplier.example']);
+
+        $classification = new RuleBasedClassifier()->classify($this->mail(['from' => 'billing@supplier.example', 'folderRoles' => [FolderRole::Spam]]), $this->context([$invoices]));
+
+        self::assertSame($this->builtin['spam'], $classification->smartInbox);
+        self::assertSame(ClassificationReason::SERVER_SPAM, $classification->reason);
+    }
+
+    public function testSenderRuleWinsOverTheServerForAnAuthenticatedSender(): void
+    {
+        $rule = new SenderRule($this->user, 'billing@supplier.example', $this->builtin['todo'], null);
+        $mail = $this->mail(['from' => 'billing@supplier.example', 'junk' => true, 'headers' => ['authentication-results' => 'mx.example; spf=pass; dkim=pass; dmarc=pass header.from=supplier.example']]);
+
+        $classification = new RuleBasedClassifier()->classify($mail, $this->context([], [$rule]));
+
+        self::assertSame($this->builtin['todo'], $classification->smartInbox);
+        self::assertSame(ClassificationReason::SENDER_RULE, $classification->reason);
+    }
+
+    public function testAuthenticatedJunkWithoutARuleIsStillSpam(): void
+    {
+        $mail = $this->mail(['junk' => true, 'headers' => ['authentication-results' => 'mx.example; dmarc=pass header.from=partner.example']]);
+
+        $classification = new RuleBasedClassifier()->classify($mail, $this->context());
+
+        self::assertSame($this->builtin['spam'], $classification->smartInbox);
+        self::assertSame(ClassificationReason::SERVER_SPAM, $classification->reason);
+    }
+
     /**
      * @param array<string, mixed> $overrides
      */
     private function mail(array $overrides): MailToClassify
     {
-        /** @var array{from: string, to: list<string>, cc: list<string>, headers: array<string, string>, junk: bool, folderRoles: list<FolderRole>} $mail */
-        $mail = [...['from' => 'anna@partner.example', 'to' => [self::ME], 'cc' => [], 'headers' => [], 'junk' => false, 'folderRoles' => [FolderRole::Inbox]], ...$overrides];
+        /** @var array{from: string, to: list<string>, cc: list<string>, headers: array<string, string>, junk: bool, folderRoles: list<FolderRole>, isReply: bool} $mail */
+        $mail = [...['from' => 'anna@partner.example', 'to' => [self::ME], 'cc' => [], 'headers' => [], 'junk' => false, 'folderRoles' => [FolderRole::Inbox], 'isReply' => false], ...$overrides];
 
-        return new MailToClassify('m1', $mail['from'], null, $mail['to'], $mail['cc'], 'Subject', 'Snippet', $mail['headers'], $mail['junk'], $mail['folderRoles']);
+        return new MailToClassify('m1', $mail['from'], null, $mail['to'], $mail['cc'], 'Subject', 'Snippet', $mail['headers'], $mail['junk'], $mail['folderRoles'], $mail['isReply']);
     }
 
     /**

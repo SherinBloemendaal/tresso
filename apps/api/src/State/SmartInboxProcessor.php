@@ -58,6 +58,8 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
     private function write(mixed $data, Operation $operation, array $uriVariables): ?SmartInboxResource
     {
         $owner = $this->currentUser->get();
+        // Writes of one user take turns, so two requests cannot both pass the name and count checks below.
+        $this->connection->executeStatement('SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))', ['key' => 'smart-inboxes:'.$owner->getId()->toRfc4122()]);
         $existing = $this->smartInboxes->findOwnedBy($owner);
 
         if ($data instanceof CreateSmartInbox) {

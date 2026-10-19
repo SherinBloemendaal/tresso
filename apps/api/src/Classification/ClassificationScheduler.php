@@ -35,15 +35,30 @@ final class ClassificationScheduler implements TransactionListener, ResetInterfa
         }
     }
 
-    /** The user's smart inboxes or remembered corrections changed: recent conversations are classified again. */
+    /** The user's smart inboxes changed: every recent conversation is classified again. */
     public function rulesChanged(Uuid $userId): void
     {
-        $key = 'rerun:'.$userId->toRfc4122();
-        if (!isset($this->scheduled[$key])) {
-            $since = new \DateTimeImmutable(self::RECLASSIFY_PERIOD)->format(\DATE_ATOM);
-            $this->afterCommit->dispatch(new ReclassifyMail($userId->toRfc4122(), $since));
-            $this->scheduled[$key] = true;
+        $this->rerun($userId, null);
+    }
+
+    /**
+     * A remembered correction for one sender (an address or `@domain`) was made or forgotten: only recent
+     * conversations with mail from that sender are classified again.
+     */
+    public function senderChanged(Uuid $userId, string $sender): void
+    {
+        $this->rerun($userId, SenderPattern::normalize($sender));
+    }
+
+    private function rerun(Uuid $userId, ?string $sender): void
+    {
+        $key = 'rerun:'.$userId->toRfc4122().':'.($sender ?? '*');
+        if (isset($this->scheduled['rerun:'.$userId->toRfc4122().':*']) || isset($this->scheduled[$key])) {
+            return;
         }
+        $since = new \DateTimeImmutable(self::RECLASSIFY_PERIOD)->format(\DATE_ATOM);
+        $this->afterCommit->dispatch(new ReclassifyMail($userId->toRfc4122(), $since, $sender));
+        $this->scheduled[$key] = true;
     }
 
     public function transactionCommitted(): void
