@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Functional;
 
 use App\Entity\Attachment;
+use App\Entity\Folder;
 use App\Entity\Message;
 use App\Entity\MessageLocation;
 use App\Entity\Thread;
@@ -244,6 +245,36 @@ final class SyncIngestTest extends DatabaseTestCase
         self::assertSame('modseq=9', $this->folders(['INBOX' => 1, 'Archive' => 1])[0]['cursor'] ?? null);
     }
 
+    public function testPresenceRangesRemoveEverythingNotListed(): void
+    {
+        $this->folders(['INBOX' => 1, 'Archive' => 1]);
+        $this->messages('INBOX', [
+            $this->message('10'), $this->message('11'), $this->message('12'),
+            $this->message('25', ['messageId' => '<also-archived@x>']),
+            $this->message('40'),
+        ]);
+        $this->messages('Archive', [$this->message('3', ['messageId' => '<also-archived@x>'])]);
+
+        $result = $this->changes('INBOX', ['presence' => [
+            ['fromUid' => 1, 'toUid' => 20, 'uids' => [10, 12]],
+            ['fromUid' => 21, 'toUid' => 30, 'uids' => []],
+        ]]);
+
+        self::assertSame(['updated' => 0, 'removed' => 2, 'unknown' => 0, 'deleted' => 1], $result);
+        $remaining = array_map(static fn (MessageLocation $l): string => $l->getRemoteUid(), $this->entityManager()->getRepository(MessageLocation::class)->findBy(['folder' => $this->folderEntity('INBOX')], ['remoteUid' => 'ASC']));
+        self::assertSame(['10', '12', '40'], $remaining, 'Uid 40 is outside every range and stays.');
+        self::assertNotNull($this->entityManager()->getRepository(Message::class)->findOneBy(['messageIdHeader' => 'also-archived@x']));
+    }
+
+    public function testPresenceUidsMustLieInTheirRange(): void
+    {
+        $this->folders(['INBOX' => 1]);
+
+        $this->client->jsonRequest('POST', $this->url('changes'), ['workerId' => 'w1', 'folder' => 'INBOX', 'presence' => [['fromUid' => 5, 'toUid' => 10, 'uids' => [4]]]], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+    }
+
     public function testUnknownFolderIsRejected(): void
     {
         $this->folders(['INBOX' => 1]);
@@ -394,6 +425,14 @@ final class SyncIngestTest extends DatabaseTestCase
     private function rows(string $class): int
     {
         return $this->entityManager()->getRepository($class)->count([]);
+    }
+
+    private function folderEntity(string $remoteName): Folder
+    {
+        $folder = $this->entityManager()->getRepository(Folder::class)->findOneBy(['remoteName' => $remoteName]);
+        self::assertInstanceOf(Folder::class, $folder);
+
+        return $folder;
     }
 
     private function onlyMessage(): Message

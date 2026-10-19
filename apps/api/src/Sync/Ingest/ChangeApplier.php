@@ -7,6 +7,7 @@ namespace App\Sync\Ingest;
 use App\ApiResource\Input\Sync\ChangeBatchInput;
 use App\Entity\MailAccount;
 use App\Entity\MessageLocation;
+use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
@@ -16,6 +17,7 @@ final readonly class ChangeApplier
 {
     public function __construct(
         private EntityManagerInterface $entityManager,
+        private Connection $connection,
         private FolderLookup $folders,
         private MessageJanitor $janitor,
     ) {
@@ -44,6 +46,23 @@ final readonly class ChangeApplier
                     ->setParameter('folder', $folder->getId(), 'uuid')
                     ->setParameter('uids', array_values(array_unique($batch->vanished)))
                     ->execute();
+            }
+
+            foreach ($batch->presence as $range) {
+                // Only numeric (IMAP) uids take part; the regex guard keeps the cast safe.
+                $removed += (int) $this->connection->executeStatement(
+                    "DELETE FROM message_location l
+                     WHERE l.folder_id = :folder
+                       AND l.remote_uid ~ '^[0-9]{1,18}$'
+                       AND CAST(l.remote_uid AS BIGINT) BETWEEN :from AND :to
+                       AND NOT (CAST(l.remote_uid AS BIGINT) = ANY(CAST(:uids AS BIGINT[])))",
+                    [
+                        'folder' => $folder->getId()->toRfc4122(),
+                        'from' => $range->fromUid,
+                        'to' => $range->toUid,
+                        'uids' => '{'.implode(',', $range->uids).'}',
+                    ],
+                );
             }
 
             if (null !== $batch->cursor) {
