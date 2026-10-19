@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"tresso/sync/internal/api"
 	"tresso/sync/internal/caldav"
@@ -166,5 +167,47 @@ func TestAWrongPasswordIsReported(t *testing.T) {
 func TestResourceNamesAreSafe(t *testing.T) {
 	if got := resourceURL("https://dav.example/cal/home", "01a1@tresso/../x y"); got != "https://dav.example/cal/home/01a1-tresso-..-x-y.ics" {
 		t.Fatalf("got %s", got)
+	}
+}
+
+func TestReportsAProblemOnceUntilTheSyncWorksAgain(t *testing.T) {
+	server := newFakeServer(t, true)
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	syncer := New(fake, plainDialer{}, "w1", Options{AllowHTTP: true}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	status := newStatusReporter(syncer, "a1", syncer.logger)
+
+	status.report(context.Background(), api.CalendarAuthFailed, "refused")
+	status.report(context.Background(), api.CalendarAuthFailed, "refused")
+	status.reset()
+	status.report(context.Background(), api.CalendarAuthFailed, "refused")
+
+	if len(fake.statuses) != 2 {
+		t.Fatalf("want the status reported once per problem, got %v", fake.statuses)
+	}
+}
+
+func TestAWrongPasswordReachesTheUser(t *testing.T) {
+	server := newFakeServer(t, true)
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	fake.password = "wrong"
+	syncer := New(fake, plainDialer{}, "w1", Options{AllowHTTP: true, MinBackoff: time.Hour, MaxBackoff: time.Hour, NotFoundRetry: time.Hour}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- syncer.Run(ctx, api.Account{ID: "a1"}) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		fake.mu.Lock()
+		reported := len(fake.statuses)
+		fake.mu.Unlock()
+		if reported > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if len(fake.statuses) != 1 || fake.statuses[0] != api.CalendarAuthFailed {
+		t.Fatalf("statuses = %v", fake.statuses)
 	}
 }
