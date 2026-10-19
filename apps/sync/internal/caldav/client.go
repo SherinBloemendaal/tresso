@@ -160,6 +160,12 @@ func (c *Client) markAuthed(host string) {
 	c.authed[strings.ToLower(host)] = true
 }
 
+// trusts tells whether the account trusts the host of a URL with its password.
+func (c *Client) trusts(target string) bool {
+	u, err := url.Parse(target)
+	return err == nil && c.trust.allows(u.Hostname())
+}
+
 // mayAuthenticate tells whether the login may go to a host that asked for it: a trusted host, or one a trusted host
 // redirected to on its own site (example.com/.well-known/caldav to caldav.example.com).
 func (c *Client) mayAuthenticate(origin, host string) bool {
@@ -265,14 +271,16 @@ func (c *Client) Get(ctx context.Context, href string) (Object, error) {
 	return Object{Href: href, ETag: resp.Header.Get("ETag"), Data: string(data)}, nil
 }
 
-// Put writes a resource. With ifMatch the write only happens when the server's version is still that one; without it
-// the resource must not exist yet. Returns the new ETag when the server tells it.
-func (c *Client) Put(ctx context.Context, href, data, ifMatch string) (string, error) {
+// Put writes a resource. A new one (create) is written only when nothing is there yet. An update with ifMatch is
+// written only when the server's version is still that one; without it (the server never gave an ETag) it is
+// written as it is. Returns the new ETag when the server tells it.
+func (c *Client) Put(ctx context.Context, href, data, ifMatch string, create bool) (string, error) {
 	header := map[string]string{"Content-Type": "text/calendar; charset=utf-8"}
-	if ifMatch != "" {
-		header["If-Match"] = ifMatch
-	} else {
+	switch {
+	case create:
 		header["If-None-Match"] = "*"
+	case ifMatch != "":
+		header["If-Match"] = ifMatch
 	}
 	resp, err := c.request(ctx, http.MethodPut, href, []byte(data), header)
 	if err != nil {
