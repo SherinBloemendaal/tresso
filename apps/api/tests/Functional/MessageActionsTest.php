@@ -360,6 +360,21 @@ final class MessageActionsTest extends DatabaseTestCase
         self::assertEqualsWithDelta(time(), $stamp->getDateTime()->getTimestamp(), 5);
     }
 
+    public function testAFlagChangeWaitsForACopyThatIsStillToLand(): void
+    {
+        $this->act('archive');
+        $move = $this->claim()[0]['id'];
+        $this->act('markRead');
+
+        $this->report($move, 'done');
+        self::assertSame([], $this->claim(), 'the uid of the archived copy is not known yet');
+
+        $this->ingest($this->accountId, 'Archive', '7', '<plan@finance.example>');
+        $changes = $this->claim();
+        self::assertSame([['folder' => 'Archive', 'uidValidity' => 2, 'remoteUid' => '7']], $changes[0]['locations']);
+        self::assertTrue($this->message()['flags']['seen']);
+    }
+
     public function testAResetTargetFolderKeepsTheMoveAndADeletedOneUndoesIt(): void
     {
         $this->act('archive');

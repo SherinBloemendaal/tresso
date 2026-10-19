@@ -263,8 +263,14 @@ final readonly class MailboxChanges
                 return false;
             }
         }
+        // A copy still waiting to land blocks it, unless a later move left it (that move goes after this change, and
+        // the flags travel along with it; see locations()).
         foreach ($this->entityManager->getRepository(MessageLocation::class)->findBy(['message' => $change->getMessage()]) as $location) {
-            if ($location->isPlaceholder() && strcmp($location->getRemoteUid(), $change->placeholderUid()) < 0) {
+            if (!$location->isPlaceholder()) {
+                continue;
+            }
+            $origin = $this->origin($location->getRemoteUid());
+            if (null === $origin || strcmp($origin->getId()->toRfc4122(), $change->getId()->toRfc4122()) < 0) {
                 return false;
             }
         }
