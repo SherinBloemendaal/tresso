@@ -165,11 +165,21 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
 
 ### 3.5 Client sync protocol
 
-- Every mutable row carries a monotonically increasing `change_seq` per user.
-- `GET /api/sync/changes?cursor=…` returns changes since the cursor (messages, threads, todos, categories,
-  settings, and add-on data such as assignments). Clients store data in a local SQLite cache (desktop via Rust/Tauri, mobile via
-  expo-sqlite, web via IndexedDB) and fetch message bodies lazily.
-- Realtime: Mercure event tells the client "new changes up to seq N", client pulls the delta.
+- Synced entities (mail accounts, folders, threads, messages; todos and settings follow the same pattern) carry a
+  `change_seq`. Every insert or client-visible update gets the owner's next number; updates that only touch internal
+  fields (sync cursors, leases, encrypted credentials) do not. A message also changes when it gains or loses a
+  folder. Deletes leave a tombstone.
+- Numbers come from `UPDATE app_user SET change_seq = change_seq + 1 RETURNING`, which locks the user's row until
+  the transaction commits. Writes for one user therefore become visible in number order, so a client that has seen
+  N never later meets an uncommitted smaller number. Every write path runs in an explicit transaction; the
+  allocator refuses to run outside one. Different users never wait on each other.
+- `GET /api/v1/sync/changes?since=N&limit=500` (scope `mail:read`) returns mail accounts, folders (with role),
+  threads, messages (metadata, flags and folder ids, never bodies) and `deleted` entries above N, plus the new
+  `cursor` and `hasMore`. A page never splits one change number. A deleted mail account implies its folders,
+  threads and messages are gone.
+- Clients store data in a local cache (desktop via Rust/Tauri SQLite, mobile via expo-sqlite, web via IndexedDB),
+  start with `since=0`, keep the cursor, and fetch message bodies lazily.
+- Realtime (phase 1.3b): the hub tells the client "new changes up to N", the client pulls the delta.
 
 ### 3.6 Processing pipeline (per new message)
 
