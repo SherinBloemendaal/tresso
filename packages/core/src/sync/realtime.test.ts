@@ -126,4 +126,25 @@ describe('RealtimeClient', () => {
 
     expect(fetch).toHaveBeenCalledTimes(1)
   })
+
+  it('stops at once when stopped just before waiting for the next attempt', async () => {
+    let stopping: Promise<void> | null = null
+    const failing = new RealtimeClient({
+      fetchAccess: async () => {
+        throw new Error('offline')
+      },
+      onCursor: () => {},
+      retryDelays: [60_000],
+      // Runs after the client checked whether it was stopped and before it starts to wait.
+      onError: () => {
+        stopping ??= failing.stop()
+      },
+    })
+
+    failing.start()
+    await until(() => stopping !== null)
+    const outcome = await Promise.race([stopping!.then(() => 'stopped'), new Promise((resolve) => setTimeout(() => resolve('still waiting'), 500))])
+
+    expect(outcome).toBe('stopped')
+  })
 })
