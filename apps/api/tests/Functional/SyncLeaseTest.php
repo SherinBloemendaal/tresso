@@ -95,7 +95,7 @@ final class SyncLeaseTest extends DatabaseTestCase
         $auth = $this->bearer('sync:lease');
 
         self::assertSame([$active], $this->lease('w1', $auth));
-        $this->connection()->executeStatement("UPDATE mail_account SET lease_expires_at = now() - interval '1 second'");
+        $this->connection()->executeStatement("UPDATE mail_account SET lease_expires_at = now() - interval '1 minute'");
 
         self::assertSame([$active], $this->lease('w2', $auth));
         self::assertSame([], $this->lease('w1', $auth), 'w1 lost the account to w2');

@@ -359,7 +359,7 @@ final class OutboxTest extends DatabaseTestCase
     private function scheduledThatIsDue(): string
     {
         $id = $this->sendId(['to' => [['address' => 'anna@finance.example']], 'sendAt' => new \DateTimeImmutable('+1 hour')->format(\DATE_ATOM)]);
-        $this->connection()->executeStatement("UPDATE outgoing_message SET send_at = now() - interval '1 second' WHERE id = :id", ['id' => $id]);
+        $this->connection()->executeStatement("UPDATE outgoing_message SET send_at = now() - interval '1 minute' WHERE id = :id", ['id' => $id]);
         static::getContainer()->get(EntityManagerInterface::class)->clear();
 
         return $id;
@@ -367,7 +367,7 @@ final class OutboxTest extends DatabaseTestCase
 
     private function makeDue(string $id): void
     {
-        $this->connection()->executeStatement("UPDATE outgoing_message SET status = 'queued', send_at = now() - interval '1 second' WHERE id = :id", ['id' => $id]);
+        $this->connection()->executeStatement("UPDATE outgoing_message SET status = 'queued', send_at = now() - interval '1 minute' WHERE id = :id", ['id' => $id]);
         static::getContainer()->get(EntityManagerInterface::class)->clear();
     }
 

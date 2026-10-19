@@ -179,7 +179,7 @@ final class ProviderConnectTest extends DatabaseTestCase
     {
         $query = $this->start('google');
         $this->googleTokens();
-        $this->connection()->executeStatement("UPDATE provider_authorization_request SET expires_at = now() - interval '1 second'");
+        $this->connection()->executeStatement("UPDATE provider_authorization_request SET expires_at = now() - interval '1 minute'");
 
         self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=expired', $this->returnFromProvider('google', $query['state']));
         self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=expired', $this->returnFromProvider('google', 'made-up-state'));
