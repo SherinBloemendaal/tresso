@@ -22,6 +22,12 @@ framework:
                 retry_strategy:
                     max_retries: 5
                     delay: 1000
+            # Notifications have their own queue, so a reminder never waits behind other work.
+            push:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%_push'
+                retry_strategy:
+                    max_retries: 3
+                    delay: 2000
                     multiplier: 3
             failed: '%env(MESSENGER_TRANSPORT_DSN)%_failed'
             sync: 'sync://'
@@ -33,6 +39,9 @@ framework:
             App\Classification\ClassifyNewMail: classify
             App\Classification\ReclassifyMail: classify
             App\Calendar\Invitation\ApplyCalendarInvitation: async
+            App\Notification\PlanCalendarObject: push
+            App\Notification\PlanUserNotifications: push
+            App\Notification\FireNotification: push
 
 when@test:
     framework:
@@ -41,4 +50,5 @@ when@test:
                 async: 'in-memory://'
                 search: 'in-memory://'
                 classify: 'in-memory://'
+                push: 'in-memory://'
                 failed: 'in-memory://'

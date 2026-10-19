@@ -27,6 +27,11 @@ services:
         class: Symfony\Component\HttpClient\NoPrivateNetworkHttpClient
         arguments: ['@http_client']
 
+    # Web Push endpoints come from clients, so private and internal addresses are refused.
+    notification.push_http_client:
+        class: Symfony\Component\HttpClient\NoPrivateNetworkHttpClient
+        arguments: ['@http_client']
+
 when@test:
     services:
         App\Tests\Support\RecordingMercureHub:
@@ -39,6 +44,7 @@ when@test:
         App\Storage\ObjectStorage: '@App\Tests\Support\InMemoryObjectStorage'
         # Test hosts do not resolve; the mocked client answers instead.
         mail_autoconfig.http_client: '@http_client'
+        notification.push_http_client: '@http_client'
         App\Tests\Support\StaticMxResolver:
             public: true
         App\Tests\Support\QueryLog:

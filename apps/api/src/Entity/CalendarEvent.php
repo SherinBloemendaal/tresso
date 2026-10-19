@@ -137,6 +137,13 @@ class CalendarEvent implements TracksChanges
     #[ORM\Column(type: Types::JSON, nullable: true)]
     private ?array $conference = null;
 
+    #[ORM\Column(nullable: true)]
+    private ?int $travelMinutes = null;
+
+    /** No reminders of its own: the user's default rules apply. */
+    #[ORM\Column(options: ['default' => true])]
+    private bool $defaultReminders = true;
+
     /** The invitation this event came from. */
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(onDelete: 'SET NULL')]
@@ -205,6 +212,8 @@ class CalendarEvent implements TracksChanges
         $this->selfPartstat = $data->selfPartstat;
         $this->reminders = $data->reminders;
         $this->conference = $data->conference;
+        $this->travelMinutes = $data->travelMinutes;
+        $this->defaultReminders = $data->defaultReminders;
         $this->updatedAt = new \DateTimeImmutable();
     }
 
@@ -359,6 +368,16 @@ class CalendarEvent implements TracksChanges
         return $this->conference;
     }
 
+    public function getTravelMinutes(): ?int
+    {
+        return $this->travelMinutes;
+    }
+
+    public function usesDefaultReminders(): bool
+    {
+        return $this->defaultReminders;
+    }
+
     public function getMessage(): ?Message
     {
         return $this->message;
@@ -399,7 +418,7 @@ class CalendarEvent implements TracksChanges
         return [
             'sequence', 'status', 'summary', 'description', 'location', 'url', 'transparency', 'visibility', 'allDay',
             'startValue', 'startTimeZone', 'endValue', 'endTimeZone', 'rrule', 'rdates', 'exdates', 'organizer',
-            'attendees', 'selfPartstat', 'reminders', 'conference', 'message', 'syncError',
+            'attendees', 'selfPartstat', 'reminders', 'conference', 'message', 'syncError', 'travelMinutes', 'defaultReminders',
         ];
     }
 

@@ -14,7 +14,7 @@ use App\Enum\Transparency;
  *
  * @phpstan-type Address array{address: string, name: ?string}
  * @phpstan-type Attendee array{address: string, name: ?string, role: string, partstat: string, rsvp: bool, kind: string}
- * @phpstan-type Reminder array{action: string, trigger: ?string, relatedTo: string, at: ?string}
+ * @phpstan-type Reminder array{action: string, trigger: ?string, relatedTo: string, at: ?string, channels: list<string>}
  * @phpstan-type Conference array{provider: string, url: string, id: ?string, dialIn: ?string}
  */
 final readonly class EventData
@@ -53,6 +53,10 @@ final readonly class EventData
         public ?ParticipationStatus $selfPartstat,
         public array $reminders,
         public ?array $conference,
+        /** Minutes to travel to the event, set by the user; null when unknown. */
+        public ?int $travelMinutes = null,
+        /** The event has no reminders of its own, so the user's default rules apply. */
+        public bool $defaultReminders = true,
     ) {
     }
 

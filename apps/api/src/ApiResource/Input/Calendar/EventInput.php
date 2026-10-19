@@ -64,10 +64,17 @@ final class EventInput
     #[Assert\Valid]
     public array $attendees = [];
 
-    /** @var list<int> minutes before the start; 0 is at the start */
+    /** The user's default reminder rules apply; when false, exactly `reminders` (possibly none). */
+    public bool $useDefaultReminders = true;
+
+    /** @var list<ReminderInput> */
     #[Assert\Count(max: 10)]
-    #[Assert\All([new Assert\Range(min: 0, max: 40320)])]
+    #[Assert\Valid]
     public array $reminders = [];
+
+    /** Minutes to travel there, for leave-now reminders; estimated from the location when null. */
+    #[Assert\Range(min: 0, max: 1440)]
+    public ?int $travelMinutes = null;
 
     #[Assert\Url(protocols: ['https'], requireTld: true)]
     #[Assert\Length(max: 2048)]

@@ -29,6 +29,10 @@ final class EventReader
 {
     /** Series longer than this are treated as endless for range queries, which only widens them. */
     private const int MAX_COUNTED_OCCURRENCES = 20000;
+    /** Tresso's own properties: alarm channels, travel time, and "no reminders" for an event without alarms. */
+    public const string CHANNELS = 'X-TRESSO-CHANNELS';
+    public const string TRAVEL = 'X-TRESSO-TRAVEL-MINUTES';
+    public const string DEFAULT_REMINDERS = 'X-TRESSO-DEFAULT-REMINDERS';
 
     /**
      * @param list<string> $selfAddresses the owner's addresses, lower case, to find their own response
@@ -88,6 +92,8 @@ final class EventReader
             self::selfPartstat($organizer, $attendees, $selfAddresses),
             self::reminders($event),
             ConferenceDetector::detect($event),
+            self::travelMinutes($event),
+            self::usesDefaultReminders($event),
         );
     }
 
@@ -271,8 +277,9 @@ final class EventReader
                 continue;
             }
             $action = strtolower(Props::text($alarm, 'ACTION') ?? 'DISPLAY');
+            $channels = self::channels($alarm, $action);
             if ($trigger instanceof DateTimeProperty) {
-                $reminders[] = ['action' => $action, 'trigger' => null, 'relatedTo' => 'start', 'at' => RecurrenceKey::fromInstant($trigger->getDateTime(new \DateTimeZone('UTC')))];
+                $reminders[] = ['action' => $action, 'trigger' => null, 'relatedTo' => 'start', 'at' => RecurrenceKey::fromInstant($trigger->getDateTime(new \DateTimeZone('UTC'))), 'channels' => $channels];
                 continue;
             }
             $reminders[] = [
@@ -280,10 +287,58 @@ final class EventReader
                 'trigger' => strtoupper(trim(Props::value($trigger))),
                 'relatedTo' => 'END' === strtoupper((string) self::param($trigger, 'RELATED')) ? 'end' : 'start',
                 'at' => null,
+                'channels' => $channels,
             ];
         }
 
         return $reminders;
+    }
+
+    /**
+     * Tresso's channels for an alarm (X-TRESSO-CHANNELS), else what its action means: email for EMAIL, push otherwise.
+     *
+     * @return list<string>
+     */
+    private static function channels(\Sabre\VObject\Component $alarm, string $action): array
+    {
+        $listed = Props::text($alarm, self::CHANNELS);
+        if (null !== $listed) {
+            $channels = array_values(array_unique(array_filter(
+                array_map(static fn (string $channel): string => strtolower(trim($channel)), explode(',', $listed)),
+                static fn (string $channel): bool => \in_array($channel, ['push', 'email'], true),
+            )));
+            if ([] !== $channels) {
+                return $channels;
+            }
+        }
+
+        return 'email' === $action ? ['email'] : ['push'];
+    }
+
+    /** Tresso's own travel time, else Apple Calendar's travel duration. */
+    private static function travelMinutes(VEvent $event): ?int
+    {
+        $minutes = Props::text($event, self::TRAVEL);
+        if (null !== $minutes && ctype_digit($minutes)) {
+            return min((int) $minutes, 1440);
+        }
+        $apple = Props::get($event, 'X-APPLE-TRAVEL-DURATION');
+        if (null !== $apple) {
+            try {
+                $interval = new \DateInterval(ltrim(strtoupper(trim(Props::value($apple))), '+'));
+            } catch (\Exception) {
+                return null;
+            }
+
+            return min($interval->d * 1440 + $interval->h * 60 + $interval->i, 1440);
+        }
+
+        return null;
+    }
+
+    private static function usesDefaultReminders(VEvent $event): bool
+    {
+        return [] === Props::components($event, 'VALARM') && 'FALSE' !== strtoupper(Props::text($event, self::DEFAULT_REMINDERS) ?? '');
     }
 
     private static function address(string $value): ?string

@@ -12,6 +12,7 @@ use App\ApiResource\CalendarEventResource;
 use App\ApiResource\Input\Calendar\AttendeeInput;
 use App\ApiResource\Input\Calendar\EventInput;
 use App\ApiResource\Input\Calendar\EventResponseInput;
+use App\ApiResource\Input\Calendar\ReminderInput;
 use App\Calendar\EditRejected;
 use App\Calendar\EventChanges;
 use App\Calendar\EventEditor;
@@ -144,8 +145,10 @@ final readonly class CalendarEventProcessor implements ProcessorInterface
             $input->transparency,
             $input->visibility,
             array_map(static fn (AttendeeInput $attendee): array => $attendee->toArray(), $input->attendees),
-            array_map(intval(...), $input->reminders),
+            array_map(static fn (ReminderInput $reminder): array => $reminder->toArray(), $input->reminders),
             $input->conferenceUrl,
+            $input->useDefaultReminders,
+            $input->travelMinutes,
         );
     }
 

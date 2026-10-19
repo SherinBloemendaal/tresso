@@ -76,4 +76,14 @@ final class MockHttpRouter
     {
         return array_values(array_filter($this->requests, static fn (array $request): bool => (strtok($request['url'], '?') ?: $request['url']) === $url));
     }
+
+    /**
+     * Every request with its headers and body, oldest first, for tests that check what was sent.
+     *
+     * @return list<array{method: string, url: string, body: string, headers: list<string>}>
+     */
+    public function calls(): array
+    {
+        return $this->requests;
+    }
 }
