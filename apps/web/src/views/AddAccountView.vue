@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import FieldLabel from '@/forms/FieldLabel.vue'
 import { provideRequiredFields } from '@/forms/required'
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
-import { defaultPort, type MailAccount, type SuggestedServerSettings } from '@tresso/core'
+import { connectErrorMessage, defaultPort, providerName, signInProvider, type MailAccount, type OAuthProviderId, type SuggestedServerSettings } from '@tresso/core'
 import { ApiError, errorMessage } from '@/api/errors'
 import { addressSchema, connectSchema, serverErrors, type AddressValues, type ConnectValues } from '@/forms/accounts'
 import { useAccountsStore } from '@/stores/accounts'
@@ -21,6 +21,8 @@ const PATIENCE_MS = 45_000
 const auth = useAuthStore()
 const accounts = useAccountsStore()
 const mail = useMailStore()
+const route = useRoute()
+const router = useRouter()
 
 provideRequiredFields(addressSchema, connectSchema)
 
@@ -28,6 +30,9 @@ const step = ref<Step>('address')
 const suggestion = ref<SuggestedServerSettings | null>(null)
 const busy = ref(false)
 const error = ref<string | null>(null)
+/** The provider whose sign-in page the browser is about to open. */
+const openingProvider = ref<OAuthProviderId | null>(null)
+const providersUnavailable = ref(false)
 /** The created account; a second submit fixes it instead of creating another. */
 const accountId = ref<string | null>(null)
 const waitedTooLong = ref(false)
@@ -55,6 +60,9 @@ const [username] = connectForm.defineField('username')
 const [password] = connectForm.defineField('password')
 const [imap] = connectForm.defineField('imap')
 const [smtp] = connectForm.defineField('smtp')
+
+/** Set for Gmail and Microsoft 365 accounts, which sign in with their provider instead of a password. */
+const currentProvider = computed(() => (current.value === null ? null : signInProvider(current.value)))
 
 const domain = computed(() => (emailAddress.value ?? '').split('@')[1] ?? '')
 const passwordUnusual = computed(() => suggestion.value?.found === true && !suggestion.value.authentication.includes('password'))
@@ -125,6 +133,50 @@ const connect = connectForm.handleSubmit(async (values) => {
   }
 })
 
+/** Leaves for the provider's sign-in page; the API sends the browser back here with the outcome. */
+async function signInWith(provider: OAuthProviderId, mailAccountId?: string): Promise<void> {
+  openingProvider.value = provider
+  error.value = null
+  try {
+    window.location.assign(await accounts.startProviderSignIn(provider, mailAccountId))
+  } catch (e) {
+    error.value = errorMessage(e)
+    openingProvider.value = null
+  }
+}
+
+/** Back from a provider sign-in: wait for the connected account, or say why it did not work. */
+async function finishProviderSignIn(): Promise<void> {
+  const { connected, connectError, provider } = route.query
+  if (typeof connected !== 'string' && typeof connectError !== 'string') return
+  await router.replace({ query: {} })
+
+  if (typeof connectError === 'string') {
+    error.value = connectErrorMessage(connectError, provider === 'microsoft' ? 'microsoft' : 'google')
+    return
+  }
+  if (typeof connected !== 'string') return
+  try {
+    const account = await accounts.get(connected)
+    accountId.value = account.id
+    current.value = account
+    addressForm.setFieldValue('emailAddress', account.emailAddress)
+    step.value = 'connecting'
+    startWaiting()
+  } catch (e) {
+    error.value = errorMessage(e)
+  }
+}
+
+onMounted(async () => {
+  await finishProviderSignIn()
+  try {
+    await accounts.loadProviders()
+  } catch {
+    providersUnavailable.value = true
+  }
+})
+
 function startWaiting(): void {
   waitedTooLong.value = false
   if (patience !== null) clearTimeout(patience)
@@ -165,6 +217,21 @@ onBeforeUnmount(() => {
     <form v-if="step === 'address'" class="form" novalidate @submit.prevent="findSettings">
       <h2>Connect a mail account</h2>
       <p class="lead">Work, support, personal: add every account you read. They all land in one Unified Inbox.</p>
+      <div v-if="accounts.providers.length > 0" class="providers">
+        <button
+          v-for="provider in accounts.providers"
+          :key="provider.id"
+          type="button"
+          class="button provider"
+          :disabled="openingProvider !== null"
+          @click="signInWith(provider.id)"
+        >
+          {{ openingProvider === provider.id ? `Opening ${provider.name}…` : `Sign in with ${provider.name}` }}
+        </button>
+        <p class="hint">For Gmail, Google Workspace, Outlook.com and Microsoft 365. Tresso never sees your password.</p>
+        <p class="divider"><span>or connect any other provider</span></p>
+      </div>
+      <p v-else-if="providersUnavailable" class="hint">Signing in with Google or Microsoft is not available right now; you can still connect with a password.</p>
       <label class="field">
         <FieldLabel name="emailAddress">Email address</FieldLabel>
         <input v-model="emailAddress" type="email" autocomplete="email" maxlength="320" :aria-invalid="addressForm.errors.value.emailAddress ? 'true' : undefined" />
@@ -189,7 +256,8 @@ onBeforeUnmount(() => {
         <template v-else>We could not find the settings for {{ domain }}. Your provider lists them in its help pages.</template>
       </p>
       <p v-if="passwordUnusual" class="note">
-        This provider normally signs you in through its own page, which Tresso will support later. Until then, create an app password at your provider and use that.
+        This provider normally signs you in through its own page. For Gmail and Microsoft 365, go back and use Sign in with
+        Google or Microsoft. Otherwise create an app password at your provider and use that.
       </p>
 
       <label class="field">
@@ -229,7 +297,16 @@ onBeforeUnmount(() => {
           <span v-if="current?.statusDetail">The server said: {{ current.statusDetail }}</span>
         </div>
         <div class="actions">
-          <button type="button" class="button button-primary" @click="step = 'settings'">Change the settings</button>
+          <button
+            v-if="currentProvider !== null && current !== null"
+            type="button"
+            class="button button-primary"
+            :disabled="openingProvider !== null"
+            @click="signInWith(currentProvider, current.id)"
+          >
+            Sign in with {{ providerName(currentProvider) }} again
+          </button>
+          <button v-else type="button" class="button button-primary" @click="step = 'settings'">Change the settings</button>
           <RouterLink :to="{ name: 'settings-accounts' }" class="button button-quiet">Back to accounts</RouterLink>
         </div>
       </template>
@@ -294,6 +371,38 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+.providers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.provider {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+}
+.provider:hover {
+  background: var(--ground);
+}
+.providers .hint {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 0;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.divider::before,
+.divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--line);
 }
 .actions .button {
   text-decoration: none;

@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { MailAccount, MailAccountUpdate, NewMailAccount, SuggestedServerSettings } from '@tresso/core'
+import type { MailAccount, MailAccountUpdate, NewMailAccount, OAuthProviderId, OAuthProviderInfo, ProviderAuthorization, SuggestedServerSettings } from '@tresso/core'
 import { useAuthStore } from '@/stores/auth'
 
 /** Mail account settings, read and written through the API (the synced copy has no server settings). */
@@ -40,9 +40,30 @@ export const useAccountsStore = defineStore('accounts', () => {
     accounts.value = accounts.value.filter((account) => account.id !== id)
   }
 
+  /** Providers this server can sign in with; empty when the operator registered none. */
+  const providers = ref<OAuthProviderInfo[]>([])
+
+  async function loadProviders(): Promise<void> {
+    providers.value = await auth.api<OAuthProviderInfo[]>('/api/v1/oauth-providers')
+  }
+
+  /**
+   * Starts a sign-in at the provider and returns where to send the browser. With an account id, signs that account in
+   * again (after a failed sign-in).
+   */
+  async function startProviderSignIn(provider: OAuthProviderId, mailAccountId?: string): Promise<string> {
+    const started = await auth.send<ProviderAuthorization>('POST', '/api/v1/provider-authorizations', {
+      provider,
+      features: ['mail'],
+      ...(mailAccountId === undefined ? {} : { mailAccountId }),
+    })
+
+    return started.authorizationUrl
+  }
+
   function suggest(emailAddress: string): Promise<SuggestedServerSettings> {
     return auth.api<SuggestedServerSettings>(`/api/v1/mail-server-settings?${new URLSearchParams({ emailAddress })}`)
   }
 
-  return { accounts, loaded, load, get, create, update, remove, suggest }
+  return { accounts, loaded, load, get, create, update, remove, suggest, providers, loadProviders, startProviderSignIn }
 })

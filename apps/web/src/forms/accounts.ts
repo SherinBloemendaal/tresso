@@ -32,9 +32,15 @@ export const accountSchema = z.object({
   smtp: serverSchema,
 })
 
+/** Gmail and Microsoft 365 accounts: only the name is theirs to change; signing in again replaces the rest. */
+export const providerAccountSchema = z.object({
+  displayName: z.string().trim().min(1, 'Enter the name people see.').max(120, 'Use at most 120 characters.'),
+})
+
 export type AddressValues = z.infer<typeof addressSchema>
 export type ConnectValues = z.infer<typeof connectSchema>
 export type AccountValues = z.infer<typeof accountSchema>
+export type ProviderAccountValues = z.infer<typeof providerAccountSchema>
 
 /** Validation messages for one server, from a form's flat error map ("imap.host" and so on). */
 export function serverErrors(errors: Partial<Record<string, string | undefined>>, prefix: 'imap' | 'smtp'): Record<string, string> {

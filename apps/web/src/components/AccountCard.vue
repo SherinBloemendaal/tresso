@@ -1,20 +1,14 @@
 <script setup lang="ts">
-import FieldLabel from '@/forms/FieldLabel.vue'
-import { provideRequiredFields } from '@/forms/required'
-import { computed, ref, watch } from 'vue'
-import { useForm } from 'vee-validate'
-import { toTypedSchema } from '@vee-validate/zod'
-import type { MailAccount, MailAccountUpdate } from '@tresso/core'
-import { ApiError, errorMessage } from '@/api/errors'
-import { accountSchema, serverErrors, type AccountValues } from '@/forms/accounts'
+import { computed, ref } from 'vue'
+import { providerName, signInProvider, type MailAccount } from '@tresso/core'
+import { errorMessage } from '@/api/errors'
 import { fullTime } from '@/mail/format'
 import { useAccountsStore } from '@/stores/accounts'
+import ProviderAccountForm from '@/components/ProviderAccountForm.vue'
 import SenderAvatar from '@/components/SenderAvatar.vue'
-import ServerFields from '@/components/ServerFields.vue'
+import ServerAccountForm from '@/components/ServerAccountForm.vue'
 
 const props = defineProps<{ account: MailAccount }>()
-
-provideRequiredFields(accountSchema)
 
 const accounts = useAccountsStore()
 const open = ref(props.account.status === 'auth_failed' || props.account.status === 'error')
@@ -23,30 +17,12 @@ const message = ref<string | null>(null)
 const error = ref<string | null>(null)
 const confirmingRemoval = ref(false)
 
-function initialValues(): AccountValues {
-  return {
-    displayName: props.account.displayName,
-    username: props.account.username,
-    password: '',
-    imap: { ...props.account.imap },
-    smtp: { ...props.account.smtp },
-  }
-}
-
-const { defineField, handleSubmit, errors, resetForm, setErrors } = useForm<AccountValues>({
-  validationSchema: toTypedSchema(accountSchema),
-  initialValues: initialValues(),
+/** Gmail and Microsoft 365 accounts sign in with their provider; the others have a password and servers. */
+const provider = computed(() => signInProvider(props.account))
+const servers = computed(() => {
+  const { username, imap, smtp } = props.account
+  return username !== null && imap !== null && smtp !== null ? { username, imap, smtp } : null
 })
-const [displayName] = defineField('displayName')
-const [username] = defineField('username')
-const [password] = defineField('password')
-const [imap] = defineField('imap')
-const [smtp] = defineField('smtp')
-
-function reset(): void {
-  resetForm({ values: initialValues() })
-}
-watch(() => props.account, reset)
 
 const problem = computed(() => props.account.status === 'auth_failed' || props.account.status === 'error')
 const statusLabel = computed(
@@ -58,17 +34,11 @@ const statusLabel = computed(
       error: 'Sync problem',
     })[props.account.status],
 )
-
-function changes(values: AccountValues): MailAccountUpdate {
-  const changed: MailAccountUpdate = {}
-  if (values.displayName !== props.account.displayName) changed.displayName = values.displayName
-  if (values.username !== props.account.username) changed.username = values.username
-  if (values.password !== '') changed.password = values.password
-  if (JSON.stringify(values.imap) !== JSON.stringify(props.account.imap)) changed.imap = values.imap
-  if (JSON.stringify(values.smtp) !== JSON.stringify(props.account.smtp)) changed.smtp = values.smtp
-
-  return changed
-}
+const fixHint = computed(() =>
+  provider.value === null
+    ? 'New mail is not arriving until this is fixed. Check the password (or app password) and the server settings below.'
+    : `New mail is not arriving until this is fixed. Sign in with ${providerName(provider.value)} again below.`,
+)
 
 async function run(action: () => Promise<unknown>, done: string): Promise<void> {
   saving.value = true
@@ -79,20 +49,10 @@ async function run(action: () => Promise<unknown>, done: string): Promise<void> 
     message.value = done
   } catch (e) {
     error.value = errorMessage(e)
-    if (e instanceof ApiError) setErrors(e.violations)
   } finally {
     saving.value = false
   }
 }
-
-const save = handleSubmit((values) => {
-  const changed = changes(values)
-  if (Object.keys(changed).length === 0) {
-    message.value = 'Nothing changed.'
-    return
-  }
-  return run(() => accounts.update(props.account.id, changed), changed.password ? 'Saved. Tresso connects again with the new password.' : 'Saved.')
-})
 
 function togglePause(): Promise<void> {
   const paused = props.account.status === 'paused'
@@ -119,57 +79,37 @@ function remove(): Promise<void> {
       <div v-if="problem" class="alert" role="alert">
         <strong>{{ account.status === 'auth_failed' ? 'Tresso could not sign in to this account.' : 'Syncing this account failed.' }}</strong>
         <span v-if="account.statusDetail">The server said: {{ account.statusDetail }}</span>
-        <span>New mail is not arriving until this is fixed. Check the password (or app password) and the server settings below.</span>
+        <span>{{ fixHint }}</span>
       </div>
       <p v-else class="sync">
         {{ account.lastSyncedAt ? `Last synced ${fullTime(account.lastSyncedAt)}.` : 'Not synced yet.' }}
       </p>
 
-      <form class="form" novalidate @submit.prevent="save">
-        <div class="pair">
-          <label class="field">
-            <FieldLabel name="displayName">Display name</FieldLabel>
-            <input v-model="displayName" maxlength="120" :aria-invalid="errors.displayName ? 'true' : undefined" />
-            <small class="hint">Recipients see: {{ displayName }} &lt;{{ account.emailAddress }}&gt;</small>
-            <small v-if="errors.displayName" class="error">{{ errors.displayName }}</small>
-          </label>
-          <label class="field">
-            <FieldLabel name="username">Username</FieldLabel>
-            <input v-model="username" autocomplete="off" spellcheck="false" :aria-invalid="errors.username ? 'true' : undefined" />
-            <small v-if="errors.username" class="error">{{ errors.username }}</small>
-          </label>
-        </div>
-        <label class="field">
-          <FieldLabel name="password">New password or app password</FieldLabel>
-          <input v-model="password" type="password" autocomplete="new-password" placeholder="Leave empty to keep the current one" />
-          <small class="hint">Stored encrypted and only used to sync and send your mail.</small>
-          <small v-if="errors.password" class="error">{{ errors.password }}</small>
-        </label>
-        <ServerFields v-if="imap" v-model="imap" protocol="imap" title="Incoming mail" :errors="serverErrors(errors, 'imap')" />
-        <ServerFields v-if="smtp" v-model="smtp" protocol="smtp" title="Outgoing mail" :errors="serverErrors(errors, 'smtp')" />
+      <ProviderAccountForm v-if="provider !== null" :account="account" :provider="provider" />
+      <ServerAccountForm v-else-if="servers !== null" :account="account" :servers="servers" />
 
-        <p v-if="error" class="form-error" role="alert">{{ error }}</p>
-        <p v-if="message" class="done" role="status">{{ message }}</p>
+      <p v-if="error" class="form-error" role="alert">{{ error }}</p>
+      <p v-if="message" class="done" role="status">{{ message }}</p>
 
+      <div class="actions">
+        <span class="spacer" />
+        <button v-if="account.status === 'active' || account.status === 'paused'" type="button" class="button button-quiet" :disabled="saving" @click="togglePause">
+          {{ account.status === 'paused' ? 'Resume syncing' : 'Pause syncing' }}
+        </button>
+        <button type="button" class="button button-danger" :disabled="saving" @click="confirmingRemoval = true">Remove account</button>
+      </div>
+
+      <div v-if="confirmingRemoval" class="confirm" role="alertdialog" aria-labelledby="remove-title">
+        <p id="remove-title"><strong>Remove {{ account.emailAddress }}?</strong></p>
+        <p>
+          Its mail disappears from Tresso on every device. Nothing is deleted at your provider, and you can add the account again later.
+          <template v-if="provider !== null">Tresso also deletes its access to your {{ providerName(provider) }} account.</template>
+        </p>
         <div class="actions">
-          <button type="submit" class="button button-primary" :disabled="saving">Save changes</button>
-          <button type="button" class="button button-quiet" :disabled="saving" @click="reset">Undo changes</button>
-          <span class="spacer" />
-          <button v-if="account.status === 'active' || account.status === 'paused'" type="button" class="button button-quiet" :disabled="saving" @click="togglePause">
-            {{ account.status === 'paused' ? 'Resume syncing' : 'Pause syncing' }}
-          </button>
-          <button type="button" class="button button-danger" :disabled="saving" @click="confirmingRemoval = true">Remove account</button>
+          <button type="button" class="button button-danger" :disabled="saving" @click="remove">Remove account</button>
+          <button type="button" class="button button-quiet" @click="confirmingRemoval = false">Keep it</button>
         </div>
-
-        <div v-if="confirmingRemoval" class="confirm" role="alertdialog" aria-labelledby="remove-title">
-          <p id="remove-title"><strong>Remove {{ account.emailAddress }}?</strong></p>
-          <p>Its mail disappears from Tresso on every device. Nothing is deleted at your provider, and you can add the account again later.</p>
-          <div class="actions">
-            <button type="button" class="button button-danger" :disabled="saving" @click="remove">Remove account</button>
-            <button type="button" class="button button-quiet" @click="confirmingRemoval = false">Keep it</button>
-          </div>
-        </div>
-      </form>
+      </div>
     </div>
   </section>
 </template>
@@ -241,21 +181,6 @@ function remove(): Promise<void> {
 .sync {
   margin: 0;
   color: var(--ink-2);
-}
-.form {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-.pair {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-@media (max-width: 600px) {
-  .pair {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 .actions {
   display: flex;
