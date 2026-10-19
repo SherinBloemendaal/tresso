@@ -369,7 +369,8 @@ export class SqliteMailStore implements MailStore {
 
   async messagesByThread(threadIds: string[]): Promise<Map<string, string[]>> {
     const byThread = new Map<string, string[]>(threadIds.map((threadId) => [threadId, []]))
-    for (const chunk of chunks(threadIds)) {
+    // Each thread once, however often it is asked for, so no message is listed twice.
+    for (const chunk of chunks([...byThread.keys()])) {
       for (const row of await this.sql.all<{ id: string; thread_id: string }>(`SELECT id, thread_id FROM messages WHERE thread_id IN (${placeholders(chunk)}) ORDER BY id`, chunk)) {
         byThread.get(row.thread_id)?.push(row.id)
       }

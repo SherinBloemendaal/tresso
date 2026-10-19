@@ -207,6 +207,28 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
       expect(await db.messageIdsOfThreads(['t1', 't2'])).toEqual(['m1', 'm2', 'm3'])
     })
 
+    it('breaks ties the same way: the larger id first', async () => {
+      const at = '2026-10-19T12:00:00+00:00'
+      await db.apply(
+        page({
+          cursor: 11,
+          threads: [thread('ta', 'work'), thread('tb', 'work')],
+          messages: [message('ma', 'ta', 'work', ['work-inbox'], at), message('mb', 'tb', 'work', ['work-inbox'], at)],
+        }),
+      )
+      await db.saveDraft(draft('da', { updatedAt: 5 }))
+      await db.saveDraft(draft('db', { updatedAt: 5 }))
+
+      expect((await db.inbox(null, 2)).map((c) => c.threadId)).toEqual(['tb', 'ta'])
+      expect((await db.inboxThreadIds('work', () => true)).slice(0, 2)).toEqual(['tb', 'ta'])
+      expect((await db.drafts()).map((d) => d.id)).toEqual(['db', 'da'])
+      expect((await db.suggestContacts('m', 2)).map((c) => c.key)).toEqual(['mb@sender.example', 'ma@sender.example'])
+    })
+
+    it('lists the messages of a thread asked for twice once', async () => {
+      expect(await db.messageIdsOfThreads(['t1', 't1'])).toEqual(['m1', 'm2'])
+    })
+
     it('keeps outgoing mail that is not settled, newest first', async () => {
       const outgoing = (id: string, status: SyncedOutgoingMessage['status'], sendAt: string): SyncedOutgoingMessage => ({
         id,

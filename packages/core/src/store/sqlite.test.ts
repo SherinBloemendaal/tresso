@@ -61,6 +61,12 @@ describe('SqliteMailStore', () => {
     expect(await db.draft('d1')).not.toBeNull()
   })
 
+  it('lists each message once for a selection larger than one query takes, with threads repeated across its parts', async () => {
+    const filler = Array.from({ length: 600 }, (_, index) => `none-${index}`)
+
+    expect(await db.messageIdsOfThreads(['t1', ...filler, 't1', 't3'])).toEqual(['m1', 'm2', 'm4'])
+  })
+
   it('syncs from the start after a resync, even when a pull under way stores a page meanwhile, and after a restart', async () => {
     // A pull that began from the stored cursor, before the resync was asked for.
     expect(await db.cursor()).toBe(10)
