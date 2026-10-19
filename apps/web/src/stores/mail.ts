@@ -1,4 +1,4 @@
-import { ref, shallowRef, watch } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import { defineStore } from 'pinia'
 import {
   RealtimeClient,
@@ -24,9 +24,13 @@ import {
   type SyncedMessage,
   type SyncedOutgoingMessage,
   type SyncedSignature,
+  type SyncedSmartInbox,
   type SyncedThread,
+  type ThreadClassification,
+  type ThreadClassificationRequest,
+  type Verdict,
 } from '@tresso/core'
-import type { Contact, Conversation, Draft } from '@/mail/db'
+import type { Contact, Conversation, Draft, ListScope } from '@/mail/db'
 import { deleteMailStore, openMailStore } from '@/mail/store'
 import { freshArrivals, mailNotifications } from '@/mail/mailNotifications'
 import { notifier } from '@/platform/notifier'
@@ -53,8 +57,16 @@ export const useMailStore = defineStore('mail', () => {
   const unreadCounts = ref<Map<string, number>>(new Map())
   /** Outgoing mail that is scheduled, on its way or failed. */
   const outbox = ref<SyncedOutgoingMessage[]>([])
-  /** null: the Unified Inbox; otherwise one account's inbox. */
+  /** null: the Unified Inbox; otherwise one account's inbox. Ignored while a smart inbox is on screen. */
   const mailbox = ref<string | null>(null)
+  /** The smart inbox on screen, or null for an inbox (see `mailbox`). */
+  const smartInbox = ref<string | null>(null)
+  const smartInboxes = ref<SyncedSmartInbox[]>([])
+  /** Threads with unread mail per smart inbox. */
+  const smartInboxCounts = ref<Map<string, number>>(new Map())
+  const scope = computed<ListScope>(() =>
+    smartInbox.value === null ? { kind: 'inbox', mailAccountId: mailbox.value } : { kind: 'smartInbox', smartInboxId: smartInbox.value },
+  )
   const listLimit = ref(LIST_STEP)
   const hasMore = ref(false)
   const syncState = ref<SyncState>('idle')
@@ -214,6 +226,8 @@ export const useMailStore = defineStore('mail', () => {
     signatures.value = []
     conversations.value = []
     unreadCounts.value = new Map()
+    smartInboxes.value = []
+    smartInboxCounts.value = new Map()
     outbox.value = []
     await stopping?.stop()
     await database?.close()
@@ -235,14 +249,18 @@ export const useMailStore = defineStore('mail', () => {
     if (database === null) {
       return
     }
-    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox] = await Promise.all([
+    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts] = await Promise.all([
       database.mailAccounts(),
       database.folders(),
       database.signatures(),
-      database.inbox(mailbox.value, listLimit.value + 1),
+      database.list(scope.value, listLimit.value + 1),
       database.unreadInboxCounts(),
       database.outbox(),
+      database.smartInboxes(),
+      database.unreadSmartInboxCounts(),
     ])
+    smartInboxes.value = nextSmartInboxes
+    smartInboxCounts.value = nextSmartCounts
     outbox.value = nextOutbox
     accounts.value = nextAccounts
     allFolders.value = nextFolders
@@ -253,12 +271,49 @@ export const useMailStore = defineStore('mail', () => {
   }
 
   async function showMailbox(mailAccountId: string | null): Promise<void> {
-    if (mailbox.value === mailAccountId) {
+    if (mailbox.value === mailAccountId && smartInbox.value === null) {
       return
     }
     mailbox.value = mailAccountId
+    smartInbox.value = null
     listLimit.value = LIST_STEP
     await refresh()
+  }
+
+  async function showSmartInbox(smartInboxId: string): Promise<void> {
+    if (smartInbox.value === smartInboxId) {
+      return
+    }
+    smartInbox.value = smartInboxId
+    mailbox.value = null
+    listLimit.value = LIST_STEP
+    await refresh()
+  }
+
+  /**
+   * Puts a conversation where the user says it belongs, with the smart inbox's verdict unless one is given. It shows
+   * at once; the server remembers the choice for the sender, and the delta brings its version right after.
+   */
+  async function classifyThread(threadId: string, smartInboxId: string, verdict?: Verdict): Promise<ThreadClassification> {
+    const database = db.value
+    const target = smartInboxes.value.find((candidate) => candidate.id === smartInboxId)
+    const shown = verdict ?? target?.verdict
+    const optimistic = shown === undefined ? null : { smartInboxId, verdict: shown }
+    const previous = database !== null && optimistic !== null ? await database.classifyThread(threadId, smartInboxId, optimistic.verdict) : null
+    await refresh()
+
+    const request: ThreadClassificationRequest = verdict === undefined ? { smartInboxId } : { smartInboxId, verdict }
+    try {
+      const result = await auth.send<ThreadClassification>('PUT', `/api/v1/threads/${encodeURIComponent(threadId)}/classification`, request)
+      void syncNow()
+      return result
+    } catch (error) {
+      if (previous !== null && optimistic !== null && database !== null) {
+        await database.restoreThread(previous, optimistic)
+        await refresh()
+      }
+      throw error
+    }
   }
 
   async function showMore(): Promise<void> {
@@ -270,19 +325,19 @@ export const useMailStore = defineStore('mail', () => {
     return (await db.value?.thread(threadId)) ?? null
   }
 
-  /** Threads in the mailbox on screen from any of these senders (lower-case addresses), loaded in the list or not. */
+  /** Threads in the list on screen from any of these senders (lower-case addresses), loaded in the list or not. */
   async function threadsFrom(addresses: Set<string>): Promise<string[]> {
-    return (await db.value?.inboxThreadIds(mailbox.value, (c) => c.senders.some((sender) => addresses.has(sender.address.toLowerCase())))) ?? []
+    return (await db.value?.listThreadIds(scope.value, (c) => c.senders.some((sender) => addresses.has(sender.address.toLowerCase())))) ?? []
   }
 
-  /** Threads in the mailbox on screen whose newest message is older than this moment (epoch ms). */
+  /** Threads in the list on screen whose newest message is older than this moment (epoch ms). */
   async function threadsBefore(moment: number): Promise<string[]> {
-    return (await db.value?.inboxThreadIds(mailbox.value, (c) => c.lastMessageAt < moment)) ?? []
+    return (await db.value?.listThreadIds(scope.value, (c) => c.lastMessageAt < moment)) ?? []
   }
 
-  /** Which selected threads are still in the mailbox on screen, and their accounts and senders. */
+  /** Which selected threads are still in the list on screen, and their accounts and senders. */
   async function describeThreads(threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }> {
-    return (await db.value?.describeThreads(mailbox.value, threadIds)) ?? { present: [], accounts: [], senders: [] }
+    return (await db.value?.describeThreads(scope.value, threadIds)) ?? { present: [], accounts: [], senders: [] }
   }
 
   async function messageIdsOf(threadIds: string[]): Promise<string[]> {
@@ -438,6 +493,9 @@ export const useMailStore = defineStore('mail', () => {
     unreadCounts,
     outbox,
     mailbox,
+    smartInbox,
+    smartInboxes,
+    smartInboxCounts,
     hasMore,
     syncState,
     syncError,
@@ -450,6 +508,8 @@ export const useMailStore = defineStore('mail', () => {
     forget,
     refresh,
     showMailbox,
+    showSmartInbox,
+    classifyThread,
     showMore,
     thread,
     threadsFrom,

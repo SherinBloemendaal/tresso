@@ -48,7 +48,7 @@ vi.mock('@/mail/store', () => ({
 const { useMailStore } = await import('../mail')
 
 function page(since: number): ChangePage {
-  return { cursor: since, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], deleted: [] }
+  return { cursor: since, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [] }
 }
 
 describe('the mail copy across sign-out and sign-in', () => {

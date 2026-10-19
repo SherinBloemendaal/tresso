@@ -76,3 +76,57 @@ describe('IndexedDbMailStore upgrade', () => {
     await deleteMailDatabase('upgrade-user')
   })
 })
+
+describe('IndexedDbMailStore upgrade to smart inboxes', () => {
+  it('keeps the inboxes working and syncs again to bring the classification', async () => {
+    const v4 = await openDB(databaseName('upgrade-smart'), 4, {
+      upgrade(database) {
+        database.createObjectStore('meta')
+        database.createObjectStore('mailAccounts', { keyPath: 'id' })
+        database.createObjectStore('folders', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+        database.createObjectStore('threads', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+        const messages = database.createObjectStore('messages', { keyPath: 'id' })
+        messages.createIndex('byThread', 'threadId')
+        messages.createIndex('byAccount', 'mailAccountId')
+        messages.createIndex('byFolder', 'folderIds', { multiEntry: true })
+        const conversations = database.createObjectStore('conversations', { keyPath: 'threadId' })
+        conversations.createIndex('byAccount', 'mailAccountId')
+        conversations.createIndex('byInboxDate', ['inbox', 'lastMessageAt'])
+        conversations.createIndex('byAccountInboxDate', ['mailAccountId', 'inbox', 'lastMessageAt'])
+        conversations.createIndex('byAccountUnreadInbox', ['mailAccountId', 'unreadInbox'])
+        const outgoing = database.createObjectStore('outgoing', { keyPath: 'id' })
+        outgoing.createIndex('byAccount', 'mailAccountId')
+        outgoing.createIndex('bySendAt', 'sendAt')
+        database.createObjectStore('contacts', { keyPath: 'key' }).createIndex('byLastSeen', 'lastSeen')
+        database.createObjectStore('drafts', { keyPath: 'id' }).createIndex('byUpdatedAt', 'updatedAt')
+        database.createObjectStore('signatures', { keyPath: 'id' })
+      },
+    })
+    await v4.put('threads', { id: 't1', mailAccountId: 'work', subject: 'Budget', messageCount: 1, lastMessageAt: '2026-10-19T08:00:00Z' })
+    await v4.put('conversations', {
+      threadId: 't1',
+      mailAccountId: 'work',
+      subject: 'Budget',
+      snippet: '',
+      lastMessageAt: 1,
+      messageCount: 1,
+      unreadCount: 1,
+      flagged: false,
+      hasAttachments: false,
+      senders: [],
+      inbox: 1,
+      unreadInbox: 1,
+    })
+    await v4.put('meta', 30, 'cursor')
+    v4.close()
+
+    const db = await IndexedDbMailStore.open('upgrade-smart')
+
+    expect(await db.cursor()).toBe(0)
+    expect(await db.smartInboxes()).toEqual([])
+    expect(await db.inbox(null, 10)).toEqual([expect.objectContaining({ threadId: 't1', smartInboxId: null, verdict: null, inbox: true, active: true })])
+    expect((await db.thread('t1'))?.thread).toMatchObject({ smartInboxId: null, verdict: null, classificationReason: null })
+    await db.close()
+    await deleteMailDatabase('upgrade-smart')
+  })
+})

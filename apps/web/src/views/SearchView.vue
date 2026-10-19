@@ -112,6 +112,9 @@ function threadLink(hit: SearchHit) {
         :accounts="mail.accounts"
         :unread-counts="mail.unreadCounts"
         :mailbox="null"
+        :smart-inboxes="mail.smartInboxes"
+        :smart-inbox-counts="mail.smartInboxCounts"
+        :smart-inbox="null"
         :live="mail.live"
         @sign-out="auth.signOut()"
       />

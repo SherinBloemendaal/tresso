@@ -20,7 +20,7 @@ const original: SyncedMessage = {
   receivedAt: '2026-10-19T08:00:00Z',
   flags: { seen: true, flagged: false, answered: false, draft: false },
   hasAttachments: false,
-  categoryId: null,
+  smartInboxId: null,
   verdict: null,
   summary: null,
 }
@@ -30,7 +30,7 @@ function outgoing(status: SyncedOutgoingMessage['status'], lastError: string | n
 }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [], ...extra }
 }
 
 describe('compose store', () => {

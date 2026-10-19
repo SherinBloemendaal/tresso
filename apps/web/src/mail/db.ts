@@ -2,10 +2,15 @@ import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransactio
 import {
   actionResult,
   arrivalOf,
+  classifiedByUser,
   contactMatches,
   deletedDraft,
+  inList,
+  listFolders,
   mergeContact,
   peopleOn,
+  sortSmartInboxes,
+  stillAsClassified,
   storedDraft,
   summarizeConversation,
   syncedDraft,
@@ -15,6 +20,8 @@ import {
   type Contact,
   type ConversationSummary,
   type Draft,
+  type ListFolders,
+  type ListScope,
   type MailStore,
   type MessageAction,
   type SyncedFolder,
@@ -23,23 +30,31 @@ import {
   type SyncedOutgoingMessage,
   type SyncedSignature,
   type SyncedDraft,
+  type SyncedSmartInbox,
   type SyncedThread,
+  type Verdict,
 } from '@tresso/core'
 
-export type { Arrival, Contact, Draft } from '@tresso/core'
+export type { Arrival, Contact, Draft, ListScope } from '@tresso/core'
 
 /** What a thread looks like in a mailbox list. */
 export type Conversation = ConversationSummary
 
 /**
- * A conversation as IndexedDB keeps it: booleans cannot be index keys, so the inbox flags are numbers, which the
- * lists read through indexes and so stay fast however much mail is stored.
+ * A conversation as IndexedDB keeps it: booleans and null cannot be index keys, so the list flags are numbers and a
+ * missing smart inbox is '', which the lists read through indexes and so stay fast however much mail is stored.
  */
-interface StoredConversation extends Omit<ConversationSummary, 'inbox'> {
-  /** 1 when a message of the thread is in an inbox folder. */
+interface StoredConversation extends Omit<ConversationSummary, 'inbox' | 'active' | 'smartInboxId'> {
+  /** 1 when the inboxes list the thread (see ConversationSummary.inbox). */
   inbox: 0 | 1
   /** 1 when that thread is in an inbox and has unread mail. */
   unreadInbox: 0 | 1
+  /** 1 when its smart inbox lists the thread (see ConversationSummary.active). */
+  active: 0 | 1
+  /** 1 when that thread is listed by its smart inbox and has unread mail. */
+  unreadActive: 0 | 1
+  /** '' when the thread has no smart inbox (yet). */
+  smartInboxId: string
 }
 
 function toSummary(stored: StoredConversation): ConversationSummary {
@@ -55,6 +70,10 @@ function toSummary(stored: StoredConversation): ConversationSummary {
     hasAttachments: stored.hasAttachments,
     senders: stored.senders,
     inbox: stored.inbox === 1,
+    active: stored.active === 1,
+    smartInboxId: stored.smartInboxId === '' ? null : stored.smartInboxId,
+    verdict: stored.verdict,
+    classificationReason: stored.classificationReason,
   }
 }
 
@@ -79,16 +98,19 @@ interface MailSchema extends DBSchema {
       byInboxDate: [number, number]
       byAccountInboxDate: [string, number, number]
       byAccountUnreadInbox: [string, number]
+      bySmartInboxDate: [string, number, number]
+      bySmartInboxUnread: [string, number]
     }
   }
   signatures: { key: string; value: SyncedSignature }
+  smartInboxes: { key: string; value: SyncedSmartInbox }
 }
 
 type Stores = StoreNames<MailSchema>[]
 type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
-const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts']
-const VERSION = 4
+const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes']
+const VERSION = 5
 
 export function databaseName(userId: string): string {
   return `tresso-mail-${userId}`
@@ -134,7 +156,26 @@ export class IndexedDbMailStore implements MailStore {
             await cursor.update({ ...cursor.value, version: 0, pendingSave: cursor.value.outgoingId === null, remoteVersion: null })
           }
         }
-        // Outgoing mail, contacts, signatures and drafts come from the delta: an existing copy syncs again from the start.
+        if (oldVersion < 5) {
+          database.createObjectStore('smartInboxes', { keyPath: 'id' })
+          const conversations = transaction.objectStore('conversations')
+          conversations.createIndex('bySmartInboxDate', ['smartInboxId', 'active', 'lastMessageAt'])
+          conversations.createIndex('bySmartInboxUnread', ['smartInboxId', 'unreadActive'])
+          if (oldVersion >= 1) {
+            // Stored before classification reached clients: nothing is classified yet. The sync from the start below
+            // brings it; until then the inboxes keep working.
+            const threads = transaction.objectStore('threads')
+            for (let cursor = await threads.openCursor(); cursor !== null; cursor = await cursor.continue()) {
+              await cursor.update({ ...cursor.value, smartInboxId: null, verdict: null, classificationReason: null })
+            }
+            for (let cursor = await conversations.openCursor(); cursor !== null; cursor = await cursor.continue()) {
+              const old = cursor.value
+              await cursor.update({ ...old, smartInboxId: '', verdict: null, classificationReason: null, active: old.inbox, unreadActive: old.unreadInbox })
+            }
+          }
+        }
+        // Outgoing mail, contacts, signatures, drafts and smart inboxes come from the delta: an existing copy syncs
+        // again from the start.
         if (oldVersion >= 1) {
           await transaction.objectStore('meta').delete('cursor')
         }
@@ -185,6 +226,9 @@ export class IndexedDbMailStore implements MailStore {
         case 'signature':
           await tx.objectStore('signatures').delete(deleted.id)
           break
+        case 'smartInbox':
+          await tx.objectStore('smartInboxes').delete(deleted.id)
+          break
         case 'draft': {
           const local = await tx.objectStore('drafts').get(deleted.id)
           if (local !== undefined) {
@@ -210,6 +254,16 @@ export class IndexedDbMailStore implements MailStore {
     }
     for (const signature of page.signatures) {
       await tx.objectStore('signatures').put(signature)
+    }
+    for (const smartInbox of page.smartInboxes) {
+      const known = await tx.objectStore('smartInboxes').get(smartInbox.id)
+      await tx.objectStore('smartInboxes').put(smartInbox)
+      if (known === undefined && smartInbox.builtin === 'spam') {
+        // The Spam smart inbox decides which conversations the inboxes leave out.
+        for (const threadId of await tx.objectStore('conversations').getAllKeys()) {
+          affected.add(threadId)
+        }
+      }
     }
     for (const thread of page.threads) {
       await tx.objectStore('threads').put(thread)
@@ -241,8 +295,9 @@ export class IndexedDbMailStore implements MailStore {
       await applyDraft(tx, draft)
     }
 
+    const lists = await listFoldersOf(tx)
     for (const threadId of affected) {
-      await refreshConversation(tx, threadId, inboxFolders)
+      await refreshConversation(tx, threadId, lists)
     }
 
     await tx.objectStore('meta').put(page.cursor, 'cursor')
@@ -261,7 +316,6 @@ export class IndexedDbMailStore implements MailStore {
     const tx = this.db.transaction(ALL_STORES, 'readwrite')
     const folders = await tx.objectStore('folders').getAll()
     const accounts = await tx.objectStore('mailAccounts').getAll()
-    const inboxFolders = new Set(folders.filter((folder) => folder.role === 'inbox').map((folder) => folder.id))
 
     const before: SyncedMessage[] = []
     for (const id of messageIds) {
@@ -277,8 +331,9 @@ export class IndexedDbMailStore implements MailStore {
       await tx.objectStore('messages').put(message)
       affected.add(message.threadId)
     }
+    const lists = await listFoldersOf(tx)
     for (const threadId of affected) {
-      await refreshConversation(tx, threadId, inboxFolders)
+      await refreshConversation(tx, threadId, lists)
     }
     await tx.done
 
@@ -291,9 +346,6 @@ export class IndexedDbMailStore implements MailStore {
    */
   async revertAction(applied: AppliedAction): Promise<void> {
     const tx = this.db.transaction(ALL_STORES, 'readwrite')
-    const inboxFolders = new Set(
-      (await tx.objectStore('folders').getAll()).filter((folder) => folder.role === 'inbox').map((folder) => folder.id),
-    )
     const affected = new Set<string>()
     for (const [index, previous] of applied.before.entries()) {
       const current = await tx.objectStore('messages').get(previous.id)
@@ -302,8 +354,9 @@ export class IndexedDbMailStore implements MailStore {
         affected.add(previous.threadId)
       }
     }
+    const lists = await listFoldersOf(tx)
     for (const threadId of affected) {
-      await refreshConversation(tx, threadId, inboxFolders)
+      await refreshConversation(tx, threadId, lists)
     }
     await tx.done
   }
@@ -331,17 +384,21 @@ export class IndexedDbMailStore implements MailStore {
     return signatures.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
   }
 
-  /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
-  async inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]> {
-    const tx = this.db.transaction('conversations')
-    const index = mailAccountId === null ? tx.store.index('byInboxDate') : tx.store.index('byAccountInboxDate')
-    const range =
-      mailAccountId === null
-        ? IDBKeyRange.bound([1, -Infinity], [1, Infinity])
-        : IDBKeyRange.bound([mailAccountId, 1, -Infinity], [mailAccountId, 1, Infinity])
+  /** In sidebar order. */
+  async smartInboxes(): Promise<SyncedSmartInbox[]> {
+    return sortSmartInboxes(await this.db.getAll('smartInboxes'))
+  }
 
+  /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
+  inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]> {
+    return this.list({ kind: 'inbox', mailAccountId }, limit)
+  }
+
+  /** The threads of a list (an inbox or a smart inbox), newest first. */
+  async list(scope: ListScope, limit: number): Promise<ConversationSummary[]> {
+    const tx = this.db.transaction('conversations')
     const conversations: ConversationSummary[] = []
-    for (let cursor = await index.openCursor(range, 'prev'); cursor !== null && conversations.length < limit; cursor = await cursor.continue()) {
+    for (let cursor = await openList(tx.store, scope); cursor !== null && conversations.length < limit; cursor = await cursor.continue()) {
       conversations.push(toSummary(cursor.value))
     }
 
@@ -349,19 +406,13 @@ export class IndexedDbMailStore implements MailStore {
   }
 
   /**
-   * Inbox threads (of one account, or of all) matching a test, newest first, however many there are: for selecting
-   * beyond the part of the list that is loaded.
+   * Threads of a list matching a test, newest first, however many there are: for selecting beyond the part of the list
+   * that is loaded.
    */
-  async inboxThreadIds(mailAccountId: string | null, matches: (conversation: ConversationSummary) => boolean): Promise<string[]> {
+  async listThreadIds(scope: ListScope, matches: (conversation: ConversationSummary) => boolean): Promise<string[]> {
     const tx = this.db.transaction('conversations')
-    const index = mailAccountId === null ? tx.store.index('byInboxDate') : tx.store.index('byAccountInboxDate')
-    const range =
-      mailAccountId === null
-        ? IDBKeyRange.bound([1, -Infinity], [1, Infinity])
-        : IDBKeyRange.bound([mailAccountId, 1, -Infinity], [mailAccountId, 1, Infinity])
-
     const ids: string[] = []
-    for (let cursor = await index.openCursor(range, 'prev'); cursor !== null; cursor = await cursor.continue()) {
+    for (let cursor = await openList(tx.store, scope); cursor !== null; cursor = await cursor.continue()) {
       if (matches(toSummary(cursor.value))) {
         ids.push(cursor.value.threadId)
       }
@@ -371,22 +422,22 @@ export class IndexedDbMailStore implements MailStore {
   }
 
   /**
-   * What a selection of threads holds now: the ones still in the inbox on screen (of one account, or of all), and
-   * their accounts and senders (lower-case addresses).
+   * What a selection of threads holds now: the ones still in the list on screen, and their accounts and senders
+   * (lower-case addresses).
    */
-  async describeThreads(mailAccountId: string | null, threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }> {
+  async describeThreads(scope: ListScope, threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }> {
     const tx = this.db.transaction('conversations')
     const present: string[] = []
     const accounts = new Set<string>()
     const senders = new Set<string>()
     for (const threadId of threadIds) {
-      const conversation = await tx.store.get(threadId)
-      if (conversation === undefined || conversation.inbox !== 1 || (mailAccountId !== null && conversation.mailAccountId !== mailAccountId)) {
+      const stored = await tx.store.get(threadId)
+      if (stored === undefined || !inList(toSummary(stored), scope)) {
         continue
       }
       present.push(threadId)
-      accounts.add(conversation.mailAccountId)
-      for (const sender of conversation.senders) {
+      accounts.add(stored.mailAccountId)
+      for (const sender of stored.senders) {
         senders.add(sender.address.toLowerCase())
       }
     }
@@ -420,6 +471,43 @@ export class IndexedDbMailStore implements MailStore {
     }
 
     return counts
+  }
+
+  /** Threads with unread mail per smart inbox, among those it lists. */
+  async unreadSmartInboxCounts(): Promise<Map<string, number>> {
+    const tx = this.db.transaction(['smartInboxes', 'conversations'])
+    const counts = new Map<string, number>()
+    for (const id of await tx.objectStore('smartInboxes').getAllKeys()) {
+      counts.set(id, await tx.objectStore('conversations').index('bySmartInboxUnread').count([id, 1]))
+    }
+
+    return counts
+  }
+
+  /**
+   * Shows the user's choice at once, before the server confirms it: the thread moves to the smart inbox with the
+   * verdict. Returns the thread as it was, for {@link restoreThread} when the server refuses.
+   */
+  async classifyThread(threadId: string, smartInboxId: string, verdict: Verdict): Promise<SyncedThread | null> {
+    const tx = this.db.transaction(ALL_STORES, 'readwrite')
+    const previous = await tx.objectStore('threads').get(threadId)
+    if (previous !== undefined) {
+      await tx.objectStore('threads').put(classifiedByUser(previous, smartInboxId, verdict))
+      await refreshConversation(tx, threadId, await listFoldersOf(tx))
+    }
+    await tx.done
+
+    return previous ?? null
+  }
+
+  /** Puts a thread back as it was, unless the delta changed it since. */
+  async restoreThread(previous: SyncedThread, optimistic: { smartInboxId: string; verdict: Verdict }): Promise<void> {
+    const tx = this.db.transaction(ALL_STORES, 'readwrite')
+    if (stillAsClassified(await tx.objectStore('threads').get(previous.id), optimistic)) {
+      await tx.objectStore('threads').put(previous)
+      await refreshConversation(tx, previous.id, await listFoldersOf(tx))
+    }
+    await tx.done
   }
 
   /** Outgoing mail that is not settled: scheduled, on its way, or failed. Newest first. */
@@ -500,6 +588,24 @@ export class IndexedDbMailStore implements MailStore {
   }
 }
 
+type ConversationStore = ReturnType<IDBPTransaction<MailSchema, ['conversations'], 'readonly'>['objectStore']>
+
+/** A cursor over the threads of a list, newest first, through the index that covers it. */
+function openList(store: ConversationStore, scope: ListScope) {
+  if (scope.kind === 'smartInbox') {
+    return store.index('bySmartInboxDate').openCursor(IDBKeyRange.bound([scope.smartInboxId, 1, -Infinity], [scope.smartInboxId, 1, Infinity]), 'prev')
+  }
+  if (scope.mailAccountId === null) {
+    return store.index('byInboxDate').openCursor(IDBKeyRange.bound([1, -Infinity], [1, Infinity]), 'prev')
+  }
+
+  return store.index('byAccountInboxDate').openCursor(IDBKeyRange.bound([scope.mailAccountId, 1, -Infinity], [scope.mailAccountId, 1, Infinity]), 'prev')
+}
+
+async function listFoldersOf(tx: WriteTx): Promise<ListFolders> {
+  return listFolders(await tx.objectStore('folders').getAll(), await tx.objectStore('smartInboxes').getAll())
+}
+
 function createVersion1(database: IDBPDatabase<MailSchema>): void {
   database.createObjectStore('meta')
   database.createObjectStore('mailAccounts', { keyPath: 'id' })
@@ -547,10 +653,10 @@ async function rememberContacts(tx: WriteTx, message: SyncedMessage): Promise<vo
   }
 }
 
-async function refreshConversation(tx: WriteTx, threadId: string, inboxFolders: Set<string>): Promise<void> {
+async function refreshConversation(tx: WriteTx, threadId: string, lists: ListFolders): Promise<void> {
   const thread = await tx.objectStore('threads').get(threadId)
   const messages = thread === undefined ? [] : await tx.objectStore('messages').index('byThread').getAll(threadId)
-  const summary = thread === undefined ? null : summarizeConversation(thread, messages, inboxFolders)
+  const summary = thread === undefined ? null : summarizeConversation(thread, messages, lists)
   if (summary === null) {
     await tx.objectStore('conversations').delete(threadId)
     return
@@ -558,7 +664,10 @@ async function refreshConversation(tx: WriteTx, threadId: string, inboxFolders: 
 
   await tx.objectStore('conversations').put({
     ...summary,
+    smartInboxId: summary.smartInboxId ?? '',
     inbox: summary.inbox ? 1 : 0,
     unreadInbox: summary.inbox && summary.unreadCount > 0 ? 1 : 0,
+    active: summary.active ? 1 : 0,
+    unreadActive: summary.active && summary.unreadCount > 0 ? 1 : 0,
   })
 }

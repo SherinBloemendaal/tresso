@@ -33,14 +33,14 @@ function message(id: string, folderIds: string[], receivedAt: string, seen: bool
     receivedAt,
     flags: { seen, flagged: false, answered: false, draft: false },
     hasAttachments: false,
-    categoryId: null,
+    smartInboxId: null,
     verdict: null,
     summary: null,
   }
 }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [], ...extra }
 }
 
 async function settle(): Promise<void> {
@@ -74,7 +74,7 @@ describe('ReadingPane actions', () => {
           const first = page(1, {
             mailAccounts: [account],
             folders,
-            threads: [{ id: 't1', mailAccountId: 'work', subject: 'Offsite plan', messageCount: 2, lastMessageAt: '2026-10-19T09:00:00Z' }],
+            threads: [{ id: 't1', mailAccountId: 'work', subject: 'Offsite plan', messageCount: 2, lastMessageAt: '2026-10-19T09:00:00Z', smartInboxId: null, verdict: null, classificationReason: null }],
             messages: [message('m1', ['sent'], '2026-10-19T08:00:00Z', true), message('m2', ['inbox'], '2026-10-19T09:00:00Z', false)],
           })
           return new Response(JSON.stringify(since === 0 ? first : since === 1 && later !== null ? later : page(since)))
