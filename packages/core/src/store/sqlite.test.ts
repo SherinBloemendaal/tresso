@@ -47,6 +47,23 @@ describe('SqliteMailStore', () => {
     await expect(db.saveDraft(draft('d1'))).rejects.toBeInstanceOf(CopyClosingError)
   })
 
+  it('closes only once the reads under way are done, so a desktop file is free to delete', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const slow: Sql & { closed(): boolean } = { ...sql, all: async (source, params) => (await held, sql.all(source, params)) }
+    const store = await SqliteMailStore.open(slow)
+    const reading = store.mailAccounts()
+
+    const closing = store.close()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(sql.closed()).toBe(false)
+
+    release()
+    await reading
+    await closing
+    expect(sql.closed()).toBe(true)
+  })
+
   it('stores writes that arrive together one after the other, as a device allows one writer', async () => {
     await Promise.all([
       db.apply(page({ cursor: 11, messages: [message('m5', 't1', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00')] })),
