@@ -281,6 +281,13 @@ The web client keeps its copy in IndexedDB, one database per user, deleted on si
 stores a summary per thread (senders, snippet, unread count, whether it is in an inbox), recomputed whenever one of
 its messages changes, so the inbox lists read a few dozen rows through an index however much mail is stored.
 
+Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
+addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is
+sent with a `sendAt` a few seconds ahead, so "Undo" can cancel it; "Send later" picks a time. The draft is saved in
+IndexedDB while typing and kept until the message is confirmed sent, so a failed message can be edited and sent
+again; the outcome of each sent message is announced once. Recipient suggestions come from the people in synced
+mail, stored locally per user.
+
 ## 4. Scale notes
 
 - Every mail metadata row (folders, threads, messages, attachments) carries `mail_account_id` and every query path
