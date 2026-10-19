@@ -21,7 +21,7 @@ function message(id: string): SyncedMessage {
     receivedAt: '2026-10-19T08:00:00Z',
     flags: { seen: false, flagged: false, answered: false, draft: false },
     hasAttachments: false,
-    categoryId: null,
+    smartInboxId: null,
     verdict: null,
     summary: null,
   }
@@ -46,11 +46,12 @@ describe('message actions in large selections', () => {
             hasMore: false,
             mailAccounts: [account],
             folders: [{ id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' }],
-            threads: ids.map((id) => ({ id: `t-${id}`, mailAccountId: 'work', subject: '', messageCount: 1, lastMessageAt: '2026-10-19T08:00:00Z' })),
+            threads: ids.map((id) => ({ id: `t-${id}`, mailAccountId: 'work', subject: '', messageCount: 1, lastMessageAt: '2026-10-19T08:00:00Z', smartInboxId: null, verdict: null, classificationReason: null })),
             messages: ids.map(message),
             outgoingMessages: [],
             signatures: [],
             drafts: [],
+            smartInboxes: [],
             deleted: [],
           }
           return new Response(JSON.stringify(since === 0 ? first : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [] }))

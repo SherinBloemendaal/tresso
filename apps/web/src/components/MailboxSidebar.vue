@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
-import type { SyncedMailAccount } from '@tresso/core'
+import type { SyncedMailAccount, SyncedSmartInbox } from '@tresso/core'
 import AppIcon from '@/components/AppIcon.vue'
 import SenderAvatar from '@/components/SenderAvatar.vue'
+import SmartInboxMark from '@/components/SmartInboxMark.vue'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 
@@ -13,6 +14,10 @@ const props = defineProps<{
   accounts: SyncedMailAccount[]
   unreadCounts: Map<string, number>
   mailbox: string | null
+  smartInboxes: SyncedSmartInbox[]
+  smartInboxCounts: Map<string, number>
+  /** The smart inbox on screen; null when an inbox is. */
+  smartInbox: string | null
   live: boolean
 }>()
 const emit = defineEmits<{ signOut: [] }>()
@@ -46,7 +51,7 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
     <button type="button" class="button button-primary compose" @click="compose.openNew()">Compose <kbd>C</kbd></button>
 
     <div class="group">
-      <RouterLink :to="{ name: 'unified' }" class="item" :aria-current="mailbox === null ? 'page' : undefined">
+      <RouterLink :to="{ name: 'unified' }" class="item" :aria-current="mailbox === null && smartInbox === null ? 'page' : undefined">
         <AppIcon name="inbox" />
         <span class="label">Unified Inbox</span>
         <span v-if="totalUnread > 0" class="count">{{ totalUnread }}<span class="visually-hidden"> unread</span></span>
@@ -62,6 +67,22 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
       </RouterLink>
     </div>
 
+    <div v-if="smartInboxes.length > 0" class="group">
+      <h2 class="group-title">Smart inboxes</h2>
+      <RouterLink
+        v-for="item in smartInboxes"
+        :key="item.id"
+        :to="{ name: 'smart-inbox', params: { smartInboxId: item.id } }"
+        class="item smart"
+        :aria-current="smartInbox === item.id ? 'page' : undefined"
+      >
+        <SmartInboxMark :smart-inbox="item" />
+        <span class="label">{{ item.name }}</span>
+        <span v-if="(smartInboxCounts.get(item.id) ?? 0) > 0" class="count">{{ smartInboxCounts.get(item.id) }}<span class="visually-hidden"> unread</span></span>
+      </RouterLink>
+      <RouterLink :to="{ name: 'settings-smart-inbox', params: { smartInboxId: 'new' } }" class="add">+ New smart inbox</RouterLink>
+    </div>
+
     <div class="group">
       <h2 class="group-title">Accounts</h2>
       <RouterLink
@@ -69,7 +90,7 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         :key="account.id"
         :to="{ name: 'account', params: { accountId: account.id } }"
         class="item account"
-        :aria-current="mailbox === account.id ? 'page' : undefined"
+        :aria-current="mailbox === account.id && smartInbox === null ? 'page' : undefined"
       >
         <SenderAvatar :sender="{ name: account.displayName, address: account.emailAddress }" :size="24" />
         <span class="account-text">
@@ -184,6 +205,13 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
 }
 .label {
   flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.smart {
+  min-height: 32px;
 }
 .count {
   font-size: 12px;

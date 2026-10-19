@@ -13,23 +13,40 @@ const mail = useMailStore()
 const route = useRoute()
 
 const accountId = computed(() => (typeof route.params.accountId === 'string' ? route.params.accountId : null))
+const smartInboxId = computed(() => (typeof route.params.smartInboxId === 'string' ? route.params.smartInboxId : null))
 const threadId = computed(() => (typeof route.params.threadId === 'string' ? route.params.threadId : null))
-const title = computed(() => (accountId.value === null ? 'Unified Inbox' : (mail.accounts.find((a) => a.id === accountId.value)?.displayName ?? 'Inbox')))
-const backTo = computed(() => (accountId.value === null ? '/' : `/accounts/${accountId.value}`))
+const title = computed(() => {
+  if (smartInboxId.value !== null) {
+    return mail.smartInboxes.find((s) => s.id === smartInboxId.value)?.name ?? 'Smart inbox'
+  }
+
+  return accountId.value === null ? 'Unified Inbox' : (mail.accounts.find((a) => a.id === accountId.value)?.displayName ?? 'Inbox')
+})
+const backTo = computed(() => {
+  if (smartInboxId.value !== null) {
+    return `/smart/${smartInboxId.value}`
+  }
+
+  return accountId.value === null ? '/' : `/accounts/${accountId.value}`
+})
 
 function linkTo(id: string): RouteLocationRaw {
+  if (smartInboxId.value !== null) {
+    return { name: 'smart-inbox-thread', params: { smartInboxId: smartInboxId.value, threadId: id } }
+  }
+
   return accountId.value === null
     ? { name: 'unified-thread', params: { threadId: id } }
     : { name: 'account-thread', params: { accountId: accountId.value, threadId: id } }
 }
 
 const selection = useSelectionStore()
-// A selection belongs to the mailbox it was made in.
+// A selection belongs to the list it was made in.
 watch(
-  accountId,
-  (id) => {
+  [accountId, smartInboxId],
+  ([account, smartInbox]) => {
     selection.clear()
-    void mail.showMailbox(id)
+    void (smartInbox === null ? mail.showMailbox(account) : mail.showSmartInbox(smartInbox))
   },
   { immediate: true },
 )
@@ -50,6 +67,9 @@ function signOut(): void {
         :accounts="mail.accounts"
         :unread-counts="mail.unreadCounts"
         :mailbox="mail.mailbox"
+        :smart-inboxes="mail.smartInboxes"
+        :smart-inbox-counts="mail.smartInboxCounts"
+        :smart-inbox="mail.smartInbox"
         :live="mail.live"
         @sign-out="signOut"
       />
@@ -63,6 +83,7 @@ function signOut(): void {
       :has-more="mail.hasMore"
       :loading="!mail.ready || mail.syncState === 'syncing'"
       :has-accounts="mail.accounts.length > 0"
+      :empty-text="smartInboxId === null ? 'Nothing in this inbox.' : 'Nothing in this smart inbox.'"
       :link-to="linkTo"
       @show-more="mail.showMore()"
     />

@@ -20,6 +20,11 @@ const paths = {
   trash: ['M4 7h16', 'M9 7V4h6v3', 'M6 7l1 13h10l1-13'],
   unread: ['M3 6h18v12H3z', 'M3 7l9 6 9-6'],
   folder: ['M3 6h6l2 2h10v11H3z'],
+  do: ['M12 3a9 9 0 100 18 9 9 0 000-18z', 'M8 12.5l2.5 2.5L16 9.5'],
+  delegate: ['M9 4.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7z', 'M3 20c0-3.3 2.7-6 6-6', 'M14 16h7', 'M18 13l3 3-3 3'],
+  know: ['M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z', 'M12 9a3 3 0 100 6 3 3 0 000-6z'],
+  none: ['M6 12h12'],
+  chevron: ['M6 9l6 6 6-6'],
 } as const
 
 defineProps<{ name: keyof typeof paths; size?: number; label?: string }>()

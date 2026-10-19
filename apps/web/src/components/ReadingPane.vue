@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import type { MessageAction, SyncedMessage, SyncedThread } from '@tresso/core'
+import { classificationReasonText, type MessageAction, type SyncedMessage, type SyncedThread } from '@tresso/core'
 import type { AppliedAction } from '@tresso/core'
 import { shortcutAllowed, useMessageActions } from '@/mail/useMessageActions'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import { useSelectionStore } from '@/stores/selection'
 import AppIcon from '@/components/AppIcon.vue'
+import ClassificationMenu from '@/components/ClassificationMenu.vue'
 import MessageCard from '@/components/MessageCard.vue'
 import MenuButton from '@/components/MenuButton.vue'
 
@@ -164,6 +165,16 @@ onBeforeUnmount(() => {
           @choose="moveTo"
         />
       </div>
+      <div class="classification">
+        <ClassificationMenu
+          :thread-id="thread.id"
+          :subject="thread.subject"
+          :smart-inbox-id="thread.smartInboxId ?? null"
+          :verdict="thread.verdict ?? null"
+          show-smart-inbox
+        />
+        <span v-if="classificationReasonText(thread.classificationReason ?? null)" class="reason">{{ classificationReasonText(thread.classificationReason ?? null) }}</span>
+      </div>
       <h2 class="subject">{{ thread.subject || '(no subject)' }}</h2>
       <MessageCard
         v-for="message in messages"
@@ -224,6 +235,17 @@ onBeforeUnmount(() => {
 }
 .tool.on {
   color: var(--delegate);
+}
+.classification {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-bottom: 8px;
+}
+.reason {
+  font-size: 12px;
+  color: var(--ink-2);
 }
 .subject {
   margin: 0 0 8px;

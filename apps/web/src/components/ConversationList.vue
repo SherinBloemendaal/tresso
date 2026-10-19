@@ -7,6 +7,7 @@ import { useMailStore } from '@/stores/mail'
 import { useSelectionStore } from '@/stores/selection'
 import AppIcon from '@/components/AppIcon.vue'
 import BulkBar from '@/components/BulkBar.vue'
+import ClassificationMenu from '@/components/ClassificationMenu.vue'
 import MenuButton from '@/components/MenuButton.vue'
 import SearchField from '@/components/SearchField.vue'
 import SenderAvatar from '@/components/SenderAvatar.vue'
@@ -19,6 +20,7 @@ const props = defineProps<{
   loading: boolean
   hasAccounts: boolean
   linkTo: (threadId: string) => RouteLocationRaw
+  emptyText?: string
 }>()
 const emit = defineEmits<{ showMore: [] }>()
 
@@ -132,13 +134,20 @@ const days = computed(() => {
               <span class="snippet">{{ conversation.snippet }}</span>
             </span>
           </RouterLink>
+          <ClassificationMenu
+            class="classification"
+            :thread-id="conversation.threadId"
+            :subject="conversation.subject"
+            :smart-inbox-id="conversation.smartInboxId || null"
+            :verdict="conversation.verdict ?? null"
+          />
         </div>
       </section>
 
       <p v-if="conversations.length === 0 && !loading && !hasAccounts" class="empty">
         Connect a mail account to see your mail here. <RouterLink :to="{ name: 'settings-accounts-new' }">Add account</RouterLink>
       </p>
-      <p v-else-if="conversations.length === 0 && !loading" class="empty">Nothing in this inbox.</p>
+      <p v-else-if="conversations.length === 0 && !loading" class="empty">{{ emptyText ?? 'Nothing in this inbox.' }}</p>
       <p v-if="conversations.length === 0 && loading" class="empty">Loading your mail…</p>
       <button v-if="hasMore" type="button" class="button button-quiet more" @click="emit('showMore')">Show older mail</button>
     </div>
@@ -226,6 +235,10 @@ h1 {
   padding: 12px 20px 12px 4px;
   color: var(--ink);
   text-decoration: none;
+}
+.classification {
+  flex-shrink: 0;
+  margin: 34px 12px 0 -12px;
 }
 .link[aria-current='true'] {
   background: var(--selected);

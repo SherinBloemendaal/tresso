@@ -37,7 +37,7 @@ function message(id: string, threadId: string, account: string, from: string, ag
     receivedAt: new Date(Date.now() - ageDays * DAY).toISOString(),
     flags: { seen: false, flagged: false, answered: false, draft: false },
     hasAttachments: false,
-    categoryId: null,
+    smartInboxId: null,
     verdict: null,
     summary: null,
   }
@@ -81,11 +81,12 @@ describe('bulk actions', () => {
             hasMore: false,
             mailAccounts: accounts,
             folders,
-            threads: messages.map((m) => ({ id: m.threadId, mailAccountId: m.mailAccountId, subject: m.subject, messageCount: 1, lastMessageAt: m.receivedAt })),
+            threads: messages.map((m) => ({ id: m.threadId, mailAccountId: m.mailAccountId, subject: m.subject, messageCount: 1, lastMessageAt: m.receivedAt, smartInboxId: null, verdict: null, classificationReason: null })),
             messages,
             outgoingMessages: [],
             signatures: [],
             drafts: [],
+            smartInboxes: [],
             deleted: [],
           }
           const empty = { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [] }
@@ -233,7 +234,7 @@ describe('bulk actions', () => {
     await checkbox(wrapper, 't3').trigger('click')
 
     // Archived on another device.
-    later = { cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [{ ...messages[2]!, folderIds: ['archive'] }], outgoingMessages: [], signatures: [], drafts: [], deleted: [] }
+    later = { cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [{ ...messages[2]!, folderIds: ['archive'] }], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [] }
     await useMailStore().syncNow()
 
     await vi.waitFor(() => expect([...useSelectionStore().threadIds]).toEqual(['t1']))
