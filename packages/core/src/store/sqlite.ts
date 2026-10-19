@@ -58,6 +58,13 @@ export class SqliteMailStore implements MailStore {
   private shutting = false
   /** Writes under way or queued, which closing waits for. */
   private readonly writing = new Set<Promise<void>>()
+  /** Reads under way, which closing waits for too: on the desktop a running read keeps the file open. */
+  private readonly reading = new Set<Promise<void>>()
+  /** Where screens read from: the same database, with every read tracked for closing. */
+  private readonly reader: Pick<Sql, 'all' | 'first'> = {
+    all: (source, params) => this.track(this.sql.all(source, params)),
+    first: (source, params) => this.track(this.sql.first(source, params)),
+  }
   /**
    * The last write queued. Writes run one after another: on a device each exclusive transaction may open its own
    * connection without a busy timeout, so a second write while one is open would fail with "database is locked".
@@ -97,7 +104,18 @@ export class SqliteMailStore implements MailStore {
 
   async close(): Promise<void> {
     await this.shut()
+    await Promise.allSettled([...this.reading])
     await this.sql.close()
+  }
+
+  private track<T>(read: Promise<T>): Promise<T> {
+    const settled = read.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.reading.add(settled)
+    void settled.then(() => this.reading.delete(settled))
+    return read
   }
 
   /**
@@ -120,7 +138,7 @@ export class SqliteMailStore implements MailStore {
       this.pullFromStartFor = this.resyncsAsked
       return 0
     }
-    const row = await this.sql.first<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['cursor'])
+    const row = await this.reader.first<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['cursor'])
     return row === null ? 0 : Number(row.value)
   }
 
@@ -306,24 +324,24 @@ export class SqliteMailStore implements MailStore {
   }
 
   async mailAccounts(): Promise<SyncedMailAccount[]> {
-    const accounts = (await this.sql.all<JsonRow>('SELECT json FROM mail_accounts')).map((row) => parse<SyncedMailAccount>(row))
+    const accounts = (await this.reader.all<JsonRow>('SELECT json FROM mail_accounts')).map((row) => parse<SyncedMailAccount>(row))
     return accounts.sort((a, b) => a.displayName.localeCompare(b.displayName) || a.emailAddress.localeCompare(b.emailAddress))
   }
 
   async folders(): Promise<SyncedFolder[]> {
-    return (await this.sql.all<JsonRow>('SELECT json FROM folders')).map((row) => parse<SyncedFolder>(row))
+    return (await this.reader.all<JsonRow>('SELECT json FROM folders')).map((row) => parse<SyncedFolder>(row))
   }
 
   async signatures(): Promise<SyncedSignature[]> {
-    const signatures = (await this.sql.all<JsonRow>('SELECT json FROM signatures')).map((row) => parse<SyncedSignature>(row))
+    const signatures = (await this.reader.all<JsonRow>('SELECT json FROM signatures')).map((row) => parse<SyncedSignature>(row))
     return signatures.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
   }
 
   async inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]> {
     const rows =
       mailAccountId === null
-        ? await this.sql.all<JsonRow>('SELECT json FROM conversations WHERE inbox = 1 ORDER BY last_message_at DESC, thread_id DESC LIMIT ?', [limit])
-        : await this.sql.all<JsonRow>('SELECT json FROM conversations WHERE mail_account_id = ? AND inbox = 1 ORDER BY last_message_at DESC, thread_id DESC LIMIT ?', [
+        ? await this.reader.all<JsonRow>('SELECT json FROM conversations WHERE inbox = 1 ORDER BY last_message_at DESC, thread_id DESC LIMIT ?', [limit])
+        : await this.reader.all<JsonRow>('SELECT json FROM conversations WHERE mail_account_id = ? AND inbox = 1 ORDER BY last_message_at DESC, thread_id DESC LIMIT ?', [
             mailAccountId,
             limit,
           ])
@@ -333,15 +351,15 @@ export class SqliteMailStore implements MailStore {
   async inboxThreadIds(mailAccountId: string | null, matches: (conversation: ConversationSummary) => boolean): Promise<string[]> {
     const rows =
       mailAccountId === null
-        ? await this.sql.all<JsonRow>('SELECT json FROM conversations WHERE inbox = 1 ORDER BY last_message_at DESC, thread_id DESC')
-        : await this.sql.all<JsonRow>('SELECT json FROM conversations WHERE mail_account_id = ? AND inbox = 1 ORDER BY last_message_at DESC, thread_id DESC', [mailAccountId])
+        ? await this.reader.all<JsonRow>('SELECT json FROM conversations WHERE inbox = 1 ORDER BY last_message_at DESC, thread_id DESC')
+        : await this.reader.all<JsonRow>('SELECT json FROM conversations WHERE mail_account_id = ? AND inbox = 1 ORDER BY last_message_at DESC, thread_id DESC', [mailAccountId])
     return rows.map((row) => parse<ConversationSummary>(row)).filter(matches).map((conversation) => conversation.threadId)
   }
 
   async describeThreads(mailAccountId: string | null, threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }> {
     const found = new Map<string, ConversationSummary>()
     for (const chunk of chunks(threadIds)) {
-      for (const row of await this.sql.all<JsonRow>(`SELECT json FROM conversations WHERE thread_id IN (${placeholders(chunk)})`, chunk)) {
+      for (const row of await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE thread_id IN (${placeholders(chunk)})`, chunk)) {
         const conversation = parse<ConversationSummary>(row)
         found.set(conversation.threadId, conversation)
       }
@@ -371,7 +389,7 @@ export class SqliteMailStore implements MailStore {
     const byThread = new Map<string, string[]>(threadIds.map((threadId) => [threadId, []]))
     // Each thread once, however often it is asked for, so no message is listed twice.
     for (const chunk of chunks([...byThread.keys()])) {
-      for (const row of await this.sql.all<{ id: string; thread_id: string }>(`SELECT id, thread_id FROM messages WHERE thread_id IN (${placeholders(chunk)}) ORDER BY id`, chunk)) {
+      for (const row of await this.reader.all<{ id: string; thread_id: string }>(`SELECT id, thread_id FROM messages WHERE thread_id IN (${placeholders(chunk)}) ORDER BY id`, chunk)) {
         byThread.get(row.thread_id)?.push(row.id)
       }
     }
@@ -379,25 +397,25 @@ export class SqliteMailStore implements MailStore {
   }
 
   async unreadInboxCounts(): Promise<Map<string, number>> {
-    const rows = await this.sql.all<{ id: string; count: number }>(
+    const rows = await this.reader.all<{ id: string; count: number }>(
       'SELECT a.id, COUNT(c.thread_id) AS count FROM mail_accounts a LEFT JOIN conversations c ON c.mail_account_id = a.id AND c.inbox = 1 AND c.unread = 1 GROUP BY a.id',
     )
     return new Map(rows.map((row) => [row.id, Number(row.count)]))
   }
 
   async outbox(): Promise<SyncedOutgoingMessage[]> {
-    const all = (await this.sql.all<JsonRow>('SELECT json FROM outgoing')).map((row) => parse<SyncedOutgoingMessage>(row))
+    const all = (await this.reader.all<JsonRow>('SELECT json FROM outgoing')).map((row) => parse<SyncedOutgoingMessage>(row))
     return all.filter((message) => message.status !== 'sent' && message.status !== 'cancelled').sort((a, b) => b.sendAt.localeCompare(a.sendAt))
   }
 
   async outgoing(id: string): Promise<SyncedOutgoingMessage | null> {
-    const row = await this.sql.first<JsonRow>('SELECT json FROM outgoing WHERE id = ?', [id])
+    const row = await this.reader.first<JsonRow>('SELECT json FROM outgoing WHERE id = ?', [id])
     return row === null ? null : parse<SyncedOutgoingMessage>(row)
   }
 
   async suggestContacts(query: string, limit: number): Promise<Contact[]> {
     const result: Contact[] = []
-    for (const row of await this.sql.all<JsonRow>('SELECT json FROM contacts ORDER BY last_seen DESC, key DESC')) {
+    for (const row of await this.reader.all<JsonRow>('SELECT json FROM contacts ORDER BY last_seen DESC, key DESC')) {
       if (result.length >= limit) {
         break
       }
@@ -414,11 +432,11 @@ export class SqliteMailStore implements MailStore {
   }
 
   async drafts(): Promise<Draft[]> {
-    return (await this.sql.all<JsonRow>('SELECT json FROM drafts ORDER BY updated_at DESC, id DESC')).map((row) => parse<Draft>(row))
+    return (await this.reader.all<JsonRow>('SELECT json FROM drafts ORDER BY updated_at DESC, id DESC')).map((row) => parse<Draft>(row))
   }
 
   draft(id: string): Promise<Draft | null> {
-    return readDraft(this.sql, id)
+    return readDraft(this.reader, id)
   }
 
   deleteDraft(id: string): Promise<void> {
@@ -426,11 +444,11 @@ export class SqliteMailStore implements MailStore {
   }
 
   async thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null> {
-    const row = await this.sql.first<JsonRow>('SELECT json FROM threads WHERE id = ?', [threadId])
+    const row = await this.reader.first<JsonRow>('SELECT json FROM threads WHERE id = ?', [threadId])
     if (row === null) {
       return null
     }
-    const messages = (await this.sql.all<JsonRow>('SELECT json FROM messages WHERE thread_id = ?', [threadId])).map((m) => parse<SyncedMessage>(m))
+    const messages = (await this.reader.all<JsonRow>('SELECT json FROM messages WHERE thread_id = ?', [threadId])).map((m) => parse<SyncedMessage>(m))
     messages.sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt))
     return { thread: parse<SyncedThread>(row), messages }
   }
@@ -488,7 +506,7 @@ async function rewrite(tx: Sql, messages: SyncedMessage[]): Promise<void> {
   }
 }
 
-async function readDraft(sql: Sql, id: string): Promise<Draft | null> {
+async function readDraft(sql: Pick<Sql, 'first'>, id: string): Promise<Draft | null> {
   const row = await sql.first<JsonRow>('SELECT json FROM drafts WHERE id = ?', [id])
   return row === null ? null : parse<Draft>(row)
 }
