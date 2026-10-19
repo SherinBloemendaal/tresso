@@ -52,6 +52,7 @@ async function settle(): Promise<void> {
 describe('ReadingPane actions', () => {
   const actions: Record<string, unknown>[] = []
   let refuse: string | null
+  let later: ChangePage | null
   let router: Router
 
   beforeEach(async () => {
@@ -59,6 +60,7 @@ describe('ReadingPane actions', () => {
     setActivePinia(createPinia())
     actions.length = 0
     refuse = null
+    later = null
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -71,7 +73,7 @@ describe('ReadingPane actions', () => {
             threads: [{ id: 't1', mailAccountId: 'work', subject: 'Offsite plan', messageCount: 2, lastMessageAt: '2026-10-19T09:00:00Z' }],
             messages: [message('m1', ['sent'], '2026-10-19T08:00:00Z', true), message('m2', ['inbox'], '2026-10-19T09:00:00Z', false)],
           })
-          return new Response(JSON.stringify(since === 0 ? first : page(since)))
+          return new Response(JSON.stringify(since === 0 ? first : since === 1 && later !== null ? later : page(since)))
         }
         if (url.pathname === '/api/v1/message-actions') {
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>
@@ -136,11 +138,9 @@ describe('ReadingPane actions', () => {
     expect(notice?.action?.label).toBe('Undo')
     actions.length = 0
     notice?.action?.run()
-    await vi.waitFor(() => expect(actions).toHaveLength(2))
-    expect(actions).toEqual([
-      { messageIds: ['m1'], action: 'move', folderId: 'sent' },
-      { messageIds: ['m2'], action: 'move', folderId: 'inbox' },
-    ])
+    await vi.waitFor(() => expect(actions).toHaveLength(1))
+    // Only what moved goes back, from where it went: the Sent copy was never touched.
+    expect(actions).toEqual([{ messageIds: ['m2'], action: 'move', folderId: 'inbox', fromFolderId: 'archive' }])
   })
 
   it('takes the shortcuts, but not while typing', async () => {
@@ -166,17 +166,52 @@ describe('ReadingPane actions', () => {
     expect(await folderIdsOf('m1')).toEqual(['trash'])
   })
 
-  it('moves to a folder of the account', async () => {
+  it('moves to a folder of the account from a menu', async () => {
     const wrapper = mountPane()
     await vi.waitFor(() => expect(actions).toHaveLength(1))
     actions.length = 0
 
-    const select = wrapper.get('select')
-    expect(select.findAll('option').map((o) => o.text())).toEqual(['Move to…', 'Archive', 'Inbox', 'Projects', 'Sent', 'Trash'])
-    await select.setValue('projects')
-    await vi.waitFor(() => expect(useComposeStore().notices.some((n) => n.text === 'Moved to Projects.')).toBe(true))
+    await wrapper.get('button[aria-haspopup="menu"]').trigger('click')
+    const items = wrapper.findAll('[role="menuitem"]')
+    expect(items.map((item) => item.text())).toEqual(['Archive', 'Inbox', 'Projects', 'Sent', 'Trash'])
+    expect(document.activeElement).toBe(items[0]!.element)
+    await wrapper.get('[role="menu"]').trigger('keydown', { key: 'ArrowDown' })
+    await wrapper.get('[role="menu"]').trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(items[2]!.element)
+    expect(actions, 'browsing the folders moves nothing').toEqual([])
 
+    await items[2]!.trigger('click')
+    await vi.waitFor(() => expect(useComposeStore().notices.some((n) => n.text === 'Moved to Projects.')).toBe(true))
     expect(actions).toEqual([{ messageIds: ['m1', 'm2'], action: 'move', folderId: 'projects' }])
+  })
+
+  it('offers no undo when a message cannot be put back exactly', async () => {
+    // m2 is in Inbox and in Projects: trash takes both copies, and no move puts both back.
+    later = page(2, { messages: [message('m2', ['inbox', 'projects'], '2026-10-19T09:00:00Z', false)] })
+    await useMailStore().syncNow()
+    const wrapper = mountPane()
+    await vi.waitFor(() => expect(actions).toHaveLength(1))
+
+    await wrapper.get('button[aria-keyshortcuts="#"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/'))
+
+    const notice = useComposeStore().notices.find((n) => n.text === 'Moved to Trash.')
+    expect(notice).toBeDefined()
+    expect(notice?.action).toBeUndefined()
+  })
+
+  it('ignores a held key and shortcuts meant for the compose window', async () => {
+    const wrapper = mountPane()
+    await vi.waitFor(() => expect(actions).toHaveLength(1))
+    actions.length = 0
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 's', repeat: true }))
+    useComposeStore().openNew()
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 's' }))
+    await settle()
+
+    expect(actions).toEqual([])
+    expect(wrapper.get('button[aria-keyshortcuts="S"]').attributes('aria-pressed')).toBe('false')
   })
 
   it('puts things back and says why when the server refuses', async () => {

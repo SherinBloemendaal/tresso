@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { MessageAction, SyncedFolder, SyncedMessage, SyncedThread } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
+import type { AppliedAction } from '@/mail/db'
+import { undoPlan, type UndoMove } from '@/mail/undo'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import AppIcon from '@/components/AppIcon.vue'
@@ -18,7 +20,12 @@ const messages = ref<SyncedMessage[]>([])
 const folders = ref<SyncedFolder[]>([])
 const expanded = ref(new Set<string>())
 const missing = ref(false)
-const moveTarget = ref('')
+/** An action is on its way; the buttons and shortcuts wait for it. */
+const busy = ref(false)
+const menuOpen = ref(false)
+const menu = ref<HTMLElement | null>(null)
+const menuButton = ref<HTMLButtonElement | null>(null)
+let unmounted = false
 
 const flagged = computed(() => messages.value.some((message) => message.flags.flagged))
 // Folders the conversation can move to: its account's, except the ones mail apps manage themselves.
@@ -37,18 +44,21 @@ async function load(): Promise<void> {
 
 watch(
   () => props.threadId,
-  async () => {
+  async (threadId) => {
     await load()
     folders.value = await mail.folders()
+    if (unmounted || threadId !== props.threadId) {
+      return
+    }
     // Unread messages and the newest one open; read history stays folded.
-    const open = new Set(messages.value.filter((message) => !message.flags.seen).map((message) => message.id))
+    const unread = messages.value.filter((message) => !message.flags.seen).map((message) => message.id)
+    const open = new Set(unread)
     const newest = messages.value[messages.value.length - 1]
     if (newest) {
       open.add(newest.id)
     }
     expanded.value = open
     // Opening a conversation reads it.
-    const unread = messages.value.filter((message) => !message.flags.seen).map((message) => message.id)
     if (unread.length > 0) {
       void run(unread, 'markRead')
     }
@@ -67,85 +77,150 @@ function toggle(messageId: string): void {
   expanded.value = next
 }
 
-async function run(messageIds: string[], action: MessageAction, folderId?: string): Promise<boolean> {
+async function run(messageIds: string[], action: MessageAction, folderId?: string): Promise<AppliedAction | null> {
   try {
-    await mail.act(messageIds, action, folderId)
-    await load()
-    return true
+    const applied = await mail.act(messageIds, action, { folderId })
+    if (!unmounted) {
+      await load()
+    }
+    return applied
   } catch (error) {
     compose.notify({ text: errorMessage(error), tone: 'error' })
-    return false
+    return null
+  }
+}
+
+/** Runs one action at a time: a second click or a held key waits for the first instead of acting on its result. */
+async function exclusive(task: () => Promise<void>): Promise<void> {
+  if (busy.value) {
+    return
+  }
+  busy.value = true
+  try {
+    await task()
+  } finally {
+    busy.value = false
   }
 }
 
 /**
- * Archives, trashes or moves the whole conversation and goes back to the list, with an undo that puts every message
- * back in the folder it came from.
+ * Archives, trashes or moves the whole conversation and goes back to the list. The undo puts back exactly what moved;
+ * when that is not possible (a message that was in several folders), none is offered.
  */
-async function relocate(action: 'archive' | 'trash' | 'move', folderId?: string): Promise<void> {
-  const before = messages.value.map((message) => ({ id: message.id, folderId: message.folderIds[0] }))
-  if (!(await run(before.map((entry) => entry.id), action, folderId))) {
-    return
-  }
-  const label = action === 'archive' ? 'Archived' : action === 'trash' ? 'Moved to Trash' : `Moved to ${folders.value.find((folder) => folder.id === folderId)?.displayName ?? 'the folder'}`
-  compose.notify({
-    text: `${label}.`,
-    tone: 'info',
-    action: {
-      label: 'Undo',
-      run: () => void undo(before),
-    },
-  })
-  await router.push(props.backTo)
-}
-
-async function undo(before: { id: string; folderId: string | undefined }[]): Promise<void> {
-  const byFolder = new Map<string, string[]>()
-  for (const entry of before) {
-    if (entry.folderId !== undefined) {
-      byFolder.set(entry.folderId, [...(byFolder.get(entry.folderId) ?? []), entry.id])
+function relocate(action: 'archive' | 'trash' | 'move', folderId?: string): Promise<void> {
+  return exclusive(async () => {
+    const applied = await run(
+      messages.value.map((message) => message.id),
+      action,
+      folderId,
+    )
+    if (applied === null) {
+      return
     }
-  }
-  try {
-    for (const [folderId, ids] of byFolder) {
-      await mail.act(ids, 'move', folderId)
-    }
-  } catch (error) {
-    compose.notify({ text: errorMessage(error), tone: 'error' })
-  }
-}
-
-async function markUnread(): Promise<void> {
-  const newest = messages.value[messages.value.length - 1]
-  if (newest && (await run([newest.id], 'markUnread'))) {
+    const label = action === 'archive' ? 'Archived' : action === 'trash' ? 'Moved to Trash' : `Moved to ${folders.value.find((folder) => folder.id === folderId)?.displayName ?? 'the folder'}`
+    const plan = undoPlan(applied, action, folders.value)
+    compose.notify({
+      text: `${label}.`,
+      tone: 'info',
+      action: plan.exact && plan.moves.length > 0 ? { label: 'Undo', run: () => void undo(plan.moves) } : undefined,
+    })
     await router.push(props.backTo)
+  })
+}
+
+async function undo(moves: UndoMove[]): Promise<void> {
+  let failed = 0
+  let reason = ''
+  for (const move of moves) {
+    try {
+      await mail.act(move.messageIds, 'move', { folderId: move.folderId, fromFolderId: move.fromFolderId })
+    } catch (error) {
+      failed += move.messageIds.length
+      reason = errorMessage(error)
+    }
+  }
+  if (failed > 0) {
+    compose.notify({ text: `${failed === 1 ? 'One message' : `${failed} messages`} could not be put back: ${reason}`, tone: 'error' })
   }
 }
 
-async function toggleFlag(): Promise<void> {
-  if (flagged.value) {
-    await run(messages.value.filter((message) => message.flags.flagged).map((message) => message.id), 'unflag')
-    return
-  }
-  const newest = messages.value[messages.value.length - 1]
-  if (newest) {
-    await run([newest.id], 'flag')
+function markUnread(): Promise<void> {
+  return exclusive(async () => {
+    const newest = messages.value[messages.value.length - 1]
+    if (newest && (await run([newest.id], 'markUnread')) !== null) {
+      await router.push(props.backTo)
+    }
+  })
+}
+
+function toggleFlag(): Promise<void> {
+  return exclusive(async () => {
+    if (flagged.value) {
+      await run(
+        messages.value.filter((message) => message.flags.flagged).map((message) => message.id),
+        'unflag',
+      )
+      return
+    }
+    const newest = messages.value[messages.value.length - 1]
+    if (newest) {
+      await run([newest.id], 'flag')
+    }
+  })
+}
+
+async function openMenu(): Promise<void> {
+  menuOpen.value = true
+  await nextTick()
+  menu.value?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
+}
+
+function closeMenu(): void {
+  menuOpen.value = false
+  menuButton.value?.focus()
+}
+
+function moveTo(folderId: string): void {
+  menuOpen.value = false
+  void relocate('move', folderId)
+}
+
+function menuKeydown(event: KeyboardEvent): void {
+  const items = [...(menu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])]
+  const index = items.indexOf(document.activeElement as HTMLButtonElement)
+  const focus = (next: number) => items[(next + items.length) % items.length]?.focus()
+  switch (event.key) {
+    case 'ArrowDown':
+      event.preventDefault()
+      focus(index + 1)
+      break
+    case 'ArrowUp':
+      event.preventDefault()
+      focus(index - 1)
+      break
+    case 'Home':
+      event.preventDefault()
+      focus(0)
+      break
+    case 'End':
+      event.preventDefault()
+      focus(items.length - 1)
+      break
+    case 'Escape':
+    case 'Tab':
+      event.preventDefault()
+      closeMenu()
+      break
   }
 }
 
-async function moveTo(): Promise<void> {
-  const folderId = moveTarget.value
-  moveTarget.value = ''
-  if (folderId !== '') {
-    await relocate('move', folderId)
-  }
-}
-
-// E archives, # trashes, U marks unread, S flags, unless the user is typing somewhere.
+// E archives, # trashes, U marks unread, S flags: only when the conversation has the user's attention, not while
+// they type, write in the compose window, or hold the key down.
 function shortcut(event: KeyboardEvent): void {
-  const target = event.target as HTMLElement | null
+  const target = event.target instanceof HTMLElement ? event.target : null
   const typing = target !== null && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
-  if (typing || event.metaKey || event.ctrlKey || event.altKey || thread.value === null) {
+  const composing = (compose.draft !== null && !compose.minimized) || target?.closest('[role="dialog"]') != null
+  if (typing || composing || event.repeat || event.isComposing || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || thread.value === null || menuOpen.value) {
     return
   }
   const action = { e: () => relocate('archive'), '#': () => relocate('trash'), u: markUnread, s: toggleFlag }[event.key.toLowerCase()]
@@ -154,28 +229,43 @@ function shortcut(event: KeyboardEvent): void {
     void action()
   }
 }
-onMounted(() => window.addEventListener('keydown', shortcut))
-onBeforeUnmount(() => window.removeEventListener('keydown', shortcut))
+// A click elsewhere closes the menu.
+function outside(event: MouseEvent): void {
+  const target = event.target as Node | null
+  if (menuOpen.value && target !== null && !menu.value?.contains(target) && !menuButton.value?.contains(target)) {
+    menuOpen.value = false
+  }
+}
+onMounted(() => {
+  window.addEventListener('keydown', shortcut)
+  document.addEventListener('mousedown', outside)
+})
+onBeforeUnmount(() => {
+  unmounted = true
+  window.removeEventListener('keydown', shortcut)
+  document.removeEventListener('mousedown', outside)
+})
 </script>
 
 <template>
   <article class="pane" aria-label="Conversation">
     <p v-if="missing" class="missing">This conversation no longer exists. <RouterLink :to="backTo">Back to the inbox</RouterLink></p>
     <div v-else-if="thread" class="inner">
-      <div class="toolbar" role="toolbar" aria-label="Conversation actions">
-        <button type="button" class="tool" aria-keyshortcuts="E" title="Archive (E)" @click="relocate('archive')"><AppIcon name="archive" label="Archive" /></button>
-        <button type="button" class="tool" aria-keyshortcuts="#" title="Move to Trash (#)" @click="relocate('trash')"><AppIcon name="trash" label="Move to Trash" /></button>
-        <button type="button" class="tool" aria-keyshortcuts="U" title="Mark unread (U)" @click="markUnread"><AppIcon name="unread" label="Mark unread" /></button>
-        <button type="button" class="tool" :class="{ on: flagged }" :aria-pressed="flagged" aria-keyshortcuts="S" :title="flagged ? 'Remove flag (S)' : 'Flag (S)'" @click="toggleFlag">
-          <AppIcon name="flag" :label="flagged ? 'Remove flag' : 'Flag'" />
+      <div class="actions" role="group" aria-label="Conversation actions">
+        <button type="button" class="tool" :disabled="busy" aria-keyshortcuts="E" title="Archive (E)" @click="relocate('archive')"><AppIcon name="archive" label="Archive" /></button>
+        <button type="button" class="tool" :disabled="busy" aria-keyshortcuts="#" title="Move to Trash (#)" @click="relocate('trash')"><AppIcon name="trash" label="Move to Trash" /></button>
+        <button type="button" class="tool" :disabled="busy" aria-keyshortcuts="U" title="Mark unread (U)" @click="markUnread"><AppIcon name="unread" label="Mark unread" /></button>
+        <button type="button" class="tool" :class="{ on: flagged }" :disabled="busy" :aria-pressed="flagged" aria-keyshortcuts="S" :title="flagged ? 'Remove flag (S)' : 'Flag (S)'" @click="toggleFlag">
+          <AppIcon name="flag" label="Flag" />
         </button>
-        <label class="move">
-          <AppIcon name="folder" />
-          <select v-model="moveTarget" aria-label="Move to folder" @change="moveTo">
-            <option value="" disabled>Move to…</option>
-            <option v-for="folder in moveTargets" :key="folder.id" :value="folder.id">{{ folder.displayName }}</option>
-          </select>
-        </label>
+        <div class="move">
+          <button ref="menuButton" type="button" class="tool wide" :disabled="busy" aria-haspopup="menu" :aria-expanded="menuOpen" @click="menuOpen ? closeMenu() : openMenu()">
+            <AppIcon name="folder" /> Move to
+          </button>
+          <div v-if="menuOpen" ref="menu" class="menu" role="menu" aria-label="Move to folder" @keydown="menuKeydown">
+            <button v-for="folder in moveTargets" :key="folder.id" type="button" role="menuitem" tabindex="-1" class="item" @click="moveTo(folder.id)">{{ folder.displayName }}</button>
+          </div>
+        </div>
       </div>
       <h2 class="subject">{{ thread.subject || '(no subject)' }}</h2>
       <MessageCard
@@ -199,7 +289,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', shortcut))
   max-width: 860px;
   padding: 24px 40px 32px;
 }
-.toolbar {
+.actions {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -209,37 +299,64 @@ onBeforeUnmount(() => window.removeEventListener('keydown', shortcut))
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
+  gap: 6px;
+  min-width: 36px;
   height: 36px;
+  padding: 0 8px;
   border: 0;
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--ink-2);
+  font: inherit;
   cursor: pointer;
 }
-.tool:hover {
+.tool:hover:not(:disabled) {
   background: var(--ground);
   color: var(--ink);
+}
+.tool:focus-visible,
+.item:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.tool:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .tool.on {
   color: var(--delegate);
 }
 .move {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  position: relative;
   margin-left: 8px;
-  padding: 0 8px;
-  height: 36px;
-  border-radius: var(--radius-control);
-  color: var(--ink-2);
 }
-.move select {
+.menu {
+  position: absolute;
+  top: 40px;
+  left: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--raised);
+}
+.item {
+  padding: 8px 12px;
   border: 0;
+  border-radius: var(--radius-control);
   background: transparent;
-  color: inherit;
+  color: var(--ink);
   font: inherit;
+  text-align: left;
   cursor: pointer;
+}
+.item:hover,
+.item:focus {
+  background: var(--selected);
 }
 .subject {
   margin: 0 0 8px;
