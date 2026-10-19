@@ -10,6 +10,7 @@ use App\ApiResource\SyncLease;
 use App\Outbox\DraftFiling;
 use App\Outbox\Outbox;
 use App\Repository\DraftCopyRemovalRepository;
+use App\Repository\MailboxChangeRepository;
 use App\Repository\DraftRepository;
 use App\Repository\OutgoingMessageRepository;
 use App\Sync\AccountLeaser;
@@ -29,6 +30,7 @@ final readonly class SyncLeaseProcessor implements ProcessorInterface
         private EntityManagerInterface $entityManager,
         private DraftRepository $drafts,
         private DraftCopyRemovalRepository $removals,
+        private MailboxChangeRepository $mailboxChanges,
     ) {
     }
 
@@ -45,11 +47,12 @@ final readonly class SyncLeaseProcessor implements ProcessorInterface
         $now = new \DateTimeImmutable();
         $this->entityManager->wrapInTransaction(fn () => $this->outbox->releaseDue($accountIds, $now));
 
-        // Mail to send and drafts to file or remove are both handled by the worker's outbox run.
+        // Mail to send, drafts to file or remove, and changes to messages are all handled by the worker's outbox run.
         $work = array_values(array_unique([
             ...$this->outgoing->accountsWithClaimable($accountIds, $now),
             ...$this->drafts->accountsWithFiling($accountIds, $now, $now->sub(new \DateInterval(DraftFiling::REST))),
             ...$this->removals->accountsWithRemovals($accountIds, $now),
+            ...$this->mailboxChanges->accountsWithDueChanges($accountIds, $now),
         ]));
 
         return new LeaseResult(AccountLeaser::LEASE_SECONDS, $accounts, $work);

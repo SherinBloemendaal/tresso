@@ -7,6 +7,7 @@ namespace App\Repository;
 use App\Entity\Message;
 use App\Entity\User;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
+use Doctrine\DBAL\LockMode;
 use Doctrine\Persistence\ManagerRegistry;
 use Symfony\Component\Uid\Uuid;
 
@@ -39,5 +40,39 @@ class MessageRepository extends ServiceEntityRepository
             ->getOneOrNullResult();
 
         return $message instanceof Message ? $message : null;
+    }
+
+    /**
+     * The owner's messages among $ids, keyed by id, locked for the caller's transaction; other users' mail is left out
+     * as if it did not exist.
+     *
+     * @param list<string> $ids valid uuids
+     *
+     * @return array<string, Message>
+     */
+    public function lockOwnedBy(User $owner, array $ids): array
+    {
+        if ([] === $ids) {
+            return [];
+        }
+
+        /** @var list<Message> $messages */
+        $messages = $this->createQueryBuilder('m')
+            ->join('m.mailAccount', 'a')
+            ->where('m.id IN (:ids)')
+            ->andWhere('a.owner = :owner')
+            ->setParameter('ids', array_map(static fn (string $id): string => Uuid::fromString($id)->toRfc4122(), $ids))
+            ->setParameter('owner', $owner->getId(), 'uuid')
+            ->orderBy('m.id')
+            ->getQuery()
+            ->setLockMode(LockMode::PESSIMISTIC_WRITE)
+            ->getResult();
+
+        $byId = [];
+        foreach ($messages as $message) {
+            $byId[$message->getId()->toRfc4122()] = $message;
+        }
+
+        return $byId;
     }
 }
