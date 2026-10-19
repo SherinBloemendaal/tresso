@@ -83,8 +83,12 @@ export const useMailStore = defineStore('mail', () => {
     if (userId === forUserId) {
       return
     }
-    await stop()
+    // Claimed before anything is awaited, so a sign-out (or another start) while the old copy closes overtakes it.
     const mine = ++generation
+    await teardown()
+    if (mine !== generation) {
+      return
+    }
     userId = forUserId
     let opened!: () => void
     const opening = new Promise<void>((resolve) => {
@@ -188,9 +192,14 @@ export const useMailStore = defineStore('mail', () => {
     }
   }
 
-  /** Everything is cleared before the first wait, so a start that runs meanwhile begins from a clean state. */
+  /** Stops syncing and closes the copy; a start still under way gives up. */
   async function stop(): Promise<void> {
     generation += 1
+    await teardown()
+  }
+
+  /** Everything is cleared before the first wait, so a start that runs meanwhile begins from a clean state. */
+  async function teardown(): Promise<void> {
     const stopping = realtime
     const database = db.value
     realtime = null

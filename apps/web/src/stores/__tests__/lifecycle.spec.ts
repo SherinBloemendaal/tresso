@@ -119,11 +119,28 @@ describe('the mail copy across sign-out and sign-in', () => {
     copies.holdOpen.set('anna', opening.passed.then(() => Promise.reject(new Error('disk full'))))
 
     const starting = mail.start('anna')
+    await vi.waitFor(() => expect(copies.opening).toEqual(['anna']))
     await mail.start('ben')
     opening.open()
 
     await expect(starting).resolves.toBeUndefined()
     expect(mail.ready).toBe(true)
+  })
+
+  it('opens nothing for a sign-in overtaken by a sign-out while the previous copy was still closing', async () => {
+    const mail = useMailStore()
+    await mail.start('anna')
+    const closing = gate()
+    copies.holdClose.set('anna', closing.passed)
+
+    const starting = mail.start('ben')
+    const forgetting = mail.forget()
+    closing.open()
+    await starting
+    await forgetting
+
+    expect(copies.opened).toEqual(['anna'])
+    expect(mail.ready).toBe(false)
   })
 
   it('closes a copy whose opening was overtaken by another sign-in', async () => {
@@ -132,6 +149,7 @@ describe('the mail copy across sign-out and sign-in', () => {
     copies.holdOpen.set('anna', opening.passed)
 
     const first = mail.start('anna')
+    await vi.waitFor(() => expect(copies.opening).toEqual(['anna']))
     await mail.start('ben')
     opening.open()
     await first
