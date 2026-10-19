@@ -64,12 +64,42 @@ type MailboxStore interface {
 	Close()
 }
 
+// OutgoingFinder is a SentStore that can tell whether an earlier attempt sent a message even when the provider gave
+// the sent copy another Message-ID (Gmail and Graph may). An error leaves the question open: the dispatcher then
+// does not send, as sending could send twice.
+type OutgoingFinder interface {
+	SentBefore(message api.OutgoingMessage, since time.Time) (bool, error)
+}
+
+// clockSkew is how much earlier than its id says a message may have been written, as clocks differ.
+const clockSkew = 5 * time.Minute
+
+// retrySpan bounds how long ago an earlier attempt can have been made when the message does not say when it was
+// written: the API retries after 1, 5 and 15 minutes, 1 and 3 hours (about 4.5 hours with the claims in between).
+const retrySpan = 8 * time.Hour
+
+// earliestAttempt is the earliest time an attempt to send message can have been made. Its outbox id is a UUIDv7,
+// made when the message was written, and no attempt comes before that.
+func earliestAttempt(message api.OutgoingMessage, now time.Time) time.Time {
+	if written, ok := providersend.UUIDv7Time(message.ID); ok {
+		return written.Add(-clockSkew)
+	}
+	return now.Add(-retrySpan)
+}
+
+// ChangeScoped is a MailboxStore that keeps state while it makes one change (the Gmail store sends one request for a
+// message that is in several of the change's folders). StartChange is called before each change, so nothing carries
+// over from one change to the next: read, unread, read again are three requests.
+type ChangeScoped interface {
+	StartChange()
+}
+
 // Sender does one account's work during one run of the dispatcher, so what it sets up (a provider client with its
 // access token and rate limit) is shared by every message and draft of the run.
 type Sender interface {
-	// Send delivers one message. Failures are *smtpsend.Error or *providersend.Error, which say whether sending again
-	// can help; any other error is retried.
-	Send(ctx context.Context, envelope smtpsend.Envelope, raw []byte) error
+	// Send delivers one outgoing message, raw being its MIME, to its envelope recipients. Failures are *smtpsend.Error
+	// or *providersend.Error, which say whether sending again can help; any other error is retried.
+	Send(ctx context.Context, message api.OutgoingMessage, raw []byte) error
 	// OpenSent opens the account's Sent folder. For providers that file sent mail themselves it only needs to answer
 	// Contains.
 	OpenSent(ctx context.Context) (SentStore, error)
@@ -260,6 +290,9 @@ func (d *Dispatcher) changeMailbox(ctx context.Context, logger *slog.Logger, sen
 			continue
 		}
 		changeLogger := logger.With("change", change.ID, "kind", change.Kind)
+		if scoped, ok := mailbox.(ChangeScoped); ok {
+			scoped.StartChange()
+		}
 		result, err := applyChange(mailbox, change)
 		if err != nil {
 			changeLogger.Warn("making a change to a message failed; it comes back later", "error", err)
@@ -403,7 +436,19 @@ func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, sender Se
 	// An earlier attempt may have reached the server before the worker could report it; never send twice.
 	if message.Attempt > 1 {
 		if store, err := sent.get(); err == nil {
-			if found, err := store.Contains(message.MessageID); err == nil && found {
+			if finder, ok := store.(OutgoingFinder); ok {
+				found, err := finder.SentBefore(message, earliestAttempt(message, time.Now()))
+				if err != nil {
+					logger.Warn("checking for an earlier attempt failed; not sending", "error", err)
+					d.report(ctx, logger, credentials.AccountID, message.ID, api.OutcomeRetry, "Tresso could not check whether an earlier attempt went out; trying again later.", false)
+					return
+				}
+				if found {
+					logger.Info("outgoing message was sent by an earlier attempt")
+					d.report(ctx, logger, credentials.AccountID, message.ID, api.OutcomeSent, "", true)
+					return
+				}
+			} else if found, err := store.Contains(message.MessageID); err == nil && found {
 				logger.Info("outgoing message was sent by an earlier attempt")
 				d.report(ctx, logger, credentials.AccountID, message.ID, api.OutcomeSent, "", true)
 				return
@@ -411,8 +456,7 @@ func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, sender Se
 		}
 	}
 
-	envelope := smtpsend.Envelope{From: message.EnvelopeFrom, Recipients: message.Recipients}
-	if err := sender.Send(ctx, envelope, raw); err != nil {
+	if err := sender.Send(ctx, message, raw); err != nil {
 		outcome, text := outcomeOf(err)
 		logger.Warn("sending failed", "outcome", outcome, "error", err)
 		d.report(ctx, logger, credentials.AccountID, message.ID, outcome, text, false)

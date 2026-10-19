@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -339,7 +340,7 @@ func TestSendErrors(t *testing.T) {
 	h.graph.fail(http.StatusBadRequest, `{"error":{"code":"ErrorInvalidRecipients","message":"At least one recipient is not valid."}}`)
 	err := Send(context.Background(), sendClient(h, h.syncer.opts.Client), []byte("To: a@example.test\r\n\r\nx"), nil)
 	var sendErr *providersend.Error
-	if !errors.As(err, &sendErr) || !sendErr.Permanent || sendErr.Message != "Outlook refused the message. Outlook said: At least one recipient is not valid." {
+	if !errors.As(err, &sendErr) || !sendErr.Permanent || sendErr.Message != "Outlook refused the message. Outlook said: ErrorInvalidRecipients: At least one recipient is not valid." {
 		t.Errorf("400: %#v", err)
 	}
 
@@ -658,9 +659,10 @@ func TestDraftsStoreCreatesAndRemovesDrafts(t *testing.T) {
 	if got := h.graph.log(); !slices.Equal(got, []string{"create draft-1", "create draft-2", "delete draft-1"}) {
 		t.Errorf("ops = %v", got)
 	}
-	last := h.graph.rawQueries[len(h.graph.rawQueries)-1]
-	if !strings.Contains(last, "$filter=internetMessageId%20eq%20") || strings.Contains(last, "+") {
-		t.Errorf("drafts filter encoded as %q", last)
+	for _, query := range h.graph.rawQueries {
+		if strings.Contains(query, "internetMessageId") && (!strings.Contains(query, "$filter=internetMessageId%20eq%20") || strings.Contains(query, "+")) {
+			t.Errorf("drafts filter encoded as %q", query)
+		}
 	}
 
 	big := append([]byte("To: a@example.test\r\n\r\n"), make([]byte, maxSendBody)...)
@@ -688,5 +690,132 @@ func TestMovesMadeByTheMailboxDoNotComeBackThroughDelta(t *testing.T) {
 	}
 	if got := h.graph.gets("m1"); got != 1 {
 		t.Errorf("m1 downloaded %d times; the delta round must find it known", got)
+	}
+}
+
+// Fails without the fix: the duplicate check only looked for the Message-ID, which Exchange replaced, so a retry after
+// an unreported attempt sent the message again. Both ways Graph exposes the header are covered.
+func TestEarlierSendIsFoundWhenExchangeReplacedTheMessageID(t *testing.T) {
+	for _, asProperty := range []bool{false, true} {
+		h := newHarness(t)
+		h.graph.rewriteIDs, h.graph.headersAsProperties = true, asProperty
+		client := sendClient(h, h.syncer.opts.Client)
+		raw := []byte("From: kim@example.test\r\nTo: sam@example.test\r\nSubject: Hi\r\nMessage-ID: <o1@example.test>\r\n\r\nHello\r\n")
+		marked, err := providersend.SetHeader(raw, providersend.OutgoingIDHeader, providersend.OutgoingMarker("outgoing-1", "o1@example.test"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Send(context.Background(), client, marked, []string{"sam@example.test"}); err != nil {
+			t.Fatal(err)
+		}
+
+		store := OpenSent(context.Background(), client)
+		if found, _ := store.Contains("o1@example.test"); found {
+			t.Fatal("the fake did not replace the Message-ID")
+		}
+		since := time.Now().Add(-time.Hour)
+		sam := []string{"sam@example.test"}
+		if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: sam}, since); err != nil || !found {
+			t.Errorf("properties %v: SentBefore = %v, %v; want the earlier send found by its outbox id", asProperty, found, err)
+		}
+		if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: sam}, since); err != nil || found {
+			t.Errorf("properties %v: SentBefore(other) = %v, %v", asProperty, found, err)
+		}
+	}
+}
+
+// Fails without the fix: removal only matched internetMessageId, which Exchange replaced, so the old copy stayed.
+func TestReplacedDraftCopyIsRemovedWhenExchangeReplacedItsMessageID(t *testing.T) {
+	h := newHarness(t)
+	h.graph.rewriteIDs = true
+	drafts := OpenDrafts(context.Background(), sendClient(h, h.syncer.opts.Client))
+	version := func(n string) []byte {
+		return []byte("From: kim@example.test\r\nTo: sam@example.test\r\nSubject: Draft\r\nMessage-ID: <d1." + n + "@example.test>\r\nX-Tresso-Draft: d1\r\n\r\nNot done\r\n")
+	}
+	for _, n := range []string{"1", "2"} {
+		if err := drafts.AppendDraft(version(n), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := drafts.Remove("d1.1@example.test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := h.graph.log(); !slices.Equal(got, []string{"create draft-1", "create draft-2", "delete draft-1"}) {
+		t.Errorf("ops = %v; only the replaced version may go", got)
+	}
+}
+
+func mailTo(to, messageID string) []byte {
+	return []byte("From: kim@example.test\r\nTo: " + to + "\r\nSubject: Hi\r\nMessage-ID: <" + messageID + ">\r\n\r\nHello\r\n")
+}
+
+// Fails on the earlier code: it read all Sent Items of the last 48 hours and gave up ("undecided") above 2000, so on a
+// busy mailbox a message whose first attempt never went out was never sent.
+func TestDuplicateCheckOnlyReadsSentItemsToTheRecipient(t *testing.T) {
+	for _, refused := range []bool{false, true} {
+		h := newHarness(t)
+		h.graph.rewriteIDs, h.graph.refuseRecipientFilter = true, refused
+		now := time.Now()
+		busy := 2100
+		if refused {
+			busy = 10 // without the recipient filter every Sent Item since the attempt is read
+		}
+		for i := range busy {
+			h.graph.addAt(fmt.Sprintf("busy-%d", i), "f-sent", now.Add(-time.Minute), mailTo("other@example.test", fmt.Sprintf("busy-%d@example.test", i)))
+		}
+		client := sendClient(h, h.syncer.opts.Client)
+		marked, err := providersend.SetHeader(mailTo("sam@example.test", "o1@example.test"), providersend.OutgoingIDHeader, providersend.OutgoingMarker("outgoing-1", "o1@example.test"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Send(context.Background(), client, marked, []string{"sam@example.test"}); err != nil {
+			t.Fatal(err)
+		}
+		store := OpenSent(context.Background(), client)
+		since := now.Add(-time.Hour)
+
+		found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, since)
+		if err != nil || !found {
+			t.Errorf("refused %v: SentBefore = %v, %v", refused, found, err)
+		}
+		found, err = store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: []string{"anna@example.test"}}, since)
+		if err != nil || found {
+			t.Errorf("refused %v: SentBefore(never sent) = %v, %v", refused, found, err)
+		}
+		if !refused && h.graph.headerReads > 2 {
+			t.Errorf("%d Sent Items read; only those to the recipient may be", h.graph.headerReads)
+		}
+	}
+}
+
+// Fails on the earlier code: when the Message-ID search found nothing it read every draft and gave up ("undecided")
+// above 2000, so the removal came back every run for ever.
+func TestDraftRemovalOnlyLooksAtDraftsSinceTheDraftStarted(t *testing.T) {
+	h := newHarness(t)
+	h.graph.rewriteIDs = true
+	now := time.Now()
+	for i := range 2100 {
+		h.graph.addAt(fmt.Sprintf("old-%d", i), "f-drafts", now.Add(-48*time.Hour), mailTo("other@example.test", fmt.Sprintf("old-%d@example.test", i)))
+	}
+	draftID := fakeapi.UUIDv7(now.Add(-time.Hour), 1)
+	filed := draftID + ".1@example.test"
+	drafts := OpenDrafts(context.Background(), sendClient(h, h.syncer.opts.Client))
+	if err := drafts.AppendDraft(mailTo("sam@example.test", filed), now); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := drafts.Remove(draftID + ".9@example.test"); err != nil {
+		t.Errorf("removing a copy that was never filed: %v; it counts as removed", err)
+	}
+	if err := drafts.Remove(filed); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.graph.log(); !slices.Equal(got, []string{"create draft-1", "delete draft-1"}) {
+		t.Errorf("ops = %v", got)
+	}
+	if h.graph.headerReads > 2 {
+		t.Errorf("%d drafts read; drafts older than the draft may not be", h.graph.headerReads)
 	}
 }

@@ -53,20 +53,24 @@ func Classify(provider string, err error) error {
 	var statusErr *providerhttp.StatusError
 	if errors.As(err, &statusErr) {
 		switch code := statusErr.StatusCode; {
+		case statusErr.HasReason("insufficientPermissions") || statusErr.HasReason("ACCESS_TOKEN_SCOPE_INSUFFICIENT") || statusErr.HasReason("ErrorAccessDenied"):
+			// The token lacks the right to send; it goes out once the user signed in again and allowed sending.
+			return &Error{Message: fmt.Sprintf("%s does not allow Tresso to send mail. Sign in again and allow sending mail.", provider), Err: err}
+		case statusErr.HasReason("ErrorSendAsDenied"):
+			return &Error{Permanent: true, Message: fmt.Sprintf("%s does not allow this account to send as the sender address of this message.", provider), Err: err}
+		case statusErr.HasReason("ErrorMessageSizeExceeded") || code == http.StatusRequestEntityTooLarge:
+			return &Error{Permanent: true, Message: fmt.Sprintf("The message is too large for %s.", provider), Err: err}
+		case statusErr.HasReason("domainPolicy"):
+			return &Error{Permanent: true, Message: withDetail(fmt.Sprintf("Your organization's %s policy does not allow sending this message.", provider), provider, statusErr), Err: err}
+		case statusErr.HasReason("failedPrecondition") || statusErr.HasReason("FAILED_PRECONDITION"):
+			return &Error{Permanent: true, Message: withDetail(fmt.Sprintf("%s cannot send mail from this account.", provider), provider, statusErr), Err: err}
 		case code == http.StatusTooManyRequests:
 			return &Error{Message: fmt.Sprintf("%s is limiting how much mail Tresso sends right now.", provider), Err: err}
 		case code >= 500:
 			return &Error{Message: fmt.Sprintf("%s could not send the message right now.", provider), Err: err}
-		case code == http.StatusRequestEntityTooLarge:
-			return &Error{Permanent: true, Message: fmt.Sprintf("The message is too large for %s.", provider), Err: err}
-		case code == http.StatusForbidden:
-			return &Error{Permanent: true, Message: fmt.Sprintf("%s does not allow Tresso to send mail. Sign in again and allow sending mail.", provider), Err: err}
 		default:
-			message := fmt.Sprintf("%s refused the message.", provider)
-			if detail := strings.TrimSpace(statusErr.Message); detail != "" {
-				message += " " + provider + " said: " + truncate(detail, 200)
-			}
-			return &Error{Permanent: true, Message: message, Err: err}
+			// Any other refusal, a 403 Tresso does not know included: say what the provider said, so the user can act.
+			return &Error{Permanent: true, Message: withDetail(fmt.Sprintf("%s refused the message.", provider), provider, statusErr), Err: err}
 		}
 	}
 
@@ -75,6 +79,21 @@ func Classify(provider string, err error) error {
 		return &Error{Message: fmt.Sprintf("Could not connect to %s.", provider), Err: err}
 	}
 	return &Error{Message: fmt.Sprintf("Sending through %s failed.", provider), Err: err}
+}
+
+// withDetail adds what the provider said (its error code and message, trimmed) to a user-facing message.
+func withDetail(message, provider string, statusErr *providerhttp.StatusError) string {
+	var parts []string
+	if len(statusErr.Reasons) > 0 {
+		parts = append(parts, statusErr.Reasons[0])
+	}
+	if detail := strings.TrimSpace(statusErr.Message); detail != "" {
+		parts = append(parts, truncate(detail, 200))
+	}
+	if len(parts) == 0 {
+		return message
+	}
+	return message + " " + provider + " said: " + strings.Join(parts, ": ")
 }
 
 // WithBcc returns raw with a Bcc header naming every envelope recipient that the To, Cc and Bcc headers do not list
@@ -152,6 +171,48 @@ func recipientAddress(recipient string) (string, error) {
 		return "", invalid(fmt.Errorf("recipient %q is not a bare address", recipient))
 	}
 	return parsed.Address, nil
+}
+
+// Headers the worker adds to what it hands Gmail and Graph, so it can find its own copies again: both providers may
+// replace the Message-ID of a message they send, and nothing promises they keep it on a draft.
+const (
+	// OutgoingIDHeader carries the outbox message's id on a sent message.
+	OutgoingIDHeader = "X-Tresso-Outgoing-Id"
+	// DraftCopyHeader carries the Message-ID a draft copy was composed with, one per version of a draft.
+	DraftCopyHeader = "X-Tresso-Draft-Copy"
+)
+
+// SetHeader returns raw with exactly one header field name, set to value; an existing one is replaced.
+func SetHeader(raw []byte, name, value string) ([]byte, error) {
+	if value == "" || strings.ContainsAny(value, "\r\n") || len(value) > 900 {
+		return nil, fmt.Errorf("invalid value for header %s", name)
+	}
+	newline := "\r\n"
+	if !bytes.Contains(raw[:headerEnd(raw)], []byte("\r\n")) {
+		newline = "\n"
+	}
+	return append([]byte(name+": "+value+newline), withoutHeader(raw, name)...), nil
+}
+
+// HeaderValue returns the value of the first header field name in raw (unfolded and trimmed), or "".
+func HeaderValue(raw []byte, name string) string {
+	end := headerEnd(raw)
+	lines := strings.Split(strings.ReplaceAll(string(raw[:end]), "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		colon := strings.IndexByte(line, ':')
+		if colon <= 0 || line[0] == ' ' || line[0] == '\t' || !strings.EqualFold(strings.TrimSpace(line[:colon]), name) {
+			continue
+		}
+		value := line[colon+1:]
+		for _, next := range lines[i+1:] {
+			if next == "" || (next[0] != ' ' && next[0] != '\t') {
+				break
+			}
+			value += " " + strings.TrimSpace(next)
+		}
+		return strings.TrimSpace(value)
+	}
+	return ""
 }
 
 // headerEnd is the offset of the blank line that ends the header section, or len(raw) without a body.

@@ -326,8 +326,7 @@ func TestGmailMailboxChangesAreLabelChanges(t *testing.T) {
 		"modify g1 +STARRED -UNREAD", // once, although the message is in two folders
 		"modify g2 + -INBOX",         // archive: only the source label goes
 		"modify g3 +Label_2 -Label_1",
-		"trash g4",
-		"modify g4 + -INBOX",
+		"trash g4", // the other labels stay, hidden while it is in Trash
 	}
 	if !slices.Equal(box.ops, want) {
 		t.Errorf("ops = %v\nwant %v", box.ops, want)
@@ -442,4 +441,61 @@ func countOps(ops []string, op string) int {
 		}
 	}
 	return n
+}
+
+// Fails without the fix: the Gmail store remembered flag changes across the whole run, so the third change (read
+// again after unread) made no request and Gmail stayed unread.
+func TestGmailFlagChangesOfOneMessageAreAllMade(t *testing.T) {
+	box := newProviderMailbox()
+	box.folders["g1"] = []string{"INBOX", "UNREAD"}
+	d, client, _ := providerDispatcher(t, "gmail", box)
+	yes, no := true, false
+	inbox := []api.MailboxLocation{{Folder: "INBOX", RemoteUID: "g1"}}
+	client.changes = []api.MailboxChange{
+		{ID: "c1", MessageID: "m1", Kind: api.MailboxFlags, Seen: &yes, Locations: inbox},
+		{ID: "c2", MessageID: "m1", Kind: api.MailboxFlags, Seen: &no, Locations: inbox},
+		{ID: "c3", MessageID: "m1", Kind: api.MailboxFlags, Seen: &yes, Locations: inbox},
+	}
+
+	d.Trigger(context.Background(), "acc")
+	d.Wait()
+
+	want := []string{"modify g1 + -UNREAD", "modify g1 +UNREAD -", "modify g1 + -UNREAD"}
+	if !slices.Equal(box.ops, want) {
+		t.Errorf("ops = %v, want %v", box.ops, want)
+	}
+	if slices.Contains(box.folders["g1"], "UNREAD") {
+		t.Error("the message ended unread")
+	}
+}
+
+// Fails without the fix: a retry of a move out of Trash that had been untrashed already saw no TRASH label and
+// reported the message gone, which left it archived instead of moved.
+func TestGmailFinishesAMoveOutOfTrashThatStoppedHalfway(t *testing.T) {
+	box := newProviderMailbox()
+	box.folders["g6"] = []string{"Label_1"} // untrashed by the attempt that stopped, without the target label
+	box.folders["g7"] = []string{"Label_2"} // moved out of Trash by someone else, into the target already
+	box.folders["g8"] = []string{"INBOX"}   // never in Trash: the move was made elsewhere, not by us
+	d, client, _ := providerDispatcher(t, "gmail", box)
+	trash := func(id string) *api.MailboxLocation { return &api.MailboxLocation{Folder: "TRASH", RemoteUID: id} }
+	client.changes = []api.MailboxChange{
+		{ID: "c6", MessageID: "m6", Kind: api.MailboxMove, Source: trash("g6"), Target: &api.MailboxTarget{Folder: "INBOX"}},
+		{ID: "c7", MessageID: "m7", Kind: api.MailboxMove, Source: trash("g7"), Target: &api.MailboxTarget{Folder: "Label_2"}},
+		{ID: "c8", MessageID: "m8", Kind: api.MailboxMove, Source: &api.MailboxLocation{Folder: "Label_1", RemoteUID: "g8"}, Target: &api.MailboxTarget{Folder: "Label_2"}},
+	}
+
+	d.Trigger(context.Background(), "acc")
+	d.Wait()
+
+	if !slices.Equal(box.ops, []string{"modify g6 +INBOX -"}) {
+		t.Errorf("ops = %v", box.ops)
+	}
+	reports := []mailboxReport{
+		{"c6", api.MailboxDone, "", "g6"},
+		{"c7", api.MailboxDone, "", "g7"},
+		{"c8", api.MailboxGone, gmailsync.ErrMessageGone.Error(), ""},
+	}
+	if !slices.Equal(client.changed, reports) {
+		t.Errorf("reports = %+v\nwant %+v", client.changed, reports)
+	}
 }

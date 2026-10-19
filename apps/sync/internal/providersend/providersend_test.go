@@ -41,8 +41,8 @@ func TestWithBccMergesAnExistingFoldedBccHeader(t *testing.T) {
 }
 
 func TestClassify(t *testing.T) {
-	status := func(code int, message string) error {
-		return &providerhttp.StatusError{Method: http.MethodPost, URL: "u", StatusCode: code, Message: message}
+	status := func(code int, message string, reasons ...string) error {
+		return &providerhttp.StatusError{Method: http.MethodPost, URL: "u", StatusCode: code, Message: message, Reasons: reasons}
 	}
 	cases := []struct {
 		err       error
@@ -50,7 +50,14 @@ func TestClassify(t *testing.T) {
 		message   string
 	}{
 		{status(400, "Invalid To header"), true, "Gmail refused the message. Gmail said: Invalid To header"},
-		{status(403, ""), true, "Gmail does not allow Tresso to send mail. Sign in again and allow sending mail."},
+		// Before, every 403 became the permanent "does not allow Tresso to send mail", whatever the provider said.
+		{status(403, "Mail service not enabled", "failedPrecondition"), true, "Gmail cannot send mail from this account. Gmail said: failedPrecondition: Mail service not enabled"},
+		{status(403, "Delegation denied", "domainPolicy"), true, "Your organization's Gmail policy does not allow sending this message. Gmail said: domainPolicy: Delegation denied"},
+		{status(403, "", "insufficientPermissions"), false, "Gmail does not allow Tresso to send mail. Sign in again and allow sending mail."},
+		{status(403, "The user account which was used to submit this request does not have the right to send mail on behalf of the specified sending account.", "ErrorSendAsDenied"), true, "Gmail does not allow this account to send as the sender address of this message."},
+		{status(400, "", "ErrorMessageSizeExceeded"), true, "The message is too large for Gmail."},
+		{status(403, "Something unusual happened.", "someNewReason"), true, "Gmail refused the message. Gmail said: someNewReason: Something unusual happened."},
+		{status(403, ""), true, "Gmail refused the message."},
 		{status(413, ""), true, "The message is too large for Gmail."},
 		{status(429, ""), false, "Gmail is limiting how much mail Tresso sends right now."},
 		{status(502, ""), false, "Gmail could not send the message right now."},
@@ -77,6 +84,25 @@ func TestWithBccRefusesInvalidRecipients(t *testing.T) {
 		var sendErr *Error
 		if !errors.As(err, &sendErr) || !sendErr.Permanent || sendErr.Message != "A recipient address is not valid." {
 			t.Errorf("WithBcc(%q) = %v", recipient, err)
+		}
+	}
+}
+
+func TestSetHeaderReplacesAndValidates(t *testing.T) {
+	raw := []byte("X-Tresso-Outgoing-Id: old\r\n folded\r\nSubject: Hi\r\n\r\nX-Tresso-Outgoing-Id: body\r\n")
+	out, err := SetHeader(raw, OutgoingIDHeader, "o-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "X-Tresso-Outgoing-Id: o-1\r\nSubject: Hi\r\n\r\nX-Tresso-Outgoing-Id: body\r\n" {
+		t.Errorf("got %q", out)
+	}
+	if HeaderValue(out, "x-tresso-outgoing-id") != "o-1" || HeaderValue(raw, OutgoingIDHeader) != "old folded" || HeaderValue(out, "Missing") != "" {
+		t.Error("HeaderValue is wrong")
+	}
+	for _, value := range []string{"", "a\r\nBcc: x@example.test", "a\nb"} {
+		if _, err := SetHeader(raw, OutgoingIDHeader, value); err == nil {
+			t.Errorf("SetHeader accepted %q", value)
 		}
 	}
 }

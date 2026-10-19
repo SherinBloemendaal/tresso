@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -132,5 +133,21 @@ func TestMessageCacheDropsTheOldest(t *testing.T) {
 	}
 	if m, ok := c.Get("c"); !ok || m.RemoteUID != "c" {
 		t.Error("newest missing")
+	}
+}
+
+// Fails without the guard: Missing listed every uid the API had that the provider lacks, placeholders included.
+func TestPendingMovePlaceholdersAreNeverMissing(t *testing.T) {
+	f := fakeapi.New()
+	in := &Ingest{API: f, AccountID: "acc", WorkerID: "w1", FetchBatch: 2, Logger: discard}
+	ctx := context.Background()
+	messages := []api.Message{{RemoteUID: "m1", RawObjectKey: "raw/aa/1"}, {RemoteUID: "m2", RawObjectKey: "raw/aa/2"}, {RemoteUID: "pending:c7", RawObjectKey: "raw/aa/3"}}
+	if err := in.Messages(ctx, "INBOX", messages, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	missing, err := in.Missing(ctx, "INBOX", map[string]bool{"m1": true})
+	if err != nil || !slices.Equal(missing, []string{"m2"}) {
+		t.Errorf("Missing = %v, %v; want only m2", missing, err)
 	}
 }

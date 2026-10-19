@@ -58,25 +58,40 @@ func foldersFromLabels(labels []label) []api.Folder {
 	return append(folders, user...)
 }
 
-// foldersOf returns the folders a message with these labels is in. Chat messages are not mail and are in none.
+// foldersOf returns the folders a message with these labels is in, as Gmail shows it. A message in Trash or Spam is in
+// that folder only: Gmail hides it from the Inbox, its labels and All Mail while it is there, and shows it in them
+// again once it leaves (its labels stay on it meanwhile). Chat messages are not mail and are in none.
 func foldersOf(labelIDs []string, isFolder map[string]bool) []string {
-	if slices.Contains(labelIDs, labelChat) {
+	switch {
+	case slices.Contains(labelIDs, labelChat):
 		return nil
+	case slices.Contains(labelIDs, labelTrash):
+		return onlyIf(labelTrash, isFolder)
+	case slices.Contains(labelIDs, labelSpam):
+		return onlyIf(labelSpam, isFolder)
 	}
 	var out []string
-	hidden := false
 	for _, id := range labelIDs {
-		if id == labelTrash || id == labelSpam {
-			hidden = true
-		}
 		if isFolder[id] && id != allMailFolder {
 			out = append(out, id)
 		}
 	}
-	if !hidden {
+	if isFolder[allMailFolder] {
 		out = append(out, allMailFolder)
 	}
 	return out
+}
+
+func onlyIf(folder string, isFolder map[string]bool) []string {
+	if isFolder[folder] {
+		return []string{folder}
+	}
+	return nil
+}
+
+// hidingLabel reports whether adding or removing the label moves a message out of or back into every other folder.
+func hidingLabel(id string) bool {
+	return id == labelTrash || id == labelSpam
 }
 
 // flagsOf maps labels to flags. Gmail has no answered state (it threads replies instead), so Answered stays false.
