@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { MAX_MESSAGES_PER_ACTION, PartialActionError, type ChangePage, type MessageActionRequest, type SyncedMessage } from '@tresso/core'
 import { databaseName, MailSession, type MailState } from '../mailSession'
 import type { Sql } from '../sql'
-import { memorySql } from './sqljs'
+import { memorySql } from '@tresso/core/testing/sql'
 
 const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }
 
