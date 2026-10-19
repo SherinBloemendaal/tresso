@@ -43,6 +43,8 @@ const first: ChangePage = {
   smartInboxes: [smartInbox('todo', 'do', 0), smartInbox('info', 'know', 1)],
   calendars: [],
   calendarEvents: [],
+  notifications: [],
+  eventNotes: [],
   deleted: [],
 }
 

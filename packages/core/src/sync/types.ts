@@ -2,6 +2,7 @@
 
 import type { BuiltinCategory, Verdict } from '../domain'
 import type { SyncedCalendar, SyncedCalendarEvent } from '../calendar/types'
+import type { SyncedEventNote, SyncedNotification } from '../notifications'
 
 export type FolderRole = 'inbox' | 'sent' | 'drafts' | 'trash' | 'spam' | 'archive' | 'all' | 'custom'
 
@@ -130,7 +131,7 @@ export interface SyncedSmartInbox {
   position: number
 }
 
-export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage' | 'signature' | 'draft' | 'smartInbox' | 'calendar' | 'calendarEvent'
+export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage' | 'signature' | 'draft' | 'smartInbox' | 'calendar' | 'calendarEvent' | 'notification' | 'eventNote'
 
 export type DraftKind = 'new' | 'reply' | 'replyAll' | 'forward'
 
@@ -191,6 +192,8 @@ export interface ChangePage {
   smartInboxes: SyncedSmartInbox[]
   calendars: SyncedCalendar[]
   calendarEvents: SyncedCalendarEvent[]
+  notifications: SyncedNotification[]
+  eventNotes: SyncedEventNote[]
   deleted: Deleted[]
 }
 

@@ -44,6 +44,7 @@ export interface Reminder {
   relatedTo: 'start' | 'end'
   /** The absolute time (YYYYMMDDTHHMMSSZ), or null. */
   at: string | null
+  channels: ('push' | 'email')[]
 }
 
 export interface Conference {
@@ -87,4 +88,8 @@ export interface SyncedCalendarEvent {
   messageId: string | null
   /** Why the last change did not reach the provider. */
   syncError: string | null
+  /** Minutes to travel there, set by the user. */
+  travelMinutes: number | null
+  /** No reminders of its own: the user's default rules apply. */
+  defaultReminders: boolean
 }
