@@ -11,6 +11,7 @@ import (
 	"io"
 	"mime"
 	"net/mail"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -114,6 +115,8 @@ func Parse(raw []byte) (*Message, error) {
 			}
 		}
 	}
+
+	markReferencedInline(msg.Attachments, html)
 
 	switch {
 	case strings.TrimSpace(plain) != "":
@@ -251,4 +254,22 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string([]rune(s)[:max])
+}
+
+// markReferencedInline marks every part the HTML body shows through a cid: reference as inline. Mail clients disagree
+// on the disposition of embedded images (some send them as attachments), so the reference is what counts.
+func markReferencedInline(attachments []Attachment, html string) {
+	if html == "" {
+		return
+	}
+	lower := strings.ToLower(html)
+	for i := range attachments {
+		contentID := strings.ToLower(attachments[i].ContentID)
+		if contentID == "" || attachments[i].Inline {
+			continue
+		}
+		if strings.Contains(lower, "cid:"+contentID) || strings.Contains(lower, "cid:"+strings.ToLower(url.PathEscape(attachments[i].ContentID))) {
+			attachments[i].Inline = true
+		}
+	}
 }
