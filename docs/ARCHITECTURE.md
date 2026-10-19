@@ -782,9 +782,10 @@ accepted.
     `current-user-principal`, `calendar-home-set` and the calendars with their name, color, supported components
     (only `VEVENT` calendars are synced), privileges, `getctag` and `sync-token`. The URL that worked is reported
     back and stored with the account; a server without CalDAV is reported as `unsupported` and looked for again
-    daily. Guessed candidates (the web host of the mail domain, hosts named in DNS) are not trusted: when one asks
-    for the login and no trusted one works, the status becomes `unconfirmed` with that address, and the user
-    confirms it by entering it as the account's `calendarUrl`.
+    daily. Guessed candidates (the web host of the mail domain, hosts named in DNS) are not trusted: they never get
+    the login and are never used or stored, also when they answer without asking for it. When one answers and no
+    trusted one works, the status becomes `unconfirmed` with that address, and the user confirms it by entering it
+    as the account's `calendarUrl`.
   - Changes: `sync-collection` (RFC 6578) with the stored token when the server supports it; otherwise the `getctag`
     is compared and, when it changed, the resource etags are listed and only changed resources fetched with
     `calendar-multiget`. Every 2 minutes, and right after a write. Missing tokens (`valid-sync-token` error) fall back
@@ -826,6 +827,12 @@ accepted.
     that is new; a delegate named in `SENT-BY` may send for them), never changes who organizes the event, never
     touches an event the user organizes or that has no organizer, and may raise `SEQUENCE` by at most 100;
   - a `REPLY` counts only when its single attendee is the sender and already an attendee of the event.
+  - The sender is the message's `From` address as the mail server delivered it. Tresso does not check SPF, DKIM or
+    DMARC for this yet, so a forged `From` that the receiving server let through passes these checks; they keep
+    strangers from acting for someone else, not a forger from acting for the organizer. Checking the
+    `Authentication-Results` the receiving server adds is a later step.
+  - An invitation the calendar did not take by itself (outside the inbox, or from before the account was connected)
+    shows `canAdd`; `POST /api/v1/messages/{id}/invitation/add` adds it on the user's word, with the same checks.
   - `REQUEST` (new or updated invitation): if the user has the event with that `UID` in a provider calendar, the
     provider owns it (CalDAV servers with scheduling, Google and Microsoft put invitations into the calendar
     themselves) and nothing is written. Otherwise the event is created or updated in the account's default
