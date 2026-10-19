@@ -10,6 +10,7 @@ const router = createRouter({
     { path: '/accounts/:accountId', name: 'account', component: HomeView },
     { path: '/accounts/:accountId/:threadId', name: 'account-thread', component: HomeView },
     { path: '/search', name: 'search', component: () => import('@/views/SearchView.vue'), meta: { requiresAuth: true } },
+    { path: '/drafts', name: 'drafts', component: () => import('@/views/DraftsView.vue'), meta: { requiresAuth: true } },
     { path: '/outbox', name: 'outbox', component: () => import('@/views/OutboxView.vue'), meta: { requiresAuth: true } },
     {
       path: '/settings',

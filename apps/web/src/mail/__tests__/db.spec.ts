@@ -7,7 +7,7 @@ import { databaseName, deleteMailDatabase, MailDatabase } from '../db'
 const USER = 'user-1'
 
 function page(changes: Partial<ChangePage> & { cursor: number }): ChangePage {
-  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], deleted: [], ...changes }
+  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], deleted: [], ...changes }
 }
 
 const accounts = [
@@ -182,13 +182,31 @@ describe('MailDatabase', () => {
   })
 
   it('keeps drafts on this device', async () => {
-    const draft = { id: 'd1', mailAccountId: 'work', to: [], cc: [], bcc: [], subject: 'Hi', html: '<p>Hi</p>', signatureId: null, quoteHtml: '', inReplyToMessageId: null, kind: 'new' as const, outgoingId: null, noticedStatus: null, updatedAt: 1 }
+    const draft = { id: 'd1', mailAccountId: 'work', to: [], cc: [], bcc: [], subject: 'Hi', html: '<p>Hi</p>', signatureId: null, quoteHtml: '', inReplyToMessageId: null, kind: 'new' as const, version: 0, pendingSave: false, remoteVersion: null, outgoingId: null, noticedStatus: null, updatedAt: 1 }
     await db.saveDraft(draft)
     await db.saveDraft({ ...draft, id: 'd2', updatedAt: 2 })
 
     expect((await db.drafts()).map((d) => d.id)).toEqual(['d2', 'd1'])
     await db.deleteDraft('d2')
     expect(await db.draft('d2')).toBeNull()
+  })
+
+  it('keeps a sent draft until its outcome is known, and leaves unsaved edits alone', async () => {
+    const synced = { id: 'd1', mailAccountId: 'work', kind: 'new' as const, to: [], cc: [], bcc: [], subject: 'Server', html: '', signatureId: null, quoteHtml: '', inReplyToMessageId: null, version: 3, updatedAt: '2026-10-19T08:00:00Z' }
+    await db.apply(page({ cursor: 11, drafts: [synced] }))
+    expect(await db.draft('d1')).toMatchObject({ subject: 'Server', version: 3, pendingSave: false })
+
+    await db.saveDraft({ ...(await db.draft('d1'))!, subject: 'Local edit', pendingSave: true })
+    await db.apply(page({ cursor: 12, drafts: [{ ...synced, subject: 'Newer elsewhere', version: 4 }] }))
+    expect(await db.draft('d1')).toMatchObject({ subject: 'Local edit', remoteVersion: 4 })
+
+    await db.saveDraft({ ...(await db.draft('d1'))!, pendingSave: false, outgoingId: 'o1' })
+    await db.apply(page({ cursor: 13, deleted: [{ type: 'draft', id: 'd1' }] }))
+    expect(await db.draft('d1')).toMatchObject({ outgoingId: 'o1', version: 0 })
+
+    await db.saveDraft({ ...(await db.draft('d1'))!, outgoingId: null })
+    await db.apply(page({ cursor: 14, deleted: [{ type: 'draft', id: 'd1' }] }))
+    expect(await db.draft('d1')).toBeNull()
   })
 
   it('keeps data per user and deletes it on request', async () => {
