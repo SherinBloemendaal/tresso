@@ -19,10 +19,12 @@ type hostServer struct {
 	withLogin map[string]int
 	without   map[string]int
 	redirects map[string]string // host to the URL it redirects to
+	// open hosts answer without asking for the login.
+	open map[string]bool
 }
 
 func newHostServer(t *testing.T) *hostServer {
-	h := &hostServer{withLogin: map[string]int{}, without: map[string]int{}, redirects: map[string]string{}}
+	h := &hostServer{withLogin: map[string]int{}, without: map[string]int{}, redirects: map[string]string{}, open: map[string]bool{}}
 	h.server = httptest.NewServer(http.HandlerFunc(h.handle))
 	t.Cleanup(h.server.Close)
 	return h
@@ -41,13 +43,14 @@ func (h *hostServer) handle(w http.ResponseWriter, r *http.Request) {
 		h.without[host]++
 	}
 	target, redirect := h.redirects[host]
+	open := h.open[host]
 	h.mu.Unlock()
 
 	if redirect {
 		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 		return
 	}
-	if !ok || user != "kim@company.example" || password != "app-password" {
+	if !open && (!ok || user != "kim@company.example" || password != "app-password") {
 		w.Header().Set("WWW-Authenticate", `Basic realm="calendars"`)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -153,6 +156,33 @@ func TestDiscoveryAsksToConfirmAServerItDoesNotTrust(t *testing.T) {
 	}
 	if h.logins("company.example") != 0 {
 		t.Fatal("discovery sent the password to a guessed host")
+	}
+}
+
+func TestDiscoveryNeverUsesAnUntrustedServerThatAnswersWithoutTheLogin(t *testing.T) {
+	h := newHostServer(t)
+	h.open["company.example"] = true
+	client := h.client(NewTrust("imap.mailhost.example", ""))
+
+	_, err := client.discover(context.Background(), []string{"http://company.example/dav/"})
+
+	var confirm *ConfirmError
+	if !errors.As(err, &confirm) || confirm.URL != "http://company.example/dav/" {
+		t.Fatalf("an open untrusted server must be confirmed first, got %v", err)
+	}
+	if h.logins("company.example") != 0 {
+		t.Fatal("the open server received the password")
+	}
+}
+
+func TestDiscoveryUsesAnOpenServerItTrusts(t *testing.T) {
+	h := newHostServer(t)
+	h.open["imap.company.example"] = true
+	client := h.client(NewTrust("imap.company.example", ""))
+
+	account, err := client.discover(context.Background(), []string{"http://imap.company.example/dav/", "http://company.example/dav/"})
+	if err != nil || account.ContextURL != "http://imap.company.example/dav/" {
+		t.Fatalf("want the trusted server, got %+v, %v", account, err)
 	}
 }
 

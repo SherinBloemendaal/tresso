@@ -211,3 +211,27 @@ func TestAWrongPasswordReachesTheUser(t *testing.T) {
 		t.Fatalf("statuses = %v", fake.statuses)
 	}
 }
+
+func TestAnUpdateWithoutAKnownETagIsNoFalseConflict(t *testing.T) {
+	server := newFakeServer(t, true)
+	server.put(calendarPath+"standup.ics", event("standup", "Standup"))
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+	existing := server.server.URL + calendarPath + "standup.ics"
+	updated := event("standup", "Standup, moved")
+	// The last write got no ETag back, so the API has none for it.
+	fake.operations = []api.CalendarOperation{
+		{ID: "update", Kind: "put", CalendarRemoteID: server.server.URL + calendarPath, UID: "standup", RemoteID: &existing, Ical: &updated},
+	}
+
+	if err := r.writeAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if result := fake.results["update"]; result.Outcome != api.OperationDone {
+		t.Fatalf("update = %+v", result)
+	}
+	if !strings.Contains(server.objects[calendarPath+"standup.ics"].data, "Standup, moved") {
+		t.Fatal("the update did not reach the server")
+	}
+}

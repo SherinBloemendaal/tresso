@@ -291,8 +291,8 @@ func (e *ConfirmError) Error() string {
 
 // Discover finds the CalDAV context URL for an address (RFC 6764): known providers by the IMAP host, SRV and TXT
 // records of the address's domain, its .well-known/caldav, then the IMAP host's. The first candidate that answers as
-// CalDAV wins. Candidates the account does not trust never get the login; when one of them asks for it and no
-// trusted one works, the result is a *ConfirmError naming it.
+// CalDAV wins. Candidates the account does not trust never get the login and are never used, also when they answer
+// without asking for it; when one of them answers and no trusted one works, the result is a *ConfirmError naming it.
 func (c *Client) Discover(ctx context.Context, emailAddress, imapHost string, resolver *net.Resolver) (Account, error) {
 	return c.discover(ctx, Candidates(ctx, emailAddress, imapHost, resolver))
 }
@@ -302,8 +302,16 @@ func (c *Client) discover(ctx context.Context, candidates []string) (Account, er
 	var unconfirmed string
 	for _, candidate := range candidates {
 		account, err := c.Open(ctx, candidate)
-		if err == nil {
+		if err == nil && c.trusts(candidate) {
 			return account, nil
+		}
+		if err == nil {
+			// It answered without asking for the login, so it never had to prove anything; using it would store it as
+			// the account's server, which then gets the password. The user confirms it first.
+			if unconfirmed == "" {
+				unconfirmed = candidate
+			}
+			continue
 		}
 		if errors.Is(err, ErrUnauthorized) {
 			// The right server, the wrong password (or an app password is required): no use trying others.

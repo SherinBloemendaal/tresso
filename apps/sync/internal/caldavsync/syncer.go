@@ -427,13 +427,19 @@ func (r *run) write(ctx context.Context, operation api.CalendarOperation) api.Op
 		return api.OperationResult{Outcome: api.OperationFailed, Error: text("The event was removed before it could be saved.")}
 	}
 	href := ""
-	if operation.RemoteID != nil {
-		href = *operation.RemoteID
-	} else {
+	create := operation.RemoteID == nil
+	if create {
 		href = resourceURL(operation.CalendarRemoteID, operation.UID)
 		ifMatch = ""
+	} else {
+		href = *operation.RemoteID
 	}
-	etag, err := r.client.Put(ctx, href, *operation.Ical, ifMatch)
+	if !create && ifMatch == "" {
+		// The last write got no ETag back; the server's current one still guards against overwriting a change made
+		// elsewhere since.
+		ifMatch, _ = r.client.ETag(ctx, href)
+	}
+	etag, err := r.client.Put(ctx, href, *operation.Ical, ifMatch, create)
 	if err != nil {
 		return r.failure(ctx, href, err)
 	}
