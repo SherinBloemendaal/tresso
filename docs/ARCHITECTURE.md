@@ -166,8 +166,19 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   in behind and new mail is never stuck behind it. Fetches are grouped by count (50) and size (20 MB).
 - **Cursor:** per folder, opaque to the API: UIDVALIDITY, UIDNEXT, backfill position and HIGHESTMODSEQ. It only
   advances after the API accepted the work it covers, so a crash never skips mail.
-- **Outbound:** flag/move/delete/send commands are queued per account by the API and executed by the leasing
-  worker, then confirmed back.
+- **Sending:** `POST /api/v1/outgoing-messages` (scope `mail:send`) queues mail from one of the user's accounts, now or
+  at a `sendAt` (send later, or a few seconds for undo; cancellable until a worker takes it). The API builds the
+  MIME message (In-Reply-To and References for replies, Bcc only on the envelope) and stores it in object storage.
+  Once the transaction commits it tells the workers on the Mercure topic `urn:tresso:sync:outbox`; scheduled mail is
+  released by a delayed Messenger message, and every heartbeat both releases due mail and lists the leased accounts
+  with mail to send, so a lost notification only delays sending. The leasing worker claims due messages (5 minute
+  claim), sends over SMTP (whole message refused when one recipient is refused), files a copy in Sent (except at
+  providers that do that themselves) and reports sent, retry (4xx, connection problems, a wrong password: up to 6
+  attempts over about 4.5 hours) or failed (5xx). A message claimed again after an unreported attempt is first
+  looked up in Sent by Message-ID, so it is never sent twice. Status reaches clients in the delta as
+  `outgoingMessages`.
+- **Outbound changes:** flag/move/delete commands will follow the same pattern: queued per account by the API,
+  executed by the leasing worker, confirmed back.
 
 ### 3.5 Client sync protocol
 

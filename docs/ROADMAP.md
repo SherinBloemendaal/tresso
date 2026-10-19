@@ -31,7 +31,10 @@ Delivered in steps, each its own pull request:
   delta sync and realtime, reading pane rendering the body in a sandboxed frame
 - [x] 1.4c Account management in the web client: server settings found from the address, add, fix, pause and remove
   mail accounts, with the connection result shown live
-- [ ] 1.5 Compose, reply and forward, HTML signatures per account, sending through the worker, search
+- [x] 1.5a Sending through the worker: outbox, send later and undo, retries, Sent copies, no double sends
+- [ ] 1.5b HTML signatures per account
+- [ ] 1.5c Compose, reply and forward in the web client
+- [ ] 1.5d Search
 - [ ] 1.6 Gmail and Microsoft 365: OAuth connection, Gmail API and Microsoft Graph sync
 
 ## Phase 2: Do, hand over, know
