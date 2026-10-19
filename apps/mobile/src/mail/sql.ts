@@ -1,23 +1,11 @@
 import * as SQLite from 'expo-sqlite'
+import type { Sql } from '@tresso/core'
 
-export type SqlValue = string | number | null
-
-/**
- * The part of a SQL database the mail copy uses. The app runs it on expo-sqlite; the unit tests run the same SQL on
- * sql.js, so the storage logic is tested without a device.
- */
-export interface Sql {
-  exec(source: string): Promise<void>
-  run(source: string, params?: SqlValue[]): Promise<void>
-  all<T>(source: string, params?: SqlValue[]): Promise<T[]>
-  first<T>(source: string, params?: SqlValue[]): Promise<T | null>
-  /** Runs the task in one exclusive transaction: all of it is stored, or none. */
-  transaction(task: (tx: Sql) => Promise<void>): Promise<void>
-}
+export type { Sql, SqlValue } from '@tresso/core'
 
 type Queries = Pick<SQLite.SQLiteDatabase, 'execAsync' | 'runAsync' | 'getAllAsync' | 'getFirstAsync'>
 
-function queries(database: Queries): Omit<Sql, 'transaction'> {
+function queries(database: Queries): Omit<Sql, 'transaction' | 'close'> {
   return {
     exec: (source) => database.execAsync(source),
     run: async (source, params = []) => {
@@ -28,15 +16,17 @@ function queries(database: Queries): Omit<Sql, 'transaction'> {
   }
 }
 
+const nested = () => Promise.reject(new Error('Transactions do not nest.'))
+
 /** Opens (or creates) a database on the device. */
-export async function openSql(name: string): Promise<Sql & { close(): Promise<void> }> {
+export async function openSql(name: string): Promise<Sql> {
   const database = await SQLite.openDatabaseAsync(name)
   await database.execAsync('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;')
   return {
     ...queries(database),
     transaction: (task) =>
       database.withExclusiveTransactionAsync(async (txn) => {
-        await task({ ...queries(txn), transaction: () => Promise.reject(new Error('Transactions do not nest.')) })
+        await task({ ...queries(txn), transaction: nested, close: nested })
       }),
     close: () => database.closeAsync(),
   }

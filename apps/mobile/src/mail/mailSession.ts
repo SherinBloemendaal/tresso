@@ -9,9 +9,10 @@ import {
   type MessageAction,
   type MessageActionRequest,
   type RealtimeAccess,
+  type Sql,
+  CopyClosingError,
+  SqliteMailStore,
 } from '@tresso/core'
-import { CopyClosingError, MailDatabase } from '@/mail/mailDatabase'
-import type { Sql } from '@/mail/sql'
 
 const PAGE_SIZE = 500
 /** Lists every user's copy that exists on the device, so a copy left behind is found and removed later. */
@@ -46,7 +47,7 @@ export interface MailSessionDeps {
 interface Open {
   userId: string
   sql: Sql & { close(): Promise<void> }
-  database: MailDatabase
+  database: SqliteMailStore
   engine: SyncEngine
   realtime: RealtimeClient
 }
@@ -72,7 +73,7 @@ export class MailSession {
     this.foreground = deps.foreground ?? true
   }
 
-  get database(): MailDatabase | null {
+  get database(): SqliteMailStore | null {
     return this.open?.database ?? null
   }
 
@@ -179,9 +180,9 @@ export class MailSession {
       await index.close()
     }
     const sql = await this.deps.openSql(name)
-    let database: MailDatabase
+    let database: SqliteMailStore
     try {
-      database = await MailDatabase.open(sql)
+      database = await SqliteMailStore.open(sql)
     } catch (error) {
       await sql.close()
       throw error
@@ -243,8 +244,7 @@ export class MailSession {
     this.update({ userId: null, ready: false, live: false, syncState: 'idle' })
     await open.realtime.stop()
     // Waits for a page being stored, not for one on its way over the network: that one is refused when it arrives.
-    await open.database.shut()
-    await open.sql.close()
+    await open.database.close()
   }
 
   /** Deletes every listed copy except this one; one that cannot go now stays listed and is tried again next time. */
