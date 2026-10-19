@@ -10,10 +10,17 @@ namespace App\Notification\Channel;
  */
 final readonly class PushMessage
 {
+    /** The Android channel of calendar notifications. */
+    public const string REMINDERS = 'reminders';
+    /** The Android channel of mail notifications. */
+    public const string MAIL = 'mail';
+
     /**
      * @param string|null           $path a path in the app (/calendar/events/{id}?occurrence=..., /thread/{id}), or
      *                                    null to open the app as it is
-     * @param array<string, string> $data more for the client to read, next to the fixed keys
+     * @param array<string, string> $data           more for the client to read, next to the fixed keys
+     * @param string                $androidChannel the Android notification channel the phone shows it in; the phone
+     *                                              creates "reminders" (calendar) and "mail"
      */
     public function __construct(
         public string $id,
@@ -25,6 +32,7 @@ final readonly class PushMessage
         /** Push services drop it when it could not be delivered by then. */
         public \DateTimeImmutable $expiresAt,
         public array $data = [],
+        public string $androidChannel = self::REMINDERS,
     ) {
     }
 

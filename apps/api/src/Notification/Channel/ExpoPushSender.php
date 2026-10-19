@@ -87,7 +87,7 @@ final readonly class ExpoPushSender
             'sound' => $message->silent ? null : 'default',
             'priority' => $message->silent ? 'normal' : 'high',
             'expiration' => $message->expiresAt->getTimestamp(),
-            'channelId' => 'reminders',
+            'channelId' => $message->androidChannel,
         ];
     }
 }
