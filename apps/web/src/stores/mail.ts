@@ -6,7 +6,9 @@ import {
   type ChangePage,
   type MessageBody,
   type RealtimeAccess,
+  type DraftRequest,
   type SendMessageRequest,
+  type SyncedDraft,
   type SyncedFolder,
   type SyncedMailAccount,
   type SyncedMessage,
@@ -15,6 +17,7 @@ import {
   type SyncedThread,
 } from '@tresso/core'
 import { deleteMailDatabase, MailDatabase, type Contact, type Conversation, type Draft } from '@/mail/db'
+import { ApiError } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
 
 const PAGE_SIZE = 500
@@ -79,6 +82,7 @@ export const useMailStore = defineStore('mail', () => {
     })
     await pull(() => engine?.sync())
     await refresh()
+    void uploadPendingDrafts()
     realtime.start()
   }
 
@@ -189,9 +193,117 @@ export const useMailStore = defineStore('mail', () => {
     return (await db.value?.suggestContacts(query, 8)) ?? []
   }
 
+  /** Saves on this device; the upload follows (see uploadDraft). */
   async function saveDraft(draft: Draft): Promise<void> {
     // Drafts come from reactive state; IndexedDB stores only plain data.
     await db.value?.saveDraft(JSON.parse(JSON.stringify(draft)) as Draft)
+  }
+
+  const uploads = new Map<string, Promise<void>>()
+  const uploadAgain = new Set<string>()
+
+  /**
+   * Brings the draft's unsaved edits to the server. Uploads of one draft never overlap: an upload asked for during
+   * one runs right after it, with whatever was saved by then. Another device's newer version is never overwritten;
+   * it is noted on the draft for the user to settle (see resolveDraftConflict).
+   */
+  function uploadDraft(id: string): Promise<void> {
+    uploadAgain.add(id)
+    const running = uploads.get(id)
+    if (running) return running
+    const run = (async () => {
+      try {
+        while (uploadAgain.delete(id)) {
+          await uploadOnce(id)
+        }
+      } finally {
+        uploads.delete(id)
+      }
+    })()
+    uploads.set(id, run)
+    return run
+  }
+
+  async function uploadOnce(id: string): Promise<void> {
+    const database = db.value
+    const local = await database?.draft(id)
+    if (!database || !local || !local.pendingSave || local.remoteVersion !== null || local.outgoingId !== null) return
+
+    const request: DraftRequest = {
+      mailAccountId: local.mailAccountId,
+      kind: local.kind,
+      to: local.to,
+      cc: local.cc,
+      bcc: local.bcc,
+      subject: local.subject,
+      html: local.html,
+      signatureId: local.signatureId,
+      quoteHtml: local.quoteHtml,
+      inReplyToMessageId: local.inReplyToMessageId,
+    }
+    let saved: SyncedDraft
+    try {
+      saved =
+        local.version === 0
+          ? await auth.send<SyncedDraft>('POST', '/api/v1/drafts', { ...request, draftId: id })
+          : await auth.send<SyncedDraft>('PUT', `/api/v1/drafts/${encodeURIComponent(id)}`, { ...request, expectedVersion: local.version })
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && local.version > 0) {
+        const remote = await auth.api<SyncedDraft>(`/api/v1/drafts/${encodeURIComponent(id)}`)
+        await database.saveDraft({ ...local, remoteVersion: remote.version })
+        await refresh()
+        return
+      }
+      if (e instanceof ApiError && e.status === 404 && local.version > 0) {
+        // Deleted on another device while it was being written here: it becomes a new draft again.
+        await database.saveDraft({ ...local, version: 0 })
+        uploadAgain.add(id)
+        return
+      }
+      throw e
+    }
+    // Edits made while the upload was under way stay pending and go up in the next round.
+    const current = (await database.draft(id)) ?? local
+    const unchanged = current.updatedAt === local.updatedAt
+    await database.saveDraft({ ...current, version: saved.version, pendingSave: !unchanged })
+    if (!unchanged) uploadAgain.add(id)
+  }
+
+  /** Uploads every draft with edits that did not reach the server yet, e.g. after starting offline. */
+  async function uploadPendingDrafts(): Promise<void> {
+    for (const draft of (await db.value?.drafts()) ?? []) {
+      if (draft.pendingSave && draft.remoteVersion === null && draft.outgoingId === null) {
+        await uploadDraft(draft.id).catch(() => undefined)
+      }
+    }
+  }
+
+  /** Settles a conflict: keep the edits made here (they overwrite the other version) or take the other version. */
+  async function resolveDraftConflict(id: string, keep: 'mine' | 'theirs'): Promise<Draft | null> {
+    const database = db.value
+    const local = await database?.draft(id)
+    if (!database || !local || local.remoteVersion === null) return local ?? null
+    const remote = await auth.api<SyncedDraft>(`/api/v1/drafts/${encodeURIComponent(id)}`)
+    const next: Draft =
+      keep === 'mine'
+        ? { ...local, version: remote.version, remoteVersion: null, pendingSave: true }
+        : { ...remote, updatedAt: Date.parse(remote.updatedAt), pendingSave: false, remoteVersion: null, outgoingId: null, noticedStatus: null }
+    await database.saveDraft(next)
+    if (keep === 'mine') await uploadDraft(id)
+    return (await database.draft(id)) ?? next
+  }
+
+  /** Removes the draft here and on the server, and with it its copy in the Drafts folder. */
+  async function deleteDraftEverywhere(id: string): Promise<void> {
+    const local = await db.value?.draft(id)
+    if (local && local.version > 0) {
+      try {
+        await auth.send<void>('DELETE', `/api/v1/drafts/${encodeURIComponent(id)}`)
+      } catch (e) {
+        if (!(e instanceof ApiError && e.status === 404)) throw e
+      }
+    }
+    await db.value?.deleteDraft(id)
   }
 
   async function drafts(): Promise<Draft[]> {
@@ -245,5 +357,9 @@ export const useMailStore = defineStore('mail', () => {
     drafts,
     draft,
     deleteDraft,
+    uploadDraft,
+    uploadPendingDrafts,
+    resolveDraftConflict,
+    deleteDraftEverywhere,
   }
 })

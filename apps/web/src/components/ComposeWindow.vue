@@ -17,7 +17,7 @@ const title = computed(() => {
   }
 })
 const savedText = computed(() =>
-  compose.savedAt === null ? '' : `Draft saved on this device ${new Date(compose.savedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`,
+  compose.savedAt === null ? '' : `Draft saved ${new Date(compose.savedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`,
 )
 </script>
 
@@ -31,7 +31,12 @@ const savedText = computed(() =>
       </button>
       <button type="button" class="icon" aria-label="Close and keep the draft" @click="compose.close()">×</button>
     </header>
-    <ComposeForm v-show="!compose.minimized" :key="compose.draft.id" :draft="compose.draft" />
+    <div v-if="compose.conflict" class="conflict" role="alert">
+      <span>This draft was changed on another device while you were writing here.</span>
+      <button type="button" class="button button-quiet" @click="compose.resolveConflict('theirs')">Use the other version</button>
+      <button type="button" class="button button-primary" @click="compose.resolveConflict('mine')">Keep this one</button>
+    </div>
+    <ComposeForm v-show="!compose.minimized" :key="`${compose.draft.id}:${compose.revision}`" :draft="compose.draft" />
   </section>
 </template>
 
@@ -78,6 +83,17 @@ const savedText = computed(() =>
 }
 .icon:hover {
   background: var(--ground);
+}
+.conflict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--delegate-soft);
+}
+.conflict span {
+  flex: 1 1 220px;
 }
 .minimized {
   width: 320px;

@@ -51,6 +51,10 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         <span class="label">Unified Inbox</span>
         <span v-if="totalUnread > 0" class="count">{{ totalUnread }}<span class="visually-hidden"> unread</span></span>
       </RouterLink>
+      <RouterLink :to="{ name: 'drafts' }" class="item">
+        <AppIcon name="draft" />
+        <span class="label">Drafts</span>
+      </RouterLink>
       <RouterLink v-if="outboxCount > 0" :to="{ name: 'outbox' }" class="item">
         <AppIcon name="outbox" />
         <span class="label">Outbox</span>

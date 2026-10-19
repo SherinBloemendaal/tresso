@@ -5,6 +5,7 @@ import type {
   SyncedFolder,
   SyncedMailAccount,
   SyncedMessage,
+  SyncedDraft,
   SyncedOutgoingMessage,
   SyncedSignature,
   SyncedThread,
@@ -45,7 +46,11 @@ export interface Contact {
   messages: number
 }
 
-/** A message being written, kept on this device until it is sent or discarded. */
+/**
+ * A message being written: the synced draft plus what only this device knows. Edits are saved here first
+ * (`pendingSave`) and then uploaded; `version` is the server version they build on, 0 while the draft has not
+ * reached the server.
+ */
 export interface Draft {
   id: string
   mailAccountId: string | null
@@ -61,6 +66,11 @@ export interface Draft {
   quoteHtml: string
   inReplyToMessageId: string | null
   kind: 'new' | 'reply' | 'replyAll' | 'forward'
+  version: number
+  /** Edits on this device that have not reached the server yet. */
+  pendingSave: boolean
+  /** Set when another device saved a newer version while this one had unsaved edits: the version waiting there. */
+  remoteVersion: number | null
   /** Set once sent: the draft stays until the message is confirmed sent, so a failure can be edited and resent. */
   outgoingId: string | null
   /** The outgoing status the user was last told about, so each outcome is announced once. */
@@ -97,8 +107,8 @@ interface MailSchema extends DBSchema {
 type Stores = StoreNames<MailSchema>[]
 type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
-const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures']
-const VERSION = 3
+const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts']
+const VERSION = 4
 const SENDERS_PER_CONVERSATION = 3
 
 export function databaseName(userId: string): string {
@@ -134,7 +144,14 @@ export class MailDatabase implements SyncStore {
             await cursor.update({ ...cursor.value, defaultSignatureId: cursor.value.defaultSignatureId ?? null })
           }
         }
-        // Outgoing mail, contacts and signatures come from the delta: an existing copy syncs again from the start.
+        if (oldVersion >= 2 && oldVersion < 4) {
+          // Drafts used to stay on the device; they are uploaded now, so nothing written before is lost.
+          const drafts = transaction.objectStore('drafts')
+          for (let cursor = await drafts.openCursor(); cursor !== null; cursor = await cursor.continue()) {
+            await cursor.update({ ...cursor.value, version: 0, pendingSave: cursor.value.outgoingId === null, remoteVersion: null })
+          }
+        }
+        // Outgoing mail, contacts, signatures and drafts come from the delta: an existing copy syncs again from the start.
         if (oldVersion >= 1) {
           await transaction.objectStore('meta').delete('cursor')
         }
@@ -185,6 +202,16 @@ export class MailDatabase implements SyncStore {
         case 'signature':
           await tx.objectStore('signatures').delete(deleted.id)
           break
+        case 'draft': {
+          const local = await tx.objectStore('drafts').get(deleted.id)
+          if (local?.outgoingId) {
+            // Sent: kept here until the outcome is known, so a failure can be edited and sent again.
+            await tx.objectStore('drafts').put({ ...local, version: 0, pendingSave: false, remoteVersion: null })
+          } else if (local !== undefined && !local.pendingSave) {
+            await tx.objectStore('drafts').delete(deleted.id)
+          }
+          break
+        }
       }
     }
 
@@ -220,6 +247,9 @@ export class MailDatabase implements SyncStore {
     }
     for (const outgoing of page.outgoingMessages) {
       await tx.objectStore('outgoing').put(outgoing)
+    }
+    for (const draft of page.drafts) {
+      await applyDraft(tx, draft)
     }
 
     const inboxFolders = new Set(
@@ -351,12 +381,40 @@ function createVersion1(database: IDBPDatabase<MailSchema>): void {
 
 async function deleteAccount(tx: WriteTx, accountId: string): Promise<void> {
   await tx.objectStore('mailAccounts').delete(accountId)
+  // Drafts outlive the account they were written from; they keep their text and need a new one to send.
+  for (const draft of await tx.objectStore('drafts').getAll()) {
+    if (draft.mailAccountId === accountId) {
+      await tx.objectStore('drafts').put({ ...draft, mailAccountId: null })
+    }
+  }
   for (const store of ['folders', 'threads', 'messages', 'conversations', 'outgoing'] as const) {
     const index = tx.objectStore(store).index('byAccount')
     for (let cursor = await index.openCursor(accountId); cursor !== null; cursor = await cursor.continue()) {
       await cursor.delete()
     }
   }
+}
+
+/**
+ * A draft from the server. Unsaved edits on this device are never overwritten: when the server moved past the
+ * version they build on, the newer version is noted as a conflict for the user to settle.
+ */
+async function applyDraft(tx: WriteTx, draft: SyncedDraft): Promise<void> {
+  const local = await tx.objectStore('drafts').get(draft.id)
+  if (local?.pendingSave) {
+    if (draft.version > local.version) {
+      await tx.objectStore('drafts').put({ ...local, remoteVersion: draft.version })
+    }
+    return
+  }
+  await tx.objectStore('drafts').put({
+    ...draft,
+    updatedAt: Date.parse(draft.updatedAt),
+    pendingSave: false,
+    remoteVersion: null,
+    outgoingId: local?.outgoingId ?? null,
+    noticedStatus: local?.noticedStatus ?? null,
+  })
 }
 
 /** Everyone on a message becomes a suggestion, the newest name winning. */

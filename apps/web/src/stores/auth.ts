@@ -102,8 +102,8 @@ export const useAuthStore = defineStore('auth', () => {
     return (await response.json()) as T
   }
 
-  /** POST, PATCH (as JSON merge patch) or DELETE. */
-  function send<T>(method: 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
+  /** POST, PUT, PATCH (as JSON merge patch) or DELETE. */
+  function send<T>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
     const init: RequestInit = { method }
     if (body !== undefined) {
       init.headers = { 'Content-Type': method === 'PATCH' ? 'application/merge-patch+json' : 'application/json' }

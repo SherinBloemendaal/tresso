@@ -41,6 +41,9 @@ function newDraft(kind: DraftKind, mailAccountId: string | null, signatureId: st
     quoteHtml: '',
     inReplyToMessageId: null,
     kind,
+    version: 0,
+    pendingSave: true,
+    remoteVersion: null,
     outgoingId: null,
     noticedStatus: null,
     updatedAt: Date.now(),
@@ -87,7 +90,11 @@ export const useComposeStore = defineStore('compose', () => {
     return mail.signatures.some((signature) => signature.id === id) ? id : null
   }
 
+  /** Rises whenever a draft is (re)opened, so the form starts over even for the same draft. */
+  const revision = ref(0)
+
   function open(next: Draft): void {
+    revision.value++
     draft.value = next
     minimized.value = false
     error.value = null
@@ -119,34 +126,68 @@ export const useComposeStore = defineStore('compose', () => {
   async function openDraft(id: string): Promise<void> {
     const stored = await mail.draft(id)
     if (stored) {
-      open({ ...stored, outgoingId: null, noticedStatus: null })
+      // Editing a message that failed to send makes it a draft again.
+      open(stored.outgoingId === null ? stored : { ...stored, outgoingId: null, noticedStatus: null, pendingSave: true })
     }
   }
 
   function update(changes: Partial<Draft>): void {
     if (draft.value === null) return
-    draft.value = { ...draft.value, ...changes, updatedAt: Date.now() }
+    draft.value = { ...draft.value, ...changes, pendingSave: true, updatedAt: Date.now() }
     if (saveTimer !== null) clearTimeout(saveTimer)
     saveTimer = setTimeout(() => void save(), AUTOSAVE_MS)
   }
 
-  async function save(): Promise<void> {
-    if (draft.value === null) return
-    await mail.saveDraft(draft.value)
+  /** Saves on this device at once and uploads, so the draft is on every device and in the Drafts folder. */
+  async function save(current: Draft | null = draft.value): Promise<void> {
+    if (current === null) return
+    const stored = await mail.draft(current.id)
+    // Keep what the upload learned (server version, a conflict) and lay the edits on top.
+    await mail.saveDraft({ ...current, version: stored?.version ?? current.version, remoteVersion: stored?.remoteVersion ?? null })
     savedAt.value = Date.now()
+    try {
+      await mail.uploadDraft(current.id)
+    } catch {
+      // Offline or the server is unreachable: the edits wait on this device and go up later.
+    }
+    await checkConflict(current.id)
+  }
+
+  /** Another device saved a newer version while this one was being written. */
+  const conflict = ref(false)
+
+  async function checkConflict(id: string): Promise<void> {
+    if (draft.value?.id !== id) return
+    conflict.value = ((await mail.draft(id))?.remoteVersion ?? null) !== null
+  }
+
+  async function resolveConflict(keep: 'mine' | 'theirs'): Promise<void> {
+    const current = draft.value
+    if (current === null) return
+    await save()
+    const resolved = await mail.resolveDraftConflict(current.id, keep)
+    conflict.value = false
+    if (keep === 'theirs' && resolved !== null) {
+      // The form starts over with the other device's version.
+      draft.value = null
+      open(resolved)
+    }
   }
 
   async function discard(): Promise<void> {
     if (draft.value === null) return
     if (saveTimer !== null) clearTimeout(saveTimer)
-    await mail.deleteDraft(draft.value.id)
+    const id = draft.value.id
     draft.value = null
+    await mail.deleteDraftEverywhere(id)
   }
 
   function close(): void {
     if (saveTimer !== null) clearTimeout(saveTimer)
-    if (draft.value !== null) void save()
+    const closing = draft.value
     draft.value = null
+    conflict.value = false
+    void save(closing)
   }
 
   function validate(current: Draft): string | null {
@@ -171,6 +212,13 @@ export const useComposeStore = defineStore('compose', () => {
     error.value = null
     violations.value = {}
     const at = sendAt ?? new Date(Date.now() + UNDO_SECONDS * 1000)
+    // The draft goes up first, so the server can take it (and its Drafts folder copy) away when the message is queued.
+    if (saveTimer !== null) clearTimeout(saveTimer)
+    await mail.saveDraft(current)
+    const onServer = await mail
+      .uploadDraft(current.id)
+      .then(async () => ((await mail.draft(current.id))?.version ?? 0) > 0)
+      .catch(() => false)
     const request: SendMessageRequest = {
       mailAccountId: current.mailAccountId!,
       to: current.to,
@@ -180,10 +228,11 @@ export const useComposeStore = defineStore('compose', () => {
       html: composeBody(current.html, mail.signatures.find((signature) => signature.id === current.signatureId)?.html ?? null, current.quoteHtml),
       sendAt: at.toISOString(),
       ...(current.inReplyToMessageId ? { inReplyToMessageId: current.inReplyToMessageId } : {}),
+      ...(onServer ? { draftId: current.id } : {}),
     }
     try {
       const outgoing = await mail.send(request)
-      await mail.saveDraft({ ...current, outgoingId: outgoing.id, updatedAt: Date.now() })
+      await mail.saveDraft({ ...((await mail.draft(current.id)) ?? current), outgoingId: outgoing.id, pendingSave: false, updatedAt: Date.now() })
       draft.value = null
       if (sendAt === undefined) {
         startUndo(outgoing.id, current.id)
@@ -273,6 +322,9 @@ export const useComposeStore = defineStore('compose', () => {
 
   return {
     draft,
+    revision,
+    conflict,
+    resolveConflict,
     minimized,
     savedAt,
     sending,
