@@ -104,7 +104,11 @@ export class SqliteMailStore implements MailStore {
 
   async close(): Promise<void> {
     await this.shut()
-    await Promise.allSettled([...this.reading])
+    // Reads that start while others finish (the next query of a thread, a screen still loading) are waited for too.
+    // Between the last check and closing nothing is awaited, so no read can slip in to hold the file open.
+    while (this.reading.size > 0) {
+      await Promise.allSettled([...this.reading])
+    }
     await this.sql.close()
   }
 

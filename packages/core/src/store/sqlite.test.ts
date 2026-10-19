@@ -64,6 +64,36 @@ describe('SqliteMailStore', () => {
     expect(sql.closed()).toBe(true)
   })
 
+  it('also waits for a read that starts while closing waits for another', async () => {
+    let releaseFirst!: () => void
+    let releaseSecond!: () => void
+    const first = new Promise<void>((resolve) => (releaseFirst = resolve))
+    const second = new Promise<void>((resolve) => (releaseSecond = resolve))
+    let calls = 0
+    const slow: Sql & { closed(): boolean } = {
+      ...sql,
+      all: async (source, params) => {
+        calls += 1
+        await (calls === 1 ? first : second)
+        return sql.all(source, params)
+      },
+    }
+    const store = await SqliteMailStore.open(slow)
+    const reading = store.mailAccounts()
+    const closing = store.close()
+
+    const late = store.folders()
+    releaseFirst()
+    await reading
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(sql.closed()).toBe(false)
+
+    releaseSecond()
+    await late
+    await closing
+    expect(sql.closed()).toBe(true)
+  })
+
   it('stores writes that arrive together one after the other, as a device allows one writer', async () => {
     await Promise.all([
       db.apply(page({ cursor: 11, messages: [message('m5', 't1', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00')] })),
