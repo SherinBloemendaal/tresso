@@ -46,3 +46,18 @@ func TestBuildSendsTheSignalHeaders(t *testing.T) {
 		t.Errorf("headers = %v", msg.Headers)
 	}
 }
+
+func TestBuildReportsTheCalendarParts(t *testing.T) {
+	raw := []byte("From: anna@finance.example\r\nTo: kim@company.example\r\nSubject: Invitation\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: text/calendar; charset=utf-8; method=REQUEST\r\n\r\n" +
+		"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:a@finance.example\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+
+	msg, err := Build(context.Background(), storage.NewMemory(), raw, "gmail-id", time.Now(), api.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(msg.CalendarParts) != 1 || msg.CalendarParts[0].Method == nil || *msg.CalendarParts[0].Method != "REQUEST" {
+		t.Fatalf("calendar parts = %+v", msg.CalendarParts)
+	}
+}
