@@ -5,6 +5,7 @@ import { AuthProvider } from '@/auth/AuthProvider'
 import { MailProvider } from '@/mail/MailProvider'
 import { NoticeProvider } from '@/components/Notices'
 import { ComposerProvider } from '@/compose/ComposerProvider'
+import { DeviceSetup } from '@/notifications/DeviceSetup'
 
 // Closes the sign-in popup when the app runs on the web; a no-op on iOS and Android.
 WebBrowser.maybeCompleteAuthSession()
@@ -14,6 +15,7 @@ export default function RootLayout() {
     <AuthProvider>
       <MailProvider>
         <NoticeProvider>
+          <DeviceSetup />
           <ComposerProvider>
             <Stack screenOptions={{ headerShown: false }}>
               <Stack.Screen name="compose" options={{ presentation: 'modal' }} />
