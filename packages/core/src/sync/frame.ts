@@ -26,6 +26,26 @@ export function mailFrameDocument(html: string, options: { apiOrigin: string; al
   )
 }
 
+/**
+ * The document for previewing signature HTML while it is edited, before the API sanitized it. Nothing in it runs and
+ * images load only the way the saved signature allows them (https and data); the frame must be sandboxed without
+ * allow-scripts. `background` shows how the signature reads in a light or a dark mail client.
+ */
+export function signatureFrameDocument(html: string, options: { background: 'light' | 'dark' }): string {
+  const policy = ["default-src 'none'", 'img-src https: data:', "style-src 'unsafe-inline'", "form-action 'none'", "base-uri 'none'"].join('; ')
+  const colors = options.background === 'dark' ? 'background:#1B1D22;color:#F3F4F6' : 'background:#fff;color:#16181D'
+
+  return (
+    '<!doctype html><html><head><meta charset="utf-8">' +
+    `<meta http-equiv="Content-Security-Policy" content="${escapeAttribute(policy)}">` +
+    `<meta name="color-scheme" content="${options.background}">` +
+    '<meta name="referrer" content="no-referrer">' +
+    '<base target="_blank">' +
+    `<style>html{${colors}}body{margin:0;font:13px/1.5 Arial,sans-serif;overflow-wrap:anywhere}img{max-width:100%;height:auto}</style>` +
+    `</head><body>${html}</body></html>`
+  )
+}
+
 function escapeAttribute(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
 }

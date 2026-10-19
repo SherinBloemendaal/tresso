@@ -24,6 +24,8 @@ export interface SyncedMailAccount {
   status: MailAccountStatus
   statusDetail: string | null
   lastSyncedAt: string | null
+  /** The signature inserted into new messages from this account. */
+  defaultSignatureId: string | null
 }
 
 export interface SyncedFolder {
@@ -67,7 +69,6 @@ export interface SyncedMessage {
   summary: string | null
 }
 
-export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage'
 
 export type OutgoingStatus = 'scheduled' | 'queued' | 'sending' | 'sent' | 'failed' | 'cancelled'
 
@@ -89,6 +90,15 @@ export interface SyncedOutgoingMessage {
   lastError: string | null
   inReplyToMessageId: string | null
 }
+/** Sanitized HTML; render only in a sandboxed frame (see `signatureFrameDocument`). */
+export interface SyncedSignature {
+  id: string
+  name: string
+  html: string
+  updatedAt: string
+}
+
+export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage' | 'signature'
 
 export interface Deleted {
   type: DeletedType
@@ -103,6 +113,7 @@ export interface ChangePage {
   threads: SyncedThread[]
   messages: SyncedMessage[]
   outgoingMessages: SyncedOutgoingMessage[]
+  signatures: SyncedSignature[]
   deleted: Deleted[]
 }
 

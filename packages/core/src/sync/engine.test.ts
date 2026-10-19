@@ -11,6 +11,7 @@ function page(cursor: number, hasMore = false, ids: string[] = []): ChangePage {
     threads: ids.map((id) => ({ id, mailAccountId: 'a', subject: id, messageCount: 1, lastMessageAt: '2026-10-19T08:00:00+00:00' })),
     messages: [],
     outgoingMessages: [],
+    signatures: [],
     deleted: [],
   }
 }
