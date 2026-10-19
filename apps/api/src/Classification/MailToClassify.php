@@ -30,6 +30,13 @@ final readonly class MailToClassify
         public array $folderRoles,
         /** It answers another message (In-Reply-To is set). */
         public bool $isReply = false,
+        /**
+         * Domains the receiving server's Authentication-Results header names; null when the topmost header is the
+         * provider's own (see {@see ReceivingServers}).
+         *
+         * @var list<string>|null
+         */
+        public ?array $receivingDomains = null,
     ) {
     }
 

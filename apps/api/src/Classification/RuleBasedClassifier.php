@@ -38,8 +38,11 @@ final readonly class RuleBasedClassifier implements Classifier
         // its sender being authenticated, is spam whatever rules exist for that address.
         $spam = $context->builtin(BuiltinCategory::Spam);
         $spamReason = self::spamReason($mail);
-        if (null !== $spam && null !== $spamReason && !$spam->excludes($sender)
-            && (ClassificationReason::AUTHENTICATION_FAILED === $spamReason || !self::authenticated($mail))) {
+        // The exclude list is From-based too, so it cannot rescue mail that failed authentication.
+        if (null !== $spam && ClassificationReason::AUTHENTICATION_FAILED === $spamReason) {
+            return new Classification($spam, $spam->getVerdict(), $spamReason);
+        }
+        if (null !== $spam && null !== $spamReason && !$spam->excludes($sender) && !self::authenticated($mail)) {
             return new Classification($spam, $spam->getVerdict(), $spamReason);
         }
 
@@ -144,10 +147,15 @@ final readonly class RuleBasedClassifier implements Classifier
         return self::isServerSpam($mail) ? ClassificationReason::SERVER_SPAM : null;
     }
 
-    /** DMARC passed: the From domain is the one that sent it, so rules about that sender can be trusted. */
+    /**
+     * DMARC passed according to the receiving server: the From domain is the one that sent it, so rules about that
+     * sender can be trusted. A header the receiving server did not write proves nothing (see {@see ReceivingServers}).
+     */
     private static function authenticated(MailToClassify $mail): bool
     {
-        return 1 === preg_match('/\bdmarc=pass\b/', strtolower($mail->header('authentication-results') ?? ''));
+        $results = $mail->header('authentication-results') ?? '';
+
+        return 1 === preg_match('/\bdmarc=pass\b/', strtolower($results)) && ReceivingServers::wrote($results, $mail->receivingDomains);
     }
 
     private static function isServerSpam(MailToClassify $mail): bool
