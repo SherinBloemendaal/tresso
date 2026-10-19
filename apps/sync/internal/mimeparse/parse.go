@@ -33,6 +33,8 @@ const (
 	UnknownSender = "unknown@unknown.invalid"
 	// The API takes signal header values up to this many characters.
 	signalLength = 1000
+	// Calendar parts larger than this are no invitation anyone writes; they stay plain attachments.
+	maxCalendarPart = 256 << 10
 )
 
 // signalHeaders tell automated, bulk and junk mail apart; the API classifies mail with them.
@@ -56,6 +58,13 @@ type Attachment struct {
 	Data        []byte
 }
 
+// CalendarPart is a text/calendar part (iMIP, RFC 6047): an invitation, update, cancellation or reply.
+type CalendarPart struct {
+	// Method is the METHOD parameter of the part's Content-Type, empty when it had none.
+	Method string
+	Data   string
+}
+
 type Message struct {
 	MessageID   string
 	InReplyTo   string
@@ -72,7 +81,8 @@ type Message struct {
 	Attachments []Attachment
 	// Signals holds the signal headers the message has, by lower-cased name. For a header that occurs more than
 	// once it is the first (topmost) one: for Authentication-Results that is the one the receiving server added.
-	Signals map[string]string
+	Signals       map[string]string
+	CalendarParts []CalendarPart
 }
 
 // Parse never fails on malformed input: headers it cannot read stay empty. It only returns an error when the input
@@ -108,8 +118,14 @@ func Parse(raw []byte) (*Message, error) {
 				plain = readText(part.Body)
 			case contentType == "text/html" && html == "":
 				html = readText(part.Body)
+			case isCalendar(contentType):
+				data, err := io.ReadAll(io.LimitReader(part.Body, maxCalendarPart+1))
+				_, _ = io.Copy(io.Discard, part.Body)
+				if err == nil {
+					msg.addCalendarPart(params["method"], data)
+				}
 			case strings.HasPrefix(contentType, "text/"):
-				// Other text parts (calendar, vcard) carry no snippet text.
+				// Other text parts (vcard and the like) carry no snippet text.
 				_, _ = io.Copy(io.Discard, part.Body)
 			default:
 				// Inline non-text parts are embedded images and similar, referenced by Content-ID.
@@ -119,7 +135,7 @@ func Parse(raw []byte) (*Message, error) {
 				}
 			}
 		case *gomail.AttachmentHeader:
-			contentType, _, _ := header.ContentType()
+			contentType, params, _ := header.ContentType()
 			filename, _ := header.Filename()
 			contentID := strings.Trim(header.Get("Content-Id"), "<> ")
 			disposition, _, _ := header.ContentDisposition()
@@ -127,6 +143,9 @@ func Parse(raw []byte) (*Message, error) {
 			attachment, err := readAttachment(part.Body, filenameFrom(filename, contentType), contentType, contentID, inline)
 			if err == nil {
 				msg.Attachments = append(msg.Attachments, attachment)
+				if isCalendar(contentType) || strings.HasSuffix(strings.ToLower(filename), ".ics") {
+					msg.addCalendarPart(params["method"], attachment.Data)
+				}
 			}
 		}
 	}
@@ -241,6 +260,31 @@ func parseHeadersOnly(raw []byte) (*Message, error) {
 		}
 	}
 	return msg, nil
+}
+
+func isCalendar(contentType string) bool {
+	return contentType == "text/calendar" || contentType == "application/ics"
+}
+
+// addCalendarPart keeps a calendar object once: clients often send the same object as an alternative part and as an
+// .ics attachment.
+func (m *Message) addCalendarPart(method string, data []byte) {
+	if len(data) == 0 || len(data) > maxCalendarPart {
+		return
+	}
+	if !utf8.Valid(data) {
+		data = bytes.ToValidUTF8(data, []byte("\uFFFD"))
+	}
+	text := string(data)
+	if !strings.Contains(strings.ToUpper(text), "BEGIN:VCALENDAR") {
+		return
+	}
+	for _, existing := range m.CalendarParts {
+		if existing.Data == text {
+			return
+		}
+	}
+	m.CalendarParts = append(m.CalendarParts, CalendarPart{Method: strings.ToUpper(strings.TrimSpace(method)), Data: text})
 }
 
 func readText(body io.Reader) string {

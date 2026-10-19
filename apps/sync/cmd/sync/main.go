@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/caldavsync"
 	"tresso/sync/internal/config"
 	"tresso/sync/internal/gmailsync"
 	"tresso/sync/internal/graphsync"
@@ -61,10 +62,13 @@ func run(logger *slog.Logger) error {
 	imapSyncer := imapsync.New(client, store, dialer, cfg.WorkerID, imapsync.DefaultOptions(), workerLogger)
 	gmailSyncer := gmailsync.New(client, store, cfg.WorkerID, gmailsync.DefaultOptions(), workerLogger)
 	graphSyncer := graphsync.New(client, store, cfg.WorkerID, graphsync.DefaultOptions(), workerLogger)
+	calendarOptions := caldavsync.DefaultOptions()
+	calendarOptions.AllowHTTP = cfg.AllowUnsafeServers
+	calendarSyncer := caldavsync.New(client, dialer, cfg.WorkerID, calendarOptions, workerLogger)
 	syncerFor := func(provider string) (lease.Syncer, error) {
 		switch provider {
 		case "imap":
-			return imapSyncer, nil
+			return lease.WithCompanion(imapSyncer, calendarSyncer), nil
 		case "gmail":
 			return gmailSyncer, nil
 		case "microsoft":
@@ -76,8 +80,8 @@ func run(logger *slog.Logger) error {
 
 	manager := lease.NewManager(client, syncerFor, cfg.WorkerID, cfg.Capacity, cfg.HeartbeatInterval, workerLogger)
 
-	// Outgoing mail, drafts and changes to messages: the hub says which account has work right away; every heartbeat
-	// repeats it.
+	// Outgoing mail, drafts, changes to messages and calendar changes: the hub says which account has work right away;
+	// every heartbeat repeats it.
 	transports := map[string]outbox.Transport{
 		"imap":      outbox.IMAPTransport(dialer),
 		"gmail":     outbox.GmailTransport(client, cfg.WorkerID, gmailsync.DefaultClientOptions()),
@@ -87,11 +91,13 @@ func run(logger *slog.Logger) error {
 	manager.OnOutbox(func(ctx context.Context, accountIDs []string) {
 		for _, id := range accountIDs {
 			dispatcher.Trigger(ctx, id)
+			calendarSyncer.Trigger(id)
 		}
 	})
 	subscriber := realtime.NewSubscriber(client, &http.Client{}, func(accountID string) {
 		if manager.Holds(accountID) {
 			dispatcher.Trigger(ctx, accountID)
+			calendarSyncer.Trigger(accountID)
 		}
 	}, logger.With("worker", cfg.WorkerID))
 	go subscriber.Run(ctx)

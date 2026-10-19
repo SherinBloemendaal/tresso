@@ -39,6 +39,19 @@ func Build(ctx context.Context, store storage.Store, raw []byte, remoteUID strin
 		attachments = append(attachments, attachment)
 	}
 
+	calendarParts := make([]api.CalendarPart, 0, len(parsed.CalendarParts))
+	for _, part := range parsed.CalendarParts {
+		calendarPart := api.CalendarPart{Ical: part.Data}
+		if part.Method != "" {
+			method := part.Method
+			calendarPart.Method = &method
+		}
+		calendarParts = append(calendarParts, calendarPart)
+		if len(calendarParts) == 5 {
+			break
+		}
+	}
+
 	if receivedAt.IsZero() {
 		if parsed.Date != nil {
 			receivedAt = *parsed.Date
@@ -48,23 +61,24 @@ func Build(ctx context.Context, store storage.Store, raw []byte, remoteUID strin
 	}
 
 	msg := api.Message{
-		RemoteUID:    remoteUID,
-		RawObjectKey: storage.RawKey(sha),
-		Size:         int64(len(raw)),
-		ReceivedAt:   receivedAt.UTC(),
-		SentAt:       parsed.Date,
-		Flags:        flags,
-		References:   limit(parsed.References, 200),
-		Subject:      truncate(parsed.Subject, 998),
-		From:         address(parsed.From),
-		To:           addresses(parsed.To, 1000),
-		Cc:           addresses(parsed.Cc, 1000),
-		Bcc:          addresses(parsed.Bcc, 1000),
-		ReplyTo:      addresses(parsed.ReplyTo, 100),
-		Snippet:      parsed.Snippet,
-		BodyText:     parsed.BodyText,
-		Attachments:  attachments,
-		Headers:      parsed.Signals,
+		RemoteUID:     remoteUID,
+		RawObjectKey:  storage.RawKey(sha),
+		Size:          int64(len(raw)),
+		ReceivedAt:    receivedAt.UTC(),
+		SentAt:        parsed.Date,
+		Flags:         flags,
+		References:    limit(parsed.References, 200),
+		Subject:       truncate(parsed.Subject, 998),
+		From:          address(parsed.From),
+		To:            addresses(parsed.To, 1000),
+		Cc:            addresses(parsed.Cc, 1000),
+		Bcc:           addresses(parsed.Bcc, 1000),
+		ReplyTo:       addresses(parsed.ReplyTo, 100),
+		Snippet:       parsed.Snippet,
+		BodyText:      parsed.BodyText,
+		Attachments:   attachments,
+		Headers:       parsed.Signals,
+		CalendarParts: calendarParts,
 	}
 	if parsed.MessageID != "" {
 		id := truncate(parsed.MessageID, 998)

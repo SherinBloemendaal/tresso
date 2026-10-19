@@ -68,7 +68,14 @@ type Message struct {
 	// Headers that tell automated, bulk and junk mail apart, by lower-cased name; see mimeparse.Message.Signals.
 	Headers map[string]string `json:"headers,omitempty"`
 	// Junk is set when the server flagged the message as junk ($Junk without $NotJunk).
-	Junk bool `json:"junk"`
+	Junk          bool           `json:"junk"`
+	CalendarParts []CalendarPart `json:"calendarParts"`
+}
+
+// CalendarPart is a text/calendar part of a message; the API applies it to the user's calendars.
+type CalendarPart struct {
+	Method *string `json:"method"`
+	Ical   string  `json:"ical"`
 }
 
 type MessageBatch struct {
@@ -150,7 +157,7 @@ func (c *Client) Messages(ctx context.Context, accountID string, batch MessageBa
 	batch.Messages = nonNil(batch.Messages)
 	for i := range batch.Messages {
 		m := &batch.Messages[i]
-		m.References, m.To, m.Cc, m.Bcc, m.ReplyTo, m.Attachments = nonNil(m.References), nonNil(m.To), nonNil(m.Cc), nonNil(m.Bcc), nonNil(m.ReplyTo), nonNil(m.Attachments)
+		m.References, m.To, m.Cc, m.Bcc, m.ReplyTo, m.Attachments, m.CalendarParts = nonNil(m.References), nonNil(m.To), nonNil(m.Cc), nonNil(m.Bcc), nonNil(m.ReplyTo), nonNil(m.Attachments), nonNil(m.CalendarParts)
 	}
 	var out MessageBatchResult
 	err := c.post(ctx, accountPath(accountID, "messages"), batch, &out)
