@@ -9,6 +9,7 @@ import {
   type OAuthClientConfig,
   type TokenSet,
 } from '@tresso/core'
+import { ApiError } from '@/api/errors'
 import { config } from '@/config'
 
 const TOKENS_KEY = 'auth.tokens'
@@ -90,17 +91,30 @@ export const useAuthStore = defineStore('auth', () => {
     const response = await fetch(`${config.apiUrl}${path}`, { ...init, headers })
     if (response.status === 401) {
       signOut()
-      throw new Error('Session expired.')
+      throw new ApiError(401, 'Your session has expired. Sign in again.')
     }
     if (!response.ok) {
-      throw new Error(`Request to ${path} failed (${response.status}).`)
+      throw await ApiError.fromResponse(path, response)
+    }
+    if (response.status === 204) {
+      return undefined as T
     }
     return (await response.json()) as T
+  }
+
+  /** POST, PATCH (as JSON merge patch) or DELETE. */
+  function send<T>(method: 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
+    const init: RequestInit = { method }
+    if (body !== undefined) {
+      init.headers = { 'Content-Type': method === 'PATCH' ? 'application/merge-patch+json' : 'application/json' }
+      init.body = JSON.stringify(body)
+    }
+    return api<T>(path, init)
   }
 
   async function loadMe(): Promise<void> {
     me.value = await api<Me>('/api/v1/me')
   }
 
-  return { tokens, me, isAuthenticated, signIn, completeSignIn, signOut, loadMe, api }
+  return { tokens, me, isAuthenticated, signIn, completeSignIn, signOut, loadMe, api, send }
 })

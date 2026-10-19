@@ -126,3 +126,48 @@ button {
 .button-quiet:hover {
   background: var(--ground);
 }
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.field input,
+.field select {
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  font: 400 14px var(--font-ui);
+  min-width: 0;
+}
+.field input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+.field .hint {
+  font-weight: 400;
+  color: var(--ink-2);
+}
+.field .error,
+.form-error {
+  font-weight: 500;
+  color: var(--danger);
+}
+.button-accent {
+  background: var(--focus);
+  color: #fff;
+}
+.button-danger {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid currentcolor;
+}
+.button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

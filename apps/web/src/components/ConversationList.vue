@@ -12,6 +12,7 @@ const props = defineProps<{
   selectedThreadId: string | null
   hasMore: boolean
   loading: boolean
+  hasAccounts: boolean
   linkTo: (threadId: string) => RouteLocationRaw
 }>()
 const emit = defineEmits<{ showMore: [] }>()
@@ -67,7 +68,10 @@ const days = computed(() => {
         </RouterLink>
       </section>
 
-      <p v-if="conversations.length === 0 && !loading" class="empty">Nothing in this inbox.</p>
+      <p v-if="conversations.length === 0 && !loading && !hasAccounts" class="empty">
+        Connect a mail account to see your mail here. <RouterLink :to="{ name: 'settings-accounts-new' }">Add account</RouterLink>
+      </p>
+      <p v-else-if="conversations.length === 0 && !loading" class="empty">Nothing in this inbox.</p>
       <p v-if="conversations.length === 0 && loading" class="empty">Loading your mail…</p>
       <button v-if="hasMore" type="button" class="button button-quiet more" @click="emit('showMore')">Show older mail</button>
     </div>
