@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router'
+import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { SyncedFolder, SyncedMessage, SyncedThread } from '@tresso/core'
 import { MessageBodyView } from '@/components/MessageBodyView'
@@ -41,11 +41,13 @@ export default function ThreadScreen() {
     }
   }, [])
 
-  // The action bar stays clear of notices while this screen is open.
-  useEffect(() => {
-    notices.setBottomInset(BAR_HEIGHT)
-    return () => notices.setBottomInset(0)
-  }, [notices])
+  // The action bar stays clear of notices while this screen is the one in front.
+  useFocusEffect(
+    useCallback(() => {
+      notices.setBottomInset(BAR_HEIGHT)
+      return () => notices.setBottomInset(0)
+    }, [notices]),
+  )
 
   useEffect(() => {
     let current = true
@@ -107,7 +109,6 @@ export default function ThreadScreen() {
       current = false
     }
   }, [load, id, version, after, run])
-
 
   const flagged = messages.some((message) => message.flags.flagged)
 
@@ -205,7 +206,7 @@ function BarButton({ label, busy, checked, styles, onPress }: { label: string; b
       style={({ pressed }) => [styles.action, (pressed || busy) && styles.pressed]}
       onPress={onPress}
       disabled={busy}
-      accessibilityRole="button"
+      accessibilityRole={checked === undefined ? 'button' : 'togglebutton'}
       accessibilityState={{ disabled: busy, checked }}
     >
       <Text style={[styles.actionLabel, checked === true && styles.on]}>{label}</Text>

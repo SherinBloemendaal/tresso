@@ -10,7 +10,7 @@ import {
   type MessageActionRequest,
   type RealtimeAccess,
 } from '@tresso/core'
-import { MailDatabase } from '@/mail/mailDatabase'
+import { CopyClosingError, MailDatabase } from '@/mail/mailDatabase'
 import type { Sql } from '@/mail/sql'
 
 const PAGE_SIZE = 500
@@ -126,8 +126,11 @@ export class MailSession {
       // there is nothing to put back; either way the user hears why the action failed, not why the undo did.
       try {
         await database.revertAction(appliedFor(applied, new Set(messageIds.slice(accepted))))
-      } catch {
-        // The copy is closing; see above.
+      } catch (revertError) {
+        if (!(revertError instanceof CopyClosingError)) {
+          // The local change stays until the copy syncs again; the user still hears why the action failed.
+          this.update({ syncError: `A change could not be put back on this phone: ${message(revertError)}` })
+        }
       }
       this.changed()
       void this.syncNow()

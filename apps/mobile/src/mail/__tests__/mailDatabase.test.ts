@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { MissingFolderError, type ChangePage, type SyncedMessage } from '@tresso/core'
-import { MailDatabase, SCHEMA_VERSION } from '../mailDatabase'
+import { CopyClosingError, MailDatabase, SCHEMA_VERSION } from '../mailDatabase'
 import type { Sql } from '../sql'
 import { memorySql } from './sqljs'
 
@@ -168,7 +168,7 @@ describe('MailDatabase on the device', () => {
     await storing
 
     expect(await db.cursor()).toBe(11)
-    await expect(db.apply(page({ cursor: 12 }))).rejects.toThrow('The mail copy is closing.')
+    await expect(db.apply(page({ cursor: 12 }))).rejects.toBeInstanceOf(CopyClosingError)
   })
 
   it('rebuilds a copy made by another version, so it syncs again from the start and has the current shape', async () => {
