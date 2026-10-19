@@ -17,7 +17,7 @@ export function editorDocument(theme: Theme, labels: { label: string; placeholde
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: https:">
 <style>
-html, body { margin: 0; padding: 0; background: ${theme.surface}; color: ${theme.ink}; }
+html, body { margin: 0; padding: 0; height: auto; min-height: 0; background: ${theme.surface}; color: ${theme.ink}; }
 body { font: 16px/24px -apple-system, system-ui, 'Segoe UI', Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
 #editor .tiptap { min-height: 96px; padding: 12px 16px 6px; outline: none; word-wrap: break-word; overflow-wrap: anywhere; }
 #editor p { margin: 0 0 8px; }

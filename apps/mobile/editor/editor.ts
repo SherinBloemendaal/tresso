@@ -121,5 +121,6 @@ window.tresso = {
   },
 }
 
-new ResizeObserver(() => post({ type: 'height', value: Math.ceil(document.documentElement.scrollHeight) })).observe(document.body)
+// The content's own height (the page is sized to it, not to the view), so the editor shrinks as text is deleted.
+new ResizeObserver(() => post({ type: 'height', value: Math.ceil(document.body.getBoundingClientRect().height) })).observe(document.body)
 post({ type: 'ready' })

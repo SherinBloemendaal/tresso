@@ -49,12 +49,29 @@ export function RecipientField({ label, recipients, onChange, suggest, trailing,
   // Only the suggestions for what is typed now; none while the field is empty.
   const shownSuggestions = suggestions.query === query && query !== '' ? suggestions.contacts.filter((contact) => !taken.has(contact.key)).slice(0, 5) : []
 
+  /** What the field holds, as of the last keystroke: key events can arrive before a render shows it. */
+  const typed = useRef('')
+
+  function setTyped(value: string): void {
+    typed.current = value
+    setText(value)
+  }
+
   function add(addresses: Address[]): void {
-    const fresh = addresses.filter((address) => address.address.trim() !== '' && !taken.has(address.address.trim().toLowerCase()))
-    if (fresh.length > 0) {
-      onChange([...recipients, ...fresh.map((address) => ({ address: address.address.trim(), name: address.name }))])
+    const seen = new Set(taken)
+    const fresh: Address[] = []
+    for (const address of addresses) {
+      const key = address.address.trim().toLowerCase()
+      // A pasted list naming someone twice adds them once.
+      if (key !== '' && !seen.has(key)) {
+        seen.add(key)
+        fresh.push({ address: address.address.trim(), name: address.name })
+      }
     }
-    setText('')
+    if (fresh.length > 0) {
+      onChange([...recipients, ...fresh])
+    }
+    setTyped('')
   }
 
   function changeText(value: string): void {
@@ -63,10 +80,10 @@ export function RecipientField({ label, recipients, onChange, suggest, trailing,
       const parts = value.split(/[,;\n]/)
       const rest = parts.pop() ?? ''
       add(parseAddresses(parts.join(',')))
-      setText(rest.trimStart())
+      setTyped(rest.trimStart())
       return
     }
-    setText(value)
+    setTyped(value)
   }
 
   function commit(): void {
@@ -76,7 +93,8 @@ export function RecipientField({ label, recipients, onChange, suggest, trailing,
   }
 
   function keyPress(event: TextInputKeyPressEvent): void {
-    if (event.nativeEvent.key === 'Backspace' && text === '' && recipients.length > 0) {
+    // Key events come before the text changes, so an empty field here was empty before this backspace.
+    if (event.nativeEvent.key === 'Backspace' && typed.current === '' && recipients.length > 0) {
       onChange(recipients.slice(0, -1))
     }
   }
@@ -91,8 +109,12 @@ export function RecipientField({ label, recipients, onChange, suggest, trailing,
           {recipients.map((recipient, index) => {
             const valid = isPlausibleAddress(recipient.address)
             return (
-              <View key={`${recipient.address}-${index}`} style={[styles.chip, !valid && styles.chipWrong]} accessible accessibilityLabel={`${shown(recipient)}${valid ? '' : ', not a valid address'}`}>
-                <Text style={[styles.chipText, !valid && styles.chipTextWrong]} numberOfLines={1}>
+              <View key={`${recipient.address}-${index}`} style={[styles.chip, !valid && styles.chipWrong]}>
+                <Text
+                  style={[styles.chipText, !valid && styles.chipTextWrong]}
+                  numberOfLines={1}
+                  accessibilityLabel={`${shown(recipient)}, ${recipient.address}${valid ? '' : ', not a valid address'}`}
+                >
                   {shown(recipient)}
                 </Text>
                 <Pressable
