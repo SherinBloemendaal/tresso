@@ -43,7 +43,11 @@ export function InboxList({ header }: { header: React.ReactElement }) {
       keyExtractor={(item) => item.threadId}
       ListHeaderComponent={header}
       refreshControl={<RefreshControl refreshing={mail.syncState === 'syncing'} onRefresh={() => void mail.syncNow()} />}
-      renderSectionHeader={({ section }) => <Text style={styles.day}>{section.title}</Text>}
+      renderSectionHeader={({ section }) => (
+        <Text style={styles.day} accessibilityRole="header">
+          {section.title}
+        </Text>
+      )}
       stickySectionHeadersEnabled={false}
       ListEmptyComponent={<Text style={styles.empty}>{mail.ready ? (mail.syncError ?? 'Nothing in your inbox.') : 'Loading your mail…'}</Text>}
       renderItem={({ item }) => {

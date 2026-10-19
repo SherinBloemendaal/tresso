@@ -8,17 +8,23 @@ import { useTheme, type Theme } from '@/theme'
 
 const API_ORIGIN = new URL(config.apiUrl).origin
 
-// Reports the document's height so the view can size to it. It is added by the app, not by the mail: the document's
-// Content-Security-Policy keeps any script in the message itself from running.
+// Reports the content's height so the view can size to it. It is added by the app, not by the mail: the document's
+// Content-Security-Policy keeps any script in the message itself from running. The body is measured with heights
+// set to auto, so mail sized to the viewport (100vh, height:100%) does not grow with every report.
 const MEASURE = `
   (function () {
-    function report() { window.ReactNativeWebView.postMessage(String(document.documentElement.scrollHeight)) }
-    new ResizeObserver(report).observe(document.documentElement)
+    var style = document.createElement('style')
+    style.textContent = 'html,body{height:auto!important;min-height:0!important}'
+    document.head.appendChild(style)
+    function report() { window.ReactNativeWebView.postMessage(String(Math.ceil(document.body.getBoundingClientRect().height))) }
+    new ResizeObserver(report).observe(document.body)
     window.addEventListener('load', report)
     report()
   })();
   true;
 `
+/** No message is taller than this on screen; past it, the view scrolls inside. */
+const MAX_HEIGHT = 20_000
 
 /** One message's body: sanitized HTML in a locked-down web view, or its plain text. */
 export function MessageBodyView({ messageId }: { messageId: string }) {
@@ -58,6 +64,8 @@ export function MessageBodyView({ messageId }: { messageId: string }) {
             setRemote(true)
           }}
           accessibilityRole="button"
+          accessibilityLabel="Show images from the internet"
+          accessibilityHint="Images from the internet are blocked so senders cannot see when you read their mail."
         >
           <Text style={styles.remoteLabel}>Images from the internet are blocked. Show them</Text>
         </Pressable>
@@ -67,21 +75,25 @@ export function MessageBodyView({ messageId }: { messageId: string }) {
           style={[styles.web, { height }]}
           originWhitelist={['about:*']}
           source={{ html: mailFrameDocument(body.html, { apiOrigin: API_ORIGIN, allowRemoteContent: body.remoteContentLoaded }), baseUrl: '' }}
-          scrollEnabled={false}
+          scrollEnabled={height >= MAX_HEIGHT}
           javaScriptEnabled
+          allowFileAccess={false}
+          mixedContentMode="never"
           injectedJavaScript={MEASURE}
           onMessage={(event: WebViewMessageEvent): void => {
             const measured = Number(event.nativeEvent.data)
             if (Number.isFinite(measured) && measured > 0) {
-              setHeight(Math.ceil(measured))
+              setHeight((previous) => (Math.abs(measured - previous) <= 1 ? previous : Math.min(measured, MAX_HEIGHT)))
             }
           }}
-          // Links open in the browser (or the mail app), never inside the message view.
+          // A link the reader taps opens in the browser (or the mail app), never inside the message view; nothing
+          // else leaves the page (a redirect, a frame).
           onShouldStartLoadWithRequest={(request): boolean => {
             if (request.url.startsWith('about:')) {
               return true
             }
-            if (/^(https?|mailto|tel):/i.test(request.url)) {
+            const tapped = request.isTopFrame !== false && (request.navigationType === undefined || request.navigationType === 'click')
+            if (tapped && /^(https?|mailto|tel):/i.test(request.url)) {
               void Linking.openURL(request.url)
             }
             return false
