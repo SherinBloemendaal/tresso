@@ -213,3 +213,46 @@ func TestNotAMessageIsAnError(t *testing.T) {
 		t.Error("expected an error")
 	}
 }
+
+func TestReferencedImageSentAsAttachmentIsInline(t *testing.T) {
+	raw := crlf(`
+From: billing@finance.example
+Subject: Invoice
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="rel"
+
+--rel
+Content-Type: text/html; charset=utf-8
+
+<p><img src="cid:Logo@Finance"> Invoice</p>
+--rel
+Content-Type: image/png
+Content-ID: <Logo@Finance>
+Content-Disposition: attachment; filename="logo.png"
+Content-Transfer-Encoding: base64
+
+aW1hZ2U=
+--rel
+Content-Type: image/png
+Content-ID: <unused@finance>
+Content-Disposition: attachment; filename="photo.png"
+Content-Transfer-Encoding: base64
+
+cGhvdG8=
+--rel--
+`)
+
+	msg, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.Attachments) != 2 {
+		t.Fatalf("attachments = %d", len(msg.Attachments))
+	}
+	if logo := msg.Attachments[0]; !logo.Inline || logo.ContentID != "Logo@Finance" {
+		t.Errorf("referenced image = %+v, want inline", logo)
+	}
+	if photo := msg.Attachments[1]; photo.Inline || photo.ContentID != "unused@finance" {
+		t.Errorf("unreferenced image = %+v, want a regular attachment that keeps its Content-ID", photo)
+	}
+}
