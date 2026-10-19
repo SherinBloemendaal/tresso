@@ -172,22 +172,32 @@ export class DraftSync {
       saved = local.version === 0 ? await this.api.create(id, requestOf(local)) : await this.api.update(id, requestOf(local), local.version)
     } catch (error) {
       const status = statusOf(error)
-      if (status === 409 && local.version > 0) {
+      // Deleted here while the request was under way: nothing to note on it.
+      const now = await store.draft(id)
+      if (status === 409 && local.version > 0 && now !== null) {
         const remote = await this.api.get(id)
-        await store.saveDraft({ ...((await store.draft(id)) ?? local), remoteVersion: remote.version })
+        await store.saveDraft({ ...now, remoteVersion: remote.version })
         this.onConflict()
         return
       }
-      if (status === 404 && local.version > 0) {
+      if (status === 404 && local.version > 0 && now !== null) {
         // Deleted on another device while it was being written here: it becomes a new draft again.
-        await store.saveDraft({ ...((await store.draft(id)) ?? local), version: 0 })
+        await store.saveDraft({ ...now, version: 0 })
         this.again.add(id)
+        return
+      }
+      if (now === null) {
         return
       }
       throw error
     }
+    const current = await store.draft(id)
+    if (current === null) {
+      // Deleted here while the upload was under way: the copy the server just stored goes too.
+      await this.removeRemote(id)
+      return
+    }
     // Edits made while the upload was under way stay pending and go up in the next round.
-    const current = (await store.draft(id)) ?? local
     const unchanged = current.updatedAt === local.updatedAt
     await store.saveDraft({ ...current, version: saved.version, pendingSave: !unchanged })
     if (!unchanged) {
@@ -225,18 +235,26 @@ export class DraftSync {
 
   /** Removes the draft here and on the server, and with it its copy in the Drafts folder. */
   async deleteEverywhere(id: string): Promise<void> {
+    // An upload under way finishes first, so the server copy it makes is known and removed with the rest.
+    this.again.delete(id)
+    await this.uploads.get(id)?.catch(() => undefined)
     const store = this.store()
     const local = await store?.draft(id)
     if (local && local.version > 0) {
-      try {
-        await this.api.remove(id)
-      } catch (error) {
-        if (statusOf(error) !== 404) {
-          throw error
-        }
-      }
+      await this.removeRemote(id)
     }
     await store?.deleteDraft(id)
+  }
+
+  /** Deletes the server's copy; one that is gone already is fine. Other failures are thrown (offline, say). */
+  private async removeRemote(id: string): Promise<void> {
+    try {
+      await this.api.remove(id)
+    } catch (error) {
+      if (statusOf(error) !== 404) {
+        throw error
+      }
+    }
   }
 
   /** Saves the draft and uploads it, reporting whether the server has it (so sending can take its Drafts copy away). */
@@ -245,7 +263,9 @@ export class DraftSync {
     if (!store) {
       return false
     }
-    await store.saveDraft(draft)
+    // What the uploads learned (the server version, a conflict) stays: the draft on screen does not know it.
+    const stored = await store.draft(draft.id)
+    await store.saveDraft({ ...draft, version: stored?.version ?? draft.version, remoteVersion: stored?.remoteVersion ?? null })
     return this.upload(draft.id)
       .then(async () => ((await store.draft(draft.id))?.version ?? 0) > 0)
       .catch(() => false)

@@ -114,6 +114,10 @@ describe('sendLaterOptions', () => {
     expect(sendLaterOptions(new Date(2026, 9, 21, 17, 0)).map((option) => option.key)).not.toContain('thisEvening')
   })
 
+  it('leaves Monday out on a Sunday, when tomorrow morning is Monday morning', () => {
+    expect(sendLaterOptions(new Date(2026, 9, 25, 18, 0)).map((option) => option.key)).toEqual(['tomorrowMorning', 'tomorrowAfternoon'])
+  })
+
   it('takes Monday a week ahead when it is Monday already', () => {
     const monday = sendLaterOptions(new Date(2026, 9, 19, 9, 0)).find((option) => option.key === 'mondayMorning')
     expect(monday?.at.getDate()).toBe(26)
