@@ -98,9 +98,9 @@ final readonly class MessageIngestor
 
         $hasAttachments = false;
         foreach ($input->attachments as $attachmentInput) {
-            $attachment = new Attachment($message, $attachmentInput->filename, $attachmentInput->contentType, $attachmentInput->size, $attachmentInput->sha256);
-            if ($attachmentInput->inline && null !== $attachmentInput->contentId) {
-                $attachment->markInline($attachmentInput->contentId);
+            $attachment = new Attachment($message, $attachmentInput->filename, $attachmentInput->contentType, $attachmentInput->size, $attachmentInput->sha256, $attachmentInput->contentId);
+            if ($attachmentInput->inline && null !== $attachment->getContentId()) {
+                $attachment->markInline();
             } else {
                 $hasAttachments = true;
             }
