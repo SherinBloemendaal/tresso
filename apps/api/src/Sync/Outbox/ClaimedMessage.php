@@ -8,7 +8,8 @@ use App\Entity\OutgoingMessage;
 
 /**
  * A message a worker must send now. When `attempt` is above 1 an earlier attempt may have reached the server
- * already: the worker checks the Sent folder for `messageId` before sending again.
+ * already: the worker checks the Sent folder for `messageId` before sending again. `lastAttempt` says a retry report
+ * ends the message as failed, so the worker can word its error for the user as final.
  */
 final readonly class ClaimedMessage
 {
@@ -22,6 +23,7 @@ final readonly class ClaimedMessage
         public array $recipients,
         public string $messageId,
         public int $attempt,
+        public bool $lastAttempt,
     ) {
     }
 
@@ -34,6 +36,7 @@ final readonly class ClaimedMessage
             $message->getEnvelopeRecipients(),
             $message->getMessageIdHeader(),
             $message->getAttempts(),
+            $message->getAttempts() >= OutgoingMessage::MAX_ATTEMPTS,
         );
     }
 }
