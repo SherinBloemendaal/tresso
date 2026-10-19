@@ -54,7 +54,7 @@ services:
       context: .
       dockerfile: docker/api/Dockerfile
       target: dev
-    command: ["php", "bin/console", "messenger:consume", "async", "search", "classify", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    command: ["php", "bin/console", "messenger:consume", "async", "search", "--time-limit=3600", "--memory-limit=256M", "-vv"]
     environment: *api-env
     volumes:
       - ./apps/api:/app
@@ -63,6 +63,23 @@ services:
         condition: service_healthy
     # The image's healthcheck probes the FrankenPHP admin endpoint, which this console process does not serve.
     # The container exits when the consumer stops, and restart brings it back.
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+  # Classification has its own consumer: a first sync classifies a whole mailbox, which must never hold up sending.
+  classifier:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+      target: dev
+    command: ["php", "bin/console", "messenger:consume", "classify", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    environment: *api-env
+    volumes:
+      - ./apps/api:/app
+    depends_on:
+      api:
+        condition: service_healthy
     healthcheck:
       disable: true
     restart: unless-stopped

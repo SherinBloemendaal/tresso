@@ -293,6 +293,10 @@ class Message implements TracksChanges
     /** The smart inbox and verdict classification gave this message. The thread takes those of its newest one. */
     public function classify(Category $category, Verdict $verdict, \DateTimeImmutable $at): void
     {
+        // Unchanged is no change: classifiedAt alone would count as one for clients and resend the message.
+        if ($this->category === $category && $this->verdict === $verdict && null !== $this->classifiedAt) {
+            return;
+        }
         $this->category = $category;
         $this->verdict = $verdict;
         $this->classifiedAt = $at;

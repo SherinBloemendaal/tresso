@@ -14,7 +14,7 @@ use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
- * Forgets a sender rule. Recent mail from the sender is classified again once committed.
+ * Forgets a sender rule. Recent mail from that sender is classified again once committed.
  *
  * @implements ProcessorInterface<SenderRuleResource, null>
  */
@@ -36,9 +36,10 @@ final readonly class SenderRuleProcessor implements ProcessorInterface
             ?? throw new NotFoundHttpException('Sender rule not found.');
 
         $this->entityManager->wrapInTransaction(function () use ($rule, $owner): void {
+            $sender = $rule->getSender();
             $this->entityManager->remove($rule);
             $this->entityManager->flush();
-            $this->classification->rulesChanged($owner->getId());
+            $this->classification->senderChanged($owner->getId(), $sender);
         });
 
         return null;

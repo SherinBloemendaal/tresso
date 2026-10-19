@@ -10,12 +10,15 @@ use App\Enum\FolderRole;
 /**
  * Deterministic classification, in this order:
  *
- * 1. A sender rule: a correction the user made earlier for this sender or domain.
- * 2. Include lists: the user's own smart inboxes first, then the built-in ones.
- * 3. Signals in the message, each pointing at a built-in smart inbox: spam verdicts of the server and failed
- *    authentication (spam), automated senders (notification), marketing senders and bulk headers (advertise),
- *    addresses that take no replies (notification), unsubscribe links (advertise) and mailing lists (informational).
- * 4. Mail a person wrote: to the user directly is something to do (todo), a copy is informational.
+ * 1. Spam that no From-based rule may overrule, because the From address can be forged: failed authentication, and
+ *    the server's spam verdict on mail whose sender is not authenticated (no DMARC pass).
+ * 2. A sender rule: a correction the user made earlier for this sender or domain.
+ * 3. Include lists: the user's own smart inboxes first, then the built-in ones.
+ * 4. Signals in the message, each pointing at a built-in smart inbox: the server's spam verdict (spam), automated
+ *    senders (notification), marketing senders unless it is a reply, and bulk headers (advertise), addresses that take
+ *    no replies (notification), mailing lists (informational) and unsubscribe links (advertise).
+ * 5. Mail a person wrote: to the user directly (To, Bcc or an unknown alias) is something to do (todo), a copy (Cc
+ *    only) is informational.
  *
  * A smart inbox whose exclude list covers the sender is skipped at every step, so the exclude list always wins. The
  * verdict is the smart inbox's, unless a sender rule says otherwise.
@@ -23,13 +26,22 @@ use App\Enum\FolderRole;
 final readonly class RuleBasedClassifier implements Classifier
 {
     private const string NOTIFICATION_LOCAL_PART = '/^(no[-_.]?reply|do[-_.]?not[-_.]?reply|notifications?|notify|alerts?|mailer-daemon|postmaster|bounces?|automated)([+._-].*)?$/';
-    private const string MARKETING_LOCAL_PART = '/^(newsletters?|news|marketing|promos?|promotions?|offers|deals|sales|campaigns?|mailing|nieuwsbrief)([+._-].*)?$/';
+    private const string MARKETING_LOCAL_PART = '/^(newsletters?|marketing|promos?|promotions?|offers|deals|campaigns?|mailing|nieuwsbrief)([+._-].*)?$/';
     private const array NOTIFICATION_SUBDOMAINS = ['notifications', 'notification', 'notify', 'alerts', 'alert'];
     private const array MARKETING_SUBDOMAINS = ['news', 'newsletter', 'newsletters', 'marketing', 'promo', 'promotions', 'mkt', 'em', 'email', 'e'];
 
     public function classify(MailToClassify $mail, ClassificationContext $context): Classification
     {
         $sender = mb_strtolower($mail->fromAddress);
+
+        // The From address is easy to forge. Mail that failed authentication, or that the server judged spam without
+        // its sender being authenticated, is spam whatever rules exist for that address.
+        $spam = $context->builtin(BuiltinCategory::Spam);
+        $spamReason = self::spamReason($mail);
+        if (null !== $spam && null !== $spamReason && !$spam->excludes($sender)
+            && (ClassificationReason::AUTHENTICATION_FAILED === $spamReason || !self::authenticated($mail))) {
+            return new Classification($spam, $spam->getVerdict(), $spamReason);
+        }
 
         $rule = $context->senderRule($sender);
         if (null !== $rule && !$rule->getCategory()->excludes($sender)) {
@@ -44,7 +56,7 @@ final readonly class RuleBasedClassifier implements Classifier
             }
         }
 
-        foreach ($this->candidates($mail, $context) as [$builtin, $reason]) {
+        foreach ($this->candidates($mail, $context, $spamReason) as [$builtin, $reason]) {
             $smartInbox = $context->builtin($builtin);
             if (null !== $smartInbox && !$smartInbox->excludes($sender)) {
                 return new Classification($smartInbox, $smartInbox->getVerdict(), $reason);
@@ -68,19 +80,16 @@ final readonly class RuleBasedClassifier implements Classifier
      *
      * @return list<array{BuiltinCategory, string}>
      */
-    private function candidates(MailToClassify $mail, ClassificationContext $context): array
+    private function candidates(MailToClassify $mail, ClassificationContext $context, ?string $spamReason): array
     {
         $candidates = [];
-        if (self::isServerSpam($mail)) {
-            $candidates[] = [BuiltinCategory::Spam, ClassificationReason::SERVER_SPAM];
-        }
-        if (self::failedAuthentication($mail)) {
-            $candidates[] = [BuiltinCategory::Spam, ClassificationReason::AUTHENTICATION_FAILED];
+        if (null !== $spamReason) {
+            $candidates[] = [BuiltinCategory::Spam, $spamReason];
         }
         if (self::isAutomated($mail)) {
             $candidates[] = [BuiltinCategory::Notification, ClassificationReason::AUTOMATED];
         }
-        if (self::isMarketingSender($mail->fromAddress)) {
+        if (!$mail->isReply && self::isMarketingSender($mail->fromAddress)) {
             $candidates[] = [BuiltinCategory::Advertise, ClassificationReason::MARKETING_SENDER];
         }
         if (self::isBulk($mail)) {
@@ -89,11 +98,12 @@ final readonly class RuleBasedClassifier implements Classifier
         if (self::isNotificationSender($mail->fromAddress)) {
             $candidates[] = [BuiltinCategory::Notification, ClassificationReason::NOTIFICATION_SENDER];
         }
-        if (null !== $mail->header('list-unsubscribe')) {
-            $candidates[] = [BuiltinCategory::Advertise, ClassificationReason::UNSUBSCRIBE_LINK];
-        }
+        // Discussion lists (Mailman, Google Groups, Sympa) carry an unsubscribe link too; their List-Id says what they are.
         if (null !== $mail->header('list-id') || 'list' === self::precedence($mail)) {
             $candidates[] = [BuiltinCategory::Informational, ClassificationReason::MAILING_LIST];
+        }
+        if (null !== $mail->header('list-unsubscribe')) {
+            $candidates[] = [BuiltinCategory::Advertise, ClassificationReason::UNSUBSCRIBE_LINK];
         }
 
         $reason = self::personReason($mail, $context);
@@ -105,6 +115,10 @@ final readonly class RuleBasedClassifier implements Classifier
         return $candidates;
     }
 
+    /**
+     * Mail from a person is for the user directly unless they are only in Cc. Not being in To or Cc at all means Bcc or
+     * an address of the user that Tresso does not know (an alias): addressed to them all the same.
+     */
     private static function personReason(MailToClassify $mail, ClassificationContext $context): string
     {
         foreach ($mail->to as $address) {
@@ -112,8 +126,28 @@ final readonly class RuleBasedClassifier implements Classifier
                 return ClassificationReason::DIRECT;
             }
         }
+        foreach ($mail->cc as $address) {
+            if ($context->isOwnAddress($address)) {
+                return ClassificationReason::COPIED;
+            }
+        }
 
-        return ClassificationReason::COPIED;
+        return ClassificationReason::DIRECT;
+    }
+
+    private static function spamReason(MailToClassify $mail): ?string
+    {
+        if (self::failedAuthentication($mail)) {
+            return ClassificationReason::AUTHENTICATION_FAILED;
+        }
+
+        return self::isServerSpam($mail) ? ClassificationReason::SERVER_SPAM : null;
+    }
+
+    /** DMARC passed: the From domain is the one that sent it, so rules about that sender can be trusted. */
+    private static function authenticated(MailToClassify $mail): bool
+    {
+        return 1 === preg_match('/\bdmarc=pass\b/', strtolower($mail->header('authentication-results') ?? ''));
     }
 
     private static function isServerSpam(MailToClassify $mail): bool

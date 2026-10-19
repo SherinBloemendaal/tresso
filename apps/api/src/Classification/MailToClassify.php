@@ -28,6 +28,8 @@ final readonly class MailToClassify
         public array $headers,
         public bool $junk,
         public array $folderRoles,
+        /** It answers another message (In-Reply-To is set). */
+        public bool $isReply = false,
     ) {
     }
 

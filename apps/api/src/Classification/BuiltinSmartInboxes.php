@@ -8,6 +8,8 @@ use App\Entity\Category;
 use App\Entity\User;
 use App\Enum\BuiltinCategory;
 use App\Repository\CategoryRepository;
+use App\Sync\Change\ChangeSequencer;
+use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
@@ -66,7 +68,25 @@ final readonly class BuiltinSmartInboxes
     public function __construct(
         private EntityManagerInterface $entityManager,
         private CategoryRepository $categories,
+        private Connection $connection,
+        private ChangeSequencer $sequencer,
     ) {
+    }
+
+    /**
+     * Smart inboxes created before clients synced them have no change number, so clients would never get them; this
+     * gives them one. Must run inside a transaction. Cheap when there is nothing to do.
+     */
+    public function syncOlder(User $user): void
+    {
+        $params = ['user' => $user->getId()->toRfc4122()];
+        if (false === $this->connection->fetchOne('SELECT 1 FROM category WHERE owner_id = :user AND change_seq = 0 LIMIT 1', $params)) {
+            return;
+        }
+        $this->connection->executeStatement(
+            'UPDATE category SET change_seq = :seq WHERE owner_id = :user AND change_seq = 0',
+            [...$params, 'seq' => $this->sequencer->next($user->getId())],
+        );
     }
 
     /**

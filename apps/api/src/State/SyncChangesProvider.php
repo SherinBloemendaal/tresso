@@ -7,6 +7,7 @@ namespace App\State;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProviderInterface;
 use App\ApiResource\SyncChanges;
+use App\Classification\BuiltinSmartInboxes;
 use App\Security\CurrentUser;
 use Doctrine\DBAL\Connection;
 use Symfony\Component\HttpFoundation\RequestStack;
@@ -24,15 +25,22 @@ final readonly class SyncChangesProvider implements ProviderInterface
         private Connection $connection,
         private CurrentUser $currentUser,
         private RequestStack $requests,
+        private BuiltinSmartInboxes $builtinSmartInboxes,
     ) {
     }
 
     public function provide(Operation $operation, array $uriVariables = [], array $context = []): SyncChanges
     {
-        $userId = $this->currentUser->get()->getId()->toRfc4122();
+        $user = $this->currentUser->get();
+        $userId = $user->getId()->toRfc4122();
         $query = $this->requests->getCurrentRequest()?->query;
         $since = (int) ($query?->get('since') ?? 0);
         $limit = (int) ($query?->get('limit') ?? self::DEFAULT_LIMIT);
+
+        // A sync from the start (a new device, or a copy rebuilt) also brings smart inboxes made before they synced.
+        if (0 === $since) {
+            $this->connection->transactional(fn () => $this->builtinSmartInboxes->syncOlder($user));
+        }
 
         [$until, $hasMore] = $this->boundary($userId, $since, $limit);
         if ($until === $since) {
