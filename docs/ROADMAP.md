@@ -81,6 +81,10 @@ Delivered in steps, each its own pull request:
 Still to come in this phase:
 
 - Todos (synced), "make todo" in the single-email view, automatic todo creation per smart inbox
+- Todos in the calendar: a setting puts todos with a deadline in the calendar as busy time, so nobody books a meeting
+  over them; choosing a deadline or a time shows how busy each day and hour already is; a todo gets a duration
+  ("takes 30 minutes"), and "Plan automatically" picks the best free slot before the deadline with the meeting time
+  finder of C6 (working hours, focus blocks and travel time respected), moving it when the calendar changes
 - Hand over by forwarding with a note and due date, tracked in "Waiting on" with nudges
 - Triage mode (one email at a time, D / H / K)
 - Daily brief for `know` mail, one-click "Noted"
