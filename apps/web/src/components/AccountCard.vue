@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import FieldLabel from '@/forms/FieldLabel.vue'
+import { provideRequiredFields } from '@/forms/required'
 import { computed, ref, watch } from 'vue'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
@@ -11,6 +13,8 @@ import SenderAvatar from '@/components/SenderAvatar.vue'
 import ServerFields from '@/components/ServerFields.vue'
 
 const props = defineProps<{ account: MailAccount }>()
+
+provideRequiredFields(accountSchema)
 
 const accounts = useAccountsStore()
 const open = ref(props.account.status === 'auth_failed' || props.account.status === 'error')
@@ -124,19 +128,19 @@ function remove(): Promise<void> {
       <form class="form" novalidate @submit.prevent="save">
         <div class="pair">
           <label class="field">
-            <span>Display name</span>
+            <FieldLabel name="displayName">Display name</FieldLabel>
             <input v-model="displayName" maxlength="120" :aria-invalid="errors.displayName ? 'true' : undefined" />
             <small class="hint">Recipients see: {{ displayName }} &lt;{{ account.emailAddress }}&gt;</small>
             <small v-if="errors.displayName" class="error">{{ errors.displayName }}</small>
           </label>
           <label class="field">
-            <span>Username</span>
+            <FieldLabel name="username">Username</FieldLabel>
             <input v-model="username" autocomplete="off" spellcheck="false" :aria-invalid="errors.username ? 'true' : undefined" />
             <small v-if="errors.username" class="error">{{ errors.username }}</small>
           </label>
         </div>
         <label class="field">
-          <span>New password or app password</span>
+          <FieldLabel name="password">New password or app password</FieldLabel>
           <input v-model="password" type="password" autocomplete="new-password" placeholder="Leave empty to keep the current one" />
           <small class="hint">Stored encrypted and only used to sync and send your mail.</small>
           <small v-if="errors.password" class="error">{{ errors.password }}</small>

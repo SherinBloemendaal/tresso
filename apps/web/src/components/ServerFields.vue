@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import FieldLabel from '@/forms/FieldLabel.vue'
 import { useId } from 'vue'
 import { defaultPort, type ConnectionSecurity, type ServerSettings } from '@tresso/core'
 
@@ -24,7 +25,7 @@ function setSecurity(security: ConnectionSecurity): void {
     <legend>{{ title }} <span class="protocol">{{ protocol.toUpperCase() }}</span></legend>
     <div class="row">
       <label class="field host">
-        <span>Server</span>
+        <FieldLabel :name="`${protocol}.host`">Server</FieldLabel>
         <input
           :id="`${id}-host`"
           :value="settings.host"
@@ -38,7 +39,7 @@ function setSecurity(security: ConnectionSecurity): void {
         <small v-if="errors?.host" :id="`${id}-host-error`" class="error">{{ errors.host }}</small>
       </label>
       <label class="field port">
-        <span>Port</span>
+        <FieldLabel :name="`${protocol}.port`">Port</FieldLabel>
         <input
           :value="settings.port"
           type="number"
@@ -51,7 +52,7 @@ function setSecurity(security: ConnectionSecurity): void {
         <small v-if="errors?.port" class="error">{{ errors.port }}</small>
       </label>
       <label class="field security">
-        <span>Security</span>
+        <FieldLabel :name="`${protocol}.security`">Security</FieldLabel>
         <select :value="settings.security" @change="setSecurity(($event.target as HTMLSelectElement).value as ConnectionSecurity)">
           <option value="tls">SSL/TLS</option>
           <option value="starttls">STARTTLS</option>
