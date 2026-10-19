@@ -17,12 +17,15 @@ export interface SyncedNotification {
   title: string
   body: string
   occurrenceStartsAt: string
-  deliveredAt: string
+  /** Null while snoozed: devices hide it until it is delivered again. */
+  deliveredAt: string | null
   dismissedAt: string | null
   /** Delivered during quiet hours or focus: show it without sound or banner. */
   silent: boolean
   /** Raised by every snooze, so a device shows the notification again. */
   round: number
+  /** When a snoozed notification comes again; null otherwise. */
+  snoozedUntil: string | null
 }
 
 /** A notification from /api/v1/notifications: delivered in the last week or planned for the coming days. */
