@@ -30,6 +30,8 @@ type Account struct {
 type LeaseResponse struct {
 	LeaseSeconds int       `json:"leaseSeconds"`
 	Accounts     []Account `json:"accounts"`
+	// Leased accounts with mail to send now.
+	Outbox []string `json:"outbox"`
 }
 
 // ServerSettings is where an IMAP or SMTP server lives.
@@ -154,6 +156,17 @@ func (c *Client) Credentials(ctx context.Context, accountID, workerID string) (C
 	return out, err
 }
 
+// HTTPError is an API response outside 2xx.
+type HTTPError struct {
+	Method, Path string
+	Status       int
+	Body         string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("%s %s: unexpected status %d: %s", e.Method, e.Path, e.Status, e.Body)
+}
+
 func (c *Client) post(ctx context.Context, path string, body any, out any) error {
 	return c.do(ctx, http.MethodPost, path, body, out)
 }
@@ -183,7 +196,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("%s %s: unexpected status %d: %s", method, path, resp.StatusCode, bytes.TrimSpace(snippet))
+		return &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: string(bytes.TrimSpace(snippet))}
 	}
 
 	if out == nil {

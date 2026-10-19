@@ -18,6 +18,9 @@ import (
 	"tresso/sync/internal/imapsync"
 	"tresso/sync/internal/lease"
 	"tresso/sync/internal/netguard"
+	"tresso/sync/internal/outbox"
+	"tresso/sync/internal/realtime"
+	"tresso/sync/internal/smtpsend"
 	"tresso/sync/internal/storage"
 )
 
@@ -52,7 +55,8 @@ func run(logger *slog.Logger) error {
 		logger.Warn("MAIL_ALLOW_UNSAFE_SERVERS is on: private mail server addresses are allowed (local testing only)")
 	}
 
-	imapSyncer := imapsync.New(client, store, netguard.New(cfg.AllowUnsafeServers), cfg.WorkerID, imapsync.DefaultOptions(), logger.With("worker", cfg.WorkerID))
+	dialer := netguard.New(cfg.AllowUnsafeServers)
+	imapSyncer := imapsync.New(client, store, dialer, cfg.WorkerID, imapsync.DefaultOptions(), logger.With("worker", cfg.WorkerID))
 	syncerFor := func(provider string) (lease.Syncer, error) {
 		switch provider {
 		case "imap":
@@ -65,6 +69,26 @@ func run(logger *slog.Logger) error {
 
 	manager := lease.NewManager(client, syncerFor, cfg.WorkerID, cfg.Capacity, cfg.HeartbeatInterval, logger.With("worker", cfg.WorkerID))
 
+	// Outgoing mail: the hub says which account has mail to send right away; every heartbeat repeats it.
+	send := func(ctx context.Context, server api.ServerSettings, username, password string, envelope smtpsend.Envelope, raw []byte) error {
+		return smtpsend.Send(ctx, dialer, server, username, password, envelope, raw)
+	}
+	openSent := func(ctx context.Context, credentials api.Credentials) (outbox.SentStore, error) {
+		return imapsync.OpenSent(ctx, dialer, credentials)
+	}
+	dispatcher := outbox.NewDispatcher(client, store, send, openSent, cfg.WorkerID, logger.With("worker", cfg.WorkerID))
+	manager.OnOutbox(func(ctx context.Context, accountIDs []string) {
+		for _, id := range accountIDs {
+			dispatcher.Trigger(ctx, id)
+		}
+	})
+	subscriber := realtime.NewSubscriber(client, &http.Client{}, func(accountID string) {
+		if manager.Holds(accountID) {
+			dispatcher.Trigger(ctx, accountID)
+		}
+	}, logger.With("worker", cfg.WorkerID))
+	go subscriber.Run(ctx)
+
 	server := &http.Server{Addr: cfg.HealthAddr, Handler: healthHandler(manager), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -75,6 +99,7 @@ func run(logger *slog.Logger) error {
 
 	logger.Info("sync worker started", "worker", cfg.WorkerID, "capacity", cfg.Capacity)
 	manager.Run(ctx)
+	dispatcher.Wait()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

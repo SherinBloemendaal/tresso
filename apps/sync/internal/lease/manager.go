@@ -46,6 +46,21 @@ type Manager struct {
 	lastError error
 	// Lease duration reported by the API on the last successful heartbeat.
 	leaseDuration time.Duration
+	// Called after each heartbeat with the leased accounts that have mail to send.
+	onOutbox func(ctx context.Context, accountIDs []string)
+}
+
+// OnOutbox sets what happens with accounts that have mail to send; call before Run.
+func (m *Manager) OnOutbox(handle func(ctx context.Context, accountIDs []string)) {
+	m.onOutbox = handle
+}
+
+// Holds reports whether this worker currently syncs the account.
+func (m *Manager) Holds(accountID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.accounts[accountID]
+	return ok
 }
 
 func NewManager(leaser Leaser, factory SyncerFactory, workerID string, capacity int, interval time.Duration, logger *slog.Logger) *Manager {
@@ -77,10 +92,17 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-// Heartbeat renews leases and reconciles running syncers with the leased accounts.
+// Heartbeat renews leases and reconciles running syncers with the leased accounts, then hands the accounts with mail
+// to send to the outbox handler.
 func (m *Manager) Heartbeat(ctx context.Context) {
 	resp, err := m.leaser.Lease(ctx, m.workerID, m.capacity)
+	outbox := m.applyLease(ctx, resp, err)
+	if m.onOutbox != nil && len(outbox) > 0 {
+		m.onOutbox(ctx, outbox)
+	}
+}
 
+func (m *Manager) applyLease(ctx context.Context, resp api.LeaseResponse, err error) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -93,13 +115,14 @@ func (m *Manager) Heartbeat(ctx context.Context) {
 			m.logger.Error("leases expired without a successful heartbeat; stopping all syncers")
 			m.stopAllLocked()
 		}
-		return
+		return nil
 	}
 
 	m.lastBeat = time.Now()
 	m.lastError = nil
 	m.leaseDuration = time.Duration(resp.LeaseSeconds) * time.Second
 	m.reconcileLocked(ctx, resp.Accounts)
+	return resp.Outbox
 }
 
 func (m *Manager) reconcileLocked(ctx context.Context, accounts []api.Account) {
