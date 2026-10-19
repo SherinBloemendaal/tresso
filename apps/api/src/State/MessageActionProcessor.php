@@ -52,6 +52,7 @@ final readonly class MessageActionProcessor implements ProcessorInterface
             }
 
             $target = null;
+            $from = null;
             if (MessageAction::Move === $action) {
                 $target = $this->ownedFolder($data->folderId ?? '', $owner->getId());
                 if (null === $target) {
@@ -67,13 +68,19 @@ final readonly class MessageActionProcessor implements ProcessorInterface
                         $violations->add(new ConstraintViolation('Messages cannot be moved into this folder.', null, [], $data, 'folderId', $data->folderId));
                     }
                 }
+                if (null !== $data->fromFolderId) {
+                    $from = $this->ownedFolder($data->fromFolderId, $owner->getId());
+                    if (null === $from || (null !== $target && $from->getMailAccount() !== $target->getMailAccount())) {
+                        $violations->add(new ConstraintViolation('This folder does not exist.', null, [], $data, 'fromFolderId', $data->fromFolderId));
+                    }
+                }
             }
             if (\count($violations) > 0) {
                 throw new ValidationException($violations);
             }
 
             try {
-                $changed = $this->actions->apply(array_values($messages), $action, $target, new \DateTimeImmutable());
+                $changed = $this->actions->apply(array_values($messages), $action, $target, new \DateTimeImmutable(), $from);
             } catch (MissingFolder $missing) {
                 throw new ValidationException(new ConstraintViolationList([new ConstraintViolation($missing->getMessage(), null, [], $data, 'action', $action->value)]));
             }
