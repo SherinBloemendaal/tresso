@@ -83,6 +83,12 @@ class Folder
         return $this->syncCursor;
     }
 
+    public function rename(string $displayName, FolderRole $role): void
+    {
+        $this->displayName = $displayName;
+        $this->role = $role;
+    }
+
     public function updateSyncState(?int $uidValidity, ?string $syncCursor): void
     {
         $this->uidValidity = $uidValidity;
