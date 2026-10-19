@@ -1,3 +1,4 @@
+export * from './conversation'
 export * from './engine'
 export * from './frame'
 export * from './realtime'
