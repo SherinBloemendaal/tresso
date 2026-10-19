@@ -209,6 +209,25 @@ final class SyncCalendarTest extends DatabaseTestCase
         self::assertStringContainsString('SUMMARY:Standup (cancelled?)', $second[0]['ical']);
     }
 
+    public function testADeleteDuringAWriteUsesTheVersionThatWriteMade(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->storeObject($home, 'standup.ics', '"1"', 'standup@company.example', 'Standup');
+        $eventId = self::string($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($home, ['summary' => 'Standup (short)']), $this->kim);
+        $write = $this->claim();
+
+        $this->client->request('DELETE', '/api/v1/calendar-events/'.$eventId, server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+        $this->report($write[0]['id'], ['outcome' => 'done', 'etag' => '"2"']);
+
+        $operations = $this->claim();
+        self::assertCount(1, $operations, 'One delete, not one per version.');
+        self::assertSame('delete', $operations[0]['kind']);
+        self::assertSame(self::HOME.'standup.ics', $operations[0]['remoteId']);
+        self::assertSame('"2"', $operations[0]['ifMatch']);
+    }
+
     public function testAnEditOfANewEventUpdatesTheResourceItsCreationMade(): void
     {
         $home = $this->reportCalendars()[0]['id'];

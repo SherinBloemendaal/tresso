@@ -7,8 +7,10 @@ namespace App\ApiResource;
 use ApiPlatform\Metadata\ApiProperty;
 use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\Get;
+use ApiPlatform\Metadata\Post;
 use App\Calendar\ICalendar\EventData;
 use App\Security\Scope;
+use App\State\MessageInvitationProcessor;
 use App\State\MessageInvitationProvider;
 
 /**
@@ -29,6 +31,16 @@ use App\State\MessageInvitationProvider;
             uriTemplate: '/messages/{id}/invitation',
             security: "is_granted('".Scope::ROLE_MAIL_READ."') and is_granted('".Scope::ROLE_CALENDAR_READ."')",
             provider: MessageInvitationProvider::class,
+        ),
+        // Adds an invitation the calendar did not take by itself (it arrived outside the inbox, or before the
+        // account was connected), with the same checks as calendar mail that arrives in the inbox.
+        new Post(
+            uriTemplate: '/messages/{id}/invitation/add',
+            status: 200,
+            security: "is_granted('".Scope::ROLE_MAIL_READ."') and is_granted('".Scope::ROLE_CALENDAR_WRITE."')",
+            input: false,
+            read: false,
+            processor: MessageInvitationProcessor::class,
         ),
     ],
 )]
@@ -65,6 +77,8 @@ final readonly class MessageInvitation
         public ?string $selfResponse,
         public bool $canRespond,
         public array $conflicts,
+        /** An invitation the calendar did not take by itself; POST .../invitation/add adds it. */
+        public bool $canAdd,
     ) {
     }
 }

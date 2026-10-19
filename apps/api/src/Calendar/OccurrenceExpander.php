@@ -43,7 +43,8 @@ final readonly class OccurrenceExpander
      *
      * @return list<CalendarOccurrence> ordered by start
      *
-     * @throws TooManyOccurrences when the range holds more than MAX_OCCURRENCES
+     * @throws \InvalidArgumentException when the range is empty or longer than MAX_RANGE
+     * @throws TooManyOccurrences        when the range holds more than MAX_OCCURRENCES
      */
     public function expand(User $owner, array $calendarIds, \DateTimeImmutable $from, \DateTimeImmutable $to, \DateTimeZone $zone): array
     {

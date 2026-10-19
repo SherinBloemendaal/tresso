@@ -13,13 +13,17 @@ use Sabre\VObject\Component\VTimeZone;
  *
  * The past is written out change by change, from a year before the event. From the year after both the event and
  * today, the zone's current rule is written as yearly RRULEs (as Outlook and Apple write zones), so the zone holds for
- * every later date too. A zone whose changes follow no such rule gets its changes written out for decades instead.
+ * every later date too: the nth (or last) weekday of a month, or the first weekday on or after a day of the month
+ * (Israel's Friday before the last Sunday, Chile's first Sunday from the 2nd). A zone whose changes follow no such
+ * rule gets its changes written out for a century instead, long enough for any series.
  */
 final class VTimezoneBuilder
 {
     private const int YEARS_BEFORE = 1;
-    /** Years of changes a rule must reproduce, and that a zone without a rule gets written out. */
+    /** Years of changes a rule must reproduce. */
     private const int YEARS_AHEAD = 30;
+    /** Years a zone without a rule gets its changes written out for. */
+    private const int YEARS_WRITTEN = 100;
     private const array WEEKDAYS = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
 
     /**
@@ -62,6 +66,11 @@ final class VTimezoneBuilder
         if ([] === $transitions) {
             throw new \LogicException(\sprintf('No time zone data for %s.', $zoneName));
         }
+        $changes = self::changes($transitions);
+        if (null === self::rules(array_values(array_filter($changes, static fn (array $change): bool => $change['ts'] >= $ruleStart->getTimestamp())))) {
+            $far = new \DateTimeImmutable(\sprintf('%d-12-31 23:59:59', $ruleYear + self::YEARS_WRITTEN), $utc);
+            $transitions = $zone->getTransitions($start->getTimestamp(), $far->getTimestamp());
+        }
 
         /** @var VTimeZone $vtimezone */
         $vtimezone = $calendar->createComponent('VTIMEZONE');
@@ -74,8 +83,7 @@ final class VTimezoneBuilder
 
         $past = [];
         $future = [];
-        for ($i = 1, $n = \count($transitions); $i < $n; ++$i) {
-            $change = ['ts' => $transitions[$i]['ts'], 'from' => $transitions[$i - 1]['offset'], 'to' => $transitions[$i]['offset'], 'isdst' => $transitions[$i]['isdst'], 'abbr' => $transitions[$i]['abbr']];
+        foreach (self::changes($transitions) as $change) {
             if ($change['ts'] < $ruleStart->getTimestamp()) {
                 $past[] = $change;
             } else {
@@ -83,7 +91,7 @@ final class VTimezoneBuilder
             }
         }
 
-        $rules = self::rules($future);
+        $rules = self::rules(array_values(array_filter($future, static fn (array $change): bool => $change['ts'] <= $end->getTimestamp())));
         foreach (null === $rules ? [...$past, ...$future] : $past as $change) {
             $vtimezone->add(self::observance($calendar, $change['isdst'], $change['ts'], $change['from'], $change['to'], $change['abbr']));
         }
@@ -95,6 +103,23 @@ final class VTimezoneBuilder
         }
 
         return $vtimezone;
+    }
+
+    /**
+     * The changes after the first entry of getTransitions(), which is the state at the start.
+     *
+     * @param list<array{ts: int, time: string, offset: int, isdst: bool, abbr: string}> $transitions
+     *
+     * @return list<array{ts: int, from: int, to: int, isdst: bool, abbr: string}>
+     */
+    private static function changes(array $transitions): array
+    {
+        $changes = [];
+        for ($i = 1, $n = \count($transitions); $i < $n; ++$i) {
+            $changes[] = ['ts' => $transitions[$i]['ts'], 'from' => $transitions[$i - 1]['offset'], 'to' => $transitions[$i]['offset'], 'isdst' => $transitions[$i]['isdst'], 'abbr' => $transitions[$i]['abbr']];
+        }
+
+        return $changes;
     }
 
     /**
@@ -120,23 +145,83 @@ final class VTimezoneBuilder
 
         $rules = [];
         foreach ($byKind as $kind) {
-            $first = $kind[0];
-            $local = self::local($first['ts'], $first['from']);
-            $day = (int) $local->format('j');
-            $nth = $day + 7 > (int) $local->format('t') ? -1 : intdiv($day - 1, 7) + 1;
-            $weekday = (int) $local->format('w');
-            $month = (int) $local->format('n');
-            $year = (int) $local->format('Y');
-            foreach ($kind as $index => $change) {
-                $expected = self::nthWeekday($year + $index, $month, $weekday, $nth)->format('Y-m-d').' '.$local->format('H:i:s');
-                if (self::local($change['ts'], $change['from'])->format('Y-m-d H:i:s') !== $expected || $change['from'] !== $first['from'] || $change['to'] !== $first['to']) {
-                    return null;
-                }
+            $rule = self::nthWeekdayRule($kind) ?? self::onOrAfterRule($kind);
+            if (null === $rule) {
+                return null;
             }
-            $rules[] = ['change' => $first, 'rrule' => \sprintf('FREQ=YEARLY;BYMONTH=%d;BYDAY=%d%s', $month, $nth, self::WEEKDAYS[$weekday])];
+            $rules[] = ['change' => $kind[0], 'rrule' => $rule];
         }
 
         return $rules;
+    }
+
+    /**
+     * The nth (or last) weekday of a month, when it gives every change of the kind.
+     *
+     * @param non-empty-list<array{ts: int, from: int, to: int, isdst: bool, abbr: string}> $kind
+     */
+    private static function nthWeekdayRule(array $kind): ?string
+    {
+        $local = self::local($kind[0]['ts'], $kind[0]['from']);
+        $day = (int) $local->format('j');
+        $nth = $day + 7 > (int) $local->format('t') ? -1 : intdiv($day - 1, 7) + 1;
+        $weekday = (int) $local->format('w');
+        $month = (int) $local->format('n');
+        $matches = self::reproduces($kind, static fn (int $year): \DateTimeImmutable => self::nthWeekday($year, $month, $weekday, $nth));
+
+        return $matches ? \sprintf('FREQ=YEARLY;BYMONTH=%d;BYDAY=%d%s', $month, $nth, self::WEEKDAYS[$weekday]) : null;
+    }
+
+    /**
+     * The first weekday on or after a day of the month (BYDAY with seven BYMONTHDAYs), when one such day gives every
+     * change of the kind.
+     *
+     * @param non-empty-list<array{ts: int, from: int, to: int, isdst: bool, abbr: string}> $kind
+     */
+    private static function onOrAfterRule(array $kind): ?string
+    {
+        $local = self::local($kind[0]['ts'], $kind[0]['from']);
+        $day = (int) $local->format('j');
+        $weekday = (int) $local->format('w');
+        $month = (int) $local->format('n');
+        // February's last days vary, so a rule there stays within the 28th.
+        $lastDay = 2 === $month ? 28 : (int) $local->format('t');
+        for ($from = max(1, $day - 6); $from <= $day && $from + 6 <= $lastDay; ++$from) {
+            $matches = self::reproduces($kind, static fn (int $year): \DateTimeImmutable => self::weekdayOnOrAfter($year, $month, $weekday, $from));
+            if ($matches) {
+                return \sprintf('FREQ=YEARLY;BYMONTH=%d;BYDAY=%s;BYMONTHDAY=%s', $month, self::WEEKDAYS[$weekday], implode(',', range($from, $from + 6)));
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether the date a rule gives for each year is the local date of each change, at the same time and offsets.
+     *
+     * @param non-empty-list<array{ts: int, from: int, to: int, isdst: bool, abbr: string}> $kind
+     * @param \Closure(int): \DateTimeImmutable                                              $dateOf
+     */
+    private static function reproduces(array $kind, \Closure $dateOf): bool
+    {
+        $first = $kind[0];
+        $local = self::local($first['ts'], $first['from']);
+        $year = (int) $local->format('Y');
+        foreach ($kind as $index => $change) {
+            $expected = $dateOf($year + $index)->format('Y-m-d').' '.$local->format('H:i:s');
+            if (self::local($change['ts'], $change['from'])->format('Y-m-d H:i:s') !== $expected || $change['from'] !== $first['from'] || $change['to'] !== $first['to']) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static function weekdayOnOrAfter(int $year, int $month, int $weekday, int $day): \DateTimeImmutable
+    {
+        $from = new \DateTimeImmutable(\sprintf('%d-%02d-%02d', $year, $month, $day), new \DateTimeZone('UTC'));
+
+        return $from->modify(\sprintf('+%d days', ($weekday - (int) $from->format('w') + 7) % 7));
     }
 
     /** The nth (or with -1 the last) given weekday of the month. */
