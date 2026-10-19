@@ -191,4 +191,36 @@ describe('RealtimeClient', () => {
 
     expect(connections).toBe(2)
   })
+
+  it('leaves no second connection when stopped and started while the first was still asking for a token', async () => {
+    const hubs = [stream(), stream()]
+    let connections = 0
+    let grant: (value: RealtimeAccess) => void = () => {}
+    let asks = 0
+    const onConnected = vi.fn()
+    client = new RealtimeClient({
+      fetchAccess: () => {
+        asks++
+        return asks === 1 ? new Promise<RealtimeAccess>((resolve) => (grant = resolve)) : Promise.resolve(access('t2'))
+      },
+      onCursor: () => {},
+      onConnected,
+      fetch: async () => hubs[connections++]!.response,
+    })
+
+    client.start()
+    await until(() => asks === 1)
+    const stopping = client.stop()
+    client.start()
+    await until(() => onConnected.mock.calls.length === 1)
+    grant(access('t1'))
+    await stopping
+    for (let i = 0; i < 20; i++) {
+      await tick()
+    }
+    expect(connections).toBe(1)
+
+    const finished = await Promise.race([client.stop().then(() => 'stopped'), new Promise((resolve) => setTimeout(() => resolve('still running'), 500))])
+    expect(finished).toBe('stopped')
+  })
 })
