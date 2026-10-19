@@ -23,6 +23,8 @@ final class ScopeTest extends TestCase
 
     public function testRoleConstantsMatchScopes(): void
     {
+        self::assertSame(Scope::SettingsRead->role(), Scope::ROLE_SETTINGS_READ);
+        self::assertSame(Scope::SettingsWrite->role(), Scope::ROLE_SETTINGS_WRITE);
         self::assertSame(Scope::SyncLease->role(), Scope::ROLE_SYNC_LEASE);
         self::assertSame(Scope::SyncIngest->role(), Scope::ROLE_SYNC_INGEST);
         self::assertSame(Scope::SyncCredentials->role(), Scope::ROLE_SYNC_CREDENTIALS);

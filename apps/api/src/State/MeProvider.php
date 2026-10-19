@@ -7,26 +7,19 @@ namespace App\State;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProviderInterface;
 use App\ApiResource\Me;
-use App\Entity\User;
-use Symfony\Bundle\SecurityBundle\Security;
-use Symfony\Component\Security\Core\Exception\AccessDeniedException;
+use App\Security\CurrentUser;
 
 /**
  * @implements ProviderInterface<Me>
  */
 final readonly class MeProvider implements ProviderInterface
 {
-    public function __construct(private Security $security)
+    public function __construct(private CurrentUser $currentUser)
     {
     }
 
     public function provide(Operation $operation, array $uriVariables = [], array $context = []): Me
     {
-        $user = $this->security->getUser();
-        if (!$user instanceof User) {
-            throw new AccessDeniedException('This endpoint requires a user token.');
-        }
-
-        return Me::fromUser($user);
+        return Me::fromUser($this->currentUser->get());
     }
 }
