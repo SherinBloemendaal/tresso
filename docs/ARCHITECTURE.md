@@ -907,51 +907,62 @@ accepted.
 
 Reminders are a reason to use Tresso over a default calendar: they fire on every device the user has, also when no
 app is open, they know about travel and quiet hours, and they bracket a meeting with a brief before and a follow-up
-after.
+after. Everything lives in `apps/api/src/Notification`.
 
 - **What can remind:**
-  - Event reminders: any number per event, each with an offset (or absolute time) and its own channels. Stored as
-    `VALARM`s in the event's iCalendar, so other clients see them too; the channels ride along as
-    `X-TRESSO-CHANNELS` (an `ACTION:EMAIL` alarm means email). An event without own reminders, and not marked
-    "no reminders", gets the user's **default rules**.
-  - Default rules (`reminder_rule`, per user): which reminders an event gets when it has none, by calendar and by
-    kind of event: timed or all-day, with or without attendees, organized or invited, with an online meeting, with a
-    physical location. The most specific matching rule wins. New users start with 10 minutes before timed events
-    (push) and 09:00 the day before all-day events (push).
-  - **Leave now:** for events with a physical location, optional per rule or event: the reminder fires at
-    start minus travel time minus a margin. Travel time is either fixed by the user per event ("30 minutes") or
-    estimated by a `TravelTimeEstimator` from the user's last known location (shared by mobile and desktop only
-    when the user allows it, kept as one coarse point with its time) and the event's location. The open edition
-    implements the estimator with a self-hostable OSRM routing server and a Nominatim geocoder when they are
-    configured (`ROUTING_OSRM_URL`, `GEOCODER_NOMINATIM_URL`), and without them only offers fixed travel times.
-    The estimate is refreshed when the location changes and an hour, then 15 minutes, before the planned time.
-  - **Pre-meeting brief:** for events with attendees, optional per rule, a few minutes before the start: who is
-    coming and the recent threads with them. The open edition writes the brief from mail metadata (threads with the
-    attendees in the last 60 days, their last messages); Tresso Cloud adds an AI summary through
-    `MeetingBriefWriter`.
-  - **Follow-up nudge:** after a meeting with attendees ends, optional per rule: a nudge to write notes (a private
-    note on the event, never sent to the provider) and, once todos exist (phase 2), to turn them into todos.
-- **Channels:** web push (VAPID, RFC 8030/8291, for the web app and browsers that run it), mobile push through
-  Expo's push service (APNs/FCM), desktop through the realtime connection while the desktop app runs (the app shows
-  a native notification), and email (from the system sender `NOTIFICATIONS_FROM`). Devices register themselves
-  (`POST /api/v1/notification-devices` with their kind and push subscription or Expo token); a subscription the
-  push service reports gone is removed.
-- **Quiet hours and focus:** per user, days and times in their zone during which notifications are delivered
-  silently (listed, no sound or banner), and focus rules: while an event marked busy is running, only reminders of
-  the user's own meetings and leave-now alerts break through. A reminder whose event starts after quiet hours end is
-  moved to the end of the quiet hours instead.
-- **Scheduling:** a planner keeps `scheduled_notification` rows for the next 8 days of occurrences: per occurrence,
-  reminder and kind, with its fire time. It replans an event whenever its rows are projected, and a rolling sweep
-  extends the window. Each row is announced as a delayed Messenger message for its fire time (transport `push`),
-  dispatched after commit, like the release of scheduled mail. When it fires, the handler re-checks that the row is
-  still current (the event may have moved since), applies quiet hours and focus, and delivers. A sweep every
-  minute (Symfony Scheduler) fires rows that are due and not delivered, so a lost message only delays a reminder.
-- **Idempotent delivery:** every delivery is recorded per device (`notification_delivery`, unique on the scheduled
-  notification and the device), so a retried message or a sweep never notifies a device twice. Clients dismiss or
-  snooze through the API; a dismissal on one device clears the notification on the others.
-- `GET /api/v1/notifications` lists recent and upcoming notifications for the in-app list; reminder rules, quiet
-  hours, focus rules and devices are managed under `/api/v1/notification-settings` and
-  `/api/v1/notification-devices` (scopes `settings:read` and `settings:write`).
+  - Event reminders: any number per event (up to 10 from the editor), each with an offset and its own channels.
+    Stored as `VALARM`s in the event's iCalendar, so other clients see them too; the channels ride along as
+    `X-TRESSO-CHANNELS` (an alarm without it means push, `ACTION:EMAIL` means email). Alarms other clients set
+    relative to the end or at a fixed time are kept and fire as well. An event without alarms uses the user's
+    **default rules** (`defaultReminders`); `X-TRESSO-DEFAULT-REMINDERS:FALSE` means "no reminders at all".
+  - Default rules (`reminder_rule`, `/api/v1/reminder-rules`): by calendar, timed or all-day, the user's role
+    (organizes or invited), with or without other people, with an online meeting, with a place. The rule that sets
+    the most conditions wins, ties by position. A rule gives reminders in minutes before the start, or for all-day
+    events a time on the day before, and switches leave-now, the brief (minutes before) and the follow-up for the
+    events it matches. New users start with 10 minutes before timed events and 09:00 the day before all-day events,
+    both by push.
+  - **Leave now:** for timed events with a place. With a travel time set on the event (`travelMinutes`, stored as
+    `X-TRESSO-TRAVEL-MINUTES`; Apple Calendar's `X-APPLE-TRAVEL-DURATION` is read too) it fires at start minus travel
+    minus 5 minutes. When the matching rule asks for leave-now and the user shared a position (`PUT
+    /api/v1/me/location`, rounded to about 100 m, `DELETE` forgets it), a `TravelTimeEstimator` estimates the
+    travel: the open edition geocodes with Nominatim and routes with OSRM when the operator configures them
+    (`GEOCODER_NOMINATIM_URL`, `ROUTING_OSRM_URL`). It is first looked at two hours before the start and moved to the
+    estimated moment (looked at again at most every 15 minutes); without a route it is dropped rather than guessed.
+  - **Pre-meeting brief:** for events with other people. At delivery the `MeetingBriefWriter` writes it: the open
+    edition names the people and the recent threads with them (last 60 days, from mail metadata, nothing leaves the
+    server); Tresso Cloud adds an AI summary. `GET /api/v1/calendar-events/{id}/brief` returns the full brief.
+  - **Follow-up nudge:** at the end of a meeting with other people, to write notes: private notes on an event or an
+    occurrence (`PUT /api/v1/calendar-events/{id}/note`, in the delta as `eventNotes`, never sent to a provider) and,
+    once todos exist (phase 2), todos.
+- **Channels:** `push` reaches every enabled device of the user, `email` the address in the settings (or the sign-in
+  address) from the system sender `NOTIFICATIONS_FROM`. Devices register with `POST /api/v1/notification-devices`:
+  - Web push (`web_push`): the browser's subscription. Messages are encrypted per RFC 8291 (aes128gcm) and signed
+    with VAPID (RFC 8292, ES256) on ext-openssl, checked against the RFC's own example. Endpoints come from clients,
+    so they must be https and requests refuse private networks. Keys come from `WEB_PUSH_PUBLIC_KEY` and
+    `WEB_PUSH_PRIVATE_KEY` (`bin/console app:notifications:vapid-keys`); clients read the public key from
+    `GET /api/v1/notification-devices/web-push-key`.
+  - Mobile (`expo`): the Expo push token; sent through Expo's push service (`EXPO_ACCESS_TOKEN` when the project
+    requires it), channel `reminders`.
+  - Desktop (`desktop`): no push service; the delivered notification reaches the running app through the delta
+    (`notifications`) and the realtime ping that comes with every change, and the app shows it natively.
+  - A subscription the push service reports gone (404, 410, `DeviceNotRegistered`) is removed.
+- **Quiet hours and focus** (`/api/v1/notification-settings`): quiet hours per day in the user's time zone (past
+  midnight they end the next day). A notification that fires in quiet hours for an event that starts after them is
+  moved to their end; otherwise it is delivered silently (no sound, low urgency, shown in the list). With focus on,
+  while the user is in another busy event they take part in, notifications of events they are invited to are
+  delivered silently; their own meetings and leave-now alerts break through.
+- **Scheduling:** `scheduled_notification` holds one row per occurrence, kind and reminder, planned for the next 8
+  days. Saving or removing a calendar object queues a replan of that object (`PlanCalendarObject`, transport `push`,
+  after commit); rule, time zone and location changes replan the user. Every new or moved plan is a delayed
+  `FireNotification` for its fire time. A Symfony Scheduler task (`scheduler_notifications`) sweeps every minute:
+  it delivers due notifications whose message got lost (up to two hours late) and extends the plan for users whose
+  plan ends within a week. A delivered notification is never planned again.
+- **Idempotent delivery:** delivery takes a lock on the notification, checks it is still current, and records one
+  `notification_delivery` per target and round (unique) before anything is sent, so a retried message or a sweep
+  never notifies a device twice. Sends happen after that commit; their outcome is recorded afterwards.
+- **In the apps:** `GET /api/v1/notifications` lists the last week and the coming days; `POST .../dismiss` clears a
+  notification on every device (the delta carries `dismissedAt`), `POST .../snooze` delivers it again later (a new
+  round).
 
 #### Online meetings
 
