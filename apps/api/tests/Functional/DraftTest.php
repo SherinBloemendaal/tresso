@@ -198,6 +198,21 @@ final class DraftTest extends DatabaseTestCase
         self::assertSame([['id' => $id, 'signatureId' => null]], array_map(static fn (mixed $d): array => \is_array($d) ? ['id' => $d['id'], 'signatureId' => $d['signatureId']] : [], $drafts));
     }
 
+    public function testRemovingTheAccountKeepsTheDraftOnEveryDevice(): void
+    {
+        $id = $this->newDraft(['subject' => 'Orphan']);
+        $this->client->request('GET', '/api/v1/sync/changes?since=0', server: $this->kim);
+        $cursor = $this->cursor();
+
+        $this->client->request('DELETE', '/api/v1/mail-accounts/'.$this->accountId, server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+
+        $this->client->request('GET', '/api/v1/sync/changes?since='.$cursor, server: $this->kim);
+        $drafts = $this->decodedResponse()['drafts'] ?? null;
+        self::assertIsArray($drafts);
+        self::assertSame([['id' => $id, 'mailAccountId' => null]], array_map(static fn (mixed $d): array => \is_array($d) ? ['id' => $d['id'], 'mailAccountId' => $d['mailAccountId']] : [], $drafts));
+    }
+
     public function testRequiresWriteScope(): void
     {
         $this->client->jsonRequest('POST', '/api/v1/drafts', $this->payload([]), $this->userHeaders('kim@example.test', ['mail:read']));
