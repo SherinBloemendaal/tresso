@@ -454,9 +454,21 @@ export class IndexedDbMailStore implements MailStore {
     const tx = this.db.transaction('drafts', 'readwrite')
     const found = await tx.store.get(id)
     const stored = found === undefined ? null : storedDraft(found)
-    const next = change(stored)
-    if (next !== null) {
-      await tx.store.put(next)
+    let next: Draft | null
+    try {
+      next = change(stored)
+      if (next !== null) {
+        await tx.store.put(next)
+      }
+    } catch (error) {
+      // Nothing of it is kept; the transaction's own failure is the same one and needs no handling of its own.
+      try {
+        tx.abort()
+      } catch {
+        // Aborted already, by the failed write.
+      }
+      await tx.done.catch(() => undefined)
+      throw error
     }
     await tx.done
     return next ?? stored
