@@ -1,5 +1,7 @@
 # Tresso
 
+[![CI](https://github.com/SherinBloemendaal/tresso/actions/workflows/ci.yml/badge.svg)](https://github.com/SherinBloemendaal/tresso/actions/workflows/ci.yml)
+
 **One T, three ways out.** Tresso is an email client built around a single idea: every email is something
 to **do**, to **hand over**, or to **know**.
 
@@ -136,11 +138,14 @@ Then run the checks for the part you changed:
 |---|---|
 | API tests (per file) | `docker compose exec -e APP_ENV=test api php bin/phpunit tests/Functional/SyncLeaseTest.php` |
 | API static analysis | `docker compose exec api vendor/bin/phpstan analyse` |
+| API docs (dev only) | http://localhost:8080/docs |
 | Sync worker | `docker run --rm -v "$PWD/apps/sync":/src -w /src golang:1.27 go test -race ./...` |
 | Shared core | `npm test --workspace @tresso/core` |
 | Web | `npm run test:unit --workspace @tresso/web` and `npm run type-check --workspace @tresso/web` |
 | Mobile | `npm run type-check --workspace @tresso/mobile` |
 | Desktop | `cargo check` in `apps/desktop/src-tauri` |
+
+Every push and pull request runs all of these in [CI](.github/workflows/ci.yml).
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/) with a required scope from
 [`.agents/commit-scopes.md`](.agents/commit-scopes.md), for example `feat(api): add todo endpoints`.
