@@ -52,6 +52,10 @@ class MailAccount
     #[ORM\Column(length: 16, enumType: MailAccountStatus::class)]
     private MailAccountStatus $status = MailAccountStatus::Active;
 
+    /** Why the account is not syncing, in words the user can act on. */
+    #[ORM\Column(length: 500, nullable: true)]
+    private ?string $statusDetail = null;
+
     #[ORM\Column(length: 120, nullable: true)]
     private ?string $leasedBy = null;
 
@@ -159,9 +163,15 @@ class MailAccount
         return $this->status;
     }
 
-    public function setStatus(MailAccountStatus $status): void
+    public function setStatus(MailAccountStatus $status, ?string $detail = null): void
     {
         $this->status = $status;
+        $this->statusDetail = MailAccountStatus::Active === $status || MailAccountStatus::Paused === $status ? null : $detail;
+    }
+
+    public function getStatusDetail(): ?string
+    {
+        return $this->statusDetail;
     }
 
     public function getLeasedBy(): ?string
