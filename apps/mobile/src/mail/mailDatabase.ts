@@ -85,6 +85,14 @@ export class MailDatabase implements SyncStore {
     return new MailDatabase(sql)
   }
 
+  /**
+   * Makes the next pull fetch everything again, so the copy is put right where it may differ from the server (a
+   * change that could not be put back after the server refused it).
+   */
+  resyncFromStart(): Promise<void> {
+    return this.write(() => this.sql.run('DELETE FROM meta WHERE key = ?', ['cursor']))
+  }
+
   async cursor(): Promise<number> {
     const row = await this.sql.first<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['cursor'])
     return row === null ? 0 : Number(row.value)

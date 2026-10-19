@@ -190,6 +190,30 @@ describe('MailSession', () => {
     await mail.switchTo(null)
   })
 
+  it('says so when a refused change cannot be put back, and syncs the copy from the start to put it right', async () => {
+    const disk = device()
+    const since: number[] = []
+    const { mail } = session(
+      disk,
+      async (from) => {
+        since.push(from)
+        return page(from === 0 ? 1 : from, from === 0 ? { mailAccounts: [account] } : {})
+      },
+      async () => {
+        throw new Error('Try again later.')
+      },
+    )
+    await mail.switchTo('kim')
+    await vi.waitFor(async () => expect(await mail.database?.cursor()).toBe(1))
+    vi.spyOn(mail.database!, 'revertAction').mockRejectedValue(new Error('disk full'))
+    since.length = 0
+
+    await expect(mail.act(['m1'], 'markRead')).rejects.toThrow('Try again later. This phone shows the change until it has synced your mail again.')
+
+    await vi.waitFor(() => expect(since).toContain(0))
+    await mail.switchTo(null)
+  })
+
   it('refuses an action while no copy is open, instead of pretending it worked', async () => {
     const { mail } = session(device())
 
