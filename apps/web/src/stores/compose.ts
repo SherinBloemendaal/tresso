@@ -44,7 +44,9 @@ export const useComposeStore = defineStore('compose', () => {
     cancel: (outgoingId) => mail.cancelOutgoing(outgoingId),
     notify,
     explain: (error) => ({ message: errorMessage(error), violations: error instanceof ApiError ? error.violations : {} }),
-    changed: () => void mail.refresh(),
+    changed: () => {
+      mail.refresh().catch((error: unknown) => console.error('Refreshing the lists failed', error))
+    },
   })
 
   // The composer's state, for templates; replaced whole on every change, so a shallow ref is enough.

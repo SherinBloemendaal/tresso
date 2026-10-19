@@ -357,4 +357,49 @@ describe('Composer', () => {
     await vi.advanceTimersByTimeAsync(1000)
     expect(changes).toBeGreaterThan(0)
   })
+
+  it('tells of a send that fails after another draft took the screen, without touching that one', async () => {
+    composer.openNew([{ address: 'anna@example.test', name: null }])
+    composer.update({ subject: 'First' })
+    const first = composer.state.draft!.id
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    uploading = () => held
+    const sending = composer.send()
+    composer.close()
+    composer.openNew()
+    sendFails = new ApiFailure(500)
+    release()
+    await sending
+
+    expect(composer.state.draft?.id).not.toBe(first)
+    expect(composer.state.error).toBeNull()
+    expect(notices.at(-1)).toMatchObject({ text: '"First" was not sent: HTTP 500', tone: 'error', action: { label: 'Edit' } })
+    await notices.at(-1)!.action!.run()
+    await vi.waitFor(() => expect(composer.state.draft?.id).toBe(first))
+  })
+
+  it('lets a save into a closing copy go quietly, and says when saving fails otherwise', async () => {
+    composer.openNew()
+    composer.update({ subject: 'Closing' })
+    await store.shut()
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(composer.state.error).toBeNull()
+  })
+
+  it('tells lists of a new draft and one put away, not of every pause in typing', async () => {
+    composer.openNew()
+    composer.update({ subject: 'One' })
+    await vi.advanceTimersByTimeAsync(1000)
+    const afterFirst = changes
+    composer.update({ subject: 'Two' })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(changes).toBe(afterFirst)
+
+    composer.close()
+    await vi.advanceTimersByTimeAsync(10)
+    expect(changes).toBe(afterFirst + 1)
+  })
 })

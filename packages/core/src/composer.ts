@@ -1,6 +1,6 @@
 import { isPlausibleAddress, type SendMessageRequest } from './compose'
 import { defaultSignatureOf, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome, type DraftSync } from './drafts'
-import type { Draft, MailStore } from './store/mailStore'
+import { CopyClosingError, type Draft, type MailStore } from './store/mailStore'
 import type { Address, MessageBody, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature } from './sync/types'
 
 /** Seconds a sent message waits before it goes out, so "Undo" can still stop it. */
@@ -99,12 +99,17 @@ export class Composer {
   }
 
   private open(draft: Draft): void {
+    const store = this.deps.store()
+    if (store === null) {
+      // No copy is open (signed out): there is nowhere to keep a draft.
+      return
+    }
     // A save that was still waiting for typing to stop is made before the other draft takes its place.
     if (this.saveTimer !== null) {
       this.clearSaveTimer()
       void this.save(this.current.draft)
     }
-    this.openedIn = this.deps.store()
+    this.openedIn = store
     this.set({ draft: plain(draft), revision: this.current.revision + 1, error: null, violations: {}, savedAt: null, conflict: draft.remoteVersion !== null })
   }
 
@@ -164,15 +169,31 @@ export class Composer {
   }
 
   /** Saves on this device at once and uploads, so the draft is on every device and in the Drafts folder. */
-  async save(draft: Draft | null = this.current.draft): Promise<void> {
+  async save(draft: Draft | null = this.current.draft, closing = false): Promise<void> {
     const store = this.storeOfDraft()
     if (draft === null || store === null) {
       return
     }
-    const stored = await store.draft(draft.id)
-    // Keep what the upload learned (server version, a conflict) and lay the edits on top.
-    await store.saveDraft({ ...draft, version: stored?.version ?? draft.version, remoteVersion: stored?.remoteVersion ?? null })
-    this.deps.changed?.()
+    let isNew: boolean
+    try {
+      const stored = await store.draft(draft.id)
+      isNew = stored === null
+      // Keep what the upload learned (server version, a conflict) and lay the edits on top.
+      await store.saveDraft({ ...draft, version: stored?.version ?? draft.version, remoteVersion: stored?.remoteVersion ?? null })
+    } catch (error) {
+      if (error instanceof CopyClosingError) {
+        // Signed out meanwhile: the copy is going, and the draft with it.
+        return
+      }
+      if (this.current.draft?.id === draft.id) {
+        this.set({ error: `The draft could not be saved: ${this.deps.explain(error).message}` })
+      }
+      return
+    }
+    // Lists only need to know of a new draft and of one put away; every pause in typing would be too often.
+    if (isNew || closing) {
+      this.deps.changed?.()
+    }
     if (this.current.draft?.id === draft.id) {
       this.set({ savedAt: Date.now() })
     }
@@ -219,7 +240,12 @@ export class Composer {
     try {
       await this.deps.drafts.deleteEverywhere(draft.id)
     } catch (error) {
-      this.set({ error: `The draft could not be deleted: ${this.deps.explain(error).message}` })
+      const text = `The draft could not be deleted: ${this.deps.explain(error).message}`
+      if (this.current.draft?.id === draft.id) {
+        this.set({ error: text })
+      } else {
+        this.deps.notify({ text, tone: 'error' }, 8000)
+      }
       return false
     }
     this.deps.changed?.()
@@ -238,7 +264,7 @@ export class Composer {
     this.clearSaveTimer()
     const closing = this.current.draft
     this.set({ draft: null, conflict: false })
-    void this.save(closing)
+    void this.save(closing, true)
   }
 
   /** Why the draft cannot be sent as it is, or null when it can. */
@@ -300,7 +326,15 @@ export class Composer {
       }
     } catch (error) {
       const { message, violations } = this.deps.explain(error)
-      this.set({ error: message, violations })
+      if (this.current.draft?.id === draft.id) {
+        this.set({ error: message, violations })
+      } else {
+        // Another draft took the screen meanwhile: this one is in Drafts, offered for another try.
+        this.deps.notify(
+          { text: `"${draft.subject || '(no subject)'}" was not sent: ${message}`, tone: 'error', action: { label: 'Edit', run: () => void this.openDraft(draft.id) } },
+          30000,
+        )
+      }
     } finally {
       this.set({ sending: false })
     }
