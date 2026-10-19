@@ -86,3 +86,21 @@ func TestUserFacingDetailNeverLeaksServerText(t *testing.T) {
 		}
 	}
 }
+
+func TestJunkKeywords(t *testing.T) {
+	cases := []struct {
+		flags []imap.Flag
+		want  bool
+	}{
+		{nil, false},
+		{[]imap.Flag{imap.FlagSeen, "$Junk"}, true},
+		{[]imap.Flag{"Junk"}, true},
+		{[]imap.Flag{"$Junk", "$NotJunk"}, false},
+		{[]imap.Flag{"NonJunk", "$Junk"}, false},
+	}
+	for _, c := range cases {
+		if got := isJunk(c.flags); got != c.want {
+			t.Errorf("isJunk(%v) = %v, want %v", c.flags, got, c.want)
+		}
+	}
+}

@@ -65,6 +65,10 @@ type Message struct {
 	Snippet      string       `json:"snippet"`
 	BodyText     string       `json:"bodyText"` // plain text for search, at most 32768 characters
 	Attachments  []Attachment `json:"attachments"`
+	// Headers that tell automated, bulk and junk mail apart, by lower-cased name; see mimeparse.Message.Signals.
+	Headers map[string]string `json:"headers,omitempty"`
+	// Junk is set when the server flagged the message as junk ($Junk without $NotJunk).
+	Junk bool `json:"junk"`
 }
 
 type MessageBatch struct {
