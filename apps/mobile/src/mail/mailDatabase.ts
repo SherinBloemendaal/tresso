@@ -60,8 +60,20 @@ export class MailDatabase implements SyncStore {
   private shutting = false
   /** Pages being stored, which closing waits for. */
   private readonly writing = new Set<Promise<void>>()
+  /**
+   * Set while the copy must sync from the start (see resyncFromStart). It is kept in the database too, so it holds
+   * after a restart.
+   */
+  private resyncing: boolean
+  /** Whether the pull under way began from the start since the resync was asked for, so its pages may move the cursor. */
+  private pullFromStart = false
 
-  private constructor(private readonly sql: Sql) {}
+  private constructor(
+    private readonly sql: Sql,
+    resyncing: boolean,
+  ) {
+    this.resyncing = resyncing
+  }
 
   /** Refuses further pages and resolves once the ones being stored are in, so the database can be closed. */
   async shut(): Promise<void> {
@@ -82,7 +94,8 @@ export class MailDatabase implements SyncStore {
         await tx.run('INSERT INTO meta (key, value) VALUES (?, ?)', ['schema', String(SCHEMA_VERSION)])
       })
     }
-    return new MailDatabase(sql)
+    const resync = await sql.first<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['resync'])
+    return new MailDatabase(sql, resync !== null)
   }
 
   /**
@@ -90,10 +103,21 @@ export class MailDatabase implements SyncStore {
    * change that could not be put back after the server refused it).
    */
   resyncFromStart(): Promise<void> {
-    return this.write(() => this.sql.run('DELETE FROM meta WHERE key = ?', ['cursor']))
+    return this.write(async () => {
+      await this.sql.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['resync', '1'])
+      // A pull already under way keeps the cursor it began from: its pages are stored, but it no longer moves the
+      // cursor, so the next pull still begins from the start.
+      this.resyncing = true
+      this.pullFromStart = false
+    })
   }
 
+  /** Where the next pull begins. The sync engine reads it once per pull, which is how a resync knows its pull began. */
   async cursor(): Promise<number> {
+    if (this.resyncing) {
+      this.pullFromStart = true
+      return 0
+    }
     const row = await this.sql.first<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['cursor'])
     return row === null ? 0 : Number(row.value)
   }
@@ -187,8 +211,17 @@ export class MailDatabase implements SyncStore {
       for (const threadId of affected) {
         await refreshConversation(tx, threadId, inboxFolders)
       }
-      await tx.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['cursor', String(page.cursor)])
+      if (!this.resyncing) {
+        await tx.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['cursor', String(page.cursor)])
+      } else if (this.pullFromStart) {
+        await tx.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['cursor', String(page.cursor)])
+        await tx.run('DELETE FROM meta WHERE key = ?', ['resync'])
+      }
     })
+    if (this.resyncing && this.pullFromStart) {
+      this.resyncing = false
+      this.pullFromStart = false
+    }
   }
 
   /**
