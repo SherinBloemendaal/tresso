@@ -71,7 +71,7 @@ export function appliedFor(applied: AppliedAction, messageIds: Set<string>): App
 export function actionResult(
   messages: SyncedMessage[],
   action: MessageAction,
-  context: { folders: SyncedFolder[]; accounts: SyncedMailAccount[]; folderId?: string; fromFolderId?: string },
+  context: { folders: SyncedFolder[]; accounts: SyncedMailAccount[]; folderId?: string | undefined; fromFolderId?: string | undefined },
 ): SyncedMessage[] {
   const accounts = new Map(context.accounts.map((account) => [account.id, account.emailAddress]))
   const inboxFolders = new Set(context.folders.filter((folder) => folder.role === 'inbox').map((folder) => folder.id))

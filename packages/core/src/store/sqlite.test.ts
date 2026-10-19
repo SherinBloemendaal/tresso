@@ -1,0 +1,115 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+import { describeMailStore, draft, firstPage, message, page } from './contract'
+import { CopyClosingError } from './mailStore'
+import { memorySql } from './memorySql'
+import type { Sql } from './sql'
+import { SCHEMA_VERSION, SqliteMailStore } from './sqlite'
+
+describeMailStore(
+  'SQLite',
+  async () => SqliteMailStore.open(await memorySql()),
+  (store) => store.close(),
+)
+
+describe('SqliteMailStore', () => {
+  let sql: Sql & { closed(): boolean }
+  let db: SqliteMailStore
+
+  beforeEach(async () => {
+    sql = await memorySql()
+    db = await SqliteMailStore.open(sql)
+    await db.apply(firstPage)
+  })
+
+  it('stores a page completely or not at all, and hands out no arrivals of a page it refused', async () => {
+    db.takeArrivals()
+    const broken = page({
+      cursor: 11,
+      messages: [message('m9', 't1', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00', { verdict: 'do' }), { ...message('m10', 't1', 'work', [], 'x'), threadId: null as unknown as string }],
+    })
+
+    await expect(db.apply(broken)).rejects.toThrow()
+
+    expect(await db.cursor()).toBe(10)
+    expect((await db.thread('t1'))?.messages.map((m) => m.id)).toEqual(['m2', 'm1'])
+    expect(db.takeArrivals()).toEqual([])
+  })
+
+  it('refuses writes once closing, after finishing the one in progress, and then closes the database', async () => {
+    const storing = db.apply(page({ cursor: 11, messages: [message('m5', 't1', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00')] }))
+    const closing = db.close()
+    await storing
+    await closing
+
+    expect(await db.cursor()).toBe(11)
+    expect(sql.closed()).toBe(true)
+    await expect(db.apply(page({ cursor: 12 }))).rejects.toBeInstanceOf(CopyClosingError)
+    await expect(db.saveDraft(draft('d1'))).rejects.toBeInstanceOf(CopyClosingError)
+  })
+
+  it('stores writes that arrive together one after the other, as a device allows one writer', async () => {
+    await Promise.all([
+      db.apply(page({ cursor: 11, messages: [message('m5', 't1', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00')] })),
+      db.applyAction(['m4'], 'flag'),
+      db.saveDraft(draft('d1')),
+      db.resyncFromStart(),
+    ])
+
+    expect(await db.cursor()).toBe(0)
+    expect((await db.thread('t1'))?.messages.map((m) => m.id)).toContain('m5')
+    expect((await db.thread('t3'))?.messages[0]?.flags.flagged).toBe(true)
+    expect(await db.draft('d1')).not.toBeNull()
+  })
+
+  it('syncs from the start after a resync, even when a pull under way stores a page meanwhile, and after a restart', async () => {
+    // A pull that began from the stored cursor, before the resync was asked for.
+    expect(await db.cursor()).toBe(10)
+    await db.resyncFromStart()
+    await db.apply(page({ cursor: 11 }))
+
+    expect(await (await SqliteMailStore.open(sql)).cursor()).toBe(0)
+    expect(await db.cursor()).toBe(0)
+    await db.apply(page({ cursor: 11, hasMore: true }))
+    expect(await db.cursor()).toBe(11)
+    expect(await (await SqliteMailStore.open(sql)).cursor()).toBe(11)
+  })
+
+  it('keeps a resync asked for while a pull from the start stores its first page', async () => {
+    await db.resyncFromStart()
+    expect(await db.cursor()).toBe(0)
+
+    await Promise.all([db.apply(page({ cursor: 11 })), db.resyncFromStart()])
+
+    expect(await db.cursor()).toBe(0)
+    expect(await (await SqliteMailStore.open(sql)).cursor()).toBe(0)
+  })
+
+  it('rebuilds a copy made by another version, so it syncs again from the start, keeping drafts that exist only here', async () => {
+    await db.saveDraft(draft('unsent', { pendingSave: true, version: 3, remoteVersion: 4 }))
+    await db.saveDraft(draft('sending', { outgoingId: 'o1' }))
+    await db.saveDraft(draft('synced', { version: 2 }))
+    await sql.run("UPDATE meta SET value = '1' WHERE key = 'schema'")
+    // An older shape of a table.
+    await sql.exec('DROP TABLE conversations; CREATE TABLE conversations (thread_id TEXT PRIMARY KEY NOT NULL)')
+
+    const reopened = await SqliteMailStore.open(sql)
+
+    expect(await reopened.cursor()).toBe(0)
+    expect(await reopened.inbox(null, 10)).toEqual([])
+    expect(await sql.first<{ value: string }>("SELECT value FROM meta WHERE key = 'schema'")).toEqual({ value: String(SCHEMA_VERSION) })
+    expect((await reopened.drafts()).map((d) => d.id).sort()).toEqual(['sending', 'unsent'])
+    expect(await reopened.draft('unsent')).toMatchObject({ pendingSave: true, version: 0, remoteVersion: null })
+    await reopened.apply(firstPage)
+    expect((await reopened.inbox(null, 10)).map((c) => c.threadId)).toEqual(['t1', 't3'])
+  })
+
+  it('rebuilds a copy from before drafts were kept', async () => {
+    const old = await memorySql()
+    await old.exec("CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema', '1'), ('cursor', '7')")
+
+    const reopened = await SqliteMailStore.open(old)
+
+    expect(await reopened.cursor()).toBe(0)
+    expect(await reopened.drafts()).toEqual([])
+  })
+})

@@ -1,0 +1,545 @@
+import { actionResult, type AppliedAction, type MessageAction } from '../actions'
+import { summarizeConversation, type ConversationSummary } from '../sync/conversation'
+import type { ChangePage, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedThread } from '../sync/types'
+import { CopyClosingError, type Arrival, type Contact, type Draft, type MailStore } from './mailStore'
+import { arrivalOf, contactMatches, deletedDraft, draftOnlyHere, mergeContact, peopleOn, syncedDraft } from './rules'
+import type { Sql, SqlValue } from './sql'
+
+/**
+ * Raised whenever the copy changes shape. A copy made by another version is emptied and synced again from the start,
+ * so nothing it skipped stays missing; drafts that exist only on this device are carried over.
+ */
+export const SCHEMA_VERSION = 2
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mail_accounts (id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, role TEXT NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY NOT NULL, thread_id TEXT NOT NULL, mail_account_id TEXT NOT NULL, json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS messages_by_thread ON messages (thread_id);
+CREATE INDEX IF NOT EXISTS messages_by_account ON messages (mail_account_id);
+CREATE TABLE IF NOT EXISTS message_folders (message_id TEXT NOT NULL, folder_id TEXT NOT NULL, PRIMARY KEY (message_id, folder_id));
+CREATE INDEX IF NOT EXISTS message_folders_by_folder ON message_folders (folder_id);
+CREATE TABLE IF NOT EXISTS conversations (
+  thread_id TEXT PRIMARY KEY NOT NULL,
+  mail_account_id TEXT NOT NULL,
+  inbox INTEGER NOT NULL,
+  unread INTEGER NOT NULL,
+  last_message_at INTEGER NOT NULL,
+  json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS conversations_by_inbox ON conversations (inbox, last_message_at);
+CREATE INDEX IF NOT EXISTS conversations_by_account_inbox ON conversations (mail_account_id, inbox, last_message_at);
+CREATE TABLE IF NOT EXISTS outgoing (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS outgoing_by_account ON outgoing (mail_account_id);
+CREATE TABLE IF NOT EXISTS contacts (key TEXT PRIMARY KEY NOT NULL, last_seen INTEGER NOT NULL, json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS contacts_by_last_seen ON contacts (last_seen);
+CREATE TABLE IF NOT EXISTS drafts (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT, updated_at INTEGER NOT NULL, json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS drafts_by_updated_at ON drafts (updated_at);
+CREATE TABLE IF NOT EXISTS signatures (id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL);
+`
+
+/** Every table any version made, so a rebuild leaves none of an old shape behind. */
+const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'meta']
+
+type JsonRow = { json: string }
+
+function parse<T>(row: JsonRow): T {
+  return JSON.parse(row.json) as T
+}
+
+/**
+ * The signed-in user's mail in SQLite: everything the delta brings, a summary per thread for the lists, the people the
+ * user exchanged mail with, and drafts. Used on the phone and on the desktop.
+ */
+export class SqliteMailStore implements MailStore {
+  /** Set once the copy is being closed: pages that arrive later are refused. */
+  private shutting = false
+  /** Writes under way or queued, which closing waits for. */
+  private readonly writing = new Set<Promise<void>>()
+  /**
+   * The last write queued. Writes run one after another: on a device each exclusive transaction may open its own
+   * connection without a busy timeout, so a second write while one is open would fail with "database is locked".
+   */
+  private queue: Promise<void> = Promise.resolve()
+  /** Collected by {@link apply}, handed out by {@link takeArrivals}. */
+  private arrivals: Arrival[] = []
+  /** Set while the copy must sync from the start (see resyncFromStart); kept in the database too, so it holds after a restart. */
+  private resyncing: boolean
+  /** Counts the resyncs asked for, so one asked for while a pull from the start is finishing is not lost. */
+  private resyncsAsked = 0
+  /** Which resync the pull under way began from the start for, if it did; only then may its pages move the cursor. */
+  private pullFromStartFor: number | null = null
+
+  private constructor(
+    private readonly sql: Sql,
+    resyncing: boolean,
+  ) {
+    this.resyncing = resyncing
+  }
+
+  static async open(sql: Sql): Promise<SqliteMailStore> {
+    await sql.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)')
+    const version = await sql.first<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['schema'])
+    if (version === null || Number(version.value) !== SCHEMA_VERSION) {
+      await rebuild(sql)
+    }
+    const resync = await sql.first<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['resync'])
+    return new SqliteMailStore(sql, resync !== null)
+  }
+
+  /** Refuses further writes and resolves once the ones under way are in, so the database can be closed. */
+  async shut(): Promise<void> {
+    this.shutting = true
+    await Promise.allSettled([...this.writing])
+  }
+
+  async close(): Promise<void> {
+    await this.shut()
+    await this.sql.close()
+  }
+
+  /**
+   * Makes the next pull fetch everything again, so the copy is put right where it may differ from the server (a
+   * change that could not be put back after the server refused it).
+   */
+  resyncFromStart(): Promise<void> {
+    return this.write(async () => {
+      // A pull already under way keeps the cursor it began from: its later pages are stored, but they no longer move
+      // the cursor, so the next pull still begins from the start.
+      this.resyncing = true
+      this.resyncsAsked += 1
+      await this.sql.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['resync', '1'])
+    })
+  }
+
+  /** Where the next pull begins. The sync engine reads it once per pull, which is how a resync knows its pull began. */
+  async cursor(): Promise<number> {
+    if (this.resyncing) {
+      this.pullFromStartFor = this.resyncsAsked
+      return 0
+    }
+    const row = await this.sql.first<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['cursor'])
+    return row === null ? 0 : Number(row.value)
+  }
+
+  apply(page: ChangePage): Promise<void> {
+    return this.write(() => this.store(page))
+  }
+
+  /**
+   * Every write goes through here: one at a time, refused once the copy is closing, and waited for when it closes. A
+   * task must not call write() itself: it would wait behind its own turn forever.
+   */
+  private async write<T>(task: () => Promise<T>): Promise<T> {
+    if (this.shutting) {
+      throw new CopyClosingError()
+    }
+    const writing = this.queue.then(task)
+    const settled = writing.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.queue = settled
+    this.writing.add(settled)
+    try {
+      return await writing
+    } finally {
+      this.writing.delete(settled)
+    }
+  }
+
+  private async store(page: ChangePage): Promise<void> {
+    let finished: number | null = null
+    const arrivals: Arrival[] = []
+    await this.sql.transaction(async (tx) => {
+      const affected = new Set<string>()
+
+      for (const deleted of page.deleted) {
+        switch (deleted.type) {
+          case 'mailAccount':
+            await deleteAccount(tx, deleted.id)
+            break
+          case 'folder':
+            for (const threadId of await threadsInFolder(tx, deleted.id)) {
+              affected.add(threadId)
+            }
+            await tx.run('DELETE FROM message_folders WHERE folder_id = ?', [deleted.id])
+            await tx.run('DELETE FROM folders WHERE id = ?', [deleted.id])
+            break
+          case 'thread':
+            await tx.run('DELETE FROM threads WHERE id = ?', [deleted.id])
+            affected.add(deleted.id)
+            break
+          case 'message': {
+            const row = await tx.first<{ thread_id: string }>('SELECT thread_id FROM messages WHERE id = ?', [deleted.id])
+            if (row !== null) {
+              affected.add(row.thread_id)
+              await tx.run('DELETE FROM message_folders WHERE message_id = ?', [deleted.id])
+              await tx.run('DELETE FROM messages WHERE id = ?', [deleted.id])
+            }
+            break
+          }
+          case 'outgoingMessage':
+            await tx.run('DELETE FROM outgoing WHERE id = ?', [deleted.id])
+            break
+          case 'signature':
+            await tx.run('DELETE FROM signatures WHERE id = ?', [deleted.id])
+            break
+          case 'draft': {
+            const local = await readDraft(tx, deleted.id)
+            if (local !== null) {
+              const kept = deletedDraft(local)
+              await (kept === null ? tx.run('DELETE FROM drafts WHERE id = ?', [deleted.id]) : writeDraft(tx, kept))
+            }
+            break
+          }
+        }
+      }
+
+      for (const account of page.mailAccounts) {
+        await tx.run('INSERT OR REPLACE INTO mail_accounts (id, json) VALUES (?, ?)', [account.id, JSON.stringify(account)])
+      }
+      for (const folder of page.folders) {
+        const previous = await tx.first<{ role: string }>('SELECT role FROM folders WHERE id = ?', [folder.id])
+        await tx.run('INSERT OR REPLACE INTO folders (id, mail_account_id, role, json) VALUES (?, ?, ?, ?)', [folder.id, folder.mailAccountId, folder.role, JSON.stringify(folder)])
+        if (previous !== null && previous.role !== folder.role) {
+          for (const threadId of await threadsInFolder(tx, folder.id)) {
+            affected.add(threadId)
+          }
+        }
+      }
+      for (const signature of page.signatures) {
+        await tx.run('INSERT OR REPLACE INTO signatures (id, json) VALUES (?, ?)', [signature.id, JSON.stringify(signature)])
+      }
+      for (const thread of page.threads) {
+        await tx.run('INSERT OR REPLACE INTO threads (id, mail_account_id, json) VALUES (?, ?, ?)', [thread.id, thread.mailAccountId, JSON.stringify(thread)])
+        affected.add(thread.id)
+      }
+      const inboxFolders = await inboxFolderIds(tx)
+      for (const message of page.messages) {
+        const row = await tx.first<JsonRow>('SELECT json FROM messages WHERE id = ?', [message.id])
+        const previous = row === null ? null : parse<SyncedMessage>(row)
+        if (previous !== null && previous.threadId !== message.threadId) {
+          affected.add(previous.threadId)
+        }
+        await writeMessage(tx, message)
+        affected.add(message.threadId)
+        if (previous === null) {
+          await rememberContacts(tx, message)
+        }
+        const arrival = arrivalOf(previous, message, inboxFolders)
+        if (arrival !== null) {
+          arrivals.push(arrival)
+        }
+      }
+      for (const outgoing of page.outgoingMessages) {
+        await tx.run('INSERT OR REPLACE INTO outgoing (id, mail_account_id, json) VALUES (?, ?, ?)', [outgoing.id, outgoing.mailAccountId, JSON.stringify(outgoing)])
+      }
+      for (const draft of page.drafts) {
+        const next = syncedDraft(await readDraft(tx, draft.id), draft)
+        if (next !== null) {
+          await writeDraft(tx, next)
+        }
+      }
+
+      for (const threadId of affected) {
+        await refreshConversation(tx, threadId, inboxFolders)
+      }
+      if (!this.resyncing) {
+        await tx.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['cursor', String(page.cursor)])
+      } else if (this.pullFromStartFor === this.resyncsAsked) {
+        await tx.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['cursor', String(page.cursor)])
+        await tx.run('DELETE FROM meta WHERE key = ?', ['resync'])
+        finished = this.resyncsAsked
+      }
+    })
+    this.arrivals.push(...arrivals)
+    // A resync asked for while this page was being stored still stands: the next pull begins from the start again.
+    if (finished !== null && finished === this.resyncsAsked) {
+      this.resyncing = false
+      this.pullFromStartFor = null
+    }
+  }
+
+  applyAction(messageIds: string[], action: MessageAction, folderId?: string, fromFolderId?: string): Promise<AppliedAction> {
+    return this.write(async () => {
+      let applied: AppliedAction = { before: [], after: [] }
+      await this.sql.transaction(async (tx) => {
+        const folders = (await tx.all<JsonRow>('SELECT json FROM folders')).map((row) => parse<SyncedFolder>(row))
+        const accounts = (await tx.all<JsonRow>('SELECT json FROM mail_accounts')).map((row) => parse<SyncedMailAccount>(row))
+        const before: SyncedMessage[] = []
+        for (const id of messageIds) {
+          const row = await tx.first<JsonRow>('SELECT json FROM messages WHERE id = ?', [id])
+          if (row !== null) {
+            before.push(parse<SyncedMessage>(row))
+          }
+        }
+        const after = actionResult(before, action, { folders, accounts, folderId, fromFolderId })
+        await rewrite(tx, after)
+        applied = { before, after }
+      })
+      return applied
+    })
+  }
+
+  revertAction(applied: AppliedAction): Promise<void> {
+    return this.write(() =>
+      this.sql.transaction(async (tx) => {
+        const restore: SyncedMessage[] = []
+        for (const [index, previous] of applied.before.entries()) {
+          const row = await tx.first<JsonRow>('SELECT json FROM messages WHERE id = ?', [previous.id])
+          if (row !== null && row.json === JSON.stringify(applied.after[index])) {
+            restore.push(previous)
+          }
+        }
+        await rewrite(tx, restore)
+      }),
+    )
+  }
+
+  takeArrivals(): Arrival[] {
+    const taken = this.arrivals
+    this.arrivals = []
+    return taken
+  }
+
+  async mailAccounts(): Promise<SyncedMailAccount[]> {
+    const accounts = (await this.sql.all<JsonRow>('SELECT json FROM mail_accounts')).map((row) => parse<SyncedMailAccount>(row))
+    return accounts.sort((a, b) => a.displayName.localeCompare(b.displayName) || a.emailAddress.localeCompare(b.emailAddress))
+  }
+
+  async folders(): Promise<SyncedFolder[]> {
+    return (await this.sql.all<JsonRow>('SELECT json FROM folders')).map((row) => parse<SyncedFolder>(row))
+  }
+
+  async signatures(): Promise<SyncedSignature[]> {
+    const signatures = (await this.sql.all<JsonRow>('SELECT json FROM signatures')).map((row) => parse<SyncedSignature>(row))
+    return signatures.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+  }
+
+  async inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]> {
+    const rows =
+      mailAccountId === null
+        ? await this.sql.all<JsonRow>('SELECT json FROM conversations WHERE inbox = 1 ORDER BY last_message_at DESC, thread_id DESC LIMIT ?', [limit])
+        : await this.sql.all<JsonRow>('SELECT json FROM conversations WHERE mail_account_id = ? AND inbox = 1 ORDER BY last_message_at DESC, thread_id DESC LIMIT ?', [
+            mailAccountId,
+            limit,
+          ])
+    return rows.map((row) => parse<ConversationSummary>(row))
+  }
+
+  async inboxThreadIds(mailAccountId: string | null, matches: (conversation: ConversationSummary) => boolean): Promise<string[]> {
+    const rows =
+      mailAccountId === null
+        ? await this.sql.all<JsonRow>('SELECT json FROM conversations WHERE inbox = 1 ORDER BY last_message_at DESC, thread_id DESC')
+        : await this.sql.all<JsonRow>('SELECT json FROM conversations WHERE mail_account_id = ? AND inbox = 1 ORDER BY last_message_at DESC, thread_id DESC', [mailAccountId])
+    return rows.map((row) => parse<ConversationSummary>(row)).filter(matches).map((conversation) => conversation.threadId)
+  }
+
+  async describeThreads(mailAccountId: string | null, threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }> {
+    const found = new Map<string, ConversationSummary>()
+    for (const chunk of chunks(threadIds)) {
+      for (const row of await this.sql.all<JsonRow>(`SELECT json FROM conversations WHERE thread_id IN (${placeholders(chunk)})`, chunk)) {
+        const conversation = parse<ConversationSummary>(row)
+        found.set(conversation.threadId, conversation)
+      }
+    }
+    const present: string[] = []
+    const accounts = new Set<string>()
+    const senders = new Set<string>()
+    for (const threadId of threadIds) {
+      const conversation = found.get(threadId)
+      if (conversation === undefined || !conversation.inbox || (mailAccountId !== null && conversation.mailAccountId !== mailAccountId)) {
+        continue
+      }
+      present.push(threadId)
+      accounts.add(conversation.mailAccountId)
+      for (const sender of conversation.senders) {
+        senders.add(sender.address.toLowerCase())
+      }
+    }
+    return { present, accounts: [...accounts], senders: [...senders] }
+  }
+
+  async messageIdsOfThreads(threadIds: string[]): Promise<string[]> {
+    return [...(await this.messagesByThread(threadIds)).values()].flat()
+  }
+
+  async messagesByThread(threadIds: string[]): Promise<Map<string, string[]>> {
+    const byThread = new Map<string, string[]>(threadIds.map((threadId) => [threadId, []]))
+    for (const chunk of chunks(threadIds)) {
+      for (const row of await this.sql.all<{ id: string; thread_id: string }>(`SELECT id, thread_id FROM messages WHERE thread_id IN (${placeholders(chunk)}) ORDER BY id`, chunk)) {
+        byThread.get(row.thread_id)?.push(row.id)
+      }
+    }
+    return byThread
+  }
+
+  async unreadInboxCounts(): Promise<Map<string, number>> {
+    const rows = await this.sql.all<{ id: string; count: number }>(
+      'SELECT a.id, COUNT(c.thread_id) AS count FROM mail_accounts a LEFT JOIN conversations c ON c.mail_account_id = a.id AND c.inbox = 1 AND c.unread = 1 GROUP BY a.id',
+    )
+    return new Map(rows.map((row) => [row.id, Number(row.count)]))
+  }
+
+  async outbox(): Promise<SyncedOutgoingMessage[]> {
+    const all = (await this.sql.all<JsonRow>('SELECT json FROM outgoing')).map((row) => parse<SyncedOutgoingMessage>(row))
+    return all.filter((message) => message.status !== 'sent' && message.status !== 'cancelled').sort((a, b) => b.sendAt.localeCompare(a.sendAt))
+  }
+
+  async outgoing(id: string): Promise<SyncedOutgoingMessage | null> {
+    const row = await this.sql.first<JsonRow>('SELECT json FROM outgoing WHERE id = ?', [id])
+    return row === null ? null : parse<SyncedOutgoingMessage>(row)
+  }
+
+  async suggestContacts(query: string, limit: number): Promise<Contact[]> {
+    const result: Contact[] = []
+    for (const row of await this.sql.all<JsonRow>('SELECT json FROM contacts ORDER BY last_seen DESC, key DESC')) {
+      if (result.length >= limit) {
+        break
+      }
+      const contact = parse<Contact>(row)
+      if (contactMatches(contact, query)) {
+        result.push(contact)
+      }
+    }
+    return result
+  }
+
+  saveDraft(draft: Draft): Promise<void> {
+    return this.write(() => writeDraft(this.sql, draft))
+  }
+
+  async drafts(): Promise<Draft[]> {
+    return (await this.sql.all<JsonRow>('SELECT json FROM drafts ORDER BY updated_at DESC, id DESC')).map((row) => parse<Draft>(row))
+  }
+
+  draft(id: string): Promise<Draft | null> {
+    return readDraft(this.sql, id)
+  }
+
+  deleteDraft(id: string): Promise<void> {
+    return this.write(() => this.sql.run('DELETE FROM drafts WHERE id = ?', [id]))
+  }
+
+  async thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null> {
+    const row = await this.sql.first<JsonRow>('SELECT json FROM threads WHERE id = ?', [threadId])
+    if (row === null) {
+      return null
+    }
+    const messages = (await this.sql.all<JsonRow>('SELECT json FROM messages WHERE thread_id = ?', [threadId])).map((m) => parse<SyncedMessage>(m))
+    messages.sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt))
+    return { thread: parse<SyncedThread>(row), messages }
+  }
+}
+
+/** Drops every table and builds the current shape in one go, keeping the drafts that exist only on this device. */
+async function rebuild(sql: Sql): Promise<void> {
+  await sql.transaction(async (tx) => {
+    const hasDrafts = (await tx.first('SELECT name FROM sqlite_master WHERE type = ? AND name = ?', ['table', 'drafts'])) !== null
+    const kept = hasDrafts ? (await tx.all<JsonRow>('SELECT json FROM drafts')).map((row) => parse<Draft>(row)).filter(draftOnlyHere) : []
+    for (const table of TABLES) {
+      await tx.exec(`DROP TABLE IF EXISTS ${table}`)
+    }
+    await tx.exec(SCHEMA)
+    await tx.run('INSERT INTO meta (key, value) VALUES (?, ?)', ['schema', String(SCHEMA_VERSION)])
+    for (const draft of kept) {
+      // The server version they built on may be gone with the old copy; uploading starts from scratch.
+      await writeDraft(tx, { ...draft, version: 0, remoteVersion: null })
+    }
+  })
+}
+
+/** SQLite takes at most 999 parameters in older builds; lists are queried in parts below that. */
+const CHUNK = 500
+
+function chunks(values: string[]): string[][] {
+  const parts: string[][] = []
+  for (let start = 0; start < values.length; start += CHUNK) {
+    parts.push(values.slice(start, start + CHUNK))
+  }
+  return parts
+}
+
+function placeholders(values: SqlValue[]): string {
+  return values.map(() => '?').join(', ')
+}
+
+async function writeMessage(tx: Sql, message: SyncedMessage): Promise<void> {
+  await tx.run('INSERT OR REPLACE INTO messages (id, thread_id, mail_account_id, json) VALUES (?, ?, ?, ?)', [message.id, message.threadId, message.mailAccountId, JSON.stringify(message)])
+  await tx.run('DELETE FROM message_folders WHERE message_id = ?', [message.id])
+  for (const folderId of new Set(message.folderIds)) {
+    await tx.run('INSERT INTO message_folders (message_id, folder_id) VALUES (?, ?)', [message.id, folderId])
+  }
+}
+
+async function rewrite(tx: Sql, messages: SyncedMessage[]): Promise<void> {
+  const affected = new Set<string>()
+  for (const message of messages) {
+    await writeMessage(tx, message)
+    affected.add(message.threadId)
+  }
+  const inboxFolders = await inboxFolderIds(tx)
+  for (const threadId of affected) {
+    await refreshConversation(tx, threadId, inboxFolders)
+  }
+}
+
+async function readDraft(sql: Sql, id: string): Promise<Draft | null> {
+  const row = await sql.first<JsonRow>('SELECT json FROM drafts WHERE id = ?', [id])
+  return row === null ? null : parse<Draft>(row)
+}
+
+async function writeDraft(sql: Sql, draft: Draft): Promise<void> {
+  await sql.run('INSERT OR REPLACE INTO drafts (id, mail_account_id, updated_at, json) VALUES (?, ?, ?, ?)', [draft.id, draft.mailAccountId, draft.updatedAt, JSON.stringify(draft)])
+}
+
+async function rememberContacts(tx: Sql, message: SyncedMessage): Promise<void> {
+  const at = Date.parse(message.receivedAt)
+  for (const { key, person } of peopleOn(message)) {
+    const row = await tx.first<JsonRow>('SELECT json FROM contacts WHERE key = ?', [key])
+    const contact = mergeContact(row === null ? null : parse<Contact>(row), key, person, at)
+    await tx.run('INSERT OR REPLACE INTO contacts (key, last_seen, json) VALUES (?, ?, ?)', [key, contact.lastSeen, JSON.stringify(contact)])
+  }
+}
+
+async function threadsInFolder(tx: Sql, folderId: string): Promise<string[]> {
+  const rows = await tx.all<{ thread_id: string }>('SELECT DISTINCT m.thread_id FROM messages m JOIN message_folders f ON f.message_id = m.id WHERE f.folder_id = ?', [folderId])
+  return rows.map((row) => row.thread_id)
+}
+
+async function inboxFolderIds(tx: Sql): Promise<Set<string>> {
+  return new Set((await tx.all<{ id: string }>("SELECT id FROM folders WHERE role = 'inbox'")).map((row) => row.id))
+}
+
+async function deleteAccount(tx: Sql, accountId: string): Promise<void> {
+  // Drafts outlive the account they were written from; they keep their text and need a new one to send.
+  for (const row of await tx.all<JsonRow>('SELECT json FROM drafts WHERE mail_account_id = ?', [accountId])) {
+    await writeDraft(tx, { ...parse<Draft>(row), mailAccountId: null })
+  }
+  await tx.run('DELETE FROM message_folders WHERE message_id IN (SELECT id FROM messages WHERE mail_account_id = ?)', [accountId])
+  for (const table of ['messages', 'threads', 'folders', 'conversations', 'outgoing']) {
+    await tx.run(`DELETE FROM ${table} WHERE mail_account_id = ?`, [accountId])
+  }
+  await tx.run('DELETE FROM mail_accounts WHERE id = ?', [accountId])
+}
+
+async function refreshConversation(tx: Sql, threadId: string, inboxFolders: Set<string>): Promise<void> {
+  const thread = await tx.first<JsonRow>('SELECT json FROM threads WHERE id = ?', [threadId])
+  const messages = thread === null ? [] : (await tx.all<JsonRow>('SELECT json FROM messages WHERE thread_id = ?', [threadId])).map((row) => parse<SyncedMessage>(row))
+  const summary = thread === null ? null : summarizeConversation(parse<SyncedThread>(thread), messages, inboxFolders)
+  if (summary === null) {
+    await tx.run('DELETE FROM conversations WHERE thread_id = ?', [threadId])
+    return
+  }
+  await tx.run('INSERT OR REPLACE INTO conversations (thread_id, mail_account_id, inbox, unread, last_message_at, json) VALUES (?, ?, ?, ?, ?, ?)', [
+    threadId,
+    summary.mailAccountId,
+    summary.inbox ? 1 : 0,
+    summary.unreadCount > 0 ? 1 : 0,
+    summary.lastMessageAt,
+    JSON.stringify(summary),
+  ])
+}
