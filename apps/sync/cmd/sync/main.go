@@ -15,7 +15,10 @@ import (
 
 	"tresso/sync/internal/api"
 	"tresso/sync/internal/config"
+	"tresso/sync/internal/imapsync"
 	"tresso/sync/internal/lease"
+	"tresso/sync/internal/netguard"
+	"tresso/sync/internal/storage"
 )
 
 func main() {
@@ -37,6 +40,29 @@ func run(logger *slog.Logger) error {
 	defer stop()
 
 	client := api.New(ctx, cfg.APIURL, cfg.TokenURL, cfg.ClientID, cfg.ClientSecret)
+
+	store, err := storage.NewS3(cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3Region)
+	if err != nil {
+		return fmt.Errorf("object storage: %w", err)
+	}
+	if err := store.EnsureBucket(ctx); err != nil {
+		return fmt.Errorf("object storage: %w", err)
+	}
+	if cfg.AllowUnsafeServers {
+		logger.Warn("MAIL_ALLOW_UNSAFE_SERVERS is on: private mail server addresses are allowed (local testing only)")
+	}
+
+	imapSyncer := imapsync.New(client, store, netguard.New(cfg.AllowUnsafeServers), cfg.WorkerID, imapsync.DefaultOptions(), logger.With("worker", cfg.WorkerID))
+	syncerFor := func(provider string) (lease.Syncer, error) {
+		switch provider {
+		case "imap":
+			return imapSyncer, nil
+		default:
+			// Gmail and Microsoft Graph follow in phase 1.6.
+			return nil, fmt.Errorf("%w: %s", lease.ErrUnsupportedProvider, provider)
+		}
+	}
+
 	manager := lease.NewManager(client, syncerFor, cfg.WorkerID, cfg.Capacity, cfg.HeartbeatInterval, logger.With("worker", cfg.WorkerID))
 
 	server := &http.Server{Addr: cfg.HealthAddr, Handler: healthHandler(manager), ReadHeaderTimeout: 5 * time.Second}
@@ -53,12 +79,6 @@ func run(logger *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdownCtx)
-}
-
-// syncerFor returns the provider implementation. IMAP, Gmail and Microsoft Graph syncers are built in phase 1;
-// until then accounts are leased but not synced, and the manager logs why.
-func syncerFor(provider string) (lease.Syncer, error) {
-	return nil, fmt.Errorf("%w: %s", lease.ErrUnsupportedProvider, provider)
 }
 
 func healthHandler(manager *lease.Manager) http.Handler {
