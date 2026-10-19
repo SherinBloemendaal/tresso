@@ -21,6 +21,11 @@ x-api-env: &api-env
   MERCURE_PUBLISHER_JWT_KEY: dev-mercure-publisher-key-change-me-0123456789
   MERCURE_SUBSCRIBER_JWT_KEY: dev-mercure-subscriber-key-change-me-012345678
   MERCURE_CORS_ORIGINS: http://localhost:5173 tauri://localhost http://tauri.localhost
+  # Web Push and notification sender; development keys only.
+  WEB_PUSH_PUBLIC_KEY: BJZGnmWrmrx-tp6kSVq5BcoG7ls4fec1GtNApoq5VwurMGOWVJWC6uvYl_iKw7XaBZGqwxxMwR7-rz2_QYdGo_k
+  WEB_PUSH_PRIVATE_KEY: ebvbvaK9hI8Y0jN1-Vlokj2DY82hSiZiwM5uTIgNkMY
+  WEB_PUSH_SUBJECT: mailto:dev@localhost
+  NOTIFICATIONS_FROM: Tresso <notifications@localhost>
 
 services:
   api:
@@ -54,7 +59,7 @@ services:
       context: .
       dockerfile: docker/api/Dockerfile
       target: dev
-    command: ["php", "bin/console", "messenger:consume", "async", "search", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    command: ["php", "bin/console", "messenger:consume", "async", "search", "push", "scheduler_notifications", "--time-limit=3600", "--memory-limit=256M", "-vv"]
     environment: *api-env
     volumes:
       - ./apps/api:/app
