@@ -128,9 +128,22 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   renewed by heartbeat, so a crashed worker's accounts move to another worker automatically.
 - **Change detection:** IMAP `IDLE` + `CONDSTORE`/`QRESYNC` (MODSEQ based deltas), Gmail `history.list` with
   Pub/Sub push, Microsoft Graph delta queries with change notifications.
-- **Ingest:** raw MIME goes directly to object storage (content-addressed by SHA-256, so duplicates across
-  folders/accounts are stored once). Parsed metadata (headers, snippet, flags, folder, thread keys, attachment
-  manifest) is sent to `POST /internal/sync/ingest` in batches.
+- **Ingest:** raw MIME goes directly to object storage (`raw/<sha256[0:2]>/<sha256>`, content-addressed, so
+  duplicates are stored once); attachments too (`attachments/<sha256[0:2]>/<sha256>`). Parsed metadata goes to the
+  ingest protocol (scope `sync:ingest`, only for the leasing worker, every call safe to repeat):
+
+  | Call | Purpose |
+  |---|---|
+  | `POST /internal/sync/accounts/{id}/folders` | The complete folder list. Answers each folder's stored cursor; a changed UIDVALIDITY resets the folder. Folders missing from the list are deleted. |
+  | `POST /internal/sync/accounts/{id}/messages` | Up to 200 new messages for one folder plus the folder's cursor after the batch. A known (folder, uid) only refreshes flags; a message already stored (same Message-ID, else same raw content) only gains a location. |
+  | `POST /internal/sync/accounts/{id}/changes` | Flag changes and vanished uids for one folder. A message that is in no folder anymore is deleted. |
+  | `POST /internal/sync/accounts/{id}/status` | `active`, `auth_failed` or `error` with a short detail the user sees. |
+
+  The cursor is opaque to the API: the worker decides what it holds (UIDNEXT, HIGHESTMODSEQ, backfill position).
+- **Threading** (API side, at ingest): first by headers in both directions (messages this one refers to through
+  In-Reply-To/References, and stored messages that refer to this one), merging threads that turn out to be one
+  conversation; without any references, a thread from the last 14 days with the same normalized subject that shares
+  a participant; otherwise a new thread.
 - **Backfill:** newest first, so the inbox is usable within seconds while history fills in behind.
 - **Outbound:** flag/move/delete/send commands are queued per account by the API and executed by the leasing
   worker, then confirmed back.
