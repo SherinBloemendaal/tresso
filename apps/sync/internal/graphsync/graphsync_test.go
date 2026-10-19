@@ -1,0 +1,692 @@
+package graphsync
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"tresso/sync/internal/api"
+	"tresso/sync/internal/fakeapi"
+	"tresso/sync/internal/providerauth"
+	"tresso/sync/internal/providersend"
+	"tresso/sync/internal/storage"
+)
+
+func testOptions(baseURL string) Options {
+	opts := DefaultOptions()
+	opts.Client.BaseURL = baseURL
+	opts.Client.HTTP.MinBackoff = time.Millisecond
+	opts.Client.HTTP.MaxBackoff = 5 * time.Millisecond
+	opts.Client.HTTP.MaxAttempts = 3
+	opts.Client.HTTP.UnitsPerSecond = 0 // the limiter has its own tests; here it would only slow the tests down
+	opts.BackfillPageSize = 2
+	opts.BackfillPagesPerPass = 10
+	opts.MinBackoff = time.Millisecond
+	opts.MaxBackoff = 5 * time.Millisecond
+	return opts
+}
+
+type harness struct {
+	graph   *fakeGraph
+	api     *fakeapi.API
+	syncer  *Syncer
+	session *session
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	h := &harness{graph: newFakeGraph(t), api: fakeapi.New()}
+	h.graph.standardTree()
+	h.syncer = New(h.api, storage.NewMemory(), "w1", testOptions(h.graph.base), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return h
+}
+
+// start opens a session and runs its first step over every folder, as Run does.
+func (h *harness) start(t *testing.T) {
+	t.Helper()
+	h.session = h.syncer.newSession(api.Account{ID: "acc"}, h.syncer.logger)
+	if err := h.session.refreshFolders(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.session.step(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pollInbox runs a step in which only the inbox is due.
+func (h *harness) pollInbox(t *testing.T) {
+	t.Helper()
+	for _, run := range h.session.runs {
+		run.nextPoll = time.Now().Add(time.Hour)
+		if run.folder.Role == "inbox" {
+			run.nextPoll = time.Now().Add(-time.Second)
+		}
+	}
+	if err := h.session.step(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (h *harness) cursor(t *testing.T, folder string) Cursor {
+	t.Helper()
+	raw := h.api.Cursor(folder)
+	c, err := DecodeCursor(&raw)
+	if err != nil || c == nil {
+		t.Fatalf("%s cursor %q: %v", folder, raw, err)
+	}
+	return *c
+}
+
+func raw(id string) []byte { return fakeapi.RawMessage(id+"@example.test", "Message "+id) }
+
+func expectUIDs(t *testing.T, h *harness, folder string, want ...string) {
+	t.Helper()
+	if want == nil {
+		want = []string{}
+	}
+	if got := h.api.UIDs(folder); !slices.Equal(got, want) {
+		t.Errorf("%s holds %v, want %v", folder, got, want)
+	}
+}
+
+// synced is a mailbox with mail in the inbox and a nested folder, synced once.
+func synced(t *testing.T) *harness {
+	h := newHarness(t)
+	h.graph.add("m1", "f-inbox", 100, raw("m1"))
+	h.graph.add("m2", "f-inbox", 200, raw("m2"))
+	h.graph.add("m3", "f-inbox", 300, raw("m3"))
+	h.graph.add("p1", "f-proj", 50, raw("p1"))
+	h.graph.markRead("m2")
+	h.start(t)
+	return h
+}
+
+func TestFolderTreeWithPathsAndRoles(t *testing.T) {
+	h := newHarness(t)
+	h.start(t)
+
+	var got []string
+	for _, f := range h.api.ReportedFolders() {
+		got = append(got, f.RemoteName+"="+f.DisplayName+"/"+f.Role)
+		if f.UIDValidity != nil {
+			t.Errorf("folder %s has a uidValidity", f.RemoteName)
+		}
+	}
+	want := []string{
+		"f-inbox=Inbox/inbox", "f-sent=Sent Items/sent", "f-proj=Inbox/Projects/custom", "f-acme=Inbox/Projects/Acme/custom",
+		"f-drafts=Drafts/drafts", "f-trash=Deleted Items/trash", "f-junk=Junk Email/spam", "f-notes=Notes/custom",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("folders = %v\nwant      %v", got, want)
+	}
+}
+
+func TestInitialDeltaThenNewestFirstBackfill(t *testing.T) {
+	h := synced(t)
+
+	expectUIDs(t, h, "f-inbox", "m1", "m2", "m3")
+	expectUIDs(t, h, "f-proj", "p1")
+	if got := h.api.Ingested("f-inbox"); !slices.Equal(got, []string{"m3", "m2", "m1"}) {
+		t.Errorf("inbox ingested in order %v, want newest first", got)
+	}
+	if f, _ := h.api.Flags("f-inbox", "m2"); !f.Seen || f.Flagged || f.Answered {
+		t.Errorf("m2 flags = %+v", f)
+	}
+	if f, _ := h.api.Flags("f-inbox", "m1"); f.Seen {
+		t.Errorf("m1 flags = %+v", f)
+	}
+	for _, id := range []string{"m1", "m2", "m3", "p1"} {
+		if got := h.graph.gets(id); got != 1 {
+			t.Errorf("%s downloaded %d times", id, got)
+		}
+	}
+	c := h.cursor(t, "f-inbox")
+	if !c.BackfillDone || c.BackfillBefore != "" || !strings.HasPrefix(c.DeltaLink, "/me/mailFolders/f-inbox/messages/delta?$deltatoken=") {
+		t.Errorf("inbox cursor = %+v; the delta link is stored relative to the base URL", c)
+	}
+}
+
+func TestBackfillResumesFromTheStoredPage(t *testing.T) {
+	h := newHarness(t)
+	for i, id := range []string{"m1", "m2", "m3", "m4", "m5"} {
+		h.graph.add(id, "f-inbox", 100*(i+1), raw(id))
+	}
+	h.syncer.opts.BackfillPagesPerPass = 1
+	h.start(t)
+
+	c := h.cursor(t, "f-inbox")
+	if c.BackfillDone || c.BackfillBefore != "1970-01-01T00:06:40Z" {
+		t.Fatalf("cursor after one page = %+v", c)
+	}
+	expectUIDs(t, h, "f-inbox", "m4", "m5")
+
+	// A new session (another worker) continues where the stored cursor points.
+	h.start(t)
+	expectUIDs(t, h, "f-inbox", "m2", "m3", "m4", "m5")
+}
+
+func TestDeltaRoundAppliesNewChangedMovedAndDeleted(t *testing.T) {
+	h := synced(t)
+	g := h.graph
+	g.add("m4", "f-inbox", 400, raw("m4")) // new
+	g.markRead("m1")                       // changed
+	g.move("m2", "f-proj")                 // moved, same immutable id
+	g.remove("m3", false)                  // deleted
+
+	h.pollInbox(t)
+
+	expectUIDs(t, h, "f-inbox", "m1", "m4")
+	expectUIDs(t, h, "f-proj", "m2", "p1")
+	if f, _ := h.api.Flags("f-inbox", "m1"); !f.Seen {
+		t.Error("m1 not marked read")
+	}
+	if f, _ := h.api.Flags("f-proj", "m2"); !f.Seen {
+		t.Error("m2 lost its flags on the move")
+	}
+	// The move was linked to the new folder before it left the inbox: only m3 was deleted.
+	deleted := h.api.DeletedKeys()
+	if len(deleted) != 1 || !strings.Contains(deleted[0], "m3@") {
+		t.Errorf("deleted = %v, want only m3", deleted)
+	}
+	if got := g.gets("m1"); got != 1 {
+		t.Errorf("m1 downloaded %d times; a flag change needs no MIME", got)
+	}
+	if !strings.HasSuffix(h.cursor(t, "f-inbox").DeltaLink, "$deltatoken="+strconv.Itoa(g.seq)) {
+		t.Errorf("inbox delta link not advanced: %s", h.cursor(t, "f-inbox").DeltaLink)
+	}
+}
+
+func TestQuietRoundStoresNothing(t *testing.T) {
+	h := synced(t)
+	before := h.api.Cursor("f-inbox")
+
+	h.pollInbox(t)
+
+	if h.api.Cursor("f-inbox") != before {
+		t.Error("a round without changes rewrote the cursor")
+	}
+}
+
+func TestExpiredDeltaTokenResyncsTheFolder(t *testing.T) {
+	h := synced(t)
+	g := h.graph
+	g.remove("m1", true)
+	g.mu.Lock()
+	g.messages["m3"].flagged = true
+	g.mu.Unlock()
+	g.expireDeltaTokens()
+
+	h.pollInbox(t)
+
+	expectUIDs(t, h, "f-inbox", "m2", "m3")
+	if f, _ := h.api.Flags("f-inbox", "m3"); !f.Flagged {
+		t.Error("m3 flags not refreshed by the resync")
+	}
+	if deleted := h.api.DeletedKeys(); len(deleted) != 1 || !strings.Contains(deleted[0], "m1@") {
+		t.Errorf("deleted = %v, want m1", deleted)
+	}
+	if got := g.gets("m2"); got != 1 {
+		t.Errorf("m2 downloaded %d times during the resync", got)
+	}
+
+	// The new delta link works.
+	g.add("m5", "f-inbox", 500, raw("m5"))
+	h.pollInbox(t)
+	expectUIDs(t, h, "f-inbox", "m2", "m3", "m5")
+}
+
+func TestThrottlingHonoursRetryAfter(t *testing.T) {
+	h := newHarness(t)
+	h.graph.throttle, h.graph.retryAfter = 1, "1"
+	started := time.Now()
+
+	h.start(t)
+
+	if len(h.graph.throttledAt) != 1 {
+		t.Fatalf("throttled %d times", len(h.graph.throttledAt))
+	}
+	if elapsed := time.Since(started); elapsed < time.Second {
+		t.Errorf("retried after %v, want at least the 1 s Retry-After", elapsed)
+	}
+	if len(h.api.ReportedFolders()) == 0 {
+		t.Error("folders not synced after the throttled request")
+	}
+}
+
+func TestRefusedTokenIsRenewedOnce(t *testing.T) {
+	h := newHarness(t)
+	h.graph.token = "token-2"
+
+	h.start(t)
+
+	if h.api.Refreshes != 1 || h.graph.authRejected != 1 {
+		t.Errorf("refreshes %d, rejected %d", h.api.Refreshes, h.graph.authRejected)
+	}
+}
+
+func TestAccessDeniedReportsAuthFailure(t *testing.T) {
+	h := newHarness(t)
+	h.graph.fail(http.StatusForbidden, `{"error":{"code":"ErrorAccessDenied","message":"Access is denied."}}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.syncer.Run(ctx, api.Account{ID: "acc"}); err != nil || ctx.Err() != nil {
+		t.Fatalf("Run = %v, ctx %v; want it to end on its own", err, ctx.Err())
+	}
+	if log := h.api.StatusLog(); !strings.HasPrefix(log, api.StatusAuthFailed+": Tresso is not allowed to read this mailbox. Sign in with Microsoft again") {
+		t.Errorf("statuses = %q", log)
+	}
+}
+
+func TestCursorLimit(t *testing.T) {
+	if _, err := (Cursor{DeltaLink: "/" + strings.Repeat("x", api.MaxCursorLength)}).Encode(); err == nil {
+		t.Error("an oversized cursor must fail, not be cut")
+	}
+	encoded, err := Cursor{DeltaLink: "/me/x", BackfillBefore: "2026-10-19T10:00:00Z"}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, err := DecodeCursor(&encoded); err != nil || c == nil || c.DeltaLink != "/me/x" || c.BackfillBefore != "2026-10-19T10:00:00Z" {
+		t.Errorf("decoded %+v, %v", c, err)
+	}
+}
+
+func TestLinksOutsideTheBaseURLAreRefused(t *testing.T) {
+	c := NewClient(nil, ClientOptions{BaseURL: "https://graph.example/v1.0"})
+	if _, err := c.resolve("https://elsewhere.example/v1.0/me"); err == nil {
+		t.Error("a link to another host must be refused")
+	}
+	if got, _ := c.resolve(c.relative("https://graph.example/v1.0/me/x?a=1")); got != "https://graph.example/v1.0/me/x?a=1" {
+		t.Errorf("round trip = %q", got)
+	}
+}
+
+func sendClient(h *harness, opts ClientOptions) *Client {
+	return NewClient(providerauth.New(h.api, "acc", "w1"), opts)
+}
+
+func TestSendPostsBase64MIMEWithBcc(t *testing.T) {
+	h := newHarness(t)
+	message := []byte("From: kim@example.test\r\nTo: anna@example.test\r\nSubject: Hi\r\n\r\nHello\r\n")
+
+	if err := Send(context.Background(), sendClient(h, h.syncer.opts.Client), message, []string{"anna@example.test", "hidden@example.test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	sent := h.graph.sent
+	if len(sent) != 1 || sent[0].contentType != "text/plain" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	delivered, err := base64.StdEncoding.DecodeString(string(sent[0].body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(delivered), "Bcc: <hidden@example.test>\r\nFrom: kim@example.test\r\n") {
+		t.Errorf("delivered = %q", delivered)
+	}
+}
+
+func TestSendErrors(t *testing.T) {
+	h := newHarness(t)
+	h.graph.fail(http.StatusBadRequest, `{"error":{"code":"ErrorInvalidRecipients","message":"At least one recipient is not valid."}}`)
+	err := Send(context.Background(), sendClient(h, h.syncer.opts.Client), []byte("To: a@example.test\r\n\r\nx"), nil)
+	var sendErr *providersend.Error
+	if !errors.As(err, &sendErr) || !sendErr.Permanent || sendErr.Message != "Outlook refused the message. Outlook said: At least one recipient is not valid." {
+		t.Errorf("400: %#v", err)
+	}
+
+	opts := h.syncer.opts.Client
+	opts.HTTP.MaxAttempts = 1
+	h.graph.fail(http.StatusServiceUnavailable, `{"error":{"code":"ServiceUnavailable"}}`)
+	err = Send(context.Background(), sendClient(h, opts), []byte("To: a@example.test\r\n\r\nx"), nil)
+	if !errors.As(err, &sendErr) || sendErr.Permanent {
+		t.Errorf("503: %#v", err)
+	}
+
+	big := append([]byte("To: a@example.test\r\n\r\n"), make([]byte, maxSendBody)...)
+	err = Send(context.Background(), sendClient(h, opts), big, nil)
+	if !errors.As(err, &sendErr) || !sendErr.Permanent || len(h.graph.sent) != 0 {
+		t.Errorf("too large: %#v, sent %d", err, len(h.graph.sent))
+	}
+}
+
+func TestSentStoreFindsEarlierSends(t *testing.T) {
+	h := newHarness(t)
+	h.graph.add("s1", "f-sent", 100, raw("s1"))
+	store := OpenSent(context.Background(), sendClient(h, h.syncer.opts.Client))
+
+	if found, err := store.Contains("s1@example.test"); err != nil || !found {
+		t.Errorf("Contains = %v, %v", found, err)
+	}
+	if found, err := store.Contains("other@example.test"); err != nil || found {
+		t.Errorf("Contains(other) = %v, %v", found, err)
+	}
+	// Graph reads "+" literally in $filter: spaces must be %20.
+	last := h.graph.rawQueries[len(h.graph.rawQueries)-1]
+	if !strings.Contains(last, "$filter=internetMessageId%20eq%20%27%3Cother%40example.test%3E%27") || strings.Contains(last, "+") {
+		t.Errorf("filter encoded as %q", last)
+	}
+}
+
+func TestDeletionDuringBackfillSkipsNothing(t *testing.T) {
+	h := newHarness(t)
+	for i, id := range []string{"m1", "m2", "m3", "m4", "m5"} {
+		h.graph.add(id, "f-inbox", 100*(i+1), raw(id))
+	}
+	h.syncer.opts.BackfillPagesPerPass = 1
+	h.start(t)
+	expectUIDs(t, h, "f-inbox", "m4", "m5")
+
+	// A message on the page already done goes away; with position-based pages the next page would start one too far
+	// and m3 would never be ingested.
+	h.graph.remove("m5", false)
+	h.pollInbox(t)
+	h.pollInbox(t)
+
+	expectUIDs(t, h, "f-inbox", "m1", "m2", "m3", "m4")
+	if !h.cursor(t, "f-inbox").BackfillDone {
+		t.Error("backfill not done")
+	}
+}
+
+func TestEqualReceiveTimesAcrossAPageBoundary(t *testing.T) {
+	h := newHarness(t)
+	for _, id := range []string{"m1", "m2", "m3", "m4"} {
+		h.graph.add(id, "f-inbox", 100, raw(id))
+	}
+	h.graph.add("m5", "f-inbox", 200, raw("m5"))
+	h.syncer.opts.BackfillPagesPerPass = 1
+
+	h.start(t)
+	expectUIDs(t, h, "f-inbox", "m1", "m2", "m3", "m4", "m5")
+	h.start(t)
+	if !h.cursor(t, "f-inbox").BackfillDone {
+		t.Error("backfill not done")
+	}
+	for _, id := range []string{"m1", "m2", "m3", "m4", "m5"} {
+		if got := h.graph.gets(id); got != 1 {
+			t.Errorf("%s downloaded %d times", id, got)
+		}
+	}
+}
+
+func TestMoveIntoAFolderCreatedSinceLinksInsteadOfDeleting(t *testing.T) {
+	h := synced(t)
+	g := h.graph
+	g.mu.Lock()
+	g.folders = append(g.folders, fakeFolder{"f-new", "Receipts", ""})
+	g.mu.Unlock()
+	g.move("m1", "f-new")
+	g.move("m2", "f-new")
+
+	// Only the inbox is due and the session has not read the folder tree since the folder was created.
+	h.pollInbox(t)
+
+	expectUIDs(t, h, "f-inbox", "m3")
+	expectUIDs(t, h, "f-new", "m1", "m2")
+	if deleted := h.api.DeletedKeys(); len(deleted) != 0 {
+		t.Errorf("moved messages were deleted: %v", deleted)
+	}
+	if f, _ := h.api.Flags("f-new", "m2"); !f.Seen {
+		t.Error("m2 lost its flags on the move")
+	}
+	if c := h.cursor(t, "f-new"); !c.BackfillDone {
+		t.Errorf("new folder cursor = %+v; its mail is in, nothing to backfill", c)
+	}
+}
+
+func TestFolderFoundByAFolderRefreshAppliesItsMailBeforeRemovals(t *testing.T) {
+	h := synced(t)
+	g := h.graph
+	g.mu.Lock()
+	g.folders = append(g.folders, fakeFolder{"f-new", "Receipts", ""})
+	g.mu.Unlock()
+	g.move("m1", "f-new")
+	if err := h.session.refreshFolders(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	h.pollInbox(t)
+
+	expectUIDs(t, h, "f-inbox", "m2", "m3")
+	expectUIDs(t, h, "f-new", "m1")
+	if deleted := h.api.DeletedKeys(); len(deleted) != 0 {
+		t.Errorf("moved message was deleted: %v", deleted)
+	}
+}
+
+func TestQuietFolderStoresAFreshDeltaLinkOnceTheOldOneAges(t *testing.T) {
+	h := synced(t)
+	inbox := h.session.runs[0]
+	before := h.api.Cursor("f-inbox")
+	// A change elsewhere moves Graph's token on; the inbox itself stays quiet.
+	h.graph.add("n1", "f-notes", 100, raw("n1"))
+
+	h.pollInbox(t)
+	if h.api.Cursor("f-inbox") != before {
+		t.Fatal("a recent delta link was replaced in a quiet round")
+	}
+
+	inbox.storedAt = time.Now().Add(-25 * time.Hour)
+	h.pollInbox(t)
+	if after := h.api.Cursor("f-inbox"); after == before {
+		t.Error("an old delta link was not refreshed")
+	}
+	if inbox.storedAt.Before(time.Now().Add(-time.Minute)) {
+		t.Error("storedAt not updated")
+	}
+}
+
+func TestPartialFirstStartResumesWithCheckpointedBackfill(t *testing.T) {
+	h := newHarness(t)
+	g := h.graph
+	g.add("m1", "f-inbox", 100, raw("m1"))
+	g.add("p1", "f-proj", 100, raw("p1"))
+	g.add("p2", "f-proj", 200, raw("p2"))
+	g.add("p3", "f-proj", 300, raw("p3"))
+	g.add("a1", "f-acme", 100, raw("a1"))
+	g.failDelta = "f-proj"
+
+	// The first session stops while starting the folders.
+	h.session = h.syncer.newSession(api.Account{ID: "acc"}, h.syncer.logger)
+	if err := h.session.refreshFolders(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.session.step(context.Background(), true); err == nil {
+		t.Fatal("the failing delta walk did not end the session")
+	}
+	if h.api.Cursor("f-inbox") == "" || h.api.Cursor("f-proj") != "" {
+		t.Fatalf("cursors after the failed start: inbox %q, proj %q", h.api.Cursor("f-inbox"), h.api.Cursor("f-proj"))
+	}
+
+	// The next session starts the rest the same way: newest first, checkpointed.
+	h.start(t)
+	if got := h.api.Ingested("f-proj"); !slices.Equal(got, []string{"p3", "p2", "p1"}) {
+		t.Errorf("proj ingested in order %v, want newest first", got)
+	}
+	expectUIDs(t, h, "f-inbox", "m1")
+	expectUIDs(t, h, "f-acme", "a1")
+	for _, folder := range []string{"f-inbox", "f-proj", "f-acme"} {
+		if !h.cursor(t, folder).BackfillDone {
+			t.Errorf("%s backfill not done", folder)
+		}
+	}
+}
+
+func TestMoveIntoAFolderStillBackfillingIsRescued(t *testing.T) {
+	h := newHarness(t)
+	g := h.graph
+	g.add("m1", "f-inbox", 100, raw("m1"))
+	for i, id := range []string{"n1", "n2", "n3", "n4", "n5"} {
+		g.add(id, "f-notes", 100*(i+1), raw(id))
+	}
+	h.syncer.opts.BackfillPagesPerPass = 1
+	h.start(t)
+	if h.cursor(t, "f-notes").BackfillDone {
+		t.Fatal("notes should still be backfilling")
+	}
+
+	// m1 sits in Notes without Notes' delta reporting it (it got there before the delta started, as seen by a new
+	// session); the inbox reports it removed.
+	g.moveQuietly("m1", "f-notes")
+	h.start(t) // a new session: nothing of the earlier one is remembered
+	h.pollInbox(t)
+
+	if deleted := h.api.DeletedKeys(); len(deleted) != 0 {
+		t.Errorf("moved message was deleted: %v", deleted)
+	}
+	if _, ok := h.api.Flags("f-notes", "m1"); !ok {
+		t.Error("m1 not linked to Notes")
+	}
+	expectUIDs(t, h, "f-inbox")
+}
+
+func TestNoLookupsOnceEveryFolderIsBackfilled(t *testing.T) {
+	h := synced(t)
+	h.graph.remove("m3", false)
+
+	h.pollInbox(t)
+
+	for _, op := range h.graph.log() {
+		if strings.HasPrefix(op, "lookup ") {
+			t.Errorf("looked %s up although no folder is backfilling", op)
+		}
+	}
+	if deleted := h.api.DeletedKeys(); len(deleted) != 1 {
+		t.Errorf("deleted = %v", deleted)
+	}
+}
+
+func TestBackfillEndsOnlyWithoutANextLink(t *testing.T) {
+	h := newHarness(t)
+	for i, id := range []string{"m1", "m2", "m3", "m4"} {
+		h.graph.add(id, "f-inbox", 100*(i+1), raw(id))
+	}
+	h.graph.shortPages = true
+
+	h.start(t)
+
+	expectUIDs(t, h, "f-inbox", "m1", "m2", "m3", "m4")
+	if !h.cursor(t, "f-inbox").BackfillDone {
+		t.Error("backfill not done")
+	}
+}
+
+func TestCompletionSweepIngestsMessagesWithoutAReceiveTime(t *testing.T) {
+	h := newHarness(t)
+	h.graph.add("m1", "f-inbox", 100, raw("m1"))
+	h.graph.add("m2", "f-inbox", 200, raw("m2"))
+	h.graph.addUndated("u1", "f-inbox", 50, raw("u1"))
+	h.syncer.opts.BackfillPageSize = 1
+
+	h.start(t)
+
+	if got := h.api.Ingested("f-inbox"); !slices.Equal(got, []string{"m2", "m1", "u1"}) {
+		t.Errorf("ingested %v; the undated message comes with the completion sweep", got)
+	}
+	if msg, _ := h.api.Message("f-inbox", "u1"); !msg.ReceivedAt.Equal(time.Unix(50, 0)) {
+		t.Errorf("u1 received at %v, want its creation time", msg.ReceivedAt)
+	}
+	for _, id := range []string{"m1", "m2", "u1"} {
+		if got := h.graph.gets(id); got != 1 {
+			t.Errorf("%s downloaded %d times; the sweep only downloads what the API lacks", id, got)
+		}
+	}
+	if c := h.cursor(t, "f-inbox"); !c.BackfillDone || c.BackfillBefore != "" {
+		t.Errorf("cursor = %+v", c)
+	}
+	for _, query := range h.graph.rawQueries {
+		if strings.Contains(query, "null") {
+			t.Errorf("query relies on null comparisons: %s", query)
+		}
+	}
+}
+
+func TestUndatedMessageOnAPageComesWithIt(t *testing.T) {
+	h := newHarness(t)
+	h.graph.addUndated("u1", "f-inbox", 50, raw("u1"))
+	h.graph.add("m1", "f-inbox", 100, raw("m1"))
+
+	h.start(t)
+
+	if got := h.api.Ingested("f-inbox"); !slices.Equal(got, []string{"u1", "m1"}) && !slices.Equal(got, []string{"m1", "u1"}) {
+		t.Errorf("ingested %v", got)
+	}
+	if got := h.graph.gets("u1"); got != 1 {
+		t.Errorf("u1 downloaded %d times", got)
+	}
+}
+
+func TestMessageWithoutAnyTimeFallsBackToItsDateHeader(t *testing.T) {
+	h := newHarness(t)
+	h.graph.addUndated("u1", "f-inbox", 0, raw("u1"))
+	h.graph.mu.Lock()
+	h.graph.messages["u1"].created = time.Time{}
+	h.graph.mu.Unlock()
+
+	h.start(t)
+
+	if msg, ok := h.api.Message("f-inbox", "u1"); !ok || !msg.ReceivedAt.Equal(time.Date(2026, 10, 19, 10, 0, 0, 0, time.UTC)) {
+		t.Errorf("u1 = %v, %v; want the Date header's time", msg.ReceivedAt, ok)
+	}
+}
+
+func TestDraftsStoreCreatesAndRemovesDrafts(t *testing.T) {
+	h := newHarness(t)
+	drafts := OpenDrafts(context.Background(), sendClient(h, h.syncer.opts.Client))
+
+	if err := drafts.AppendDraft(raw("d1.1"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := drafts.AppendDraft(raw("d1.2"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := drafts.Remove("d1.1@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := drafts.Remove("gone@example.test"); err != nil {
+		t.Errorf("removing a missing draft: %v", err)
+	}
+	if got := h.graph.log(); !slices.Equal(got, []string{"create draft-1", "create draft-2", "delete draft-1"}) {
+		t.Errorf("ops = %v", got)
+	}
+	last := h.graph.rawQueries[len(h.graph.rawQueries)-1]
+	if !strings.Contains(last, "$filter=internetMessageId%20eq%20") || strings.Contains(last, "+") {
+		t.Errorf("drafts filter encoded as %q", last)
+	}
+
+	big := append([]byte("To: a@example.test\r\n\r\n"), make([]byte, maxSendBody)...)
+	var sendErr *providersend.Error
+	if err := drafts.AppendDraft(big, time.Now()); !errors.As(err, &sendErr) || !sendErr.Permanent {
+		t.Errorf("too large: %v", err)
+	}
+}
+
+func TestMovesMadeByTheMailboxDoNotComeBackThroughDelta(t *testing.T) {
+	h := synced(t)
+	mailbox := OpenMailbox(context.Background(), sendClient(h, h.syncer.opts.Client))
+	uid, err := mailbox.Move(api.MailboxLocation{Folder: "f-inbox", RemoteUID: "m1"}, "f-proj", "")
+	if err != nil || uid != "m1" {
+		t.Fatalf("Move = %q, %v", uid, err)
+	}
+	h.api.MoveLocation("f-inbox", "f-proj", "m1", uid) // what the API does with the report
+
+	h.pollInbox(t)
+
+	expectUIDs(t, h, "f-inbox", "m2", "m3")
+	expectUIDs(t, h, "f-proj", "m1", "p1")
+	if deleted := h.api.DeletedKeys(); len(deleted) != 0 {
+		t.Errorf("deleted = %v", deleted)
+	}
+	if got := h.graph.gets("m1"); got != 1 {
+		t.Errorf("m1 downloaded %d times; the delta round must find it known", got)
+	}
+}

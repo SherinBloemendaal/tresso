@@ -15,6 +15,7 @@ import (
 
 	"tresso/sync/internal/api"
 	"tresso/sync/internal/imapsync"
+	"tresso/sync/internal/providersend"
 	"tresso/sync/internal/smtpsend"
 	"tresso/sync/internal/storage"
 )
@@ -30,6 +31,7 @@ type mailboxReport struct {
 
 type fakeAPI struct {
 	mu       sync.Mutex
+	provider string // "imap" unless a test says otherwise
 	smtpHost string
 	queue    [][]api.OutgoingMessage
 	reports  []report
@@ -82,8 +84,17 @@ func (f *fakeAPI) ReportDraftRemoved(_ context.Context, _, removalID, _ string) 
 }
 
 func (f *fakeAPI) Credentials(context.Context, string, string) (api.Credentials, error) {
+	if f.provider != "imap" {
+		// Gmail and Microsoft accounts have no connection and no password, only an access token.
+		return api.Credentials{
+			AccountID: "a1",
+			Provider:  f.provider,
+			Secrets:   map[string]string{"type": "oauth2", "accessToken": "ya29.token", "expiresAt": time.Now().Add(time.Hour).Format(time.RFC3339)},
+		}, nil
+	}
 	return api.Credentials{
 		AccountID:  "a1",
+		Provider:   "imap",
 		Connection: api.Connection{SMTP: api.ServerSettings{Host: f.smtpHost, Port: 465, Security: "tls"}, Username: "kim@company.example"},
 		Secrets:    map[string]string{"type": "password", "password": "secret"},
 	}, nil
@@ -184,30 +195,72 @@ type harness struct {
 	mailbox *fakeMailbox
 	store   *storage.Memory
 	sends   []smtpsend.Envelope
-	fail    error
-	mu      sync.Mutex
-	d       *Dispatcher
+	// via lists the transport of every send, and opened the transport of every Sent folder that was opened.
+	via    []string
+	opened []string
+	fail   error
+	mu     sync.Mutex
+	d      *Dispatcher
 }
 
 func newHarness(messages ...api.OutgoingMessage) *harness {
-	h := &harness{api: &fakeAPI{smtpHost: "smtp.company.example", queue: [][]api.OutgoingMessage{messages}}, sent: &fakeSent{contains: map[string]bool{}}, drafts: &fakeDrafts{}, mailbox: &fakeMailbox{errors: map[string]error{}}, store: storage.NewMemory()}
+	h := &harness{api: &fakeAPI{provider: "imap", smtpHost: "smtp.company.example", queue: [][]api.OutgoingMessage{messages}}, sent: &fakeSent{contains: map[string]bool{}}, drafts: &fakeDrafts{}, mailbox: &fakeMailbox{errors: map[string]error{}}, store: storage.NewMemory()}
 	_ = h.store.PutIfAbsent(context.Background(), "outgoing/ab/raw1", []byte("Subject: Hi\r\n\r\nHello\r\n"), "message/rfc822")
-	send := func(_ context.Context, _ api.ServerSettings, _, _ string, envelope smtpsend.Envelope, _ []byte) error {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		h.sends = append(h.sends, envelope)
-		return h.fail
-	}
-	open := func(context.Context, api.Credentials) (SentStore, error) {
-		if h.sent.openErr != nil {
-			return nil, h.sent.openErr
-		}
-		return h.sent, nil
-	}
-	openDrafts := func(context.Context, api.Credentials) (DraftsStore, error) { return h.drafts, nil }
-	openMailbox := func(context.Context, api.Credentials) (MailboxStore, error) { return h.mailbox, nil }
-	h.d = NewDispatcher(h.api, h.store, send, open, openDrafts, openMailbox, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	password := func(c api.Credentials) error { _, err := c.Password(); return err }
+	token := func(c api.Credentials) error { _, _, err := c.AccessToken(); return err }
+	transports := map[string]Transport{"imap": &fakeTransport{h, "imap", password}, "gmail": &fakeTransport{h, "gmail", token}, "microsoft": &fakeTransport{h, "microsoft", token}}
+	h.d = NewDispatcher(h.api, h.store, transports, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return h
+}
+
+// fakeTransport records which provider's path a message took.
+type fakeTransport struct {
+	h     *harness
+	name  string
+	check func(api.Credentials) error
+}
+
+func (t *fakeTransport) Open(credentials api.Credentials) (Sender, error) {
+	if err := t.check(credentials); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+func (t *fakeTransport) Send(_ context.Context, envelope smtpsend.Envelope, _ []byte) error {
+	h := t.h
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.sends = append(h.sends, envelope)
+	h.via = append(h.via, t.name)
+	return h.fail
+}
+
+func (t *fakeTransport) OpenSent(context.Context) (SentStore, error) {
+	h := t.h
+	h.mu.Lock()
+	h.opened = append(h.opened, t.name)
+	h.mu.Unlock()
+	if h.sent.openErr != nil {
+		return nil, h.sent.openErr
+	}
+	return h.sent, nil
+}
+
+func (t *fakeTransport) OpenDrafts(context.Context) (DraftsStore, error) {
+	h := t.h
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.opened = append(h.opened, t.name+" drafts")
+	return h.drafts, nil
+}
+
+func (t *fakeTransport) OpenMailbox(context.Context) (MailboxStore, error) {
+	h := t.h
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.opened = append(h.opened, t.name+" mailbox")
+	return h.mailbox, nil
 }
 
 func (h *harness) run() {
@@ -335,6 +388,91 @@ func TestTriggersDuringARunNeverOverlap(t *testing.T) {
 	}
 	if len(h.api.reports) != 2 {
 		t.Errorf("reports = %+v", h.api.reports)
+	}
+}
+
+func TestProviderAccountsSendThroughTheirAPIWithoutPasswordOrSentCopy(t *testing.T) {
+	for _, provider := range []string{"gmail", "microsoft"} {
+		t.Run(provider, func(t *testing.T) {
+			h := newHarness(message("m1", 1))
+			h.api.provider = provider
+
+			h.run()
+
+			if !slices.Equal(h.via, []string{provider}) {
+				t.Fatalf("sent via %v, want %s", h.via, provider)
+			}
+			if !slices.Equal(h.sends[0].Recipients, []string{"anna@finance.example", "archive@company.example"}) {
+				t.Errorf("envelope = %+v", h.sends[0])
+			}
+			if len(h.opened) != 0 || len(h.sent.appended) != 0 {
+				t.Errorf("Sent folder opened %v, copies %d; the provider files the copy itself", h.opened, len(h.sent.appended))
+			}
+			if !slices.Equal(h.api.reports, []report{{"m1", api.OutcomeSent, "", true}}) {
+				t.Errorf("reports = %+v", h.api.reports)
+			}
+		})
+	}
+}
+
+func TestProviderRetryChecksTheProviderForAnEarlierSend(t *testing.T) {
+	h := newHarness(message("m1", 2))
+	h.api.provider = "gmail"
+	h.sent.contains["m1@company.example"] = true
+
+	h.run()
+
+	if len(h.sends) != 0 || !slices.Equal(h.opened, []string{"gmail"}) {
+		t.Fatalf("sends %d, opened %v", len(h.sends), h.opened)
+	}
+	if !slices.Equal(h.api.reports, []report{{"m1", api.OutcomeSent, "", true}}) {
+		t.Errorf("reports = %+v", h.api.reports)
+	}
+}
+
+func TestProviderErrorsMapToOutcomes(t *testing.T) {
+	cases := []struct {
+		err     error
+		outcome string
+		text    string
+	}{
+		{&providersend.Error{Permanent: true, Message: "Gmail refused the message.", Err: errors.New("400")}, api.OutcomeFailed, "Gmail refused the message."},
+		{&providersend.Error{Permanent: false, Message: "Outlook could not send the message right now.", Err: errors.New("503")}, api.OutcomeRetry, "Outlook could not send the message right now."},
+		{errors.New("something unexpected"), api.OutcomeRetry, "Sending failed; trying again later."},
+	}
+	for _, c := range cases {
+		h := newHarness(message("m1", 1))
+		h.api.provider = "microsoft"
+		h.fail = c.err
+
+		h.run()
+
+		if !slices.Equal(h.api.reports, []report{{"m1", c.outcome, c.text, false}}) {
+			t.Errorf("%v: reports = %+v", c.err, h.api.reports)
+		}
+	}
+}
+
+func TestUnknownProviderClaimsNothing(t *testing.T) {
+	h := newHarness(message("m1", 1))
+	h.api.provider = "exchange"
+
+	h.run()
+
+	if h.api.claims != 0 || len(h.sends) != 0 {
+		t.Errorf("claims %d, sends %d", h.api.claims, len(h.sends))
+	}
+}
+
+func TestAutoSavesSent(t *testing.T) {
+	imapAt := func(host string) api.Credentials {
+		return api.Credentials{Provider: "imap", Connection: api.Connection{SMTP: api.ServerSettings{Host: host}}}
+	}
+	if !AutoSavesSent(api.Credentials{Provider: "gmail"}) || !AutoSavesSent(api.Credentials{Provider: "microsoft"}) {
+		t.Error("provider accounts file sent mail themselves")
+	}
+	if !AutoSavesSent(imapAt("SMTP.Gmail.com.")) || AutoSavesSent(imapAt("smtp.company.example")) {
+		t.Error("SMTP host detection is wrong")
 	}
 }
 

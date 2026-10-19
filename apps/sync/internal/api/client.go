@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,11 +51,29 @@ type Connection struct {
 
 // Credentials are the decrypted secrets of one leased account. Keep them in memory only.
 type Credentials struct {
-	AccountID    string            `json:"accountId"`
-	EmailAddress string            `json:"emailAddress"`
-	Provider     string            `json:"provider"`
-	Connection   Connection        `json:"connection"`
-	Secrets      map[string]string `json:"credentials"`
+	AccountID    string `json:"accountId"`
+	EmailAddress string `json:"emailAddress"`
+	Provider     string `json:"provider"`
+	// Connection is null for Gmail and Microsoft accounts, which leaves it empty here.
+	Connection Connection        `json:"connection"`
+	Secrets    map[string]string `json:"credentials"`
+}
+
+// ErrReauthorize means the provider refused to renew the account's access: the user has to sign in with the provider
+// again. The API has already marked the account as auth_failed.
+var ErrReauthorize = errors.New("account must be authorized again")
+
+// AccessToken returns the provider access token of an OAuth account and when it expires. Workers never see the
+// refresh token: the API renews access tokens itself.
+func (c Credentials) AccessToken() (token string, expiresAt time.Time, err error) {
+	if c.Secrets["type"] != "oauth2" || c.Secrets["accessToken"] == "" {
+		return "", time.Time{}, fmt.Errorf("account %s has no OAuth credentials", c.AccountID)
+	}
+	expiresAt, err = time.Parse(time.RFC3339, c.Secrets["expiresAt"])
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("account %s: unreadable access token expiry: %w", c.AccountID, err)
+	}
+	return c.Secrets["accessToken"], expiresAt, nil
 }
 
 // Password returns the password for password-based accounts.
@@ -148,11 +167,29 @@ func (c *Client) Release(ctx context.Context, workerID string) error {
 	return c.post(ctx, "/internal/sync/leases/release", map[string]any{"workerId": workerID}, nil)
 }
 
-// Credentials fetches the decrypted credentials of an account this worker currently leases.
+// Credentials fetches the decrypted credentials of an account this worker currently leases. For OAuth accounts it
+// returns ErrReauthorize (wrapped) when the user has to sign in with the provider again.
 func (c *Client) Credentials(ctx context.Context, accountID, workerID string) (Credentials, error) {
+	return c.credentials(ctx, accountID, workerID, false)
+}
+
+// RefreshCredentials is Credentials after the provider refused the access token it returned: the API renews the
+// token at the provider before answering.
+func (c *Client) RefreshCredentials(ctx context.Context, accountID, workerID string) (Credentials, error) {
+	return c.credentials(ctx, accountID, workerID, true)
+}
+
+func (c *Client) credentials(ctx context.Context, accountID, workerID string, rejected bool) (Credentials, error) {
 	var out Credentials
 	path := "/internal/sync/accounts/" + url.PathEscape(accountID) + "/credentials?workerId=" + url.QueryEscape(workerID)
+	if rejected {
+		path += "&rejected=1"
+	}
 	err := c.do(ctx, http.MethodGet, path, nil, &out)
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.Status == http.StatusConflict {
+		return out, fmt.Errorf("%w: %w", ErrReauthorize, err)
+	}
 	return out, err
 }
 

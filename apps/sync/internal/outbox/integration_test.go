@@ -10,7 +10,6 @@ package outbox
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,9 +24,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 
 	"tresso/sync/internal/api"
-	"tresso/sync/internal/imapsync"
 	"tresso/sync/internal/netguard"
-	"tresso/sync/internal/smtpsend"
 	"tresso/sync/internal/storage"
 )
 
@@ -64,10 +61,6 @@ func (a *integrationAPI) ClaimMailbox(context.Context, string, string) ([]api.Ma
 func (a *integrationAPI) ReportMailbox(_ context.Context, _, changeID, _, outcome, text, remoteUID string) error {
 	a.changed = append(a.changed, mailboxReport{changeID, outcome, text, remoteUID})
 	return nil
-}
-
-func noMailbox(context.Context, api.Credentials) (MailboxStore, error) {
-	return nil, errors.New("no changes to messages in this test")
 }
 
 func (a *integrationAPI) Credentials(context.Context, string, string) (api.Credentials, error) {
@@ -143,6 +136,7 @@ func TestSendsFilesAndNeverSendsTwice(t *testing.T) {
 	dialer := netguard.New(true)
 	client := &integrationAPI{credentials: api.Credentials{
 		AccountID: "acc",
+		Provider:  "imap",
 		Connection: api.Connection{
 			IMAP:     api.ServerSettings{Host: host, Port: port("GREENMAIL_IMAP_PORT", 3143), Security: "none"},
 			SMTP:     api.ServerSettings{Host: host, Port: port("GREENMAIL_SMTP_PORT", 3025), Security: "none"},
@@ -150,16 +144,7 @@ func TestSendsFilesAndNeverSendsTwice(t *testing.T) {
 		},
 		Secrets: map[string]string{"type": "password", "password": password},
 	}}
-	send := func(ctx context.Context, server api.ServerSettings, username, password string, envelope smtpsend.Envelope, raw []byte) error {
-		return smtpsend.Send(ctx, dialer, server, username, password, envelope, raw)
-	}
-	openSent := func(ctx context.Context, credentials api.Credentials) (SentStore, error) {
-		return imapsync.OpenSent(ctx, dialer, credentials)
-	}
-	openDrafts := func(ctx context.Context, credentials api.Credentials) (DraftsStore, error) {
-		return imapsync.OpenDrafts(ctx, dialer, credentials)
-	}
-	dispatcher := NewDispatcher(client, store, send, openSent, openDrafts, noMailbox, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	dispatcher := NewDispatcher(client, store, map[string]Transport{"imap": IMAPTransport(dialer)}, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	message := api.OutgoingMessage{ID: "m1", RawObjectKey: "outgoing/aa/m1", EnvelopeFrom: sender, Recipients: []string{sender}, MessageID: messageID, Attempt: 1}
 
 	client.messages = []api.OutgoingMessage{message}
@@ -217,18 +202,15 @@ func TestKeepsTheDraftsFolderInStep(t *testing.T) {
 	dialer := netguard.New(true)
 	client := &integrationAPI{credentials: api.Credentials{
 		AccountID: "acc",
+		Provider:  "imap",
 		Connection: api.Connection{
 			IMAP:     api.ServerSettings{Host: host, Port: port("GREENMAIL_IMAP_PORT", 3143), Security: "none"},
 			Username: sender,
 		},
 		Secrets: map[string]string{"type": "password", "password": password},
 	}}
-	openDrafts := func(ctx context.Context, credentials api.Credentials) (DraftsStore, error) {
-		return imapsync.OpenDrafts(ctx, dialer, credentials)
-	}
-	noSend := func(context.Context, api.ServerSettings, string, string, smtpsend.Envelope, []byte) error { return nil }
-	noSent := func(context.Context, api.Credentials) (SentStore, error) { return nil, imapsync.ErrNoSentFolder }
-	dispatcher := NewDispatcher(client, store, noSend, noSent, openDrafts, noMailbox, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// Nothing is queued to send, so only the Drafts folder is opened.
+	dispatcher := NewDispatcher(client, store, map[string]Transport{"imap": IMAPTransport(dialer)}, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	run := func() {
 		dispatcher.Trigger(context.Background(), "acc")
 		dispatcher.Wait()
@@ -293,6 +275,7 @@ func TestMakesTheUsersChangesOnTheServer(t *testing.T) {
 	client := &integrationAPI{
 		credentials: api.Credentials{
 			AccountID:  "acc",
+			Provider:   "imap",
 			Connection: api.Connection{IMAP: api.ServerSettings{Host: host, Port: port("GREENMAIL_IMAP_PORT", 3143), Security: "none"}, Username: sender},
 			Secrets:    map[string]string{"type": "password", "password": password},
 		},
@@ -303,15 +286,8 @@ func TestMakesTheUsersChangesOnTheServer(t *testing.T) {
 			{ID: "c4", MessageID: "m4", MessageIDHeader: &messageID, Kind: api.MailboxMove, Source: &source, Target: &api.MailboxTarget{Folder: "Archive"}},
 		},
 	}
-	openMailbox := func(ctx context.Context, credentials api.Credentials) (MailboxStore, error) {
-		return imapsync.OpenMailbox(ctx, dialer, credentials)
-	}
-	noSend := func(context.Context, api.ServerSettings, string, string, smtpsend.Envelope, []byte) error { return nil }
-	noSent := func(context.Context, api.Credentials) (SentStore, error) { return nil, imapsync.ErrNoSentFolder }
-	noDrafts := func(context.Context, api.Credentials) (DraftsStore, error) {
-		return nil, errors.New("no drafts in this test")
-	}
-	dispatcher := NewDispatcher(client, storage.NewMemory(), noSend, noSent, noDrafts, openMailbox, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// Nothing is queued to send and no draft work, so only the connection for changes is opened.
+	dispatcher := NewDispatcher(client, storage.NewMemory(), map[string]Transport{"imap": IMAPTransport(dialer)}, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	dispatcher.Trigger(context.Background(), "acc")
 	dispatcher.Wait()
 
