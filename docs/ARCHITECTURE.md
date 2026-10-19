@@ -177,6 +177,15 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   attempts over about 4.5 hours) or failed (5xx). A message claimed again after an unreported attempt is first
   looked up in Sent by Message-ID, so it is never sent twice. Status reaches clients in the delta as
   `outgoingMessages`.
+- **Drafts:** `/api/v1/drafts` (scopes `mail:read`, `mail:write`) stores the message being written with a `version`
+  per save; an update names the version it builds on (`expectedVersion`) and is refused with 409 when another
+  device saved in between, so nothing is overwritten silently. Clients choose the draft's id (`draftId` on create),
+  so a draft has it before it reached the server. Drafts are in the delta. Once a draft rested 20 seconds after the
+  last edit, the leasing worker appends a copy (`\Draft`, Bcc kept, `X-Tresso-Draft` header) to the account's
+  Drafts folder, creating the folder when there is none, and only then removes the copy it replaces, so a failure
+  leaves an extra copy rather than none. Copies of drafts that were sent (`draftId` on the outgoing message),
+  deleted or moved to another account are queued for removal. The work comes with the outbox run: the same
+  realtime notification and heartbeat hint, the same claim and report cycle.
 - **Outbound changes:** flag/move/delete commands will follow the same pattern: queued per account by the API,
   executed by the leasing worker, confirmed back.
 
@@ -280,6 +289,11 @@ protocol, so every client syncs the same way:
 The web client keeps its copy in IndexedDB, one database per user, deleted on sign-out. Next to the synced records it
 stores a summary per thread (senders, snippet, unread count, whether it is in an inbox), recomputed whenever one of
 its messages changes, so the inbox lists read a few dozen rows through an index however much mail is stored.
+
+Drafts in the web client are saved on the device first and uploaded right after (one upload at a time per
+draft). Edits made here are never overwritten by the delta: when another device saved a newer version, the compose
+window asks whether to keep this version or take the other one. Drafts written before they were synced are
+uploaded after the update.
 
 Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
 addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is
