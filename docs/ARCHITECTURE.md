@@ -921,13 +921,20 @@ after. Everything lives in `apps/api/src/Notification`.
     events a time on the day before, and switches leave-now, the brief (minutes before) and the follow-up for the
     events it matches. New users start with 10 minutes before timed events and 09:00 the day before all-day events,
     both on the phone and the desktop.
-  - **Leave now:** for timed events with a place. With a travel time set on the event (`travelMinutes`, stored as
-    `X-TRESSO-TRAVEL-MINUTES`; Apple Calendar's `X-APPLE-TRAVEL-DURATION` is read too) it fires at start minus travel
-    minus 5 minutes. When the matching rule asks for leave-now and the user shared a position (`PUT
-    /api/v1/me/location`, rounded to about 100 m, `DELETE` forgets it), a `TravelTimeEstimator` estimates the
-    travel: the open edition geocodes with Nominatim and routes with OSRM when the operator configures them
-    (`GEOCODER_NOMINATIM_URL`, `ROUTING_OSRM_URL`). It is first looked at two hours before the start and moved to the
-    estimated moment (looked at again at most every 15 minutes); without a route it is dropped rather than guessed.
+  - **Leave now** (switched off as a whole with `leaveNow` in the settings): for timed events with a place. With a
+    travel time set on the event (`travelMinutes`, stored as `X-TRESSO-TRAVEL-MINUTES`; Apple Calendar's
+    `X-APPLE-TRAVEL-DURATION` is read too) it fires at start minus travel minus the user's extra time (0, 5 or 10
+    minutes, `extraTravelMinutes`). When the matching rule asks for leave-now, the travel time comes from the phone:
+    the position is read on the phone only, from an hour before such an event until it starts, and is never stored
+    or logged on the server. The phone sends it for one estimate (`POST /api/v1/calendar-events/{id}/leave-estimate`
+    with the position and the occurrence), the `TravelTimeEstimator` computes the minutes for the user's way of
+    travel (`travelMode`: walk, bike, public transport, car), and the reminder moves to the moment to leave. From an
+    hour before the start, while no estimate came, the server asks the user's phones for one with a silent push
+    (`kind: leave_estimate`, data only, every 15 minutes); without one by shortly before the moment to leave, there
+    is no reminder rather than a guessed one. The open edition geocodes with Nominatim and routes with OSRM, one
+    server per profile (`ROUTING_OSRM_URL` for the car, `ROUTING_OSRM_BIKE_URL`, `ROUTING_OSRM_FOOT_URL`,
+    `GEOCODER_NOMINATIM_URL`); public transport has no estimate there (OSRM has no timetables), so it needs a travel
+    time on the event or an add-on estimator.
   - **Pre-meeting brief:** for events with other people. At delivery the `MeetingBriefWriter` writes it: the open
     edition names the people and the recent threads with them (last 60 days, from mail metadata, nothing leaves the
     server); Tresso Cloud adds an AI summary. `GET /api/v1/calendar-events/{id}/brief` returns the full brief.
@@ -949,11 +956,22 @@ after. Everything lives in `apps/api/src/Notification`.
   - Desktop (`desktop`): no push service; the delivered notification reaches the running app through the delta
     (`notifications`) and the realtime ping that comes with every change, and the app shows it natively.
   - A subscription the push service reports gone (404, 410, `DeviceNotRegistered`) is removed.
-- **Quiet hours and focus** (`/api/v1/notification-settings`): quiet hours per day in the user's time zone (past
-  midnight they end the next day). A notification that fires in quiet hours for an event that starts after them is
-  moved to their end; otherwise it is delivered silently (no sound, low urgency, shown in the list). With focus on,
-  while the user is in another busy event they take part in, notifications of events they are invited to are
-  delivered silently; their own meetings and leave-now alerts break through.
+- **Quiet hours, working hours and focus** (`/api/v1/notification-settings`), in the user's time zone:
+  - Quiet hours per day (past midnight they end the next day). A notification that fires in quiet hours for an
+    event that starts after them is moved to their end; otherwise it is delivered silently (no sound, low urgency,
+    shown in the list).
+  - Working hours (`workDays`, `workStart`, `workEnd`) apply to calendars the user marks as work (`work` on the
+    calendar). Their notifications wait for the next working hours when the event starts after that, and are
+    silent otherwise (`workCalendarsQuiet`); leave-now comes through. A reminder that would come before the working
+    day, for an event that also starts before it, comes at the end of the working day before instead
+    (`shiftEarlyReminders`: a reminder for a 08:00 meeting at 17:30 the evening before).
+  - Focus blocks (busy, no one else, titled "Focus..."): while the user is in one, notifications wait until it ends
+    (`holdDuringFocus`); reminders of meetings with others and leave-now come through. With `focusDuringBusy`,
+    while the user is in another busy event they take part in, notifications of events they are invited to are
+    delivered silently; their own meetings and leave-now alerts break through. `holdMailInMeetings` is kept for
+    mail notifications (phase 3.7).
+  - Important events (`important`, stored as `PRIORITY:1`; `PRIORITY` 1 to 4 from other clients counts too) come
+    through quiet hours, working hours and focus.
 - **Scheduling:** `scheduled_notification` holds one row per occurrence, kind and reminder, planned for the next 8
   days. Saving or removing a calendar object queues a replan of that object (`PlanCalendarObject`, transport `push`,
   after commit); rule, time zone and location changes replan the user. Every new or moved plan is a delayed
@@ -970,7 +988,8 @@ after. Everything lives in `apps/api/src/Notification`.
   of its own.
 - **In the apps:** `GET /api/v1/notifications` lists the last week and the coming days; `POST .../dismiss` clears a
   notification on every device (the delta carries `dismissedAt`), `POST .../snooze` delivers it again later (a new
-  round).
+  round): after some minutes, or `until` one of the choices a reminder offers (`snoozeChoices` in the settings: 5,
+  10 or 15 minutes, one minute before the start, the start, or the end of the meeting the user is in now).
 
 #### Online meetings
 
