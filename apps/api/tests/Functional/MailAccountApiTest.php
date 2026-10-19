@@ -40,6 +40,21 @@ final class MailAccountApiTest extends DatabaseTestCase
         self::assertArrayNotHasKey('password', $body);
     }
 
+    public function testUnknownValuesAreExplicitNulls(): void
+    {
+        $headers = $this->userHeaders('kim@example.test', self::READ_WRITE);
+        $this->client->jsonRequest('POST', '/api/v1/mail-accounts', $this->imapPayload(), $headers);
+        $id = $this->responseString('id');
+
+        $this->client->request('GET', '/api/v1/mail-accounts/'.$id, server: $headers);
+
+        $body = $this->decodedResponse();
+        self::assertArrayHasKey('statusDetail', $body);
+        self::assertNull($body['statusDetail']);
+        self::assertArrayHasKey('lastSyncedAt', $body);
+        self::assertNull($body['lastSyncedAt']);
+    }
+
     public function testPasswordIsStoredEncryptedAndDecryptable(): void
     {
         $headers = $this->userHeaders('kim@example.test', self::READ_WRITE);

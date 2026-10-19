@@ -27,6 +27,8 @@ use App\State\MailAccountProvider;
 #[ApiResource(
     shortName: 'MailAccount',
     routePrefix: '/api/v1',
+    // Clients tell "never synced" and "no problem" apart from missing data by explicit nulls.
+    normalizationContext: ['skip_null_values' => false],
     operations: [
         new GetCollection(
             uriTemplate: '/mail-accounts',
