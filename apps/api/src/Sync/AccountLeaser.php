@@ -34,7 +34,7 @@ final readonly class AccountLeaser
                     WITH claimable AS (
                         SELECT id
                         FROM mail_account
-                        WHERE status = :active
+                        WHERE status IN (:active, :error)
                           AND (leased_by = :worker OR lease_expires_at IS NULL OR lease_expires_at < now())
                         ORDER BY (leased_by = :worker) DESC NULLS LAST, last_synced_at ASC NULLS FIRST
                         LIMIT :capacity
@@ -49,6 +49,9 @@ final readonly class AccountLeaser
                     SQL,
                 [
                     'active' => MailAccountStatus::Active->value,
+                    // A sync problem is temporary: such accounts keep being retried. Paused accounts and refused
+                    // logins wait for the user.
+                    'error' => MailAccountStatus::Error->value,
                     'worker' => $workerId,
                     'capacity' => $capacity,
                     'seconds' => self::LEASE_SECONDS,
