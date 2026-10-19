@@ -62,14 +62,12 @@ final class VTimezoneBuilder
         $ruleStart = new \DateTimeImmutable(\sprintf('%d-01-01 00:00:00', $ruleYear), $utc);
         $end = new \DateTimeImmutable(\sprintf('%d-12-31 23:59:59', $ruleYear + self::YEARS_AHEAD), $utc);
 
-        $transitions = $zone->getTransitions($start->getTimestamp(), $end->getTimestamp());
-        if ([] === $transitions) {
-            throw new \LogicException(\sprintf('No time zone data for %s.', $zoneName));
-        }
+        $lastYear = $ruleYear + self::YEARS_AHEAD;
+        $transitions = self::transitions($zone, $start->getTimestamp(), $end->getTimestamp());
         $changes = self::changes($transitions);
-        if (null === self::rules(array_values(array_filter($changes, static fn (array $change): bool => $change['ts'] >= $ruleStart->getTimestamp())))) {
+        if (null === self::rules(array_values(array_filter($changes, static fn (array $change): bool => $change['ts'] >= $ruleStart->getTimestamp())), $lastYear)) {
             $far = new \DateTimeImmutable(\sprintf('%d-12-31 23:59:59', $ruleYear + self::YEARS_WRITTEN), $utc);
-            $transitions = $zone->getTransitions($start->getTimestamp(), $far->getTimestamp());
+            $transitions = self::transitions($zone, $start->getTimestamp(), $far->getTimestamp());
         }
 
         /** @var VTimeZone $vtimezone */
@@ -91,7 +89,7 @@ final class VTimezoneBuilder
             }
         }
 
-        $rules = self::rules(array_values(array_filter($future, static fn (array $change): bool => $change['ts'] <= $end->getTimestamp())));
+        $rules = self::rules(array_values(array_filter($future, static fn (array $change): bool => $change['ts'] <= $end->getTimestamp())), $lastYear);
         foreach (null === $rules ? [...$past, ...$future] : $past as $change) {
             $vtimezone->add(self::observance($calendar, $change['isdst'], $change['ts'], $change['from'], $change['to'], $change['abbr']));
         }
@@ -106,9 +104,50 @@ final class VTimezoneBuilder
     }
 
     /**
-     * The changes after the first entry of getTransitions(), which is the state at the start.
+     * The zone's state at $from and every change of offset until $to, found from getOffset() rather than
+     * getTransitions(): with the system's tz database PHP's transition list can miss changes and end in a bogus entry
+     * at 2038 (the 32-bit limit), while offsets are read right. Days are sampled at noon and a change is pinned down
+     * to the second; no zone changes its offset twice within one day.
      *
-     * @param list<array{ts: int, time: string, offset: int, isdst: bool, abbr: string}> $transitions
+     * @return non-empty-list<array{ts: int, offset: int, isdst: bool, abbr: string}> the state at $from first
+     */
+    private static function transitions(\DateTimeZone $zone, int $from, int $to): array
+    {
+        $state = static function (int $timestamp) use ($zone): array {
+            $moment = new \DateTimeImmutable('@'.$timestamp)->setTimezone($zone);
+
+            return ['ts' => $timestamp, 'offset' => $moment->getOffset(), 'isdst' => '1' === $moment->format('I'), 'abbr' => $moment->format('T')];
+        };
+        $transitions = [$state($from)];
+        $previous = $from;
+        $previousOffset = $transitions[0]['offset'];
+        for ($sample = $from + 43200; $previous < $to; $sample += 86400) {
+            $sample = min($sample, $to);
+            $offset = $state($sample)['offset'];
+            if ($offset !== $previousOffset) {
+                // The first second with the new offset lies in (previous, sample].
+                [$low, $high] = [$previous, $sample];
+                while ($high - $low > 1) {
+                    $middle = intdiv($low + $high, 2);
+                    if ($state($middle)['offset'] === $previousOffset) {
+                        $low = $middle;
+                    } else {
+                        $high = $middle;
+                    }
+                }
+                $transitions[] = $state($high);
+                $previousOffset = $offset;
+            }
+            $previous = $sample;
+        }
+
+        return $transitions;
+    }
+
+    /**
+     * The changes after the first entry of transitions(), which is the state at the start.
+     *
+     * @param list<array{ts: int, offset: int, isdst: bool, abbr: string}> $transitions
      *
      * @return list<array{ts: int, from: int, to: int, isdst: bool, abbr: string}>
      */
@@ -126,11 +165,14 @@ final class VTimezoneBuilder
      * The yearly rules behind the coming changes: one into summer time and one back, each reproducing every change of
      * its kind. Null when the changes follow no such rule; an empty list when there are none.
      *
+     * A rule must also account for every year until $lastYear, so a zone whose changes stop (or whose data does)
+     * gets its changes written out instead.
+     *
      * @param list<array{ts: int, from: int, to: int, isdst: bool, abbr: string}> $changes
      *
      * @return list<array{change: array{ts: int, from: int, to: int, isdst: bool, abbr: string}, rrule: string}>|null
      */
-    private static function rules(array $changes): ?array
+    private static function rules(array $changes, int $lastYear): ?array
     {
         if ([] === $changes) {
             return [];
@@ -145,6 +187,10 @@ final class VTimezoneBuilder
 
         $rules = [];
         foreach ($byKind as $kind) {
+            $firstYear = (int) self::local($kind[0]['ts'], $kind[0]['from'])->format('Y');
+            if (\count($kind) < $lastYear - $firstYear) {
+                return null;
+            }
             $rule = self::nthWeekdayRule($kind) ?? self::onOrAfterRule($kind);
             if (null === $rule) {
                 return null;
@@ -259,8 +305,8 @@ final class VTimezoneBuilder
         }
         $horizon = $around->modify('+1 year');
 
-        // getTransitions() starts with the state at the first timestamp; more entries are changes.
-        return $latest >= $horizon || \count($zone->getTransitions($latest->getTimestamp() + 1, $horizon->getTimestamp())) <= 1;
+        // transitions() starts with the state at the first timestamp; more entries are changes.
+        return $latest >= $horizon || \count(self::transitions($zone, $latest->getTimestamp() + 1, $horizon->getTimestamp())) <= 1;
     }
 
     private static function earliest(Component $vtimezone, \DateTimeZone $zone): ?\DateTimeImmutable
