@@ -251,7 +251,18 @@ statistics and Year in mail.
 | Desktop (`apps/desktop`) | Tauri 2 (Rust) wrapping `apps/web` | SQLite via Rust | Native notifications |
 | Mobile (`apps/mobile`) | Expo (React Native), TypeScript | expo-sqlite | APNs / FCM via Expo |
 
-Shared TypeScript lives in `packages/` (`api-client`, `core` with domain types and verdict logic).
+Shared TypeScript lives in `packages/core` (MIT): domain types, the OAuth flow, and the client side of the sync
+protocol, so every client syncs the same way:
+
+- `SyncEngine` pulls the delta into a `SyncStore` (each page and its cursor in one transaction). Pulls never overlap;
+  a request during a pull makes it go round once more.
+- `RealtimeClient` reads the hub through `fetch()` with the token as bearer, reconnects with backoff, renews the token
+  before it expires, and asks for a pull on every (re)connect, because missed notifications are not replayed.
+- `mailFrameDocument` wraps a sanitized body in the document for the sandboxed frame, with its Content-Security-Policy.
+
+The web client keeps its copy in IndexedDB, one database per user, deleted on sign-out. Next to the synced records it
+stores a summary per thread (senders, snippet, unread count, whether it is in an inbox), recomputed whenever one of
+its messages changes, so the inbox lists read a few dozen rows through an index however much mail is stored.
 
 ## 4. Scale notes
 
