@@ -149,6 +149,14 @@ describe('inline images in a quote', () => {
     expect(quoteWithContentId(table, url, 'logo@example.test')).toBe(`<table background="cid:logo@example.test"><tr><td><img alt="x" src="cid:logo@example.test"></td></tr></table><script src="${url}"></script>`)
   })
 
+  it('also finds an image an inline style shows', () => {
+    const cell = `<td style="color:red;background-image:url(&quot;${url.replace(/&/g, '&amp;')}&quot;)">x</td>`
+    expect(quotedInlineImages(cell, [image])).toEqual([image])
+    const sent = quoteWithContentId(cell, url, 'logo@example.test')
+    expect(sent).toBe('<td style="color:red;background-image:url(&quot;cid:logo@example.test&quot;)">x</td>')
+    expect(withInlineLinks(sent, [{ contentId: 'logo@example.test', url: 'https://fresh.test/a?b=1&c=2' }])).toBe('<td style="color:red;background-image:url(&quot;https://fresh.test/a?b=1&amp;c=2&quot;)">x</td>')
+  })
+
   it('does not take one content id for another that starts with it', () => {
     const html = '<img src="cid:a@b"><img src="cid:a@bc">'
     expect(withInlineLinks(html, [{ contentId: 'a@b', url: 'https://fresh.test/1' }])).toBe('<img src="https://fresh.test/1"><img src="cid:a@bc">')
