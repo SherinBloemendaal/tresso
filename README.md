@@ -1,6 +1,6 @@
 # Tresso
 
-[![CI](https://github.com/SherinBloemendaal/tresso/actions/workflows/ci.yml/badge.svg)](https://github.com/SherinBloemendaal/tresso/actions/workflows/ci.yml)
+[![CI](https://github.com/gettresso/tresso/actions/workflows/ci.yml/badge.svg)](https://github.com/gettresso/tresso/actions/workflows/ci.yml)
 
 **One T, three ways out.** Tresso is an email client built around a single idea: every email is something
 to **do**, to **hand over**, or to **know**.
