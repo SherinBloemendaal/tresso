@@ -124,20 +124,24 @@ export class MailSession {
     } catch (error) {
       // Earlier batches went through; only the rest goes back. A copy closing meanwhile is about to be removed, so
       // there is nothing to put back; either way the user hears why the action failed, not why the undo did.
+      let undoFailed = false
       try {
         await database.revertAction(appliedFor(applied, new Set(messageIds.slice(accepted))))
       } catch (revertError) {
         if (!(revertError instanceof CopyClosingError)) {
-          // The local change stays until the copy syncs again; the user still hears why the action failed.
-          this.update({ syncError: `A change could not be put back on this phone: ${message(revertError)}` })
+          // The phone still shows a change the server never made, and no page of the delta would mention those
+          // messages: the copy syncs from the start, which puts them right.
+          undoFailed = true
+          await database.resyncFromStart().catch(() => {})
         }
       }
+      const failure = undoFailed ? new Error(`${message(error)} This phone shows the change until it has synced your mail again.`) : error
       this.changed()
       void this.syncNow()
       if (accepted > 0) {
-        throw new PartialActionError(error, appliedFor(applied, new Set(messageIds.slice(0, accepted))), messageIds.length - accepted)
+        throw new PartialActionError(failure, appliedFor(applied, new Set(messageIds.slice(0, accepted))), messageIds.length - accepted)
       }
-      throw error
+      throw failure
     }
     void this.syncNow()
     return applied
