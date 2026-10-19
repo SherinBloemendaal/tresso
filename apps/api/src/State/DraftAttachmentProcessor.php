@@ -9,6 +9,7 @@ use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProcessorInterface;
 use ApiPlatform\Validator\Exception\ValidationException;
 use App\ApiResource\Output\DraftAttachmentOutput;
+use App\ApiResource\Output\DraftFilesOutput;
 use App\ApiResource\Input\Draft\ForwardAttachmentInput;
 use App\Entity\Attachment;
 use App\Entity\Draft;
@@ -18,6 +19,7 @@ use App\Enum\ScanStatus;
 use App\Mail\Body\AttachmentUrls;
 use App\Outbox\AttachmentLimits;
 use App\Outbox\CollectUpload;
+use App\Outbox\OutgoingAttachment;
 use App\Outbox\UploadCollector;
 use App\Repository\AttachmentRepository;
 use App\Repository\DraftAttachmentRepository;
@@ -42,7 +44,6 @@ use Symfony\Component\Validator\ConstraintViolationList;
  */
 final readonly class DraftAttachmentProcessor implements ProcessorInterface
 {
-    private const string CONTENT_TYPE = '~^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$~i';
 
     public function __construct(
         private EntityManagerInterface $entityManager,
@@ -59,7 +60,7 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
     ) {
     }
 
-    public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): ?DraftAttachmentOutput
+    public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): DraftAttachmentOutput|DraftFilesOutput
     {
         $user = $this->currentUser->get();
         $draftId = $uriVariables['draftId'] ?? null;
@@ -69,7 +70,7 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
 
         if ($operation instanceof DeleteOperationInterface) {
             $id = $uriVariables['id'] ?? null;
-            $this->entityManager->wrapInTransaction(function () use ($user, $draftId, $id): void {
+            $version = $this->entityManager->wrapInTransaction(function () use ($user, $draftId, $id): int {
                 $draft = $this->lock($user, $draftId);
                 $attachment = \is_string($id) ? $this->draftAttachments->findOneOwnedBy($user, $draft, $id) : null;
                 if (!$attachment instanceof DraftAttachment) {
@@ -80,9 +81,11 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
                 $this->entityManager->remove($attachment);
                 $this->uploads->releaseAll([$attachment]);
                 $this->entityManager->flush();
+
+                return $draft->getVersion();
             });
 
-            return null;
+            return new DraftFilesOutput($version);
         }
 
         $attachment = $data instanceof ForwardAttachmentInput ? $this->forward($user, $draftId, $data) : $this->upload($user, $draftId);
@@ -96,7 +99,7 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
         $file = $request?->files->get('file');
         if (!$file instanceof UploadedFile) {
             // PHP drops a body larger than post_max_size altogether: what arrives is an empty form with a length.
-            if ((int) $request?->headers->get('Content-Length', '0') > 0 && 0 === \count($request?->files->all() ?? []) && 0 === \count($request?->request->all() ?? [])) {
+            if (str_starts_with(strtolower((string) $request?->headers->get('Content-Type')), 'multipart/form-data') && (int) $request?->headers->get('Content-Length', '0') > 0 && 0 === \count($request?->files->all() ?? []) && 0 === \count($request?->request->all() ?? [])) {
                 throw self::invalid('file', \sprintf('The file is too large (at most %s).', AttachmentLimits::describe($this->limits->maxAttachmentBytes)));
             }
             throw self::invalid('file', 'Send the file as multipart/form-data in the field "file".');
@@ -163,7 +166,7 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
                 $draft,
                 self::filename($source->getFilename()),
                 // As the sender declared it, which may be malformed; the message is built only from well-formed types.
-                1 === preg_match(self::CONTENT_TYPE, $source->getContentType()) ? strtolower($source->getContentType()) : 'application/octet-stream',
+                1 === preg_match(OutgoingAttachment::CONTENT_TYPE, $source->getContentType()) ? strtolower($source->getContentType()) : 'application/octet-stream',
                 $source->getSize(),
                 $source->getSha256(),
                 $source->getObjectKey(),
@@ -214,12 +217,12 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
     private static function contentType(UploadedFile $file): string
     {
         $guessed = $file->getMimeType();
-        if (null !== $guessed && 'application/octet-stream' !== $guessed && 1 === preg_match(self::CONTENT_TYPE, $guessed)) {
+        if (null !== $guessed && 'application/octet-stream' !== $guessed && 1 === preg_match(OutgoingAttachment::CONTENT_TYPE, $guessed)) {
             return strtolower($guessed);
         }
         $claimed = $file->getClientMimeType();
 
-        return 1 === preg_match(self::CONTENT_TYPE, $claimed) ? strtolower($claimed) : 'application/octet-stream';
+        return 1 === preg_match(OutgoingAttachment::CONTENT_TYPE, $claimed) ? strtolower($claimed) : 'application/octet-stream';
     }
 
     private static function invalid(string $path, string $message): ValidationException

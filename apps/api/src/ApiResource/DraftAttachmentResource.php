@@ -11,6 +11,7 @@ use ApiPlatform\Metadata\Link;
 use ApiPlatform\Metadata\Post;
 use App\ApiResource\Input\Draft\ForwardAttachmentInput;
 use App\ApiResource\Output\DraftAttachmentOutput;
+use App\ApiResource\Output\DraftFilesOutput;
 use App\Security\Scope;
 use App\State\DraftAttachmentProcessor;
 
@@ -51,7 +52,9 @@ use App\State\DraftAttachmentProcessor;
                 'draftId' => new Link(fromClass: DraftResource::class, identifiers: ['id']),
                 'id' => new Link(fromClass: self::class, identifiers: ['id']),
             ],
+            status: 200,
             security: "is_granted('".Scope::ROLE_MAIL_WRITE."')",
+            output: DraftFilesOutput::class,
             read: false,
             processor: DraftAttachmentProcessor::class,
             name: 'draft_attachment_delete',

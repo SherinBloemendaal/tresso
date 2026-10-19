@@ -25,6 +25,9 @@ final readonly class MimeComposer
     /** Clients and servers cope with long chains, but there is no use in sending hundreds of ids. */
     private const int MAX_REFERENCES = 30;
 
+    /** What a Content-ID header can carry: a dot-atom, an "@" and a domain. */
+    private const string CONTENT_ID = ';^[A-Za-z0-9!#$%&*+/=?^_{|}~-]+(\.[A-Za-z0-9!#$%&*+/=?^_{|}~-]+)*@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$;';
+
     public function __construct(
         private OutgoingHtmlSanitizer $html,
         private EntityManagerInterface $entityManager,
@@ -63,10 +66,29 @@ final readonly class MimeComposer
         return new ComposedMessage($raw, $messageId);
     }
 
+    /**
+     * The id an inline part goes out under. Received ids need not be what a Content-ID header can carry (Gmail's
+     * "ii_..." has no "@"): those get one of Tresso's own, and the HTML refers to that instead.
+     */
+    private static function headerContentId(string $contentId): string
+    {
+        if (1 === preg_match(self::CONTENT_ID, $contentId)) {
+            return $contentId;
+        }
+
+        return substr(hash('sha256', $contentId), 0, 24).'@inline.tresso.invalid';
+    }
+
     private function build(Composition $composition, string $messageId): Email
     {
         $account = $composition->account;
-        $html = $this->html->sanitize($composition->html);
+        $contentIds = [];
+        foreach ($composition->attachments as $attachment) {
+            if (null !== $attachment->contentId) {
+                $contentIds[$attachment->contentId] = self::headerContentId($attachment->contentId);
+            }
+        }
+        $html = $this->html->sanitize($composition->html, $contentIds);
 
         $email = new Email()
             ->from(new Address($account->getEmailAddress(), $account->getDisplayName()))
@@ -83,12 +105,12 @@ final readonly class MimeComposer
             } catch (ObjectNotFound $exception) {
                 throw new MissingAttachment($attachment->filename, $exception);
             }
-            // A type without a subtype would make an unusable part; such a file goes out as plain bytes.
-            $type = 1 === preg_match('~^[^/\s]+/[^/\s]+$~', $attachment->contentType) ? $attachment->contentType : 'application/octet-stream';
+            // A type that is not one makes an unusable part (or a broken header); such a file goes out as plain bytes.
+            $type = 1 === preg_match(OutgoingAttachment::CONTENT_TYPE, $attachment->contentType) ? $attachment->contentType : 'application/octet-stream';
             $part = new DataPart($content, $attachment->filename, $type);
             if (null !== $attachment->contentId) {
                 // The quoted text refers to it as cid:{contentId}; mail apps show it in place.
-                $part->asInline()->setContentId($attachment->contentId);
+                $part->asInline()->setContentId($contentIds[$attachment->contentId]);
             }
             $email->addPart($part);
         }
