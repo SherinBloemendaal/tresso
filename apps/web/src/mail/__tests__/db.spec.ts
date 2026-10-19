@@ -6,7 +6,7 @@ import { deleteMailDatabase, MailDatabase } from '../db'
 const USER = 'user-1'
 
 function page(changes: Partial<ChangePage> & { cursor: number }): ChangePage {
-  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], deleted: [], ...changes }
+  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], deleted: [], ...changes }
 }
 
 const accounts = [
@@ -141,6 +141,48 @@ describe('MailDatabase', () => {
     const result = await db.thread('t1')
 
     expect(result?.messages.map((m) => m.id)).toEqual(['m2', 'm1'])
+  })
+
+  it('keeps outgoing mail that is not settled, newest first', async () => {
+    const outgoing = (id: string, status: 'scheduled' | 'sent' | 'failed', sendAt: string) => ({
+      id,
+      mailAccountId: 'work',
+      status,
+      subject: id,
+      recipients: { to: [{ address: 'anna@finance.example', name: null }], cc: [], bcc: [] },
+      sendAt,
+      sentAt: null,
+      lastError: null,
+      inReplyToMessageId: null,
+    })
+    await db.apply(page({ cursor: 11, outgoingMessages: [outgoing('o1', 'scheduled', '2026-10-20T08:00:00Z'), outgoing('o2', 'sent', '2026-10-19T08:00:00Z'), outgoing('o3', 'failed', '2026-10-21T08:00:00Z')] }))
+
+    expect((await db.outbox()).map((o) => o.id)).toEqual(['o3', 'o1'])
+
+    await db.apply(page({ cursor: 12, deleted: [{ type: 'outgoingMessage', id: 'o3' }] }))
+    expect((await db.outbox()).map((o) => o.id)).toEqual(['o1'])
+
+    await db.apply(page({ cursor: 13, deleted: [{ type: 'mailAccount', id: 'work' }] }))
+    expect(await db.outbox()).toEqual([])
+  })
+
+  it('suggests the people the user exchanged mail with, most recent first', async () => {
+    const contacts = await db.suggestContacts('sender', 10)
+    expect(contacts.map((c) => c.address)).toEqual(['m3@sender.example', 'm1@sender.example', 'm2@sender.example', 'm4@sender.example'])
+
+    expect((await db.suggestContacts('m4', 10)).map((c) => c.address)).toEqual(['m4@sender.example'])
+    expect((await db.suggestContacts('Sender m1', 10)).length).toBe(0)
+    expect((await db.suggestContacts('', 2)).length).toBe(2)
+  })
+
+  it('keeps drafts on this device', async () => {
+    const draft = { id: 'd1', mailAccountId: 'work', to: [], cc: [], bcc: [], subject: 'Hi', html: '<p>Hi</p>', inReplyToMessageId: null, kind: 'new' as const, outgoingId: null, noticedStatus: null, updatedAt: 1 }
+    await db.saveDraft(draft)
+    await db.saveDraft({ ...draft, id: 'd2', updatedAt: 2 })
+
+    expect((await db.drafts()).map((d) => d.id)).toEqual(['d2', 'd1'])
+    await db.deleteDraft('d2')
+    expect(await db.draft('d2')).toBeNull()
   })
 
   it('keeps data per user and deletes it on request', async () => {

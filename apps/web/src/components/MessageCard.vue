@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import type { Address, MessageBody, SyncedMessage } from '@tresso/core'
 import { fullTime, senderName } from '@/mail/format'
+import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import AppIcon from '@/components/AppIcon.vue'
 import AttachmentList from '@/components/AttachmentList.vue'
@@ -13,6 +14,7 @@ const props = defineProps<{ message: SyncedMessage; expanded: boolean }>()
 const emit = defineEmits<{ toggle: [] }>()
 
 const mail = useMailStore()
+const compose = useComposeStore()
 const body = ref<MessageBody | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -82,6 +84,12 @@ watch(
         <p v-else class="state">This message has no text.</p>
 
         <AttachmentList :attachments="files" />
+
+        <div class="respond">
+          <button type="button" class="button button-quiet" @click="compose.openReply(message, 'reply')"><AppIcon name="reply" /> Reply</button>
+          <button type="button" class="button button-quiet" @click="compose.openReply(message, 'replyAll')"><AppIcon name="replyAll" /> Reply all</button>
+          <button type="button" class="button button-quiet" @click="compose.openReply(message, 'forward')"><AppIcon name="forward" /> Forward</button>
+        </div>
       </template>
     </div>
   </article>
@@ -146,6 +154,11 @@ watch(
 }
 .remote span {
   flex: 1;
+}
+.respond {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .state {
   margin: 0;
