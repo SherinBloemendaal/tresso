@@ -1,5 +1,5 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb'
-import { summarizeConversation } from '@tresso/core'
+import { actionResult, summarizeConversation, type AppliedAction } from '@tresso/core'
 import type {
   Address,
   ChangePage,
@@ -136,25 +136,8 @@ export interface Arrival {
   verdict: 'do' | 'delegate'
 }
 
-/** The account has no folder for the action, e.g. nothing to archive into. */
-export class MissingFolderError extends Error {
-  constructor(readonly account: string, readonly folder: string) {
-    super(`${account} has no ${folder} folder.`)
-    this.name = 'MissingFolderError'
-  }
-}
 
-/** Messages as they were before {@link MailDatabase.applyAction} and as it left them, to undo it with. */
-export interface AppliedAction {
-  before: SyncedMessage[]
-  after: SyncedMessage[]
-}
 
-/** The part of an applied action that concerns these messages. */
-export function appliedFor(applied: AppliedAction, messageIds: Set<string>): AppliedAction {
-  const keep = applied.before.map((message) => messageIds.has(message.id))
-  return { before: applied.before.filter((_, i) => keep[i]), after: applied.after.filter((_, i) => keep[i]) }
-}
 
 function needsTheUser(message: SyncedMessage | undefined): boolean {
   return message?.verdict === 'do' || message?.verdict === 'delegate'
@@ -335,16 +318,7 @@ export class MailDatabase implements SyncStore {
   async applyAction(messageIds: string[], action: MessageAction, folderId?: string, fromFolderId?: string): Promise<AppliedAction> {
     const tx = this.db.transaction(ALL_STORES, 'readwrite')
     const folders = await tx.objectStore('folders').getAll()
-    const accounts = new Map((await tx.objectStore('mailAccounts').getAll()).map((account) => [account.id, account.emailAddress]))
-    const byRole = (accountId: string, ...roles: SyncedFolder['role'][]): SyncedFolder | undefined => {
-      for (const role of roles) {
-        const folder = folders.find((candidate) => candidate.mailAccountId === accountId && candidate.role === role)
-        if (folder !== undefined) {
-          return folder
-        }
-      }
-      return undefined
-    }
+    const accounts = await tx.objectStore('mailAccounts').getAll()
     const inboxFolders = new Set(folders.filter((folder) => folder.role === 'inbox').map((folder) => folder.id))
 
     const before: SyncedMessage[] = []
@@ -354,43 +328,7 @@ export class MailDatabase implements SyncStore {
         before.push(message)
       }
     }
-
-    const after = before.map((message) => {
-      const flags = message.flags
-      switch (action) {
-        case 'markRead':
-        case 'markUnread':
-          return { ...message, flags: { ...flags, seen: action === 'markRead' } }
-        case 'flag':
-        case 'unflag':
-          return { ...message, flags: { ...flags, flagged: action === 'flag' } }
-        case 'archive': {
-          const target = byRole(message.mailAccountId, 'archive', 'all')
-          if (target === undefined) {
-            throw new MissingFolderError(accounts.get(message.mailAccountId) ?? message.mailAccountId, 'Archive')
-          }
-          if (!message.folderIds.some((id) => inboxFolders.has(id))) {
-            return message
-          }
-          return { ...message, folderIds: withFolder(message.folderIds.filter((id) => !inboxFolders.has(id)), target.id) }
-        }
-        case 'trash': {
-          const target = byRole(message.mailAccountId, 'trash')
-          if (target === undefined) {
-            throw new MissingFolderError(accounts.get(message.mailAccountId) ?? message.mailAccountId, 'Trash')
-          }
-          return { ...message, folderIds: [target.id] }
-        }
-        case 'move':
-          if (folderId === undefined) {
-            throw new Error('A move needs a folder.')
-          }
-          if (fromFolderId !== undefined) {
-            return message.folderIds.includes(fromFolderId) ? { ...message, folderIds: withFolder(message.folderIds.filter((id) => id !== fromFolderId), folderId) } : message
-          }
-          return { ...message, folderIds: [folderId] }
-      }
-    })
+    const after = actionResult(before, action, { folders, accounts, folderId, fromFolderId })
 
     const affected = new Set<string>()
     for (const message of after) {
@@ -404,6 +342,7 @@ export class MailDatabase implements SyncStore {
 
     return { before, after }
   }
+
 
   /**
    * Puts back what {@link applyAction} changed, on the messages the delta has not updated since. It is only given
@@ -671,9 +610,6 @@ async function rememberContacts(tx: WriteTx, message: SyncedMessage): Promise<vo
   }
 }
 
-function withFolder(folderIds: string[], folderId: string): string[] {
-  return folderIds.includes(folderId) ? folderIds : [...folderIds, folderId]
-}
 
 async function refreshConversation(tx: WriteTx, threadId: string, inboxFolders: Set<string>): Promise<void> {
   const thread = await tx.objectStore('threads').get(threadId)

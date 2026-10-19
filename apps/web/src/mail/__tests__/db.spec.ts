@@ -2,7 +2,8 @@ import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ChangePage, SyncedMessage } from '@tresso/core'
 import { openDB } from 'idb'
-import { databaseName, deleteMailDatabase, MailDatabase, MissingFolderError } from '../db'
+import { MissingFolderError } from '@tresso/core'
+import { databaseName, deleteMailDatabase, MailDatabase } from '../db'
 
 const USER = 'user-1'
 
