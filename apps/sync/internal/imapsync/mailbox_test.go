@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -67,8 +68,13 @@ func observer(t *testing.T, credentials api.Credentials) *imapclient.Client {
 
 func appendMessage(t *testing.T, client *imapclient.Client, folder, messageID string, flags ...imap.Flag) {
 	t.Helper()
+	appendAt(t, client, folder, messageID, time.Time{}, flags...)
+}
+
+func appendAt(t *testing.T, client *imapclient.Client, folder, messageID string, at time.Time, flags ...imap.Flag) {
+	t.Helper()
 	raw := "From: anna@finance.example\r\nTo: kim@company.example\r\nSubject: Plan\r\nMessage-ID: <" + messageID + ">\r\n\r\nPlan.\r\n"
-	command := client.Append(folder, int64(len(raw)), &imap.AppendOptions{Flags: flags})
+	command := client.Append(folder, int64(len(raw)), &imap.AppendOptions{Flags: flags, Time: at})
 	if _, err := command.Write([]byte(raw)); err != nil {
 		t.Fatal(err)
 	}
@@ -194,9 +200,15 @@ func TestARetriedMoveDoesNotCopyTwice(t *testing.T) {
 	credentials := memServer(t, imap.CapSet{imap.CapIMAP4rev1: {}})
 	check := observer(t, credentials)
 	appendMessage(t, check, "INBOX", "plan@finance.example")
-	// An earlier attempt copied it but did not get to mark the source deleted.
-	appendMessage(t, check, "Archive", "plan@finance.example")
 	source := inboxCopy(t, check)
+	// An earlier attempt copied it but did not get to mark the source deleted: COPY keeps size and arrival time.
+	if _, err := check.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	uid, _ := strconv.ParseUint(source.RemoteUID, 10, 32)
+	if _, err := check.Copy(imap.UIDSetNum(imap.UID(uid)), "Archive").Wait(); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := openFor(t, credentials).Move(source, "Archive", "plan@finance.example"); err != nil {
 		t.Fatal(err)
@@ -204,6 +216,23 @@ func TestARetriedMoveDoesNotCopyTwice(t *testing.T) {
 
 	if _, archive := contents(t, check, "Archive"); len(archive) != 1 {
 		t.Errorf("archive = %v, want one copy", archive)
+	}
+}
+
+func TestAnotherMessageWithTheSameMessageIdIsNotTakenForTheCopy(t *testing.T) {
+	credentials := memServer(t, imap.CapSet{imap.CapIMAP4rev1: {}})
+	check := observer(t, credentials)
+	// A different message that shares the Message-ID arrived a day earlier.
+	appendAt(t, check, "Archive", "plan@finance.example", time.Now().Add(-24*time.Hour))
+	appendMessage(t, check, "INBOX", "plan@finance.example")
+	source := inboxCopy(t, check)
+
+	if _, err := openFor(t, credentials).Move(source, "Archive", "plan@finance.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, archive := contents(t, check, "Archive"); len(archive) != 2 {
+		t.Errorf("archive = %v, want the moved message next to the other one", archive)
 	}
 }
 

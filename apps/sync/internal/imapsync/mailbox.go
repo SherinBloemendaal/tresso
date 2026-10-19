@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -77,24 +78,16 @@ func (m *Mailbox) SetFlags(location api.MailboxLocation, seen, flagged *bool) er
 //
 // Servers without MOVE get COPY, then \Deleted on the source, each only after the step before succeeded; the source
 // is expunged only with UIDPLUS, so that only this copy goes: expunging the whole folder would also erase messages
-// another mail app merely marked deleted. A copy an earlier attempt already put in the target is not copied again.
+// another mail app merely marked deleted. A copy an earlier attempt already put in the target (same Message-ID, size
+// and arrival time, which COPY keeps) is not copied again.
 func (m *Mailbox) Move(source api.MailboxLocation, target, messageID string) (string, error) {
-	var copied string
-	if !m.client.Caps().Has(imap.CapMove) && messageID != "" {
-		found, err := m.find(target, messageID)
-		if err != nil {
-			return "", err
-		}
-		copied = found
-	}
-
 	uid, err := m.open(source)
 	if err != nil {
 		return "", err
 	}
 	set := imap.UIDSetNum(uid)
 	// A uid that is gone would make MOVE succeed without doing anything; say so instead.
-	present, err := m.client.Fetch(set, &imap.FetchOptions{UID: true}).Collect()
+	present, err := m.client.Fetch(set, &imap.FetchOptions{UID: true, RFC822Size: true, InternalDate: true}).Collect()
 	if err != nil {
 		return "", fmt.Errorf("look up the message in %s: %w", source.Folder, err)
 	}
@@ -103,6 +96,7 @@ func (m *Mailbox) Move(source api.MailboxLocation, target, messageID string) (st
 	}
 
 	var dest imap.NumSet
+	copied := ""
 	if m.client.Caps().Has(imap.CapMove) {
 		data, err := m.client.Move(set, target).Wait()
 		if err != nil {
@@ -110,6 +104,14 @@ func (m *Mailbox) Move(source api.MailboxLocation, target, messageID string) (st
 		}
 		dest = data.DestUIDs
 	} else {
+		if messageID != "" {
+			if copied, err = m.findCopy(target, messageID, present[0].RFC822Size, present[0].InternalDate); err != nil {
+				return "", err
+			}
+			if _, err := m.open(source); err != nil {
+				return "", err
+			}
+		}
 		if copied == "" {
 			data, err := m.client.Copy(set, target).Wait()
 			if err != nil {
@@ -136,6 +138,33 @@ func (m *Mailbox) Move(source api.MailboxLocation, target, messageID string) (st
 		return copied, nil
 	}
 	return m.find(target, messageID)
+}
+
+// findCopy returns the uid of a copy in the folder that is this very message: same Message-ID, size and arrival
+// time. Another message that merely shares the Message-ID does not count.
+func (m *Mailbox) findCopy(folder, messageID string, size int64, arrived time.Time) (string, error) {
+	if _, err := m.find(folder, messageID); err != nil {
+		return "", err
+	}
+	data, err := m.client.UIDSearch(&imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{{Key: "Message-ID", Value: "<" + messageID + ">"}},
+	}, nil).Wait()
+	if err != nil {
+		return "", fmt.Errorf("search %s: %w", folder, err)
+	}
+	if len(data.AllUIDs()) == 0 {
+		return "", nil
+	}
+	candidates, err := m.client.Fetch(imap.UIDSetNum(data.AllUIDs()...), &imap.FetchOptions{UID: true, RFC822Size: true, InternalDate: true}).Collect()
+	if err != nil {
+		return "", fmt.Errorf("look up copies in %s: %w", folder, err)
+	}
+	for _, candidate := range candidates {
+		if candidate.RFC822Size == size && candidate.InternalDate.Equal(arrived) {
+			return strconv.FormatUint(uint64(candidate.UID), 10), nil
+		}
+	}
+	return "", nil
 }
 
 // find returns the uid of the newest copy with this Message-ID in the folder, or "".
