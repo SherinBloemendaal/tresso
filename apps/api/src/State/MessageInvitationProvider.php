@@ -13,6 +13,7 @@ use App\Calendar\ICalendar\EventReader;
 use App\Calendar\ICalendar\InvalidCalendarData;
 use App\Calendar\OccurrenceExpander;
 use App\Calendar\SelfAddresses;
+use App\Calendar\TooManyOccurrences;
 use App\Entity\CalendarEvent;
 use App\Entity\CalendarInvitation;
 use App\Entity\Message;
@@ -81,7 +82,12 @@ final readonly class MessageInvitationProvider implements ProviderInterface
         $conflicts = [];
         if (ItipMethod::Request === $invitation->getMethod() && Transparency::Busy === $data->transparency) {
             $utc = new \DateTimeZone('UTC');
-            $occurrences = $this->expander->expand($user, [], $data->startsAt, max($data->endsAt, $data->startsAt->modify('+1 minute')), $utc);
+            try {
+                $occurrences = $this->expander->expand($user, [], $data->startsAt, max($data->endsAt, $data->startsAt->modify('+1 minute')), $utc);
+            } catch (TooManyOccurrences|\InvalidArgumentException) {
+                // An event too long (or a calendar too full) to look through gets no conflict hint, rather than no answer.
+                $occurrences = [];
+            }
             $conflicts = array_values(array_filter($occurrences, static fn (CalendarOccurrence $o): bool => 'busy' === $o->transparency && 'cancelled' !== $o->status && 'declined' !== $o->selfResponse && (null === $row || $o->eventId !== $row->getId()->toRfc4122()) && !$data->isAllDay() && !$o->allDay));
         }
 
@@ -106,6 +112,7 @@ final readonly class MessageInvitationProvider implements ProviderInterface
             ($row?->getSelfPartstat() ?? $data->selfPartstat)?->value,
             ItipMethod::Request === $invitation->getMethod() && null !== $row && null !== $row->getSelfPartstat() && 'outdated' !== $kind,
             $conflicts,
+            ItipMethod::Request === $invitation->getMethod() && null === $row && null === $invitation->getAppliedAt(),
         );
     }
 

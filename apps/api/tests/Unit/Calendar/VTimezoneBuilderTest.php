@@ -5,9 +5,13 @@ declare(strict_types=1);
 namespace App\Tests\Unit\Calendar;
 
 use App\Calendar\ICalendar\CalendarDocument;
+use App\Calendar\ICalendar\Props;
 use App\Calendar\ICalendar\VTimezoneBuilder;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Sabre\VObject\Component;
 use Sabre\VObject\Reader;
+use Sabre\VObject\Recur\RRuleIterator;
 use Sabre\VObject\TimeZoneUtil;
 
 final class VTimezoneBuilderTest extends TestCase
@@ -84,6 +88,92 @@ final class VTimezoneBuilderTest extends TestCase
         self::assertCount(1, $calendar->select('VTIMEZONE'));
         self::assertStringContainsString("DTSTART:20251026T030000\r\n", $calendar->serialize(), 'The new zone reaches back as far as the old one.');
         self::assertStringContainsString('RRULE:FREQ=YEARLY', $calendar->serialize());
+    }
+
+    /**
+     * The written zone gives PHP's offset on every month until 2090, read from its observances and their rules.
+     */
+    #[DataProvider('zones')]
+    public function testTheWrittenZoneHoldsForDecades(string $zoneName, ?string $rule): void
+    {
+        $calendar = CalendarDocument::create();
+        VTimezoneBuilder::ensure($calendar, $zoneName, new \DateTimeImmutable('2026-10-19'));
+        $vtimezone = $calendar->select('VTIMEZONE')[0] ?? self::fail('No zone.');
+        self::assertInstanceOf(Component::class, $vtimezone);
+        if (null !== $rule) {
+            self::assertStringContainsString('RRULE:'.$rule."\r\n", $calendar->serialize());
+        }
+
+        $onsets = self::onsets($vtimezone, 2091);
+        $zone = new \DateTimeZone($zoneName);
+        for ($year = 2026; $year <= 2090; ++$year) {
+            for ($month = 1; $month <= 12; ++$month) {
+                $moment = new \DateTimeImmutable(\sprintf('%d-%02d-15 12:00:00', $year, $month), new \DateTimeZone('UTC'));
+                $written = null;
+                foreach ($onsets as [$at, $offset]) {
+                    if ($at <= $moment->getTimestamp()) {
+                        $written = $offset;
+                    }
+                }
+                self::assertSame($zone->getOffset($moment), $written, \sprintf('%s on %s', $zoneName, $moment->format('Y-m-d')));
+            }
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string, ?string}>
+     */
+    public static function zones(): iterable
+    {
+        yield 'Amsterdam' => ['Europe/Amsterdam', 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU'];
+        yield 'Jerusalem, the Friday before the last Sunday of March' => ['Asia/Jerusalem', 'FREQ=YEARLY;BYMONTH=3;BYDAY=FR;BYMONTHDAY=23,24,25,26,27,28,29'];
+        yield 'Santiago, the first Sunday from the 2nd' => ['America/Santiago', 'FREQ=YEARLY;BYMONTH=4;BYDAY=SU;BYMONTHDAY=2,3,4,5,6,7,8'];
+        yield 'Lord Howe, half an hour' => ['Australia/Lord_Howe', null];
+        yield 'Casablanca, no rule at all' => ['Africa/Casablanca', null];
+    }
+
+    /**
+     * The moments each observance starts, with the offset it brings, sorted.
+     *
+     * @return list<array{int, int}>
+     */
+    private static function onsets(Component $vtimezone, int $untilYear): array
+    {
+        $onsets = [];
+        foreach ($vtimezone->children() as $observance) {
+            if (!$observance instanceof Component) {
+                continue;
+            }
+            $from = self::seconds(Props::text($observance, 'TZOFFSETFROM') ?? '');
+            $to = self::seconds(Props::text($observance, 'TZOFFSETTO') ?? '');
+            $start = \DateTimeImmutable::createFromFormat('Ymd\THis', Props::text($observance, 'DTSTART') ?? '', new \DateTimeZone('UTC'));
+            self::assertNotFalse($start);
+            $starts = [$start];
+            $rule = Props::text($observance, 'RRULE');
+            if (null !== $rule) {
+                $starts = [];
+                foreach (new RRuleIterator($rule, $start) as $occurrence) {
+                    self::assertInstanceOf(\DateTimeInterface::class, $occurrence);
+                    if ((int) $occurrence->format('Y') > $untilYear) {
+                        break;
+                    }
+                    $starts[] = $occurrence;
+                }
+            }
+            foreach ($starts as $local) {
+                $onsets[] = [$local->getTimestamp() - $from, $to];
+            }
+        }
+        usort($onsets, static fn (array $a, array $b): int => $a[0] <=> $b[0]);
+
+        return $onsets;
+    }
+
+    private static function seconds(string $offset): int
+    {
+        $sign = str_starts_with($offset, '-') ? -1 : 1;
+
+        return $sign * ((int) substr($offset, 1, 2) * 3600 + (int) substr($offset, 3, 2) * 60);
     }
 
     public function testSabreReadsTheZoneBack(): void

@@ -70,9 +70,15 @@ final readonly class CalendarOperations
             }
             $remoteId = $result->remoteId ?? $object?->getRemoteId() ?? $operation->getRemoteId();
             if (null === $object) {
-                // Removed while its write was under way: the resource now at the provider has to go as well.
+                // Removed while its write was under way: the resource now at the provider has to go as well. A
+                // delete queued meanwhile carries the version from before this write, so it takes this one instead.
                 if (null !== $remoteId) {
-                    $this->entityManager->persist(CalendarOperation::delete($calendar, $operation->getUid(), $remoteId, $result->etag, $now));
+                    $queued = $this->operations->findOneBy(['calendar' => $calendar, 'uid' => $operation->getUid(), 'kind' => CalendarOperationKind::Delete]);
+                    if (null !== $queued) {
+                        $queued->becomeDelete($remoteId, $result->etag);
+                    } else {
+                        $this->entityManager->persist(CalendarOperation::delete($calendar, $operation->getUid(), $remoteId, $result->etag, $now));
+                    }
                     $this->entityManager->flush();
                 }
 

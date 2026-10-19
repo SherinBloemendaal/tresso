@@ -66,15 +66,24 @@ final readonly class InvitationApplier
             if (null === $invitation || null !== $invitation->getAppliedAt()) {
                 return;
             }
-            try {
-                $this->apply($invitation);
-            } catch (InvalidCalendarData $e) {
-                $this->logger->info('Calendar mail could not be applied', ['invitation' => $command->invitationId, 'error' => $e->getMessage()]);
-            }
-            $invitation->markApplied(new \DateTimeImmutable());
-            $this->entityManager->flush();
+            $this->applyNow($invitation);
         });
         $this->entityManager->clear();
+    }
+
+    /**
+     * Applies calendar mail now, in the caller's transaction, with every check, and marks it applied whatever the
+     * checks decided, so it is never applied twice.
+     */
+    public function applyNow(CalendarInvitation $invitation): void
+    {
+        try {
+            $this->apply($invitation);
+        } catch (InvalidCalendarData $e) {
+            $this->logger->info('Calendar mail could not be applied', ['invitation' => $invitation->getId()->toRfc4122(), 'error' => $e->getMessage()]);
+        }
+        $invitation->markApplied(new \DateTimeImmutable());
+        $this->entityManager->flush();
     }
 
     private function apply(CalendarInvitation $invitation): void

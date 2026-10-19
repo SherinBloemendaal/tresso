@@ -329,6 +329,36 @@ final class CalendarInvitationTest extends DatabaseTestCase
         self::assertSame('Budget review', $invitation['summary'], 'The message still shows what it carries.');
         self::assertNull($invitation['eventId']);
         self::assertFalse($invitation['canRespond']);
+        self::assertTrue($invitation['canAdd']);
+    }
+
+    public function testAnInvitationTheCalendarDidNotTakeCanBeAddedWithTheSameChecks(): void
+    {
+        $old = $this->receive('Invitation: Budget review', self::invitation('REQUEST', 0, '20261021T140000'), receivedAt: '2020-01-06T08:00:00+00:00');
+        $forged = $this->receive('Invitation: Budget review again', str_replace('UID:budget-review@finance.example', 'UID:other@finance.example', self::invitation('REQUEST', 0, '20261022T140000')), 'mallory@attacker.test', receivedAt: '2020-01-06T08:00:00+00:00');
+
+        $this->client->request('POST', '/api/v1/messages/'.$old.'/invitation/add', server: $this->kim);
+        self::assertResponseIsSuccessful();
+        $added = $this->decodedResponse();
+        self::assertIsString($added['eventId']);
+        self::assertFalse($added['canAdd']);
+        self::assertTrue($added['canRespond']);
+        self::assertCount(1, $this->occurrences($this->kim, '2026-10-21T00:00:00+00:00', '2026-10-22T00:00:00+00:00'));
+
+        $this->client->request('POST', '/api/v1/messages/'.$forged.'/invitation/add', server: $this->kim);
+        self::assertResponseStatusCodeSame(422, 'Not from the organizer it names.');
+        self::assertSame([], $this->occurrences($this->kim, '2026-10-22T00:00:00+00:00', '2026-10-23T00:00:00+00:00'));
+    }
+
+    public function testAnEventTooLongToCheckForConflictsStillShows(): void
+    {
+        $long = str_replace('DTEND;TZID=W. Europe Standard Time:20261021T150000', 'DTEND;TZID=W. Europe Standard Time:20280101T150000', self::invitation('REQUEST', 0, '20261021T140000'));
+        $messageId = $this->receive('Invitation: Sabbatical', $long);
+
+        $invitation = $this->getJson('/api/v1/messages/'.$messageId.'/invitation', $this->kim);
+
+        self::assertSame('Budget review', $invitation['summary']);
+        self::assertSame([], $invitation['conflicts']);
     }
 
     public function testAUserWithoutATressoCalendarGetsOneForAnInvitation(): void
