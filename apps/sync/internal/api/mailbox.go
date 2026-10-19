@@ -11,8 +11,12 @@ const (
 	MailboxMove  = "move"
 )
 
-// MailboxDone reports a mailbox change the server made; OutcomeRetry and OutcomeFailed report the others.
-const MailboxDone = "done"
+// Outcomes of a mailbox change besides OutcomeRetry and OutcomeFailed: the server made it, or the copy a move was
+// to take was no longer in its folder.
+const (
+	MailboxDone = "done"
+	MailboxGone = "gone"
+)
 
 // MailboxLocation is one copy of a message on the server. The uid only counts while the folder's UIDVALIDITY is
 // UIDValidity.
@@ -27,15 +31,18 @@ type MailboxTarget struct {
 }
 
 // MailboxChange is a change the user made in Tresso that the server still has to make: a flag change sets Seen and/or
-// Flagged (nil leaves a flag alone) on every copy in Locations; a move moves the copy in Source to Target.
+// Flagged (nil leaves a flag alone) on every copy in Locations; a move moves the copy in Source to Target. Changes of
+// one message (MessageID) have to be made in order; MessageIDHeader (without angle brackets) finds a moved copy.
 type MailboxChange struct {
-	ID        string            `json:"id"`
-	Kind      string            `json:"kind"`
-	Seen      *bool             `json:"seen"`
-	Flagged   *bool             `json:"flagged"`
-	Locations []MailboxLocation `json:"locations"`
-	Source    *MailboxLocation  `json:"source"`
-	Target    *MailboxTarget    `json:"target"`
+	ID              string            `json:"id"`
+	MessageID       string            `json:"messageId"`
+	MessageIDHeader *string           `json:"messageIdHeader"`
+	Kind            string            `json:"kind"`
+	Seen            *bool             `json:"seen"`
+	Flagged         *bool             `json:"flagged"`
+	Locations       []MailboxLocation `json:"locations"`
+	Source          *MailboxLocation  `json:"source"`
+	Target          *MailboxTarget    `json:"target"`
 }
 
 // ClaimMailbox takes the account's changes to make on the server, in the order they have to be made.

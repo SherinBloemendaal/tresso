@@ -49,7 +49,7 @@ type DraftsStore interface {
 // MailboxStore makes changes to the account's messages on the server.
 type MailboxStore interface {
 	SetFlags(location api.MailboxLocation, seen, flagged *bool) error
-	Move(source api.MailboxLocation, target string) (string, error)
+	Move(source api.MailboxLocation, target, messageID string) (string, error)
 	Close()
 }
 
@@ -203,8 +203,9 @@ func (d *Dispatcher) fileDrafts(ctx context.Context, logger *slog.Logger, creden
 }
 
 // changeMailbox makes the user's changes to messages on the server, in the order they were made. A refusal is
-// reported, so Tresso undoes the change; when the connection fails, the rest is left unreported and comes back once
-// the claim expires, without counting as a failed attempt.
+// reported, so Tresso undoes the change; once a message's change is not done, its later changes wait for the next
+// run. When the connection fails, the rest is left unreported and comes back once the claim expires, without
+// counting as a failed attempt.
 func (d *Dispatcher) changeMailbox(ctx context.Context, logger *slog.Logger, credentials api.Credentials) {
 	changes, err := d.api.ClaimMailbox(ctx, credentials.AccountID, d.workerID)
 	if err != nil {
@@ -222,68 +223,114 @@ func (d *Dispatcher) changeMailbox(ctx context.Context, logger *slog.Logger, cre
 		return
 	}
 
+	waiting := map[string]bool{}
 	for _, change := range changes {
-		changeLogger := logger.With("change", change.ID, "kind", change.Kind)
-		remoteUID, err := applyChange(mailbox, change)
-		outcome, text := api.MailboxDone, ""
-		if err != nil {
-			if !refused(err) {
-				changeLogger.Warn("making a change to a message failed; it comes back later", "error", err)
-				return
-			}
-			outcome, text = api.OutcomeFailed, err.Error()
-			if retryable(change, err) {
-				outcome = api.OutcomeRetry
-			}
-			changeLogger.Warn("the server did not make a change to a message", "outcome", outcome, "error", err)
+		if waiting[change.MessageID] {
+			continue
 		}
-		if err := d.api.ReportMailbox(ctx, credentials.AccountID, change.ID, d.workerID, outcome, text, remoteUID); err != nil {
+		changeLogger := logger.With("change", change.ID, "kind", change.Kind)
+		result, err := applyChange(mailbox, change)
+		if err != nil {
+			changeLogger.Warn("making a change to a message failed; it comes back later", "error", err)
+			return
+		}
+		if result.outcome != api.MailboxDone {
+			waiting[change.MessageID] = true
+			changeLogger.Warn("the server did not make a change to a message", "outcome", result.outcome, "reason", result.text)
+		}
+		if err := d.api.ReportMailbox(ctx, credentials.AccountID, change.ID, d.workerID, result.outcome, result.text, result.remoteUID); err != nil {
 			changeLogger.Warn("reporting a change to a message failed", "error", err)
+			waiting[change.MessageID] = true
 		}
 	}
 }
 
-func applyChange(mailbox MailboxStore, change api.MailboxChange) (string, error) {
+type changeResult struct {
+	outcome, text, remoteUID string
+}
+
+// applyChange makes one change. An error means the connection failed and nothing is worth reporting; every answer
+// from the server becomes an outcome.
+func applyChange(mailbox MailboxStore, change api.MailboxChange) (changeResult, error) {
 	switch change.Kind {
 	case api.MailboxFlags:
-		for _, location := range change.Locations {
-			if err := mailbox.SetFlags(location, change.Seen, change.Flagged); err != nil {
-				return "", err
-			}
-		}
-		return "", nil
+		return applyFlags(mailbox, change)
 	case api.MailboxMove:
 		if change.Source == nil || change.Target == nil {
-			return "", fmt.Errorf("%w: a move without source or target", errInvalidChange)
+			return changeResult{api.OutcomeFailed, "a move without source or target", ""}, nil
 		}
-		return mailbox.Move(*change.Source, change.Target.Folder)
+		messageID := ""
+		if change.MessageIDHeader != nil {
+			messageID = *change.MessageIDHeader
+		}
+		uid, err := mailbox.Move(*change.Source, change.Target.Folder, messageID)
+		switch {
+		case err == nil:
+			return changeResult{api.MailboxDone, "", uid}, nil
+		case errors.Is(err, imapsync.ErrMessageGone):
+			return changeResult{api.MailboxGone, err.Error(), ""}, nil
+		case errors.Is(err, imapsync.ErrFolderReset):
+			// The uid may name another message now; the folder sync finds the copy again.
+			return changeResult{api.OutcomeFailed, err.Error(), ""}, nil
+		case refused(err):
+			return changeResult{refusalOutcome(err), err.Error(), ""}, nil
+		}
+		return changeResult{}, err
 	}
-	return "", fmt.Errorf("%w: unknown kind %q", errInvalidChange, change.Kind)
+	return changeResult{api.OutcomeFailed, fmt.Sprintf("unknown kind %q", change.Kind), ""}, nil
 }
 
-var errInvalidChange = errors.New("invalid change")
+// applyFlags sets the flags on every copy. It is done when any copy took them: a copy in a folder that is gone or was
+// reset meanwhile is the folder sync's to sort out, and undoing the whole change would take the flags off the rest.
+func applyFlags(mailbox MailboxStore, change api.MailboxChange) (changeResult, error) {
+	if len(change.Locations) == 0 {
+		return changeResult{api.MailboxDone, "", ""}, nil
+	}
+	set, reset, retry := 0, 0, 0
+	var last error
+	for _, location := range change.Locations {
+		err := mailbox.SetFlags(location, change.Seen, change.Flagged)
+		switch {
+		case err == nil:
+			set++
+		case errors.Is(err, imapsync.ErrFolderReset):
+			reset++
+			last = err
+		case refused(err):
+			if refusalOutcome(err) == api.OutcomeRetry {
+				retry++
+			}
+			last = err
+		default:
+			return changeResult{}, err
+		}
+	}
+	switch {
+	case set > 0:
+		return changeResult{api.MailboxDone, "", ""}, nil
+	case reset+retry == len(change.Locations):
+		// Busy, or every copy's folder was reset: once the sync relearnt the uids, the change applies to them.
+		return changeResult{api.OutcomeRetry, last.Error(), ""}, nil
+	}
+	return changeResult{api.OutcomeFailed, last.Error(), ""}, nil
+}
 
-// refused reports whether the server answered (or the change could not be made as asked) rather than the connection
-// failing: only an answer is worth reporting.
+// refused reports whether the server answered rather than the connection failing: only an answer is worth reporting.
 func refused(err error) bool {
 	var response *imap.Error
-	return errors.As(err, &response) || errors.Is(err, imapsync.ErrFolderReset) || errors.Is(err, imapsync.ErrMessageGone) || errors.Is(err, errInvalidChange)
+	return errors.As(err, &response)
 }
 
-// retryable reports whether a refusal may pass: the server is busy, or a flag change met a folder that was reset
-// (the folder sync relearns its uids, after which the change applies to them).
-func retryable(change api.MailboxChange, err error) bool {
-	if errors.Is(err, imapsync.ErrFolderReset) {
-		return change.Kind == api.MailboxFlags
-	}
+// refusalOutcome tells a refusal that may pass (the server is busy) from one that will not.
+func refusalOutcome(err error) string {
 	var response *imap.Error
 	if errors.As(err, &response) {
 		switch response.Code {
 		case imap.ResponseCodeUnavailable, imap.ResponseCodeInUse, imap.ResponseCodeLimit, imap.ResponseCodeServerBug, imap.ResponseCodeContactAdmin:
-			return true
+			return api.OutcomeRetry
 		}
 	}
-	return false
+	return api.OutcomeFailed
 }
 
 func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, credentials api.Credentials, password string, sent *lazy[SentStore], message api.OutgoingMessage) {
