@@ -76,6 +76,9 @@ services:
       S3_ACCESS_KEY: devaccesskey
       S3_SECRET_KEY: devsecretkey
       WORKER_ID: sync-dev-1
+      HEARTBEAT_INTERVAL: 10s
+      # Development only: lets the worker reach the GreenMail test server on the Docker network.
+      MAIL_ALLOW_UNSAFE_SERVERS: "1"
     volumes:
       - ./apps/sync:/src
       - go_cache:/root/.cache/go-build

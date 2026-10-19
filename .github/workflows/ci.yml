@@ -76,6 +76,15 @@ jobs:
     defaults:
       run:
         working-directory: apps/sync
+    services:
+      # Real IMAP server for the integration tests; same mailboxes as the dev stack.
+      greenmail:
+        image: greenmail/standalone:2.1.14
+        env:
+          GREENMAIL_OPTS: >-
+            -Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users.login=email
+            -Dgreenmail.users=kim@tresso.test:dev-password-kim,lisa@tresso.test:dev-password-lisa
+        ports: ['3143:3143']
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
@@ -83,8 +92,12 @@ jobs:
           go-version: '1.27'
           cache-dependency-path: apps/sync/go.sum
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-      - run: go vet ./...
-      - run: go test -race ./...
+      - run: go vet -tags integration ./...
+      - name: Wait for GreenMail
+        run: timeout 60 bash -c 'until (echo > /dev/tcp/localhost/3143) 2>/dev/null; do sleep 1; done'
+      - run: go test -race -tags integration ./...
+        env:
+          GREENMAIL_HOST: localhost
 
   typescript:
     name: TypeScript (core, web, mobile)
