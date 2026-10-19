@@ -48,22 +48,23 @@ watch(
   () => props.threadId,
   async (threadId) => {
     await load()
-    folders.value = await mail.folders()
     if (unmounted || threadId !== props.threadId) {
       return
     }
-    // Unread messages and the newest one open; read history stays folded.
+    // Opening a conversation reads it; actions the user takes meanwhile wait for that, so a quick "unread" goes after.
+    // It starts before anything else is awaited, so no key can come in between.
     const unread = messages.value.filter((message) => !message.flags.seen).map((message) => message.id)
+    if (unread.length > 0) {
+      opening = run(unread, 'markRead').then(() => undefined)
+    }
+    // Unread messages and the newest one open; read history stays folded.
     const open = new Set(unread)
     const newest = messages.value[messages.value.length - 1]
     if (newest) {
       open.add(newest.id)
     }
     expanded.value = open
-    // Opening a conversation reads it; actions the user takes meanwhile wait for that, so a quick "unread" goes after.
-    if (unread.length > 0) {
-      opening = run(unread, 'markRead').then(() => undefined)
-    }
+    folders.value = await mail.folders()
   },
   { immediate: true },
 )
