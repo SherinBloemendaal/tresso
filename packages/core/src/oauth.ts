@@ -1,0 +1,177 @@
+/**
+ * OAuth2 authorization code flow with PKCE (RFC 7636) for public clients: web and desktop.
+ * Mobile uses expo-auth-session, which implements the same flow natively.
+ */
+
+export const USER_SCOPES = [
+  'mail:read',
+  'mail:write',
+  'mail:send',
+  'todos:read',
+  'todos:write',
+  'settings:read',
+  'settings:write',
+  'signatures:read',
+  'signatures:write',
+  'teams:read',
+  'teams:write',
+  'webhooks:manage',
+] as const
+
+export interface OAuthClientConfig {
+  apiUrl: string
+  clientId: string
+  redirectUri: string
+  scopes?: readonly string[]
+}
+
+export interface PendingAuthorization {
+  url: string
+  state: string
+  codeVerifier: string
+}
+
+export interface TokenSet {
+  accessToken: string
+  refreshToken: string | null
+  /** Epoch milliseconds. */
+  expiresAt: number
+}
+
+export class OAuthError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | null = null,
+  ) {
+    super(message)
+    this.name = 'OAuthError'
+  }
+}
+
+function base64Url(bytes: Uint8Array): string {
+  let binary = ''
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte)
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+export function randomToken(byteLength = 32): string {
+  return base64Url(crypto.getRandomValues(new Uint8Array(byteLength)))
+}
+
+export async function codeChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
+  return base64Url(new Uint8Array(digest))
+}
+
+export async function startAuthorization(config: OAuthClientConfig): Promise<PendingAuthorization> {
+  const state = randomToken(16)
+  const codeVerifier = randomToken(48)
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: config.clientId,
+    redirect_uri: config.redirectUri,
+    scope: (config.scopes ?? USER_SCOPES).join(' '),
+    state,
+    code_challenge: await codeChallenge(codeVerifier),
+    code_challenge_method: 'S256',
+  })
+
+  return { url: `${trimSlash(config.apiUrl)}/oauth/authorize?${params}`, state, codeVerifier }
+}
+
+/** Validates the redirect back from the authorization server and returns the authorization code. */
+export function parseCallback(callbackUrl: string, expectedState: string): string {
+  const params = new URL(callbackUrl).searchParams
+  const error = params.get('error')
+  if (error !== null) {
+    throw new OAuthError(params.get('error_description') ?? error, error)
+  }
+  if (params.get('state') !== expectedState) {
+    throw new OAuthError('The sign-in response does not match the request (state mismatch).', 'invalid_state')
+  }
+  const code = params.get('code')
+  if (code === null || code === '') {
+    throw new OAuthError('The sign-in response contains no authorization code.', 'invalid_response')
+  }
+  return code
+}
+
+export function exchangeCode(
+  config: OAuthClientConfig,
+  code: string,
+  codeVerifier: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<TokenSet> {
+  return requestToken(
+    config,
+    {
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: config.redirectUri,
+      client_id: config.clientId,
+      code_verifier: codeVerifier,
+    },
+    fetchImpl,
+  )
+}
+
+export function refreshTokens(
+  config: OAuthClientConfig,
+  refreshToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<TokenSet> {
+  return requestToken(
+    config,
+    { grant_type: 'refresh_token', refresh_token: refreshToken, client_id: config.clientId },
+    fetchImpl,
+  )
+}
+
+async function requestToken(
+  config: OAuthClientConfig,
+  body: Record<string, string>,
+  fetchImpl: typeof fetch,
+): Promise<TokenSet> {
+  const response = await fetchImpl(`${trimSlash(config.apiUrl)}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: new URLSearchParams(body),
+  })
+  const payload: unknown = await response.json().catch(() => null)
+
+  if (!response.ok || !isTokenResponse(payload)) {
+    const error = isErrorResponse(payload) ? payload : null
+    throw new OAuthError(error?.error_description ?? `Token request failed (${response.status}).`, error?.error ?? null)
+  }
+
+  return {
+    accessToken: payload.access_token,
+    refreshToken: payload.refresh_token ?? null,
+    expiresAt: Date.now() + payload.expires_in * 1000,
+  }
+}
+
+interface TokenResponse {
+  access_token: string
+  refresh_token?: string
+  expires_in: number
+}
+
+function isTokenResponse(value: unknown): value is TokenResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as TokenResponse).access_token === 'string' &&
+    typeof (value as TokenResponse).expires_in === 'number'
+  )
+}
+
+function isErrorResponse(value: unknown): value is { error: string; error_description?: string } {
+  return typeof value === 'object' && value !== null && typeof (value as { error?: unknown }).error === 'string'
+}
+
+function trimSlash(url: string): string {
+  return url.replace(/\/+$/, '')
+}

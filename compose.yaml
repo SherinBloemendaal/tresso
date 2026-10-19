@@ -1,0 +1,160 @@
+name: tresso
+
+x-api-env: &api-env
+  APP_ENV: dev
+  DATABASE_URL: postgresql://app:app@postgres:5432/app?serverVersion=18&charset=utf8
+  MESSENGER_TRANSPORT_DSN: redis://redis:6379/messages
+  REDIS_URL: redis://redis:6379
+  S3_ENDPOINT: http://s3:9000
+  S3_BUCKET: mail
+  S3_ACCESS_KEY: devaccesskey
+  S3_SECRET_KEY: devsecretkey
+  MEILISEARCH_URL: http://meilisearch:7700
+  MEILISEARCH_KEY: dev-master-key-change-me
+  CLAMAV_HOST: clamav
+  CLAMAV_PORT: "3310"
+  MAILER_DSN: smtp://mailpit:1025
+  SYNC_WORKER_CLIENT_SECRET: dev-sync-worker-secret
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+      target: dev
+    environment:
+      <<: *api-env
+      RUN_MIGRATIONS: "1"
+    volumes:
+      - ./apps/api:/app
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "8080:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 120s
+
+  messenger:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+      target: dev
+    command: ["php", "bin/console", "messenger:consume", "async", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    environment: *api-env
+    volumes:
+      - ./apps/api:/app
+    depends_on:
+      api:
+        condition: service_healthy
+    # The image's healthcheck probes the FrankenPHP admin endpoint, which this console process does not serve.
+    # The container exits when the consumer stops, and restart brings it back.
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+  sync:
+    build:
+      context: .
+      dockerfile: docker/sync/Dockerfile
+      target: dev
+    environment:
+      API_URL: http://api
+      OAUTH_TOKEN_URL: http://api/oauth/token
+      OAUTH_CLIENT_ID: sync-worker
+      OAUTH_CLIENT_SECRET: dev-sync-worker-secret
+      S3_ENDPOINT: http://s3:9000
+      S3_BUCKET: mail
+      S3_ACCESS_KEY: devaccesskey
+      S3_SECRET_KEY: devsecretkey
+      WORKER_ID: sync-dev-1
+    volumes:
+      - ./apps/sync:/src
+      - go_cache:/root/.cache/go-build
+      - go_mod:/go/pkg/mod
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "54320:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-d", "app", "-U", "app"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:8.8-alpine
+    ports:
+      - "63790:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  s3:
+    image: rustfs/rustfs:1.0.3
+    environment:
+      RUSTFS_ACCESS_KEY: devaccesskey
+      RUSTFS_SECRET_KEY: devsecretkey
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - s3_data:/data
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.55
+    environment:
+      MEILI_MASTER_KEY: dev-master-key-change-me
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "7700:7700"
+    volumes:
+      - meili_data:/meili_data
+
+  mailpit:
+    image: axllent/mailpit:v1.31
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  # ClamAV needs about 1.5 GB of RAM, so it only starts with: docker compose --profile scan up
+  clamav:
+    image: clamav/clamav:1.5-debian13-slim
+    profiles: ["scan"]
+    volumes:
+      - clamav_data:/var/lib/clamav
+
+volumes:
+  postgres_data:
+  redis_data:
+  s3_data:
+  meili_data:
+  clamav_data:
+  caddy_data:
+  caddy_config:
+  go_cache:
+  go_mod:

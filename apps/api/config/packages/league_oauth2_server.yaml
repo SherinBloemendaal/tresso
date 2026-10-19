@@ -1,0 +1,41 @@
+league_oauth2_server:
+    authorization_server:
+        private_key: '%env(resolve:OAUTH_PRIVATE_KEY)%'
+        private_key_passphrase: '%env(resolve:OAUTH_PASSPHRASE)%'
+        encryption_key: '%env(resolve:OAUTH_ENCRYPTION_KEY)%'
+        access_token_ttl: PT1H
+        refresh_token_ttl: P30D
+        enable_password_grant: false
+        enable_implicit_grant: false
+    resource_server:
+        public_key: '%env(resolve:OAUTH_PUBLIC_KEY)%'
+    scopes:
+        # Keep in sync with App\Security\Scope.
+        available:
+            - 'mail:read'
+            - 'mail:write'
+            - 'mail:send'
+            - 'todos:read'
+            - 'todos:write'
+            - 'settings:read'
+            - 'settings:write'
+            - 'signatures:read'
+            - 'signatures:write'
+            - 'teams:read'
+            - 'teams:write'
+            - 'webhooks:manage'
+            - 'sync:lease'
+            - 'sync:ingest'
+            - 'sync:credentials'
+        default: ['mail:read']
+    persistence:
+        doctrine: null
+    client:
+        allow_plaintext_secrets: false
+
+when@test:
+    services:
+        league.oauth2_server.password_hasher:
+            class: Symfony\Component\PasswordHasher\Hasher\NativePasswordHasher
+            arguments:
+                $cost: 4

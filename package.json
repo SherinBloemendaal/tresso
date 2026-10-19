@@ -1,0 +1,16 @@
+{
+  "name": "tresso",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/web",
+    "apps/desktop",
+    "apps/mobile"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @tresso/web",
+    "dev:desktop": "npm run tauri --workspace @tresso/desktop -- dev",
+    "dev:mobile": "npm run start --workspace @tresso/mobile"
+  }
+}
