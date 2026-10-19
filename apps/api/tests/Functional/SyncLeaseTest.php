@@ -81,6 +81,14 @@ final class SyncLeaseTest extends DatabaseTestCase
         self::assertSame([$active], $this->lease('w2', $auth), 'w2 takes over after release');
     }
 
+    public function testAccountsWithASyncProblemKeepBeingRetried(): void
+    {
+        $failing = $this->createAccount('failing@example.test', MailAccountStatus::Error);
+        $this->createAccount('refused@example.test', MailAccountStatus::AuthFailed);
+
+        self::assertSame([$failing], $this->lease('w1', $this->bearer('sync:lease')), 'An error is retried; a refused login waits for a new password.');
+    }
+
     public function testExpiredLeaseIsTakenOver(): void
     {
         $active = $this->createAccount('expired@example.test', MailAccountStatus::Active);
