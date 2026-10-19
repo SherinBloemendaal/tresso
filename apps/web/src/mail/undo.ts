@@ -10,20 +10,22 @@ export interface UndoMove {
 
 export interface UndoPlan {
   moves: UndoMove[]
-  /** Whether the moves put every changed message back exactly; when not, no undo is offered. */
+  /** Whether the moves put every changed message back exactly. */
   exact: boolean
+  /** Changed messages the moves leave where they are, because no move puts them back exactly. */
+  unrestorable: number
 }
 
 /**
  * How to undo an archive, trash or move. Only messages the action changed are put back, each from where it went into
  * the one folder it came from. A message that came from several folders (Gmail's All Mail aside, which holds every
  * message anyway) cannot be put back exactly, because a move takes every copy along; neither can mail archived into
- * Gmail's All Mail, where moving out would delete it from Gmail. Then the plan is not exact.
+ * Gmail's All Mail, where moving out would delete it from Gmail. Those stay where they are and are counted.
  */
 export function undoPlan(applied: AppliedAction, action: 'archive' | 'trash' | 'move', folders: SyncedFolder[]): UndoPlan {
   const roles = new Map(folders.map((folder) => [folder.id, folder.role]))
   const groups = new Map<string, UndoMove>()
-  let exact = true
+  let unrestorable = 0
 
   applied.before.forEach((before, index) => {
     const after = applied.after[index]
@@ -43,7 +45,7 @@ export function undoPlan(applied: AppliedAction, action: 'archive' | 'trash' | '
       to = original.length === 1 ? original[0] : undefined
     }
     if (from === undefined || to === undefined || roles.get(to) === 'drafts' || roles.get(to) === 'all') {
-      exact = false
+      unrestorable++
       return
     }
     const key = `${from}>${to}`
@@ -52,7 +54,7 @@ export function undoPlan(applied: AppliedAction, action: 'archive' | 'trash' | '
     groups.set(key, group)
   })
 
-  return { moves: [...groups.values()], exact }
+  return { moves: [...groups.values()], exact: unrestorable === 0, unrestorable }
 }
 
 function sameFolders(a: string[], b: string[]): boolean {

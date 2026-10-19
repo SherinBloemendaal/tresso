@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, onBeforeUnmount, watch } from 'vue'
 import { useRoute, type RouteLocationRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useMailStore } from '@/stores/mail'
@@ -33,6 +33,7 @@ watch(
   },
   { immediate: true },
 )
+onBeforeUnmount(() => selection.clear())
 
 function signOut(): void {
   auth.signOut()

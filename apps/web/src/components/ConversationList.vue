@@ -32,7 +32,7 @@ const ages = [
   { id: String(365 * DAY), label: 'Older than a year' },
 ]
 
-function check(event: MouseEvent, threadId: string): void {
+function check(event: MouseEvent | KeyboardEvent, threadId: string): void {
   if (event.shiftKey) {
     selection.extend(threadId, props.conversations.map((c) => c.threadId))
     return
@@ -85,8 +85,10 @@ const days = computed(() => {
             class="check"
             role="checkbox"
             :aria-checked="selection.has(conversation.threadId)"
-            :aria-label="`Select ${conversation.subject || '(no subject)'}`"
+            :aria-label="`Select ${conversation.subject || '(no subject)'}, from ${senderName(conversation.senders[0] ?? { name: null, address: '?' })}, ${shortTime(conversation.lastMessageAt)}`"
+            :disabled="selection.busy"
             @click="check($event, conversation.threadId)"
+            @keydown.shift.space.prevent="check($event, conversation.threadId)"
           >
             <span class="box" aria-hidden="true" />
           </button>

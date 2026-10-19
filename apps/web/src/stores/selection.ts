@@ -10,6 +10,8 @@ export const useSelectionStore = defineStore('selection', () => {
   /** The row the last plain click went to, where a shift click selects up to. */
   const anchor = ref<string | null>(null)
   const active = computed(() => threadIds.value.size > 0)
+  /** A bulk action is on its way; kept here so it holds while the bar is gone and back. */
+  const busy = ref(false)
 
   function has(threadId: string): boolean {
     return threadIds.value.has(threadId)
@@ -37,6 +39,15 @@ export const useSelectionStore = defineStore('selection', () => {
       next.add(id)
     }
     threadIds.value = next
+    anchor.value = threadId
+  }
+
+  function remove(ids: string[]): void {
+    const next = new Set(threadIds.value)
+    for (const id of ids) {
+      next.delete(id)
+    }
+    threadIds.value = next
   }
 
   function add(ids: string[]): void {
@@ -52,5 +63,5 @@ export const useSelectionStore = defineStore('selection', () => {
     anchor.value = null
   }
 
-  return { threadIds, anchor, active, has, toggle, extend, add, set, clear }
+  return { threadIds, anchor, active, busy, has, toggle, extend, add, remove, set, clear }
 })

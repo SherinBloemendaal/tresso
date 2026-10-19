@@ -27,6 +27,17 @@ import { notifier } from '@/platform/notifier'
 import { useAuthStore } from '@/stores/auth'
 
 const PAGE_SIZE = 500
+
+/** A large selection went partly through: `accepted` is what the server took; `reason` is why the rest did not. */
+export class PartialActionError extends Error {
+  constructor(
+    readonly reason: unknown,
+    readonly accepted: AppliedAction,
+  ) {
+    super(reason instanceof Error ? reason.message : String(reason))
+    this.name = 'PartialActionError'
+  }
+}
 const LIST_STEP = 100
 
 export type SyncState = 'idle' | 'syncing' | 'error'
@@ -39,6 +50,8 @@ export const useMailStore = defineStore('mail', () => {
   const auth = useAuthStore()
 
   const accounts = ref<SyncedMailAccount[]>([])
+  /** Every folder of every account, kept with the rest, so screens know folder roles without waiting. */
+  const allFolders = ref<SyncedFolder[]>([])
   const signatures = ref<SyncedSignature[]>([])
   const conversations = ref<Conversation[]>([])
   const unreadCounts = ref<Map<string, number>>(new Map())
@@ -150,6 +163,7 @@ export const useMailStore = defineStore('mail', () => {
     live.value = false
     ready.value = false
     accounts.value = []
+    allFolders.value = []
     signatures.value = []
     conversations.value = []
     unreadCounts.value = new Map()
@@ -170,8 +184,9 @@ export const useMailStore = defineStore('mail', () => {
     if (database === null) {
       return
     }
-    const [nextAccounts, nextSignatures, nextConversations, nextCounts, nextOutbox] = await Promise.all([
+    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox] = await Promise.all([
       database.mailAccounts(),
+      database.folders(),
       database.signatures(),
       database.inbox(mailbox.value, listLimit.value + 1),
       database.unreadInboxCounts(),
@@ -179,6 +194,7 @@ export const useMailStore = defineStore('mail', () => {
     ])
     outbox.value = nextOutbox
     accounts.value = nextAccounts
+    allFolders.value = nextFolders
     signatures.value = nextSignatures
     hasMore.value = nextConversations.length > listLimit.value
     conversations.value = nextConversations.slice(0, listLimit.value)
@@ -211,6 +227,11 @@ export const useMailStore = defineStore('mail', () => {
   /** Threads in the mailbox on screen whose newest message is older than this moment (epoch ms). */
   async function threadsBefore(moment: number): Promise<string[]> {
     return (await db.value?.inboxThreadIds(mailbox.value, (c) => c.lastMessageAt < moment)) ?? []
+  }
+
+  /** Which selected threads are still in the mailbox on screen, and their accounts and senders. */
+  async function describeThreads(threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }> {
+    return (await db.value?.describeThreads(mailbox.value, threadIds)) ?? { present: [], accounts: [], senders: [] }
   }
 
   async function messageIdsOf(threadIds: string[]): Promise<string[]> {
@@ -257,6 +278,9 @@ export const useMailStore = defineStore('mail', () => {
       await database.revertAction(appliedFor(applied, new Set(messageIds.slice(accepted))))
       await refresh()
       void syncNow()
+      if (accepted > 0) {
+        throw new PartialActionError(error, appliedFor(applied, new Set(messageIds.slice(0, accepted))))
+      }
       throw error
     }
     void syncNow()
@@ -415,6 +439,7 @@ export const useMailStore = defineStore('mail', () => {
 
   return {
     accounts,
+    allFolders,
     signatures,
     conversations,
     unreadCounts,
@@ -436,6 +461,7 @@ export const useMailStore = defineStore('mail', () => {
     thread,
     threadsFrom,
     threadsBefore,
+    describeThreads,
     messageIdsOf,
     folders,
     body,

@@ -42,7 +42,7 @@ describe('undoPlan', () => {
       folders,
     )
 
-    expect(plan).toEqual({ exact: true, moves: [{ fromFolderId: 'archive', folderId: 'inbox', messageIds: ['m1'] }] })
+    expect(plan).toEqual({ exact: true, unrestorable: 0, moves: [{ fromFolderId: 'archive', folderId: 'inbox', messageIds: ['m1'] }] })
   })
 
   it('puts trashed mail back per folder it came from, counting Gmail labels as one', () => {
@@ -62,7 +62,13 @@ describe('undoPlan', () => {
     ])
   })
 
-  it('is not exact for mail that was in several folders, or archived into All Mail', () => {
+  it('leaves out mail that was in several folders, or archived into All Mail, and counts it', () => {
+    const partial = undoPlan(
+      { before: [message('m1', ['inbox', 'projects']), message('m2', ['inbox'])], after: [message('m1', ['trash']), message('m2', ['trash'])] },
+      'trash',
+      folders,
+    )
+    expect(partial).toEqual({ exact: false, unrestorable: 1, moves: [{ fromFolderId: 'trash', folderId: 'inbox', messageIds: ['m2'] }] })
     expect(undoPlan({ before: [message('m1', ['inbox', 'projects'])], after: [message('m1', ['trash'])] }, 'trash', folders).exact).toBe(false)
     expect(undoPlan({ before: [message('m1', ['inbox', 'all'])], after: [message('m1', ['all'])] }, 'archive', folders).exact).toBe(false)
     // A copy already in Archive would go back to the inbox along with the archived one.
@@ -70,6 +76,6 @@ describe('undoPlan', () => {
   })
 
   it('has nothing to undo when nothing moved', () => {
-    expect(undoPlan({ before: [message('m1', ['trash'])], after: [message('m1', ['trash'])] }, 'trash', folders)).toEqual({ exact: true, moves: [] })
+    expect(undoPlan({ before: [message('m1', ['trash'])], after: [message('m1', ['trash'])] }, 'trash', folders)).toEqual({ exact: true, unrestorable: 0, moves: [] })
   })
 })

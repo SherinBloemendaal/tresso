@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import type { MessageAction, SyncedFolder } from '@tresso/core'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
+import type { MessageAction } from '@tresso/core'
 import type { Conversation } from '@/mail/db'
 import { shortcutAllowed, useMessageActions } from '@/mail/useMessageActions'
 import { useComposeStore } from '@/stores/compose'
@@ -15,48 +16,55 @@ const props = defineProps<{ conversations: Conversation[] }>()
 const mail = useMailStore()
 const compose = useComposeStore()
 const selection = useSelectionStore()
-const actions = useMessageActions()
-const { busy, exclusive } = actions
-const folders = ref<SyncedFolder[]>([])
+const { busy } = storeToRefs(selection)
+const actions = useMessageActions(busy)
+const { exclusive } = actions
 const moveMenu = ref<InstanceType<typeof MenuButton> | null>(null)
 
-onMounted(async () => {
-  folders.value = await mail.folders()
-})
+// What the selection holds, from the local copy rather than the loaded part of the list: threads that left the
+// mailbox meanwhile (sync from another device) drop out of it.
+const accounts = ref<string[]>([])
+const senders = ref(new Set<string>())
+let described = 0
+watch(
+  [() => selection.threadIds, () => mail.conversations],
+  async () => {
+    // Only the newest answer counts, and it only removes what it found gone among the threads it was asked about:
+    // an older, slower answer must not undo a selection the user just made.
+    const request = ++described
+    const asked = [...selection.threadIds]
+    const info = await mail.describeThreads(asked)
+    if (request !== described) {
+      return
+    }
+    const present = new Set(info.present)
+    selection.remove(asked.filter((id) => !present.has(id)))
+    accounts.value = info.accounts
+    senders.value = new Set(info.senders)
+  },
+  { immediate: true },
+)
 
 const count = computed(() => selection.threadIds.size)
-const loadedSelected = computed(() => props.conversations.filter((c) => selection.has(c.threadId)).length)
-const allState = computed(() => (loadedSelected.value === 0 ? 'false' : loadedSelected.value === props.conversations.length ? 'true' : 'mixed'))
-// Senders of the selected conversations that are loaded; "select all from them" then reaches the whole mailbox.
-const senders = computed(() => {
-  const addresses = new Set<string>()
-  for (const conversation of props.conversations) {
-    if (selection.has(conversation.threadId)) {
-      for (const sender of conversation.senders) {
-        addresses.add(sender.address.toLowerCase())
-      }
-    }
-  }
-  return addresses
-})
+const shownSelected = computed(() => props.conversations.filter((c) => selection.has(c.threadId)).length)
+const allState = computed(() => (shownSelected.value === 0 ? 'false' : shownSelected.value === props.conversations.length ? 'true' : 'mixed'))
 // Moving needs one account: folders belong to an account.
-const account = computed(() => {
-  const accounts = new Set(props.conversations.filter((c) => selection.has(c.threadId)).map((c) => c.mailAccountId))
-  return accounts.size === 1 && loadedSelected.value === count.value ? [...accounts][0] : null
-})
+const account = computed(() => (accounts.value.length === 1 ? accounts.value[0] : null))
 const moveTargets = computed(() =>
-  folders.value
+  mail.allFolders
     .filter((folder) => folder.mailAccountId === account.value && folder.role !== 'drafts' && folder.role !== 'all')
     .sort((a, b) => a.displayName.localeCompare(b.displayName))
     .map((folder) => ({ id: folder.id, label: folder.displayName })),
 )
 
+// Acts on what is shown only: conversations selected further down (by age or sender) stay selected.
 function toggleAll(): void {
+  const shown = props.conversations.map((c) => c.threadId)
   if (allState.value === 'true') {
-    selection.clear()
+    selection.remove(shown)
     return
   }
-  selection.add(props.conversations.map((c) => c.threadId))
+  selection.add(shown)
 }
 
 function selectSenders(): Promise<void> {
@@ -65,33 +73,33 @@ function selectSenders(): Promise<void> {
   })
 }
 
-async function messageIds(): Promise<string[]> {
-  return mail.messageIdsOf([...selection.threadIds])
-}
-
+// The threads an action takes leave the selection when it is done; ones the user added meanwhile stay.
 function act(action: Extract<MessageAction, 'markRead' | 'markUnread'>): Promise<void> {
   return exclusive(async () => {
-    if ((await actions.run(await messageIds(), action)) !== null) {
-      selection.clear()
+    const threadIds = [...selection.threadIds]
+    if ((await actions.run(await mail.messageIdsOf(threadIds), action)) !== null) {
+      selection.remove(threadIds)
     }
   })
 }
 
 function relocate(action: 'archive' | 'trash' | 'move', folderId?: string): Promise<void> {
   return exclusive(async () => {
-    if (await actions.relocate(await messageIds(), action, folders.value, folderId)) {
-      selection.clear()
+    const threadIds = [...selection.threadIds]
+    if (await actions.relocate(await mail.messageIdsOf(threadIds), action, mail.allFolders, folderId)) {
+      selection.remove(threadIds)
     }
   })
 }
 
-// K marks read, E archives, # trashes, Esc lets go of the selection.
+// K marks read, E archives, # trashes, Esc lets go of the selection; not while typing, writing or in a menu (an
+// Escape that closed a menu or left a field was handled there already).
 function shortcut(event: KeyboardEvent): void {
-  if (event.key === 'Escape' && moveMenu.value?.open !== true && !(event.target instanceof HTMLElement && event.target.closest('[role="dialog"]'))) {
-    selection.clear()
+  if (!shortcutAllowed(event, compose.draft !== null && !compose.minimized) || moveMenu.value?.open === true) {
     return
   }
-  if (!shortcutAllowed(event, compose.draft !== null && !compose.minimized) || moveMenu.value?.open === true) {
+  if (event.key === 'Escape') {
+    selection.clear()
     return
   }
   const action = { k: () => act('markRead'), e: () => relocate('archive'), '#': () => relocate('trash') }[event.key.toLowerCase()]
@@ -120,7 +128,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', shortcut))
       icon="folder"
       :items="moveTargets"
       :disabled="busy"
-      :title="account === null ? 'Select conversations of one account to move them' : undefined"
+      :title="account === null ? 'Conversations of several accounts are selected; folders belong to one account' : undefined"
       @choose="(folderId) => relocate('move', folderId)"
     />
     <button type="button" class="tool" :disabled="busy" aria-keyshortcuts="#" title="Move to Trash (#)" @click="relocate('trash')"><AppIcon name="trash" /> Trash</button>
