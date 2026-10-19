@@ -32,4 +32,9 @@ final class UpdateMailAccount
     /** Users may pause and resume syncing; the other statuses are set by the system. */
     #[Assert\Choice(choices: [MailAccountStatus::Active, MailAccountStatus::Paused])]
     public ?MailAccountStatus $status = null;
+
+    /** The CalDAV address of the account's calendars; an empty string finds it automatically again. */
+    #[Assert\AtLeastOneOf([new Assert\Blank(), new Assert\Url(protocols: ['https'], requireTld: true)])]
+    #[Assert\Length(max: 2048)]
+    public ?string $calendarUrl = null;
 }

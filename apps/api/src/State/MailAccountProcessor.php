@@ -134,6 +134,7 @@ final readonly class MailAccountProcessor implements ProcessorInterface
 
         $account = new MailAccount($owner, $input->emailAddress, $input->displayName, MailProvider::Imap);
         $account->configureServers($imap, $smtp, $input->username);
+        $account->setCalendarServer($input->calendarUrl);
         $this->vault->seal($account, ['type' => 'password', 'password' => $input->password]);
 
         $this->entityManager->persist($account);
@@ -154,6 +155,10 @@ final readonly class MailAccountProcessor implements ProcessorInterface
                 $input->smtp ?? $account->getSmtp() ?? throw new \LogicException('IMAP accounts have SMTP settings.'),
                 $input->username ?? $account->getUsername() ?? throw new \LogicException('IMAP accounts have a username.'),
             );
+        }
+
+        if (null !== $input->calendarUrl) {
+            $account->setCalendarServer('' === $input->calendarUrl ? null : $input->calendarUrl);
         }
 
         if (null !== $input->password) {

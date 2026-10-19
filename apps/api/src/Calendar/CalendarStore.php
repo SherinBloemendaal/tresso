@@ -1,0 +1,113 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Calendar;
+
+use App\Calendar\ICalendar\CalendarDocument;
+use App\Calendar\ICalendar\InvalidCalendarData;
+use App\Entity\Calendar;
+use App\Entity\CalendarEvent;
+use App\Entity\CalendarOperation;
+use App\Entity\CalendarObject;
+use App\Enum\CalendarOperationKind;
+use App\Realtime\RealtimeNotifier;
+use App\Repository\CalendarOperationRepository;
+use Doctrine\ORM\EntityManagerInterface;
+use Sabre\VObject\Component\VCalendar;
+
+/**
+ * Saves and removes calendar resources: the iCalendar text, its event rows, and (for changes the user made in a
+ * provider calendar) the write the account's worker has to make at the provider. Runs inside the caller's
+ * transaction.
+ */
+final readonly class CalendarStore
+{
+    public function __construct(
+        private EntityManagerInterface $entityManager,
+        private EventProjector $projector,
+        private CalendarOperationRepository $operations,
+        private RealtimeNotifier $notifier,
+    ) {
+    }
+
+    /**
+     * @param bool $fromProvider the data came from the provider, so nothing has to be written back
+     *
+     * @return array<string, CalendarEvent> the resource's event rows by recurrence key
+     */
+    public function save(CalendarObject $object, VCalendar $calendar, bool $fromProvider = false): array
+    {
+        $uids = array_keys(CalendarDocument::eventsByUid($calendar));
+        if ([$object->getUid()] !== $uids) {
+            throw new InvalidCalendarData(\sprintf('A calendar resource holds the events of exactly one UID, got: %s.', implode(', ', $uids) ?: 'none'));
+        }
+
+        $object->setIcal($calendar->serialize());
+        if (!$this->entityManager->contains($object)) {
+            $this->entityManager->persist($object);
+        }
+        $rows = $this->projector->project($object, $calendar);
+        $this->entityManager->flush();
+
+        if (!$fromProvider && !$object->getCalendar()->isLocal()) {
+            $this->queuePut($object);
+        }
+
+        return $rows;
+    }
+
+    public function remove(CalendarObject $object, bool $fromProvider = false): void
+    {
+        $calendar = $object->getCalendar();
+        $now = new \DateTimeImmutable();
+
+        if (!$fromProvider && !$calendar->isLocal()) {
+            $pending = $this->operations->findUnclaimedFor($object);
+            $remoteId = $object->getRemoteId();
+            if (null === $remoteId) {
+                // Never reached the provider: only a pending write to drop. A write in progress reports back and
+                // finds the resource gone; its result then turns into a delete (see completeWrite).
+                if (null !== $pending) {
+                    $this->entityManager->remove($pending);
+                }
+            } elseif (null !== $pending) {
+                $pending->becomeDelete($remoteId, $object->getEtag());
+            } else {
+                $this->entityManager->persist(CalendarOperation::delete($calendar, $object->getUid(), $remoteId, $object->getEtag(), $now));
+            }
+            $this->announce($calendar);
+        }
+
+        $this->projector->remove($object);
+        $this->entityManager->remove($object);
+        $this->entityManager->flush();
+    }
+
+    /** Marks the rows of a resource with the reason its last change did not reach the provider (or clears it). */
+    public function reportSyncError(CalendarObject $object, ?string $error): void
+    {
+        foreach ($this->entityManager->getRepository(CalendarEvent::class)->findBy(['object' => $object]) as $event) {
+            $event->setSyncError($error);
+        }
+        $this->entityManager->flush();
+    }
+
+    private function queuePut(CalendarObject $object): void
+    {
+        $pending = $this->operations->findUnclaimedFor($object);
+        if (null === $pending || CalendarOperationKind::Put !== $pending->getKind()) {
+            $this->entityManager->persist(CalendarOperation::put($object, new \DateTimeImmutable()));
+            $this->entityManager->flush();
+        }
+        $this->announce($object->getCalendar());
+    }
+
+    private function announce(Calendar $calendar): void
+    {
+        $account = $calendar->getMailAccount();
+        if (null !== $account) {
+            $this->notifier->outboxDue($account->getId());
+        }
+    }
+}

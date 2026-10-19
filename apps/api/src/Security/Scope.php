@@ -14,6 +14,8 @@ enum Scope: string
     case MailSend = 'mail:send';
     case TodosRead = 'todos:read';
     case TodosWrite = 'todos:write';
+    case CalendarRead = 'calendar:read';
+    case CalendarWrite = 'calendar:write';
     case SettingsRead = 'settings:read';
     case SettingsWrite = 'settings:write';
     case SignaturesRead = 'signatures:read';
@@ -31,6 +33,8 @@ enum Scope: string
     public const string ROLE_MAIL_READ = 'ROLE_OAUTH2_MAIL:READ';
     public const string ROLE_MAIL_WRITE = 'ROLE_OAUTH2_MAIL:WRITE';
     public const string ROLE_MAIL_SEND = 'ROLE_OAUTH2_MAIL:SEND';
+    public const string ROLE_CALENDAR_READ = 'ROLE_OAUTH2_CALENDAR:READ';
+    public const string ROLE_CALENDAR_WRITE = 'ROLE_OAUTH2_CALENDAR:WRITE';
     public const string ROLE_SETTINGS_READ = 'ROLE_OAUTH2_SETTINGS:READ';
     public const string ROLE_SETTINGS_WRITE = 'ROLE_OAUTH2_SETTINGS:WRITE';
     public const string ROLE_SIGNATURES_READ = 'ROLE_OAUTH2_SIGNATURES:READ';

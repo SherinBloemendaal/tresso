@@ -22,7 +22,7 @@ use Symfony\Component\Uid\Uuid;
 /**
  * Turns a {@see Composition} into the RFC 5322 message that is sent and filed in Sent. Replies carry In-Reply-To and
  * References so every client threads them. Bcc recipients are only on the envelope, never in the message. Attached
- * files are read from object storage.
+ * files are read from object storage. A calendar object (invitation, cancellation, reply) goes along as text/calendar.
  */
 final readonly class MimeComposer
 {
@@ -130,7 +130,14 @@ final readonly class MimeComposer
         }
         // Built here rather than by Symfony, which keeps an image with the text only when an img src or a background
         // attribute names it: one an inline style shows would go out as a file.
-        $body = new AlternativePart(new TextPart($this->html->toText($html), 'utf-8'), new TextPart($html, 'utf-8', 'html'));
+        $alternatives = [new TextPart($this->html->toText($html), 'utf-8'), new TextPart($html, 'utf-8', 'html')];
+        if (null !== $composition->calendar) {
+            // As the common clients send it: the calendar object as a third alternative, and the same object as an
+            // .ics file for clients that only look at attachments.
+            $alternatives[] = new CalendarTextPart($composition->calendar->ical, $composition->calendar->method);
+            $files[] = new DataPart($composition->calendar->ical, 'invite.ics', 'application/ics');
+        }
+        $body = new AlternativePart(...$alternatives);
         if ([] !== $inline) {
             $body = new RelatedPart($body, ...$inline);
         }

@@ -8,7 +8,7 @@ final readonly class LeaseResult
 {
     /**
      * @param list<LeasedAccount> $accounts
-     * @param list<string>        $outbox   ids of leased accounts with mail to send now
+     * @param list<string>        $outbox   ids of leased accounts with mail to send or calendar changes to write now
      */
     public function __construct(
         public int $leaseSeconds,

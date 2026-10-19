@@ -32,6 +32,7 @@ framework:
             App\Outbox\CollectUpload: async
             App\Classification\ClassifyNewMail: classify
             App\Classification\ReclassifyMail: classify
+            App\Calendar\Invitation\ApplyCalendarInvitation: async
 
 when@test:
     framework:

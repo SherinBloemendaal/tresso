@@ -104,6 +104,11 @@ final class MessageInput
     #[Assert\Valid]
     public array $attachments = [];
 
+    /** @var list<CalendarPartInput> */
+    #[Assert\Count(max: 5)]
+    #[Assert\Valid]
+    public array $calendarParts = [];
+
     /**
      * @param array<mixed> $headers
      */
