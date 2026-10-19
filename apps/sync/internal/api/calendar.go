@@ -96,9 +96,11 @@ func (c *Client) Calendars(ctx context.Context, accountID string, list CalendarL
 	return out.Calendars, err
 }
 
-func (c *Client) CalendarInventory(ctx context.Context, accountID, calendarID, workerID string, objects []RemoteObject) (InventoryResult, error) {
+// CalendarInventory hands a listing of a calendar to the API, which names what to fetch. A complete listing also
+// removes what it does not list; a partial one (a page of a listing too large for one request) never removes.
+func (c *Client) CalendarInventory(ctx context.Context, accountID, calendarID, workerID string, objects []RemoteObject, partial bool) (InventoryResult, error) {
 	var out InventoryResult
-	err := c.post(ctx, calendarPath(accountID, calendarID, "inventory"), map[string]any{"workerId": workerID, "objects": nonNil(objects)}, &out)
+	err := c.post(ctx, calendarPath(accountID, calendarID, "inventory"), map[string]any{"workerId": workerID, "objects": nonNil(objects), "partial": partial}, &out)
 	return out, err
 }
 

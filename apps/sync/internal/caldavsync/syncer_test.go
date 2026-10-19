@@ -2,8 +2,10 @@ package caldavsync
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -233,5 +235,220 @@ func TestAnUpdateWithoutAKnownETagIsNoFalseConflict(t *testing.T) {
 	}
 	if !strings.Contains(server.objects[calendarPath+"standup.ics"].data, "Standup, moved") {
 		t.Fatal("the update did not reach the server")
+	}
+}
+
+func TestACutShortListingIsPagedAndRemovesNothingLaterPagesList(t *testing.T) {
+	server := newFakeServer(t, true)
+	server.pageSize = 2
+	for _, name := range []string{"a", "b", "c", "d", "e"} {
+		server.put(calendarPath+name+".ics", event(name, name))
+	}
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+
+	if err := r.syncAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.inventory) != 1 || len(fake.inventory[0]) != 5 || fake.partial[0] {
+		t.Fatalf("want one complete listing of all five pages' resources, got %d listings: %v", len(fake.inventory), fake.inventory)
+	}
+	if len(fake.etags) != 5 {
+		t.Fatalf("stored %v", fake.etags)
+	}
+	if cursor := fake.cursors["cal-Home"]; cursor == nil || !strings.Contains(*cursor, `"syncToken":"token-5"`) {
+		t.Fatalf("the cursor is the last page's token, got %v", cursor)
+	}
+}
+
+func TestCutShortChangesAreAppliedPageByPage(t *testing.T) {
+	server := newFakeServer(t, true)
+	server.put(calendarPath+"a.ics", event("a", "a"))
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+	if err := r.syncAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	server.pageSize = 2
+	server.put(calendarPath+"b.ics", event("b", "b"))
+	server.put(calendarPath+"c.ics", event("c", "c"))
+	server.remove(calendarPath + "a.ics")
+
+	if err := r.syncAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.etags) != 2 || fake.etags[server.server.URL+calendarPath+"b.ics"] == "" || fake.etags[server.server.URL+calendarPath+"c.ics"] == "" {
+		t.Fatalf("every page's changes are applied, stored %v", fake.etags)
+	}
+	if cursor := fake.cursors["cal-Home"]; !strings.Contains(*cursor, `"syncToken":"token-4"`) {
+		t.Fatalf("cursor = %v", *cursor)
+	}
+	if len(fake.inventory) != 1 {
+		t.Fatal("the changes come from sync-collection, not a listing")
+	}
+}
+
+func TestAFailingSyncCollectionFallsBackToAListing(t *testing.T) {
+	server := newFakeServer(t, true)
+	server.syncStatus = http.StatusInternalServerError
+	server.put(calendarPath+"standup.ics", event("standup", "Standup"))
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+
+	if err := r.syncAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.etags) != 1 {
+		t.Fatalf("the calendar is synced from a listing, stored %v", fake.etags)
+	}
+	if cursor := fake.cursors["cal-Home"]; cursor == nil || strings.Contains(*cursor, "syncToken") {
+		t.Fatalf("no sync token is kept from a listing, got %v", cursor)
+	}
+}
+
+func TestRemovalsGoInBatchesTheAPITakesWithTheCursorLast(t *testing.T) {
+	server := newFakeServer(t, true)
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+	removed := make([]string, 2*removedBatch+1)
+	for i := range removed {
+		removed[i] = fmt.Sprintf("%s%d.ics", calendarPath, i)
+	}
+
+	if err := r.upload(context.Background(), caldav.Calendar{URL: server.server.URL + calendarPath}, api.CalendarState{ID: "cal-Home"}, nil, removed, cursor{SyncToken: "next"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.batches) != 3 {
+		t.Fatalf("want three batches, got %d", len(fake.batches))
+	}
+	total := 0
+	for i, batch := range fake.batches {
+		if len(batch.Removed) > removedBatch {
+			t.Fatalf("batch %d removes %d", i, len(batch.Removed))
+		}
+		if (batch.Cursor != nil) != (i == len(fake.batches)-1) {
+			t.Fatalf("only the last batch carries the cursor, batch %d has %v", i, batch.Cursor)
+		}
+		total += len(batch.Removed)
+	}
+	if total != len(removed) {
+		t.Fatalf("removed %d of %d", total, len(removed))
+	}
+}
+
+func TestAListingTooLargeForOneRequestGoesInPagesThatRemoveNothing(t *testing.T) {
+	server := newFakeServer(t, true)
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+	members := make([]caldav.Member, inventoryBatch+1)
+	for i := range members {
+		members[i] = caldav.Member{Href: fmt.Sprintf("%s%d.ics", calendarPath, i), ETag: `"1"`}
+		fake.etags[members[i].Href] = `"1"`
+	}
+	fake.etags["gone.ics"] = `"1"`
+
+	if err := r.applyListing(context.Background(), caldav.Calendar{URL: server.server.URL + calendarPath}, api.CalendarState{ID: "cal-Home"}, members, cursor{SyncToken: "next"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.inventory) != 2 || len(fake.inventory[0]) != inventoryBatch || len(fake.inventory[1]) != 1 {
+		t.Fatalf("want two pages, got %d", len(fake.inventory))
+	}
+	if !fake.partial[0] || !fake.partial[1] {
+		t.Fatal("a page of a listing must not remove what other pages list")
+	}
+}
+
+func TestResourcesTheAPICannotTakeAreLeftOut(t *testing.T) {
+	server := newFakeServer(t, true)
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+	long := calendarPath + strings.Repeat("x", maxHref) + ".ics"
+	members := []caldav.Member{
+		{Href: calendarPath + "ok.ics", ETag: `"1"`},
+		{Href: long, ETag: `"1"`},
+		{Href: calendarPath + "etag.ics", ETag: `"` + strings.Repeat("e", maxETag) + `"`},
+	}
+	fake.etags[calendarPath+"ok.ics"] = `"1"`
+
+	if err := r.applyListing(context.Background(), caldav.Calendar{URL: server.server.URL + calendarPath}, api.CalendarState{ID: "cal-Home"}, members, cursor{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.inventory[0]) != 1 || fake.inventory[0][0].RemoteID != calendarPath+"ok.ics" {
+		t.Fatalf("inventory = %v", fake.inventory[0])
+	}
+}
+
+func TestCalendarsTheAPICannotTakeAreLeftOutOfTheList(t *testing.T) {
+	r := &run{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	calendars := []caldav.Calendar{{URL: "https://dav.example/" + strings.Repeat("x", maxHref)}}
+	for i := range maxCalendars + 1 {
+		calendars = append(calendars, caldav.Calendar{URL: fmt.Sprintf("https://dav.example/%d/", i)})
+	}
+
+	kept := r.acceptable(calendars)
+
+	if len(kept) != maxCalendars || kept[0].URL != "https://dav.example/0/" {
+		t.Fatalf("kept %d, first %s", len(kept), kept[0].URL)
+	}
+}
+
+func TestAnUpdateIsNotSentWhenItsETagCannotBeRead(t *testing.T) {
+	server := newFakeServer(t, true)
+	server.put(calendarPath+"standup.ics", event("standup", "Standup"))
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+	server.etagStatus = http.StatusServiceUnavailable
+	existing := server.server.URL + calendarPath + "standup.ics"
+	updated := event("standup", "Standup, moved")
+	fake.operations = []api.CalendarOperation{
+		{ID: "update", Kind: "put", CalendarRemoteID: server.server.URL + calendarPath, UID: "standup", RemoteID: &existing, Ical: &updated},
+	}
+
+	if err := r.writeAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if result := fake.results["update"]; result.Outcome != api.OperationRetry {
+		t.Fatalf("update = %+v", result)
+	}
+	if strings.Contains(server.objects[calendarPath+"standup.ics"].data, "moved") {
+		t.Fatal("the update went out without a precondition")
+	}
+}
+
+func TestACalendarThatRefusesTheLoginDoesNotStopTheOthers(t *testing.T) {
+	server := newFakeServer(t, true)
+	server.shared = true
+	server.put(calendarPath+"standup.ics", event("standup", "Standup"))
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+
+	if err := r.syncAll(context.Background()); err != nil {
+		t.Fatalf("one refusing calendar ended the sync: %v", err)
+	}
+	if len(fake.etags) != 1 {
+		t.Fatalf("the other calendar is synced, stored %v", fake.etags)
+	}
+}
+
+func TestStatusDetailsAreShortAndShowNoLogin(t *testing.T) {
+	server := newFakeServer(t, true)
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	syncer := New(fake, plainDialer{}, "w1", Options{AllowHTTP: true}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	status := newStatusReporter(syncer, "a1", syncer.logger)
+
+	status.report(context.Background(), api.CalendarError, strings.Repeat("é", maxDetail+10))
+
+	if got := []rune(fake.details[0]); len(got) != maxDetail {
+		t.Fatalf("detail has %d characters", len(got))
+	}
+	if got := displayURL("https://kim:secret@dav.example/cal/?token=abc#x"); got != "https://dav.example/cal/" {
+		t.Fatalf("displayURL = %s", got)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -194,5 +195,145 @@ func TestKnownProvidersAreTrustedOnTheirWholeSite(t *testing.T) {
 	}
 	if trust.allows("me.com") || trust.allows("caldav.fastmail.com") {
 		t.Fatal("only the provider's CalDAV site is trusted")
+	}
+}
+
+// newTLSHostServer is a hostServer over TLS whose certificate the client accepts for any host name.
+func newTLSHostServer(t *testing.T) *hostServer {
+	h := &hostServer{withLogin: map[string]int{}, without: map[string]int{}, redirects: map[string]string{}, open: map[string]bool{}}
+	h.server = httptest.NewTLSServer(http.HandlerFunc(h.handle))
+	t.Cleanup(h.server.Close)
+	return h
+}
+
+func (h *hostServer) secureClient(trust Trust) *Client {
+	c := New(anyHost{address: h.server.Listener.Addr().String()}, "kim@company.example", "app-password", false, trust)
+	c.http.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify = true
+	return c
+}
+
+func TestPlainHTTPIsRefusedOutsideLocalTests(t *testing.T) {
+	h := newHostServer(t)
+	client := New(anyHost{address: h.server.Listener.Addr().String()}, "kim@company.example", "app-password", false, NewTrust("", "http://dav.company.example/dav/"))
+
+	_, err := client.Open(context.Background(), "http://dav.company.example/dav/")
+
+	if !errors.Is(err, ErrInsecure) {
+		t.Fatalf("want ErrInsecure, got %v", err)
+	}
+	if h.without["dav.company.example"]+h.logins("dav.company.example") != 0 {
+		t.Fatal("a request went out over plain http")
+	}
+}
+
+func TestAnHTTPHrefFromTheServerNeverGetsTheLogin(t *testing.T) {
+	h := newTLSHostServer(t)
+	client := h.secureClient(NewTrust("", "https://dav.company.example/dav/"))
+	if _, err := client.Open(context.Background(), "https://dav.company.example/dav/"); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	before := h.logins("dav.company.example")
+
+	_, err := client.Get(context.Background(), "http://dav.company.example/dav/home/event.ics")
+
+	if !errors.Is(err, ErrInsecure) {
+		t.Fatalf("want ErrInsecure, got %v", err)
+	}
+	if h.logins("dav.company.example") != before {
+		t.Fatal("the login went out over plain http")
+	}
+}
+
+func TestARedirectToPlainHTTPIsRefused(t *testing.T) {
+	h := newTLSHostServer(t)
+	h.redirects["dav.company.example"] = "http://dav.company.example/dav/"
+	client := h.secureClient(NewTrust("", "https://dav.company.example/dav/"))
+
+	_, err := client.Open(context.Background(), "https://dav.company.example/dav/")
+
+	if !errors.Is(err, ErrInsecure) {
+		t.Fatalf("want ErrInsecure, got %v", err)
+	}
+}
+
+func TestTheLoginIsRememberedPerSchemeHostAndPort(t *testing.T) {
+	client := New(anyHost{}, "kim", "pw", true, NewTrust("", ""))
+	parse := func(raw string) *url.URL {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+
+	client.markAuthed(parse("https://dav.company.example/dav/"))
+
+	if !client.hasAuthed(parse("https://DAV.company.example:443/other/")) {
+		t.Fatal("the same origin is remembered")
+	}
+	for _, other := range []string{"http://dav.company.example/", "http://dav.company.example:443/", "https://dav.company.example:8443/"} {
+		if client.hasAuthed(parse(other)) {
+			t.Fatalf("%s is another origin", other)
+		}
+	}
+}
+
+func TestATrustedServerSendingTressoElsewhereIsNotUsed(t *testing.T) {
+	h := newHostServer(t)
+	h.open["calendars.attacker.test"] = true
+	h.redirects["dav.company.example"] = "http://calendars.attacker.test/dav/"
+	client := h.client(NewTrust("", "http://dav.company.example/dav/"))
+
+	_, err := client.Open(context.Background(), "http://dav.company.example/dav/")
+
+	var untrusted *UntrustedError
+	if !errors.As(err, &untrusted) || !strings.Contains(untrusted.URL, "calendars.attacker.test") {
+		t.Fatalf("calendars from another site must not be used, got %v", err)
+	}
+}
+
+func TestDiscoveryTriesAgainSoonAfterAServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	client := New(anyHost{address: server.Listener.Addr().String()}, "kim@company.example", "app-password", true, NewTrust("company.example", ""))
+
+	_, err := client.discover(context.Background(), []string{"http://company.example/.well-known/caldav"})
+
+	if errors.Is(err, ErrNotCalDAV) || !IsTemporary(err) {
+		t.Fatalf("a 503 is no proof there is no server, got %v", err)
+	}
+}
+
+func TestTemporaryErrors(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"server error":      {&StatusError{Status: 503}, true},
+		"too many requests": {&StatusError{Status: 429}, true},
+		"not found":         {&StatusError{Status: 404}, false},
+		"deadline":          {context.DeadlineExceeded, true},
+		"timeout":           {&net.DNSError{IsTimeout: true}, true},
+		"refused login":     {ErrUnauthorized, false},
+	}
+	for name, c := range cases {
+		if got := IsTemporary(c.err); got != c.want {
+			t.Errorf("%s: IsTemporary = %v", name, got)
+		}
+	}
+}
+
+func TestADiscoveryAnswerIsLimited(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusMultiStatus)
+		_, _ = w.Write([]byte(`<d:multistatus xmlns:d="DAV:"><d:response><d:href>/` + strings.Repeat("x", maxDiscovery) + `</d:href></d:response></d:multistatus>`))
+	}))
+	t.Cleanup(server.Close)
+	client := New(anyHost{address: server.Listener.Addr().String()}, "kim@company.example", "app-password", true, NewTrust("", "http://dav.company.example/"))
+
+	if _, err := client.Open(context.Background(), "http://dav.company.example/"); err == nil || !strings.Contains(err.Error(), "invalid multistatus") {
+		t.Fatalf("want the oversized answer refused, got %v", err)
 	}
 }

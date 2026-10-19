@@ -24,7 +24,7 @@ import (
 type API interface {
 	Credentials(ctx context.Context, accountID, workerID string) (api.Credentials, error)
 	Calendars(ctx context.Context, accountID string, list api.CalendarList) ([]api.CalendarState, error)
-	CalendarInventory(ctx context.Context, accountID, calendarID, workerID string, objects []api.RemoteObject) (api.InventoryResult, error)
+	CalendarInventory(ctx context.Context, accountID, calendarID, workerID string, objects []api.RemoteObject, partial bool) (api.InventoryResult, error)
 	CalendarObjects(ctx context.Context, accountID, calendarID string, batch api.ObjectBatch) (api.ObjectBatchResult, error)
 	ClaimCalendarOperations(ctx context.Context, accountID, workerID string) ([]api.CalendarOperation, error)
 	ReportCalendarOperation(ctx context.Context, accountID, operationID string, result api.OperationResult) error
@@ -51,6 +51,16 @@ func DefaultOptions() Options {
 const (
 	multigetBatch = 50
 	objectBatch   = 100
+	// The API's limits per request: removals in one object batch, entries in one inventory, calendars in one list,
+	// and the length of an href, an ETag and a status detail.
+	removedBatch   = 5000
+	inventoryBatch = 50000
+	maxCalendars   = 500
+	maxHref        = 2048
+	maxETag        = 512
+	maxDetail      = 500
+	// maxSyncPages bounds the pages of a cut-short sync-collection before a plain listing is used instead.
+	maxSyncPages = 100
 )
 
 type Syncer struct {
@@ -108,18 +118,23 @@ func (s *Syncer) Run(ctx context.Context, account api.Account) error {
 		switch {
 		case errors.As(err, &confirm):
 			logger.Info("a calendar server needs the user's confirmation", "url", confirm.URL, "retryIn", s.opts.NotFoundRetry)
-			status.report(ctx, api.CalendarUnconfirmed, "A calendar server was found at "+confirm.URL+". To sync your calendars there, confirm this address in the account settings.")
+			status.report(ctx, api.CalendarUnconfirmed, "A calendar server was found at "+displayURL(confirm.URL)+". To sync your calendars there, confirm this address in the account settings.")
 			wait = s.opts.NotFoundRetry
 			failures = 0
 		case errors.As(err, &untrusted):
 			logger.Warn("a calendar server outside the account asked for the login", "url", untrusted.URL, "retryIn", s.opts.MaxBackoff)
-			status.report(ctx, api.CalendarError, "The calendar server sent Tresso to "+untrusted.URL+", which does not get your password. Enter the right CalDAV address in the account settings.")
+			status.report(ctx, api.CalendarError, "The calendar server sent Tresso to "+displayURL(untrusted.URL)+", which does not get your password. Enter the right CalDAV address in the account settings.")
 			wait = s.opts.MaxBackoff
 			failures = 0
 		case errors.Is(err, caldav.ErrNotCalDAV), errors.Is(err, errNoServer):
 			logger.Info("no calendar server found for the account", "error", err, "retryIn", s.opts.NotFoundRetry)
 			status.report(ctx, api.CalendarUnsupported, "No calendar server was found for this account. If it has one, enter its CalDAV address in the account settings.")
 			wait = s.opts.NotFoundRetry
+			failures = 0
+		case errors.Is(err, caldav.ErrInsecure):
+			logger.Warn("the calendar server wanted plain http", "error", err, "retryIn", s.opts.MaxBackoff)
+			status.report(ctx, api.CalendarError, "The calendar server sent Tresso to an http:// address, which does not get your password. Enter its https address in the account settings.")
+			wait = s.opts.MaxBackoff
 			failures = 0
 		case errors.Is(err, caldav.ErrUnauthorized):
 			logger.Warn("the calendar server refused the login", "retryIn", s.opts.MaxBackoff)
@@ -161,6 +176,7 @@ func newStatusReporter(s *Syncer, accountID string, logger *slog.Logger) *status
 }
 
 func (r *statusReporter) report(ctx context.Context, status, detail string) {
+	detail = truncateText(detail, maxDetail)
 	if r.last == status {
 		return
 	}
@@ -239,6 +255,7 @@ func (r *run) syncAll(ctx context.Context) error {
 		return err
 	}
 	list := api.CalendarList{WorkerID: r.syncer.workerID, Source: "caldav", ServerURL: &r.server.ContextURL, ProviderSchedules: r.server.AutoSchedule}
+	calendars = r.acceptable(calendars)
 	for _, calendar := range calendars {
 		remote := api.RemoteCalendar{RemoteID: calendar.URL, Name: calendar.Name, Writable: calendar.Writable, IsDefault: calendar.IsDefault}
 		if calendar.Color != "" {
@@ -258,20 +275,45 @@ func (r *run) syncAll(ctx context.Context) error {
 		r.states[state.RemoteID] = state
 	}
 
+	refused, synced := 0, 0
 	for _, calendar := range calendars {
 		state, ok := r.states[calendar.URL]
 		if !ok {
 			continue
 		}
+		synced++
 		if err := r.syncCalendar(ctx, calendar, state); err != nil {
-			if errors.Is(err, caldav.ErrUnauthorized) || ctx.Err() != nil {
+			if ctx.Err() != nil {
 				return err
+			}
+			if errors.Is(err, caldav.ErrUnauthorized) {
+				// A calendar shared with the user and taken back refuses the login; the others may still work.
+				refused++
+				r.logger.Warn("a calendar refused the login", "calendar", calendar.URL)
+				continue
 			}
 			// One broken calendar (a shared one that went away mid-sync) must not hold up the others.
 			r.logger.Warn("calendar could not be synced", "calendar", calendar.URL, "error", err)
 		}
 	}
+	if refused > 0 && refused == synced {
+		return caldav.ErrUnauthorized
+	}
 	return nil
+}
+
+// acceptable leaves out the calendars the API cannot take, which would make it refuse the whole list every time: one
+// with an overlong address, and any past the most a list may have.
+func (r *run) acceptable(calendars []caldav.Calendar) []caldav.Calendar {
+	kept := make([]caldav.Calendar, 0, min(len(calendars), maxCalendars))
+	for _, calendar := range calendars {
+		if len(calendar.URL) > maxHref || len(kept) == maxCalendars {
+			r.logger.Warn("leaving out a calendar the API cannot take", "calendar", truncateText(calendar.URL, 200))
+			continue
+		}
+		kept = append(kept, calendar)
+	}
+	return kept
 }
 
 func (r *run) syncCalendar(ctx context.Context, calendar caldav.Calendar, state api.CalendarState) error {
@@ -285,24 +327,25 @@ func (r *run) syncCalendar(ctx context.Context, calendar caldav.Calendar, state 
 			return nil
 		}
 		if stored.SyncToken != "" {
-			members, token, err := r.client.SyncCollection(ctx, calendar.URL, stored.SyncToken)
-			if err == nil {
-				return r.applyChanges(ctx, calendar, state, members, cursor{SyncToken: token})
-			}
-			if !errors.Is(err, caldav.ErrInvalidSyncToken) {
+			err := r.syncChanges(ctx, calendar, state, stored.SyncToken)
+			if err == nil || !errors.Is(err, caldav.ErrInvalidSyncToken) && !errors.Is(err, errTooManyPages) {
 				return err
 			}
 		}
-		members, token, err := r.client.SyncCollection(ctx, calendar.URL, "")
-		if err != nil {
+		members, token, err := r.syncListing(ctx, calendar.URL)
+		if err == nil {
+			return r.applyListing(ctx, calendar, state, members, cursor{SyncToken: token})
+		}
+		if errors.Is(err, caldav.ErrUnauthorized) || ctx.Err() != nil {
 			return err
 		}
-		return r.applyListing(ctx, calendar, state, members, cursor{SyncToken: token})
-	}
-
-	if calendar.CTag != "" && stored.CTag == calendar.CTag {
+		// A server whose sync-collection fails may still list the calendar; the token is then not kept, so the next
+		// sync lists it again.
+		r.logger.Info("sync-collection failed; listing the calendar instead", "calendar", calendar.URL, "error", err)
+	} else if calendar.CTag != "" && stored.CTag == calendar.CTag {
 		return nil
 	}
+
 	members, err := r.client.List(ctx, calendar.URL)
 	if err != nil {
 		return err
@@ -310,27 +353,95 @@ func (r *run) syncCalendar(ctx context.Context, calendar caldav.Calendar, state 
 	return r.applyListing(ctx, calendar, state, members, cursor{CTag: calendar.CTag})
 }
 
-// applyListing hands the complete listing to the API, which removes what is gone and names what to fetch.
+var errTooManyPages = errors.New("the calendar server kept cutting its changes short")
+
+// syncChanges applies what changed since the token, page by page when the server cuts its answer short (RFC 6578
+// 3.6); each page carries its own token, so a sync that breaks off resumes after the last page applied.
+func (r *run) syncChanges(ctx context.Context, calendar caldav.Calendar, state api.CalendarState, token string) error {
+	for range maxSyncPages {
+		members, next, truncated, err := r.client.SyncCollection(ctx, calendar.URL, token)
+		if err != nil {
+			return err
+		}
+		if err := r.applyChanges(ctx, calendar, state, members, cursor{SyncToken: next}); err != nil {
+			return err
+		}
+		if !truncated || next == "" || next == token {
+			return nil
+		}
+		token = next
+	}
+	return errTooManyPages
+}
+
+// syncListing collects a complete listing through sync-collection, following the pages of a cut-short answer. Only
+// the last page's token stands for the whole listing; a page alone would make the API remove what later pages list.
+func (r *run) syncListing(ctx context.Context, calendarURL string) ([]caldav.Member, string, error) {
+	var all []caldav.Member
+	token := ""
+	for range maxSyncPages {
+		members, next, truncated, err := r.client.SyncCollection(ctx, calendarURL, token)
+		if err != nil {
+			return nil, "", err
+		}
+		all = append(all, members...)
+		if !truncated || next == "" || next == token {
+			return all, next, nil
+		}
+		token = next
+	}
+	return nil, "", errTooManyPages
+}
+
+// applyListing hands the complete listing to the API, which removes what is gone and names what to fetch. A listing
+// larger than the API takes in one request goes in pages that remove nothing.
 func (r *run) applyListing(ctx context.Context, calendar caldav.Calendar, state api.CalendarState, members []caldav.Member, next cursor) error {
 	objects := make([]api.RemoteObject, 0, len(members))
+	seen := make(map[string]bool, len(members))
 	for _, member := range members {
-		if member.Removed {
+		if member.Removed || seen[member.Href] {
+			continue
+		}
+		seen[member.Href] = true
+		if !r.fits(member.Href, member.ETag) {
 			continue
 		}
 		etag := member.ETag
 		objects = append(objects, api.RemoteObject{RemoteID: member.Href, ETag: &etag})
 	}
-	result, err := r.syncer.api.CalendarInventory(ctx, r.account.ID, state.ID, r.syncer.workerID, objects)
-	if err != nil {
-		return err
+	partial := len(objects) > inventoryBatch
+	if partial {
+		r.logger.Warn("the calendar is too large to find removed events in", "calendar", calendar.URL, "resources", len(objects))
 	}
-	return r.upload(ctx, calendar, state, result.Fetch, nil, next)
+	var fetch []string
+	for start := 0; start < len(objects) || start == 0; start += inventoryBatch {
+		end := min(start+inventoryBatch, len(objects))
+		result, err := r.syncer.api.CalendarInventory(ctx, r.account.ID, state.ID, r.syncer.workerID, objects[start:end], partial)
+		if err != nil {
+			return err
+		}
+		fetch = append(fetch, result.Fetch...)
+	}
+	return r.upload(ctx, calendar, state, fetch, nil, next)
+}
+
+// fits reports whether the API takes a resource's href and ETag; one it does not would make it refuse the request.
+func (r *run) fits(href, etag string) bool {
+	if len(href) <= maxHref && len(etag) <= maxETag {
+		return true
+	}
+	r.logger.Info("skipping a calendar resource the API cannot take", "href", truncateText(href, 200))
+	return false
 }
 
 // applyChanges uploads what sync-collection reported changed and removed.
 func (r *run) applyChanges(ctx context.Context, calendar caldav.Calendar, state api.CalendarState, members []caldav.Member, next cursor) error {
 	var changed, removed []string
 	for _, member := range members {
+		if len(member.Href) > maxHref {
+			r.logger.Info("skipping a calendar resource the API cannot take", "href", truncateText(member.Href, 200))
+			continue
+		}
 		if member.Removed {
 			removed = append(removed, member.Href)
 		} else {
@@ -353,6 +464,15 @@ func (r *run) upload(ctx context.Context, calendar caldav.Calendar, state api.Ca
 	flush := func(last bool) error {
 		batch := api.ObjectBatch{WorkerID: r.syncer.workerID, Changed: pending}
 		if last {
+			// Removals go after every change, in batches the API takes; the cursor only with the very last one.
+			for len(removed) > removedBatch {
+				if _, err := r.syncer.api.CalendarObjects(ctx, r.account.ID, state.ID, api.ObjectBatch{WorkerID: r.syncer.workerID, Changed: pending, Removed: removed[:removedBatch]}); err != nil {
+					return err
+				}
+				pending = nil
+				removed = removed[removedBatch:]
+			}
+			batch.Changed = pending
 			batch.Cursor = &cursorText
 			batch.Removed = removed
 		}
@@ -372,6 +492,9 @@ func (r *run) upload(ctx context.Context, calendar caldav.Calendar, state api.Ca
 		for _, object := range objects {
 			if len(object.Data) > caldav.MaxObject {
 				r.logger.Info("skipping a calendar resource that is too large", "href", object.Href, "bytes", len(object.Data))
+				continue
+			}
+			if !r.fits(object.Href, object.ETag) {
 				continue
 			}
 			etag, data := object.ETag, object.Data
@@ -437,7 +560,12 @@ func (r *run) write(ctx context.Context, operation api.CalendarOperation) api.Op
 	if !create && ifMatch == "" {
 		// The last write got no ETag back; the server's current one still guards against overwriting a change made
 		// elsewhere since.
-		ifMatch, _ = r.client.ETag(ctx, href)
+		current, err := r.client.ETag(ctx, href)
+		if err != nil {
+			// Without it the PUT would overwrite whatever the server has now.
+			return r.failure(ctx, href, err)
+		}
+		ifMatch = current
 	}
 	etag, err := r.client.Put(ctx, href, *operation.Ical, ifMatch, create)
 	if err != nil {
@@ -515,4 +643,26 @@ func ianaZone(name string) string {
 
 func text(s string) *string {
 	return &s
+}
+
+// truncateText cuts s to at most max runes.
+func truncateText(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max])
+}
+
+// displayURL is a server address as the user may see it in a status: without a login or query, which can carry
+// secrets.
+func displayURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "the address the server named"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return truncateText(u.String(), 200)
 }

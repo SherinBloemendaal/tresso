@@ -4,8 +4,16 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\Calendar;
 
+use App\Calendar\CalendarStore;
+use App\Repository\CalendarObjectRepository;
+use App\Repository\CalendarOperationRepository;
+use App\Repository\CalendarRepository;
+use App\Sync\Calendar\CalendarSynchronizer;
 use App\Tests\Functional\AuthenticatesUsers;
 use App\Tests\Functional\DatabaseTestCase;
+use Doctrine\ORM\EntityManagerInterface;
+use Psr\Log\NullLogger;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 
 final class SyncCalendarTest extends DatabaseTestCase
 {
@@ -154,6 +162,45 @@ final class SyncCalendarTest extends DatabaseTestCase
         self::assertResponseIsSuccessful();
         self::assertSame(['fetch' => [self::HOME.'c.ics'], 'removed' => 1], $this->decodedResponse());
         self::assertSame(['A'], array_column($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00'), 'summary'));
+    }
+
+    public function testAPartialInventoryRemovesNothing(): void
+    {
+        $home = $this->reportCalendars()[0]['id'];
+        $this->storeObject($home, 'a.ics', '"1"', 'a@company.example', 'A');
+        $this->storeObject($home, 'b.ics', '"1"', 'b@company.example', 'B');
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$home.'/inventory', ['workerId' => 'w1', 'partial' => true, 'objects' => [
+            ['remoteId' => self::HOME.'a.ics', 'etag' => '"2"'],
+        ]], $this->worker);
+        self::assertResponseIsSuccessful();
+        self::assertSame(['fetch' => [self::HOME.'a.ics'], 'removed' => 0], $this->decodedResponse());
+        $summaries = array_column($this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00'), 'summary');
+        sort($summaries);
+        self::assertSame(['A', 'B'], $summaries);
+    }
+
+    public function testAPlainHttpServerAddressIsRefusedAndShownToTheUser(): void
+    {
+        $container = self::getContainer();
+        $container->set(CalendarSynchronizer::class, new CalendarSynchronizer(
+            self::service($container, EntityManagerInterface::class),
+            self::service($container, CalendarRepository::class),
+            self::service($container, CalendarObjectRepository::class),
+            self::service($container, CalendarOperationRepository::class),
+            self::service($container, CalendarStore::class),
+            new NullLogger(),
+            false,
+        ));
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars', ['workerId' => 'w1', 'serverUrl' => 'http://caldav.company.example/dav/', 'calendars' => [['remoteId' => self::HOME, 'name' => 'Home']]], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+        $account = $this->getJson('/api/v1/mail-accounts/'.$this->accountId, $this->kim);
+        self::assertSame('error', $account['calendarStatus']);
+        self::assertSame('The calendar server address must use https.', $account['calendarStatusDetail']);
+        self::assertNull($account['calendarUrl']);
+        self::assertSame([], $this->remoteCalendarNames());
     }
 
     public function testUserEditsAreWrittenByTheLeasingWorker(): void
@@ -426,5 +473,20 @@ final class SyncCalendarTest extends DatabaseTestCase
             'DTSTART;TZID=Europe/Amsterdam:20261019T090000', 'DTEND;TZID=Europe/Amsterdam:20261019T091500',
             'SUMMARY:'.$summary, 'X-PROVIDER-PRIVATE:kept', 'END:VEVENT', 'END:VCALENDAR', '',
         ]);
+    }
+
+    /**
+     * @template T of object
+     *
+     * @param class-string<T> $id
+     *
+     * @return T
+     */
+    private static function service(ContainerInterface $container, string $id): object
+    {
+        $service = $container->get($id);
+        self::assertInstanceOf($id, $service);
+
+        return $service;
     }
 }
