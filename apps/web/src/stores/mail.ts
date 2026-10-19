@@ -76,6 +76,8 @@ export const useMailStore = defineStore('mail', () => {
    * never overwrites a newer session's state; the copy it opened is closed again.
    */
   let generation = 0
+  /** Opens of a copy under way, with the close of one that was overtaken; removing a copy waits for them. */
+  const openings = new Set<Promise<void>>()
 
   async function start(forUserId: string): Promise<void> {
     if (userId === forUserId) {
@@ -84,12 +86,29 @@ export const useMailStore = defineStore('mail', () => {
     await stop()
     const mine = ++generation
     userId = forUserId
-    const database = await openMailStore(forUserId)
-    if (mine !== generation) {
-      await database.close()
-      return
+    let opened!: () => void
+    const opening = new Promise<void>((resolve) => {
+      opened = resolve
+    })
+    openings.add(opening)
+    let database: MailStore
+    try {
+      database = await openMailStore(forUserId)
+      if (mine !== generation) {
+        await database.close()
+        return
+      }
+      db.value = database
+    } catch (error) {
+      if (mine !== generation) {
+        // Overtaken anyway (a sign-out, another user): its failure is no longer anyone's concern.
+        return
+      }
+      throw error
+    } finally {
+      openings.delete(opening)
+      opened()
     }
-    db.value = database
     await refresh()
     if (mine !== generation) {
       return
@@ -195,6 +214,8 @@ export const useMailStore = defineStore('mail', () => {
   async function forget(): Promise<void> {
     const forUserId = userId
     await stop()
+    // A copy still opening (at launch, say) is closed by its start once it sees it was overtaken; only then can it go.
+    await Promise.allSettled(openings)
     if (forUserId !== null) {
       await deleteMailStore(forUserId)
     }

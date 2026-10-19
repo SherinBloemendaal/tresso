@@ -13,6 +13,7 @@ function gate() {
 }
 
 const copies = vi.hoisted(() => ({
+  opening: [] as string[],
   opened: [] as string[],
   closed: [] as string[],
   deleted: [] as string[],
@@ -22,6 +23,7 @@ const copies = vi.hoisted(() => ({
 
 vi.mock('@/mail/store', () => ({
   openMailStore: async (userId: string): Promise<MailStore> => {
+    copies.opening.push(userId)
     await copies.holdOpen.get(userId)
     const store = await SqliteMailStore.open(await memorySql())
     copies.opened.push(userId)
@@ -33,7 +35,12 @@ vi.mock('@/mail/store', () => ({
     }
     return store
   },
+  // As the desktop shell does: a copy that is still open cannot be removed.
   deleteMailStore: async (userId: string) => {
+    const open = copies.opening.filter((id) => id === userId).length - copies.closed.filter((id) => id === userId).length
+    if (open > 0) {
+      throw new Error('The mail copy is still open.')
+    }
     copies.deleted.push(userId)
   },
 }))
@@ -48,6 +55,7 @@ describe('the mail copy across sign-out and sign-in', () => {
   beforeEach(() => {
     sessionStorage.setItem('auth.tokens', JSON.stringify({ accessToken: 'token', refreshToken: null, expiresAt: Date.now() + 3_600_000 }))
     setActivePinia(createPinia())
+    copies.opening = []
     copies.opened = []
     copies.closed = []
     copies.deleted = []
@@ -86,6 +94,36 @@ describe('the mail copy across sign-out and sign-in', () => {
     expect(mail.ready).toBe(true)
     await mail.forget()
     expect(copies.deleted).toEqual(['anna', 'ben'])
+  })
+
+  it('removes a copy that was still opening when the user was signed out', async () => {
+    const mail = useMailStore()
+    const opening = gate()
+    copies.holdOpen.set('anna', opening.passed)
+
+    const starting = mail.start('anna')
+    await vi.waitFor(() => expect(copies.opening).toEqual(['anna']))
+    const forgetting = mail.forget()
+    opening.open()
+    await starting
+    await forgetting
+
+    expect(copies.closed).toEqual(['anna'])
+    expect(copies.deleted).toEqual(['anna'])
+    expect(mail.ready).toBe(false)
+  })
+
+  it('does not report the failure of an open that was overtaken', async () => {
+    const mail = useMailStore()
+    const opening = gate()
+    copies.holdOpen.set('anna', opening.passed.then(() => Promise.reject(new Error('disk full'))))
+
+    const starting = mail.start('anna')
+    await mail.start('ben')
+    opening.open()
+
+    await expect(starting).resolves.toBeUndefined()
+    expect(mail.ready).toBe(true)
   })
 
   it('closes a copy whose opening was overtaken by another sign-in', async () => {
