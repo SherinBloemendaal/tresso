@@ -9,6 +9,8 @@ export interface MessageActionRequest {
   action: MessageAction
   /** The folder to move into; only for `move`. */
   folderId?: string
+  /** Only for `move`: move just the copies in this folder (e.g. to undo a move exactly), not every copy. */
+  fromFolderId?: string
 }
 
 export interface MessageActionResult {
