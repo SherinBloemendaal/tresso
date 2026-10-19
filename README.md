@@ -171,8 +171,10 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/) with
   settings (`MERCURE_PUBLIC_URL`, `MERCURE_INTERNAL_URL`, `MERCURE_CORS_ORIGINS` and two different keys of at least
   32 bytes in `MERCURE_PUBLISHER_JWT_KEY` and `MERCURE_SUBSCRIBER_JWT_KEY`), the object storage settings
   (`S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`), and keep `MAIL_ALLOW_UNSAFE_SERVERS=0`.
-- Desktop and mobile sign in through the `tresso://auth/callback` scheme. Until the native apps phase, the desktop
-  shell signs in through the web dev server.
+- Desktop and mobile sign in through the `tresso://auth/callback` scheme: the system browser signs in and the link
+  brings the result back to the app. Windows and Linux register the scheme when `npm run dev:desktop` starts; macOS
+  only takes it from an app bundle, so to sign in there build one with
+  `npm run tauri --workspace @tresso/desktop -- build --debug --bundles app` and open the `.app` it reports.
 
 ## Documentation
 

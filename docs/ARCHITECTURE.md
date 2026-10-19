@@ -277,6 +277,16 @@ statistics and Year in mail.
 | Desktop (`apps/desktop`) | Tauri 2 (Rust) wrapping `apps/web` | SQLite via Rust | Native notifications |
 | Mobile (`apps/mobile`) | Expo (React Native), TypeScript | expo-sqlite | APNs / FCM via Expo |
 
+The desktop app runs the web client unchanged; only signing in and keeping the tokens go through the shell
+(`apps/web/src/platform/desktop.ts`). It is its own OAuth client (`desktop`) with the redirect URI
+`tresso://auth/callback`: sign-in opens the authorization page in the system browser, where the user's password
+manager and existing sessions work, and the operating system hands the `tresso://` link back to the running app
+(single instance on Windows and Linux), which exchanges the code with its PKCE verifier. Tokens are kept in the OS
+keychain (Keychain, Credential Manager, Secret Service) by Rust commands, never in web storage, and read back before
+the first screen. When the keychain refuses, the app says that the sign-in will not last instead of failing quietly.
+The API and the Mercure hub accept the app's origins (`tauri://localhost`, and `http://tauri.localhost` on Windows),
+and the main window may only open http(s) pages in the browser and read the link it was opened with.
+
 Shared TypeScript lives in `packages/core` (MIT): domain types, the OAuth flow, and the client side of the sync
 protocol, so every client syncs the same way:
 
