@@ -22,6 +22,8 @@ export interface MailAccount {
   smtp: ServerSettings
   lastSyncedAt: string | null
   createdAt: string
+  /** Changed through the signature's `defaultFor`. */
+  defaultSignatureId: string | null
 }
 
 export interface NewMailAccount {
