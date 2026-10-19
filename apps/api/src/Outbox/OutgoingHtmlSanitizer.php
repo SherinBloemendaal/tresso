@@ -30,7 +30,7 @@ final readonly class OutgoingHtmlSanitizer
             ->allowMediaSchemes(['https', 'data', 'cid'])
             ->allowRelativeMedias(false)
             ->withMaxInputLength(self::MAX_INPUT_BYTES);
-        foreach (['align', 'valign', 'bgcolor', 'width', 'height', 'border', 'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'dir', 'lang', 'title', 'alt'] as $attribute) {
+        foreach (['align', 'valign', 'bgcolor', 'background', 'width', 'height', 'border', 'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'dir', 'lang', 'title', 'alt'] as $attribute) {
             $config = $config->allowAttribute($attribute, '*');
         }
         $this->sanitizer = new HtmlSanitizer($config);
@@ -45,8 +45,9 @@ final readonly class OutgoingHtmlSanitizer
     public function sanitize(string $html, array $contentIds = []): string
     {
         $standIns = (string) preg_replace_callback(
-            '~\bcid:([^"\'\s<>]+)~i',
-            static fn (array $match): string => self::CID_STAND_IN.rawurlencode(html_entity_decode($match[1], \ENT_QUOTES | \ENT_HTML5, 'UTF-8')),
+            // Only where an image is shown: a cid: link stays one the cleaner removes.
+            '~(\s(?:src|background)\s*=\s*["\']?)cid:([^"\'\s<>]+)~i',
+            static fn (array $match): string => $match[1].self::CID_STAND_IN.rawurlencode(html_entity_decode($match[2], \ENT_QUOTES | \ENT_HTML5, 'UTF-8')),
             $html,
         );
         $clean = $this->sanitizer->sanitize($standIns);
