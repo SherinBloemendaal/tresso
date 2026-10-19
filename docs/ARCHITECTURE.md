@@ -326,7 +326,8 @@ pulls it and the same `RealtimeClient` triggers pulls while the app is in the fo
 connection rests and the copy catches up when the app comes back. `MailSession` runs this lifecycle one switch at a
 time, awaiting every step: a copy is deleted only after it is closed (on sign-out, or when another user signs in),
 and a small index database lists every copy on the device, so one that could not be deleted is removed the next
-time. A copy made by another schema version is dropped and rebuilt. The storage runs behind a small `Sql` interface,
+time. The last signed-in user is remembered, so their copy opens before the server confirms who is signed in, also
+offline. A copy made by another schema version is dropped and rebuilt. The storage runs behind a small `Sql` interface,
 so its tests run the same SQL on sql.js. Message bodies show in a web view with the same Content-Security-Policy as
 the web client's frame; only links the reader taps open, in the browser, and remote images load only when the
 reader asks. Outgoing mail,
