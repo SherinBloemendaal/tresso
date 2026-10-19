@@ -29,6 +29,10 @@ describe('Composer', () => {
   let notices: ComposerNotice[]
   let serverDrafts: Map<string, SyncedDraft>
   let sendFails: unknown
+  let offline: boolean
+  let uploading: (() => Promise<void>) | null
+  let currentStore: SqliteMailStore | null
+  let changes: number
   let composer: Composer
 
   beforeEach(async () => {
@@ -40,25 +44,41 @@ describe('Composer', () => {
     notices = []
     serverDrafts = new Map()
     sendFails = null
+    offline = false
+    uploading = null
+    currentStore = store
+    changes = 0
     const api: DraftApi = {
+      // As the server answers: a second create of one id is refused, a stale update too.
       create: async (id, request) => {
+        await uploading?.()
+        if (serverDrafts.has(id)) throw new ApiFailure(409)
         const saved = { id, ...request, version: 1, updatedAt: '2026-10-19T08:00:00Z' }
         serverDrafts.set(id, saved)
         return saved
       },
       update: async (id, request, expectedVersion) => {
+        await uploading?.()
+        const current = serverDrafts.get(id)
+        if (current === undefined) throw new ApiFailure(404)
+        if (current.version !== expectedVersion) throw new ApiFailure(409)
         const saved = { id, ...request, version: expectedVersion + 1, updatedAt: '2026-10-19T08:00:00Z' }
         serverDrafts.set(id, saved)
         return saved
       },
-      get: async (id) => serverDrafts.get(id)!,
+      get: async (id) => {
+        const current = serverDrafts.get(id)
+        if (current === undefined) throw new ApiFailure(404)
+        return current
+      },
       remove: async (id) => {
-        serverDrafts.delete(id)
+        if (offline) throw new Error('Network request failed')
+        if (!serverDrafts.delete(id)) throw new ApiFailure(404)
       },
     }
     composer = new Composer({
-      store: () => store,
-      drafts: new DraftSync(() => store, api),
+      store: () => currentStore,
+      drafts: new DraftSync(() => currentStore, api),
       accounts: () => accounts,
       signatures: () => [signature('sig-work', 'Work')],
       defaultAccount: () => 'work',
@@ -74,6 +94,7 @@ describe('Composer', () => {
       },
       notify: (notice) => notices.push(notice),
       explain: (error) => ({ message: error instanceof Error ? error.message : String(error), violations: error instanceof ApiFailure ? error.violations : {} }),
+      changed: () => (changes += 1),
     })
   })
 
@@ -212,5 +233,128 @@ describe('Composer', () => {
     await composer.discard()
     expect(await store.draft(kept)).toBeNull()
     expect(serverDrafts.has(kept)).toBe(false)
+  })
+
+  it('sends a draft that was saved before with the draft, keeping the version the server knows', async () => {
+    composer.openNew([{ address: 'anna@example.test', name: null }])
+    composer.update({ subject: 'Saved first' })
+    await vi.advanceTimersByTimeAsync(1000)
+    const id = composer.state.draft!.id
+    expect(serverDrafts.get(id)?.version).toBe(1)
+
+    await composer.send()
+
+    expect(composer.state.error).toBeNull()
+    expect(sent[0]?.draftId).toBe(id)
+    // The edits on screen went up as version 2 on top of the saved version 1, not as a second create.
+    expect(serverDrafts.get(id)?.version).toBe(2)
+    expect(await store.draft(id)).toMatchObject({ version: 2, outgoingId: 'o1' })
+  })
+
+  it('offers undo until the moment the message leaves', async () => {
+    composer.openNew([{ address: 'anna@example.test', name: null }])
+    await composer.send()
+
+    expect(composer.state.undoable?.until).toBe(Date.parse(sent[0]!.sendAt!))
+  })
+
+  it('does not send a draft with a conflict before it is settled', async () => {
+    composer.openNew([{ address: 'anna@example.test', name: null }])
+    composer.update({ subject: 'Here' })
+    await vi.advanceTimersByTimeAsync(1000)
+    const id = composer.state.draft!.id
+    await store.saveDraft({ ...(await store.draft(id))!, remoteVersion: 3 })
+    await composer.openDraft(id)
+
+    await composer.send()
+
+    expect(composer.state.error).toBe('This draft was changed on another device. Choose which version to keep first.')
+    expect(sent).toEqual([])
+  })
+
+  it('does not bring back a draft deleted while its upload was under way, and removes the server copy', async () => {
+    composer.openNew()
+    composer.update({ subject: 'Short-lived' })
+    const id = composer.state.draft!.id
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    uploading = () => held
+    await vi.advanceTimersByTimeAsync(1000)
+
+    const discarding = composer.discard()
+    uploading = null
+    release()
+    expect(await discarding).toBe(true)
+
+    expect(await store.draft(id)).toBeNull()
+    expect(serverDrafts.has(id)).toBe(false)
+  })
+
+  it('keeps a draft open, saying why, when it cannot be deleted from the server', async () => {
+    composer.openNew()
+    composer.update({ subject: 'Offline' })
+    await vi.advanceTimersByTimeAsync(1000)
+    offline = true
+
+    expect(await composer.discard()).toBe(false)
+
+    expect(composer.state.draft).not.toBeNull()
+    expect(composer.state.error).toBe('The draft could not be deleted: Network request failed')
+    expect(await store.draft(composer.state.draft!.id)).not.toBeNull()
+  })
+
+  it('writes nothing into another copy after a sign-out or another user, and forgets the draft on reset', async () => {
+    composer.openNew()
+    composer.update({ subject: 'Anna writes' })
+    const id = composer.state.draft!.id
+    const other = await SqliteMailStore.open(await memorySql())
+    currentStore = other
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await composer.send()
+
+    expect(await other.draft(id)).toBeNull()
+    expect(await store.draft(id)).toBeNull()
+    expect(composer.state.error).toBe('You were signed out. Sign in again to send this message.')
+
+    composer.reset()
+    expect(composer.state.draft).toBeNull()
+  })
+
+  it('saves a draft still waiting for typing to stop before another one opens', async () => {
+    composer.openNew()
+    composer.update({ subject: 'Typed just now' })
+    const first = composer.state.draft!.id
+
+    composer.openNew()
+    await vi.advanceTimersByTimeAsync(10)
+
+    expect(await store.draft(first)).toMatchObject({ subject: 'Typed just now' })
+  })
+
+  it('keeps a draft that is being sent when the form closes, so a failure shows', async () => {
+    composer.openNew([{ address: 'anna@example.test', name: null }])
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    uploading = () => held
+    const sending = composer.send()
+
+    composer.close()
+    sendFails = new ApiFailure(500)
+    release()
+    await sending
+
+    expect(composer.state.draft).not.toBeNull()
+    expect(composer.state.error).toBe('HTTP 500')
+  })
+
+  it('holds plain data whatever it is handed, and says when it changed the copy', async () => {
+    composer.openNew()
+    const reactive = new Proxy({ address: 'anna@example.test', name: null }, {})
+    composer.update({ to: [reactive] })
+
+    expect(Object.getPrototypeOf(composer.state.draft!.to[0])).toBe(Object.prototype)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(changes).toBeGreaterThan(0)
   })
 })

@@ -33,6 +33,8 @@ export interface ComposerDeps {
   explain(error: unknown): { message: string; violations: Record<string, string> }
   /** How a scheduled time is written in a notice. */
   formatTime?(at: Date): string
+  /** Called after the composer changed the copy (a draft saved, sent or removed), so lists read it again. */
+  changed?(): void
   undoSeconds?: number
   autosaveMs?: number
 }
@@ -64,6 +66,11 @@ export class Composer {
   private undoTimer: ReturnType<typeof setTimeout> | null = null
   private following: Promise<void> | null = null
   private followAgain = false
+  /**
+   * The copy the open draft belongs to. A draft is only ever written into it: after a sign-out or another user's
+   * sign-in the composer does not touch the new copy (see reset).
+   */
+  private openedIn: MailStore | null = null
 
   constructor(private readonly deps: ComposerDeps) {}
 
@@ -92,7 +99,33 @@ export class Composer {
   }
 
   private open(draft: Draft): void {
-    this.set({ draft, revision: this.current.revision + 1, error: null, violations: {}, savedAt: null, conflict: draft.remoteVersion !== null })
+    // A save that was still waiting for typing to stop is made before the other draft takes its place.
+    if (this.saveTimer !== null) {
+      this.clearSaveTimer()
+      void this.save(this.current.draft)
+    }
+    this.openedIn = this.deps.store()
+    this.set({ draft: plain(draft), revision: this.current.revision + 1, error: null, violations: {}, savedAt: null, conflict: draft.remoteVersion !== null })
+  }
+
+  /** The copy to write the open draft into, or null when it is no longer the one open (a sign-out, another user). */
+  private storeOfDraft(): MailStore | null {
+    const store = this.deps.store()
+    return store !== null && store === this.openedIn ? store : null
+  }
+
+  /**
+   * Forgets the draft on screen without saving it, for a sign-out or another user's sign-in: whatever it is goes no
+   * further. Drafts already saved stay in the copy they were saved in.
+   */
+  reset(): void {
+    this.clearSaveTimer()
+    if (this.undoTimer !== null) {
+      clearTimeout(this.undoTimer)
+      this.undoTimer = null
+    }
+    this.openedIn = null
+    this.set({ draft: null, savedAt: null, sending: false, error: null, violations: {}, conflict: false, undoable: null })
   }
 
   openNew(to: Address[] = []): void {
@@ -118,7 +151,7 @@ export class Composer {
     if (draft === null) {
       return
     }
-    this.set({ draft: { ...draft, ...changes, pendingSave: true, updatedAt: Date.now() } })
+    this.set({ draft: { ...draft, ...plain(changes), pendingSave: true, updatedAt: Date.now() } })
     this.clearSaveTimer()
     this.saveTimer = setTimeout(() => void this.save(), this.deps.autosaveMs ?? AUTOSAVE_MS)
   }
@@ -132,13 +165,14 @@ export class Composer {
 
   /** Saves on this device at once and uploads, so the draft is on every device and in the Drafts folder. */
   async save(draft: Draft | null = this.current.draft): Promise<void> {
-    const store = this.deps.store()
+    const store = this.storeOfDraft()
     if (draft === null || store === null) {
       return
     }
     const stored = await store.draft(draft.id)
     // Keep what the upload learned (server version, a conflict) and lay the edits on top.
     await store.saveDraft({ ...draft, version: stored?.version ?? draft.version, remoteVersion: stored?.remoteVersion ?? null })
+    this.deps.changed?.()
     if (this.current.draft?.id === draft.id) {
       this.set({ savedAt: Date.now() })
     }
@@ -172,19 +206,35 @@ export class Composer {
     }
   }
 
-  /** Throws the draft away, here and on the server. */
-  async discard(): Promise<void> {
+  /**
+   * Throws the draft away, here and on the server. When the server cannot be reached the draft stays open, saying so,
+   * rather than lingering in Drafts while the form is gone.
+   */
+  async discard(): Promise<boolean> {
     const draft = this.current.draft
-    if (draft === null) {
-      return
+    if (draft === null || this.storeOfDraft() === null) {
+      return false
     }
     this.clearSaveTimer()
-    this.set({ draft: null, conflict: false })
-    await this.deps.drafts.deleteEverywhere(draft.id)
+    try {
+      await this.deps.drafts.deleteEverywhere(draft.id)
+    } catch (error) {
+      this.set({ error: `The draft could not be deleted: ${this.deps.explain(error).message}` })
+      return false
+    }
+    this.deps.changed?.()
+    if (this.current.draft?.id === draft.id) {
+      this.set({ draft: null, conflict: false })
+    }
+    return true
   }
 
   /** Closes the form; the draft is kept. */
   close(): void {
+    if (this.current.sending) {
+      // It stays until the send settles, so a failure is not lost with the form.
+      return
+    }
     this.clearSaveTimer()
     const closing = this.current.draft
     this.set({ draft: null, conflict: false })
@@ -219,23 +269,31 @@ export class Composer {
     if (draft === null || this.current.sending) {
       return
     }
-    const problem = this.validate(draft)
+    const store = this.storeOfDraft()
+    if (store === null) {
+      this.set({ error: 'You were signed out. Sign in again to send this message.' })
+      return
+    }
+    const problem = this.current.conflict ? 'This draft was changed on another device. Choose which version to keep first.' : this.validate(draft)
     if (problem) {
       this.set({ error: problem })
       return
     }
     this.set({ sending: true, error: null, violations: {} })
-    const at = sendAt ?? new Date(Date.now() + this.undoSeconds * 1000)
     // The draft goes up first, so the server can take it (and its Drafts folder copy) away when the message is queued.
     this.clearSaveTimer()
     try {
       const onServer = await this.deps.drafts.uploadForSending(draft)
+      // Worked out after the upload: the undo window is the time between queueing and sending.
+      const at = sendAt ?? new Date(Date.now() + this.undoSeconds * 1000)
       const outgoing = await this.deps.send(sendRequest(draft, this.deps.signatures(), at, onServer))
-      const store = this.deps.store()
-      await store?.saveDraft({ ...((await store.draft(draft.id)) ?? draft), outgoingId: outgoing.id, pendingSave: false, updatedAt: Date.now() })
-      this.set({ draft: null, conflict: false })
+      await store.saveDraft({ ...((await store.draft(draft.id)) ?? draft), outgoingId: outgoing.id, pendingSave: false, updatedAt: Date.now() })
+      this.deps.changed?.()
+      if (this.current.draft?.id === draft.id) {
+        this.set({ draft: null, conflict: false })
+      }
       if (sendAt === undefined) {
-        this.startUndo(outgoing.id, draft.id)
+        this.startUndo(outgoing.id, draft.id, at)
       } else {
         const when = this.deps.formatTime?.(at) ?? at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
         this.deps.notify({ text: `Scheduled for ${when}.`, tone: 'info' }, 8000)
@@ -248,12 +306,13 @@ export class Composer {
     }
   }
 
-  private startUndo(outgoingId: string, draftId: string): void {
+  /** Undo is offered until the message's send time, when it leaves. */
+  private startUndo(outgoingId: string, draftId: string, until: Date): void {
     if (this.undoTimer !== null) {
       clearTimeout(this.undoTimer)
     }
-    this.set({ undoable: { outgoingId, draftId, until: Date.now() + this.undoSeconds * 1000 } })
-    this.undoTimer = setTimeout(() => this.set({ undoable: null }), this.undoSeconds * 1000)
+    this.set({ undoable: { outgoingId, draftId, until: until.getTime() } })
+    this.undoTimer = setTimeout(() => this.set({ undoable: null }), Math.max(0, until.getTime() - Date.now()))
   }
 
   /** Stops the message that was just sent and opens it again for editing. */
@@ -309,6 +368,7 @@ export class Composer {
       }
       if (outcome === 'sent') {
         await store.deleteDraft(stored.id)
+        this.deps.changed?.()
         if (outgoing.lastError) {
           this.deps.notify({ text: outgoing.lastError, tone: 'info' }, 8000)
         }
@@ -333,13 +393,14 @@ export class Composer {
     return ((await this.deps.store()?.drafts()) ?? []).find((stored) => stored.outgoingId === outgoingId) ?? null
   }
 
-  /** Stops the timers, e.g. on sign-out; a pending save is not made. */
+  /** Stops the timers and listeners, when the app part that owns the composer goes; a pending save is not made. */
   dispose(): void {
-    this.clearSaveTimer()
-    if (this.undoTimer !== null) {
-      clearTimeout(this.undoTimer)
-      this.undoTimer = null
-    }
+    this.reset()
     this.listeners.clear()
   }
+}
+
+/** A copy holding only plain data: what the caller hands in may be a framework's reactive proxy, which stores refuse. */
+function plain<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
 }

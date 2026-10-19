@@ -156,15 +156,19 @@ function onDay(now: Date, days: number, hour: number): Date {
 
 /**
  * The times "Send later" offers, in the device's time zone: this evening (until 17:00), tomorrow morning and
- * afternoon, and next Monday morning (a week ahead on a Monday). Each client words them itself.
+ * afternoon, and next Monday morning (a week ahead on a Monday; not on a Sunday, when it is tomorrow morning). Each
+ * client words them itself.
  */
 export function sendLaterOptions(now: Date = new Date()): { key: SendLaterKey; at: Date }[] {
   const nextMonday = (8 - now.getDay()) % 7 || 7
   const options: { key: SendLaterKey; at: Date }[] = [
     { key: 'tomorrowMorning', at: onDay(now, 1, 8) },
     { key: 'tomorrowAfternoon', at: onDay(now, 1, 13) },
-    { key: 'mondayMorning', at: onDay(now, nextMonday, 8) },
   ]
+  // On a Sunday, tomorrow morning is Monday morning already.
+  if (nextMonday !== 1) {
+    options.push({ key: 'mondayMorning', at: onDay(now, nextMonday, 8) })
+  }
   if (now.getHours() < 17) {
     options.unshift({ key: 'thisEvening', at: onDay(now, 0, 18) })
   }
