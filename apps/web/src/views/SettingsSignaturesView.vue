@@ -1,36 +1,40 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useForm } from 'vee-validate'
+import { toTypedSchema } from '@vee-validate/zod'
 import type { SignatureUpdate, SyncedSignature } from '@tresso/core'
 import { ApiError, errorMessage } from '@/api/errors'
+import FieldLabel from '@/forms/FieldLabel.vue'
+import { provideRequiredFields } from '@/forms/required'
+import { signatureSchema, type SignatureValues } from '@/forms/signatures'
 import { useMailStore } from '@/stores/mail'
 import { useSignaturesStore } from '@/stores/signatures'
 import SignaturePreview from '@/components/SignaturePreview.vue'
 
-interface Draft {
-  name: string
-  html: string
-  defaultFor: string[]
-}
-
 const NEW = 'new'
+
+provideRequiredFields(signatureSchema)
 
 const store = useSignaturesStore()
 const mail = useMailStore()
 
 /** The signature being edited, or NEW for one that is not saved yet. */
 const selectedId = ref<string | null>(null)
-const draft = ref<Draft>({ name: '', html: '', defaultFor: [] })
 const saving = ref(false)
 const message = ref<string | null>(null)
 const error = ref<string | null>(null)
-const violations = ref<Record<string, string>>({})
 const confirmingRemoval = ref(false)
 
-const selected = computed<SyncedSignature | null>(() => store.signatures.find((s) => s.id === selectedId.value) ?? null)
-/** What the draft was loaded from; the draft has changes when it differs. */
-const baseline = ref<Draft>({ name: '', html: '', defaultFor: [] })
+const { defineField, handleSubmit, errors, values, meta: formMeta, resetForm, setErrors, setFieldValue } = useForm<SignatureValues>({
+  validationSchema: toTypedSchema(signatureSchema),
+  initialValues: { name: '', html: '', defaultFor: [] },
+})
+const [name] = defineField('name')
+const [html] = defineField('html')
+const draftDefaults = computed(() => values.defaultFor ?? [])
 
-function saved(): Draft {
+const selected = computed<SyncedSignature | null>(() => store.signatures.find((s) => s.id === selectedId.value) ?? null)
+function saved(): SignatureValues {
   const signature = selected.value
   if (signature === null) {
     return { name: '', html: '', defaultFor: [] }
@@ -43,26 +47,21 @@ function sameAccounts(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((id) => b.includes(id))
 }
 
-function differs(a: Draft, b: Draft): boolean {
-  return a.name !== b.name || a.html !== b.html || !sameAccounts(a.defaultFor, b.defaultFor)
-}
-
-const dirty = computed(() => differs(draft.value, baseline.value))
+const dirty = computed(() => formMeta.value.dirty)
 
 const size = computed(() => {
-  const bytes = new TextEncoder().encode(draft.value.html).length
+  const bytes = new TextEncoder().encode(values.html ?? '').length
 
   return bytes === 1 ? '1 byte' : `${bytes} bytes`
 })
 
 const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? 'Cmd S' : 'Ctrl S'
 
-const defaultForError = computed(() => Object.entries(violations.value).find(([path]) => path.startsWith('defaultFor'))?.[1] ?? null)
+const defaultForError = computed(() => Object.entries(errors.value).find(([path]) => path.startsWith('defaultFor'))?.[1] ?? null)
 
 function reset(): void {
-  baseline.value = saved()
-  draft.value = { ...baseline.value, defaultFor: [...baseline.value.defaultFor] }
-  violations.value = {}
+  const current = saved()
+  resetForm({ values: { ...current, defaultFor: [...current.defaultFor] } })
   confirmingRemoval.value = false
 }
 
@@ -110,7 +109,7 @@ function meta(signature: SyncedSignature): string {
 
 /** For an account left unticked: what it inserts after saving, so ticking it shows what it replaces. */
 function currentDefault(accountId: string): string | null {
-  if (draft.value.defaultFor.includes(accountId)) {
+  if (draftDefaults.value.includes(accountId)) {
     return null
   }
   const current = store.accounts.find((a) => a.id === accountId)?.defaultSignatureId ?? null
@@ -120,16 +119,16 @@ function currentDefault(accountId: string): string | null {
 }
 
 function toggleDefault(accountId: string): void {
-  const ids = draft.value.defaultFor
-  draft.value.defaultFor = ids.includes(accountId) ? ids.filter((id) => id !== accountId) : [...ids, accountId]
+  const ids = draftDefaults.value
+  setFieldValue('defaultFor', ids.includes(accountId) ? ids.filter((id) => id !== accountId) : [...ids, accountId])
 }
 
-function changes(): SignatureUpdate {
+function changes(current: SignatureValues): SignatureUpdate {
   const original = saved()
   const changed: SignatureUpdate = {}
-  if (draft.value.name.trim() !== original.name) changed.name = draft.value.name.trim()
-  if (draft.value.html !== original.html) changed.html = draft.value.html
-  if (!sameAccounts(draft.value.defaultFor, original.defaultFor)) changed.defaultFor = draft.value.defaultFor
+  if (current.name !== original.name) changed.name = current.name
+  if (current.html !== original.html) changed.html = current.html
+  if (!sameAccounts(current.defaultFor, original.defaultFor)) changed.defaultFor = current.defaultFor
 
   return changed
 }
@@ -138,39 +137,38 @@ async function run(action: () => Promise<void>, done: string): Promise<void> {
   saving.value = true
   error.value = null
   message.value = null
-  violations.value = {}
   try {
     await action()
     message.value = done
   } catch (e) {
     error.value = errorMessage(e)
-    violations.value = e instanceof ApiError ? e.violations : {}
+    if (e instanceof ApiError) setErrors(e.violations)
   } finally {
     saving.value = false
   }
 }
 
-function save(): Promise<void> {
+const save = handleSubmit((current) => {
   if (selectedId.value === NEW) {
     return run(async () => {
-      const created = await store.create({ name: draft.value.name.trim(), html: draft.value.html, defaultFor: draft.value.defaultFor })
+      const created = await store.create({ name: current.name, html: current.html, defaultFor: current.defaultFor })
       selectedId.value = created.id
       reset()
     }, 'Saved. Scripts and external styles, if any, were removed.')
   }
 
   const id = selectedId.value
-  const changed = changes()
+  const changed = changes(current)
   if (id === null || Object.keys(changed).length === 0) {
     message.value = 'Nothing changed.'
-    return Promise.resolve()
+    return
   }
 
   return run(async () => {
     await store.update(id, changed)
     reset()
   }, 'Saved. Scripts and external styles, if any, were removed.')
-}
+})
 
 function remove(): Promise<void> {
   const id = selectedId.value
@@ -224,16 +222,16 @@ function saveShortcut(event: KeyboardEvent): void {
           <span class="option-meta">{{ meta(signature) }}</span>
         </button>
         <button v-if="selectedId === NEW" type="button" role="option" class="option" aria-selected="true">
-          <span class="option-name">{{ draft.name.trim() || 'New signature' }}</span>
+          <span class="option-name">{{ (name ?? '').trim() || 'New signature' }}</span>
           <span class="option-meta">Not saved yet</span>
         </button>
       </div>
 
-      <form v-if="selectedId !== null" class="editor" aria-label="Signature editor" @submit.prevent="save" @keydown="saveShortcut">
+      <form v-if="selectedId !== null" class="editor" aria-label="Signature editor" novalidate @submit.prevent="save" @keydown="saveShortcut">
         <label class="field">
-          <span>Name</span>
-          <input v-model="draft.name" required maxlength="120" :aria-invalid="violations.name ? 'true' : undefined" />
-          <small v-if="violations.name" class="error">{{ violations.name }}</small>
+          <FieldLabel name="name">Name</FieldLabel>
+          <input v-model="name" maxlength="120" :aria-invalid="errors.name ? 'true' : undefined" />
+          <small v-if="errors.name" class="error">{{ errors.name }}</small>
         </label>
 
         <div class="code">
@@ -244,24 +242,24 @@ function saveShortcut(event: KeyboardEvent): void {
           <label for="signature-html" class="visually-hidden">Signature HTML</label>
           <textarea
             id="signature-html"
-            v-model="draft.html"
+            v-model="html"
             spellcheck="false"
             rows="8"
-            :aria-invalid="violations.html ? 'true' : undefined"
+            :aria-invalid="errors.html ? 'true' : undefined"
           />
         </div>
-        <small v-if="violations.html" class="form-error">{{ violations.html }}</small>
+        <small v-if="errors.html" class="form-error">{{ errors.html }}</small>
 
         <div class="previews">
           <span class="label">Live preview</span>
           <div class="preview-grid">
             <div class="preview light">
               <span class="preview-label">Light background</span>
-              <SignaturePreview :html="draft.html" background="light" />
+              <SignaturePreview :html="html ?? ''" background="light" />
             </div>
             <div class="preview dark">
               <span class="preview-label">Dark background</span>
-              <SignaturePreview :html="draft.html" background="dark" />
+              <SignaturePreview :html="html ?? ''" background="dark" />
             </div>
           </div>
         </div>
@@ -270,7 +268,7 @@ function saveShortcut(event: KeyboardEvent): void {
           <legend>Default for</legend>
           <p v-if="store.accounts.length === 0" class="hint">Add a mail account to use this signature by default.</p>
           <label v-for="account in store.accounts" :key="account.id" class="check">
-            <input type="checkbox" :checked="draft.defaultFor.includes(account.id)" @change="toggleDefault(account.id)" />
+            <input type="checkbox" :checked="draftDefaults.includes(account.id)" @change="toggleDefault(account.id)" />
             <span>{{ account.displayName }}</span>
             <span v-if="currentDefault(account.id)" class="now">(now {{ currentDefault(account.id) }})</span>
           </label>
