@@ -1,20 +1,31 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
+const route = useRoute()
 const router = useRouter()
 const error = ref<string | null>(null)
 
-onMounted(async () => {
-  try {
-    await auth.completeSignIn(window.location.href)
-    await router.replace({ name: 'unified' })
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-  }
-})
+// The desktop app routes here again for every `tresso://` link, also while this screen is open, so this follows the
+// route instead of running once on mount.
+watch(
+  () => (route.name === 'auth-callback' ? route.fullPath : null),
+  async (path) => {
+    if (path === null) {
+      return
+    }
+    error.value = null
+    try {
+      await auth.completeSignIn(new URL(path, window.location.origin).href)
+      await router.replace({ name: 'unified' })
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : String(e)
+    }
+  },
+  { immediate: true },
+)
 </script>
 
 <template>

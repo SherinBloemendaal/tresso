@@ -11,55 +11,80 @@ import {
 } from '@tresso/core'
 import { ApiError } from '@/api/errors'
 import { config } from '@/config'
+import { isDesktop, openInBrowser } from '@/platform/desktop'
+import { initialTokens, tokenStorage } from '@/platform/tokenStorage'
 
-const TOKENS_KEY = 'auth.tokens'
 const PENDING_KEY = 'auth.pending'
 /** Refresh slightly before expiry so a request never leaves with a token that dies in flight. */
 const EXPIRY_MARGIN_MS = 30_000
 
 const oauthConfig: OAuthClientConfig = config
 
-// Tokens live in sessionStorage: they survive a reload but not closing the tab. The desktop and mobile apps keep
-// them in the OS keychain instead.
-function readTokens(): TokenSet | null {
-  const raw = sessionStorage.getItem(TOKENS_KEY)
-  return raw === null ? null : (JSON.parse(raw) as TokenSet)
-}
-
 export const useAuthStore = defineStore('auth', () => {
-  const tokens = ref<TokenSet | null>(readTokens())
+  const tokens = ref<TokenSet | null>(initialTokens())
   const me = ref<Me | null>(null)
   const isAuthenticated = computed(() => tokens.value !== null)
+  /** The desktop app sent the user to the system browser and waits for the `tresso://` link back. */
+  const awaitingBrowser = ref(false)
+  /** Keeping or forgetting the tokens failed, e.g. the keychain refused; shown to the user. */
+  const storageError = ref<string | null>(null)
 
-  function store(next: TokenSet | null): void {
+  async function store(next: TokenSet | null): Promise<void> {
     tokens.value = next
-    if (next === null) {
-      sessionStorage.removeItem(TOKENS_KEY)
+    try {
+      await tokenStorage.save(next)
+      storageError.value = null
+    } catch (error) {
+      storageError.value =
+        next === null
+          ? `You are signed out here, but the sign-in could not be removed from this device: ${String(error)}`
+          : `The sign-in could not be kept on this device, so you will have to sign in again next time: ${String(error)}`
+    }
+  }
+
+  /** Loads the tokens kept from the previous launch; the desktop app reads them from the keychain before mounting. */
+  async function restore(): Promise<void> {
+    if (!isDesktop) {
       return
     }
-    sessionStorage.setItem(TOKENS_KEY, JSON.stringify(next))
+    try {
+      tokens.value = await tokenStorage.load()
+    } catch (error) {
+      storageError.value = `The saved sign-in could not be read: ${String(error)}`
+    }
   }
 
   async function signIn(): Promise<void> {
     const pending = await startAuthorization(oauthConfig)
     sessionStorage.setItem(PENDING_KEY, JSON.stringify({ state: pending.state, codeVerifier: pending.codeVerifier }))
-    window.location.assign(pending.url)
+    if (!isDesktop) {
+      window.location.assign(pending.url)
+      return
+    }
+    awaitingBrowser.value = true
+    try {
+      await openInBrowser(pending.url)
+    } catch (error) {
+      awaitingBrowser.value = false
+      throw error
+    }
   }
 
   async function completeSignIn(callbackUrl: string): Promise<void> {
     const raw = sessionStorage.getItem(PENDING_KEY)
     sessionStorage.removeItem(PENDING_KEY)
     if (raw === null) {
-      throw new Error('No sign-in was started in this tab.')
+      throw new Error(isDesktop ? 'No sign-in was started in this window.' : 'No sign-in was started in this tab.')
     }
     const pending = JSON.parse(raw) as { state: string; codeVerifier: string }
+    awaitingBrowser.value = false
     const code = parseCallback(callbackUrl, pending.state)
-    store(await exchangeCode(oauthConfig, code, pending.codeVerifier))
+    await store(await exchangeCode(oauthConfig, code, pending.codeVerifier))
   }
 
   function signOut(): void {
-    store(null)
     me.value = null
+    void store(null)
   }
 
   async function accessToken(): Promise<string> {
@@ -75,7 +100,7 @@ export const useAuthStore = defineStore('auth', () => {
       throw new Error('Session expired.')
     }
     try {
-      store(await refreshTokens(oauthConfig, current.refreshToken))
+      await store(await refreshTokens(oauthConfig, current.refreshToken))
     } catch (error) {
       signOut()
       throw error
@@ -116,5 +141,5 @@ export const useAuthStore = defineStore('auth', () => {
     me.value = await api<Me>('/api/v1/me')
   }
 
-  return { tokens, me, isAuthenticated, signIn, completeSignIn, signOut, loadMe, api, send }
+  return { tokens, me, isAuthenticated, awaitingBrowser, storageError, restore, signIn, completeSignIn, signOut, loadMe, api, send }
 })
