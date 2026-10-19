@@ -19,6 +19,14 @@ import type { Sql } from '@/mail/sql'
  */
 export const SCHEMA_VERSION = 1
 
+/** The copy is being closed (a sign-out or another user), so it takes no more writes. */
+export class CopyClosingError extends Error {
+  constructor() {
+    super('The mail copy is closing.')
+    this.name = 'CopyClosingError'
+  }
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mail_accounts (id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL);
@@ -89,7 +97,7 @@ export class MailDatabase implements SyncStore {
   /** Every write goes through here: refused once the copy is closing, and waited for when it closes. */
   private async write<T>(task: () => Promise<T>): Promise<T> {
     if (this.shutting) {
-      throw new Error('The mail copy is closing.')
+      throw new CopyClosingError()
     }
     const writing = task()
     const settled = writing.then(

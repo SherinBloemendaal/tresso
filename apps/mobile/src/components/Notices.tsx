@@ -30,7 +30,7 @@ export function NoticeProvider({ children }: { children: ReactNode }) {
   const [bottomInset, setBottomInset] = useState(0)
   const [screenReader, setScreenReader] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const view = useRef<React.ComponentRef<typeof View>>(null)
+  const undoButton = useRef<React.ComponentRef<typeof Pressable>>(null)
 
   useEffect(() => {
     void AccessibilityInfo.isScreenReaderEnabled().then(setScreenReader)
@@ -54,14 +54,18 @@ export function NoticeProvider({ children }: { children: ReactNode }) {
   )
   const value = useMemo(() => ({ notify, setBottomInset }), [notify])
 
-  // A notice with an action gets the screen reader's focus, so its button is one swipe away.
+  // A notice with an action puts the screen reader on its button, after the announcement had a moment.
   useEffect(() => {
-    if (notice?.action !== undefined && screenReader && view.current !== null) {
-      const handle = findNodeHandle(view.current)
+    if (notice?.action === undefined || !screenReader) {
+      return
+    }
+    const focus = setTimeout(() => {
+      const handle = undoButton.current === null ? null : findNodeHandle(undoButton.current)
       if (handle != null) {
         AccessibilityInfo.setAccessibilityFocus(handle)
       }
-    }
+    }, 600)
+    return () => clearTimeout(focus)
   }, [notice, screenReader])
 
   return (
@@ -69,10 +73,11 @@ export function NoticeProvider({ children }: { children: ReactNode }) {
       {children}
       {notice !== null && (
         <View style={[styles.layer, { bottom: insets.bottom + bottomInset + 16 }]} pointerEvents="box-none">
-          <View ref={view} style={styles.notice} accessible={notice.action === undefined} accessibilityRole={notice.tone === 'error' ? 'alert' : 'summary'}>
+          <View style={styles.notice} accessible={notice.action === undefined} accessibilityRole={notice.tone === 'error' ? 'alert' : 'summary'}>
             <Text style={styles.text}>{notice.text}</Text>
             {notice.action !== undefined && (
               <Pressable
+                ref={undoButton}
                 onPress={() => {
                   notice.action?.run()
                   setNotice(null)
