@@ -89,6 +89,7 @@ final class NotificationTest extends DatabaseTestCase
         self::assertSame(self::EXPO_TOKEN, $body['to']);
         self::assertSame('Standup', $body['title']);
         self::assertSame('default', $body['sound']);
+        self::assertSame('reminders', $body['channelId']);
 
         self::assertEmailCount(1);
         self::assertEmailHeaderSame(self::getMailerMessage() ?? self::fail('No email.'), 'Subject', 'Standup');

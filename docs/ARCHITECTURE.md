@@ -952,7 +952,8 @@ after. Everything lives in `apps/api/src/Notification`.
     `WEB_PUSH_PRIVATE_KEY` (`bin/console app:notifications:vapid-keys`); clients read the public key from
     `GET /api/v1/notification-devices/web-push-key`.
   - Mobile (`expo`): the Expo push token; sent through Expo's push service (`EXPO_ACCESS_TOKEN` when the project
-    requires it), channel `reminders`.
+    requires it). A `PushMessage` names its Android notification channel; the phone creates `reminders` (calendar
+    notifications, the default) and `mail`.
   - Desktop (`desktop`): no push service; the delivered notification reaches the running app through the delta
     (`notifications`) and the realtime ping that comes with every change, and the app shows it natively.
   - A subscription the push service reports gone (404, 410, `DeviceNotRegistered`) is removed.

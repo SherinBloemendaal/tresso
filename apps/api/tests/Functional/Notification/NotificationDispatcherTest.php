@@ -62,6 +62,7 @@ final class NotificationDispatcherTest extends DatabaseTestCase
         $body = json_decode($expo[0]['body'], true, flags: \JSON_THROW_ON_ERROR);
         self::assertIsArray($body);
         self::assertSame(['threadId' => 't1', 'id' => 'm1', 'kind' => 'mail', 'title' => 'Anna de Vries', 'body' => 'Budget review', 'path' => '/thread/t1', 'silent' => false], $body['data']);
+        self::assertSame('mail', $body['channelId'], 'Shown in its own Android channel.');
         self::assertCount(1, array_filter($this->http()->calls(), static fn (array $call): bool => self::PUSH_ENDPOINT === $call['url']));
     }
 
@@ -85,7 +86,7 @@ final class NotificationDispatcherTest extends DatabaseTestCase
 
     private function message(): PushMessage
     {
-        return new PushMessage('m1', 'mail', 'Anna de Vries', 'Budget review', '/thread/t1', false, new \DateTimeImmutable('+1 hour'), ['threadId' => 't1']);
+        return new PushMessage('m1', 'mail', 'Anna de Vries', 'Budget review', '/thread/t1', false, new \DateTimeImmutable('+1 hour'), ['threadId' => 't1'], PushMessage::MAIL);
     }
 
     private function dispatcher(): NotificationDispatcher
