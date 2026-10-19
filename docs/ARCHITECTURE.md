@@ -319,6 +319,16 @@ in expo-secure-store (Keychain on iOS, Keystore-encrypted on Android) as three e
 refuse values above about 2 KB, refreshes them before they expire with one shared request (refresh tokens rotate),
 and never lets a refresh that finishes after sign-out sign the user back in.
 
+Mail on the phone: the mobile app keeps a SQLite copy (expo-sqlite, one database per user, deleted on sign-out) of
+the mail accounts, folders, threads and messages from the delta, with a summary per thread as the web client does
+(`summarizeConversation` in `packages/core`), each page applied in one exclusive transaction. The same `SyncEngine`
+pulls it and the same `RealtimeClient` triggers pulls while the app is in the foreground; in the background the
+connection rests and the copy catches up when the app comes back. The storage runs behind a small `Sql` interface,
+so its tests run the same SQL on sql.js. Message bodies show in a web view with the same Content-Security-Policy as
+the web client's frame; links open in the browser, and remote images load only when the reader asks. Outgoing mail,
+drafts and signatures are not kept on the phone yet; when they are, its schema version goes up and the copy syncs
+again from the start.
+
 Shared TypeScript lives in `packages/core` (MIT): domain types, the OAuth flow, and the client side of the sync
 protocol, so every client syncs the same way:
 
