@@ -36,7 +36,8 @@ Delivered in steps, each its own pull request:
   in Settings with a live preview
 - [x] 1.5c Compose, reply and forward in the web client: recipient suggestions, undo send, send later, outbox, drafts
   kept on the device until a message is confirmed sent
-- [ ] 1.5d Search
+- [x] 1.5d Search: Meilisearch index kept in step with sync changes, from:, to:, in:, has:attachment and date filters,
+  results with highlights in the web client
 - [ ] 1.5e Drafts synced across devices and filed in the account's Drafts folder
 - [ ] 1.6 Gmail and Microsoft 365: OAuth connection, Gmail API and Microsoft Graph sync
 

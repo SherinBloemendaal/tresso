@@ -304,6 +304,24 @@ mail, stored locally per user.
   `defaultSignatureId`. The web client previews unsaved HTML in a sandboxed frame without scripts
   (`signatureFrameDocument`), on a light and a dark background.
 
+### 3.12 Search
+
+- One Meilisearch index holds every user's messages (`MEILISEARCH_INDEX`), one document per message: subject,
+  sender, recipients, snippet, body text and attachment names to search, plus owner, account, folder ids, address
+  tokens, attachment flag and received time to filter on. The worker sends the body text with each message
+  (`bodyText`, quoted replies dropped, at most 32768 characters); the API keeps it in `message_text`, so the index can
+  be rebuilt without reading object storage.
+- Indexing follows the client sync change numbers. `ChangeSequencer` queues an index run for the user after commit
+  (`AfterCommitDispatcher`, Messenger transport `search`); the run sends the messages changed since the user's search
+  cursor (`search_cursor`) and deletes tombstoned messages and removed accounts. Runs for one user take turns on the
+  locked cursor row, so a late, repeated or lost run is caught up by the next one. `app:search:reindex --user=<email>`
+  or `--all` rebuilds from the database and applies the index settings.
+- `GET /api/v1/search` (scope `mail:read`) takes words, "phrases", -exclusions and the filters `from:`, `to:`,
+  `has:attachment`, `in:` (folder role, account or folder name), `after:` and `before:` (days in `timeZone`), newest
+  first and paged. Clients never talk to Meilisearch: the API always filters on the owner and the owner's current
+  accounts, and resolves `in:` to the owner's own folder and account ids. Highlights come back as text segments, never
+  as markup. The web client searches from the conversation list (shortcut `/`) and opens a result's thread.
+
 ## 4. Scale notes
 
 - Every mail metadata row (folders, threads, messages, attachments) carries `mail_account_id` and every query path
