@@ -488,12 +488,14 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $this->client->jsonRequest('POST', '/api/v1/drafts/'.$id.'/forwarded-attachments', ['attachmentId' => $logo], $this->kim);
         self::assertResponseStatusCodeSame(201);
 
-        $raw = $this->rawOf($this->send($id, html: '<img src="cid:ii_mgx81bq20">'));
+        // Shown by an inline style, which Symfony would not see: the image still goes with the text.
+        $raw = $this->rawOf($this->send($id, html: '<p style="background-image:url(cid:ii_mgx81bq20)">Hero</p>'));
+        self::assertStringContainsString('multipart/related', $raw);
 
         preg_match('~Content-ID: <([^>]+@inline\.tresso\.invalid)>~', $raw, $match);
         $contentId = $match[1] ?? null;
         self::assertIsString($contentId, 'It goes out under an id of its own.');
-        self::assertStringContainsString('src="cid:'.$contentId.'"', $this->decodedHtmlOf($raw));
+        self::assertStringContainsString('url(cid:'.$contentId.')', $this->decodedHtmlOf($raw));
 
 
         $kept = $this->newDraft(['kind' => 'reply', 'subject' => 'Kept', 'quoteHtml' => '<img src="cid:ii_mgx81bq20">']);

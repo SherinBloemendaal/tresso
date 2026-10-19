@@ -45,8 +45,8 @@ final readonly class OutgoingHtmlSanitizer
     public function sanitize(string $html, array $contentIds = []): string
     {
         $standIns = (string) preg_replace_callback(
-            // Only where an image is shown: a cid: link stays one the cleaner removes.
-            '~(\s(?:src|background)\s*=\s*["\']?)cid:([^"\'\s<>]+)~i',
+            // Only where an image is shown (src, background, url() in a style): a cid: link stays one the cleaner removes.
+            '~(\s(?:src|background)\s*=\s*["\']?|url\(\s*(?:["\']|&quot;|&#0*39;|&apos;)?)cid:([^"\'\s<>()&]+)~i',
             static fn (array $match): string => $match[1].self::CID_STAND_IN.rawurlencode(html_entity_decode($match[2], \ENT_QUOTES | \ENT_HTML5, 'UTF-8')),
             $html,
         );
