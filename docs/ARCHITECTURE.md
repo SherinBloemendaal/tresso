@@ -287,6 +287,13 @@ the first screen. When the keychain refuses, the app says that the sign-in will 
 The API and the Mercure hub accept the app's origins (`tauri://localhost`, and `http://tauri.localhost` on Windows),
 and the main window may only open http(s) pages in the browser and read the link it was opened with.
 
+The desktop app notifies natively about mail that needs the user: a message that is unread, in an inbox and judged
+`do` or `delegate` for the first time, whether it arrived judged or was classified later (`MailDatabase.apply`
+records these arrivals, `apps/web/src/mail/mailNotifications.ts` words them). Nothing pops up for the mail synced at
+start or while the app has focus, nor for old mail reaching the device late (received more than 15 minutes before
+notifications were switched on), and more than three at once become one summary. The browser build shows none: the
+browser is meant to get Web Push from the server (see the table above), which is not built yet.
+
 The mobile app (Expo Router, screens in `apps/mobile/src/app`) is the `mobile` OAuth client with the same redirect
 URI. expo-auth-session opens the authorization page in the system's authentication browser
 (ASWebAuthenticationSession on iOS, Custom Tabs on Android) with PKCE and checks the state; the code is exchanged
