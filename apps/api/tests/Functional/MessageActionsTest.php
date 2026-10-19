@@ -687,15 +687,19 @@ final class MessageActionsTest extends DatabaseTestCase
         return $count;
     }
 
+    /**
+     * A minute back, not a second: times are stored to the second, and a test that runs fast would otherwise find the
+     * claim ending in the very second it asks again, so still in progress.
+     */
     private function makeClaimsExpire(): void
     {
-        $this->connection()->executeStatement("UPDATE mailbox_change SET claimed_until = now() - interval '1 second' WHERE claimed_until IS NOT NULL");
+        $this->connection()->executeStatement("UPDATE mailbox_change SET claimed_until = now() - interval '1 minute' WHERE claimed_until IS NOT NULL");
         static::getContainer()->get(EntityManagerInterface::class)->clear();
     }
 
     private function makeDue(): void
     {
-        $this->connection()->executeStatement("UPDATE mailbox_change SET not_before = now() - interval '1 second'");
+        $this->connection()->executeStatement("UPDATE mailbox_change SET not_before = now() - interval '1 minute'");
         static::getContainer()->get(EntityManagerInterface::class)->clear();
     }
 

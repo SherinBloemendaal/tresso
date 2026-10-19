@@ -73,7 +73,7 @@ final class SyncCredentialsTest extends DatabaseTestCase
     {
         $worker = $this->workerHeaders('sync:lease sync:credentials');
         $this->lease('w1', $worker);
-        $this->connection()->executeStatement("UPDATE mail_account SET lease_expires_at = now() - interval '1 second'");
+        $this->connection()->executeStatement("UPDATE mail_account SET lease_expires_at = now() - interval '1 minute'");
 
         $this->client->request('GET', $this->credentialsUrl('w1'), server: $worker);
 
