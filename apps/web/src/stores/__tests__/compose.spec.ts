@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { reactive } from 'vue'
 import type { ChangePage, SyncedMessage, SyncedOutgoingMessage } from '@tresso/core'
 import { deleteMailDatabase } from '@/mail/db'
 import { UNDO_SECONDS, useComposeStore } from '../compose'
@@ -101,6 +102,18 @@ describe('compose store', () => {
     expect(html.indexOf('<p>Approved.</p>')).toBe(0)
     expect(html.indexOf('<p>Kim Visser</p>')).toBeGreaterThan(0)
     expect(html.indexOf('<p>Kim Visser</p>')).toBeLessThan(html.indexOf('<blockquote>'))
+  })
+
+  it('keeps a reply opened from reactive message data when it is closed unchanged', async () => {
+    const compose = useComposeStore()
+    const mail = useMailStore()
+    // Screens hand over messages from reactive state; IndexedDB refuses proxies.
+    await compose.openReply(reactive(structuredClone(original)), 'replyAll')
+    const id = compose.draft!.id
+
+    compose.close()
+
+    await vi.waitFor(async () => expect(await mail.draft(id)).toMatchObject({ subject: 'Re: Q4 budget', kind: 'replyAll' }))
   })
 
   it('refuses to send without recipients', async () => {
