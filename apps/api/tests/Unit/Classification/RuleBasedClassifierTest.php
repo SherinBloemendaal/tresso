@@ -188,7 +188,7 @@ final class RuleBasedClassifierTest extends TestCase
     public function testSenderRuleWinsOverTheServerForAnAuthenticatedSender(): void
     {
         $rule = new SenderRule($this->user, 'billing@supplier.example', $this->builtin['todo'], null);
-        $mail = $this->mail(['from' => 'billing@supplier.example', 'junk' => true, 'headers' => ['authentication-results' => 'mx.example; spf=pass; dkim=pass; dmarc=pass header.from=supplier.example']]);
+        $mail = $this->mail(['from' => 'billing@supplier.example', 'junk' => true, 'authenticationResultsTrusted' => true, 'headers' => ['authentication-results' => 'mx.google.com; spf=pass; dkim=pass; dmarc=pass header.from=supplier.example']]);
 
         $classification = new RuleBasedClassifier()->classify($mail, $this->context([], [$rule]));
 
@@ -208,26 +208,24 @@ final class RuleBasedClassifierTest extends TestCase
     }
 
     /**
-     * @return iterable<string, array{string, bool}>
+     * @return iterable<string, array{string, bool, bool}>
      */
-    public static function authenticationResultsOnAServerOfItsOwn(): iterable
+    public static function authenticationResults(): iterable
     {
-        yield 'written by the receiving server' => ['mx.company.example; dmarc=pass header.from=supplier.example', true];
-        yield 'naming the bare domain' => ['company.example; dmarc=pass header.from=supplier.example', true];
-        yield 'forged by the sender' => ['mx.supplier.example; dmarc=pass header.from=supplier.example', false];
-        yield 'a look-alike domain' => ['mx.evilcompany.example; dmarc=pass', false];
-        yield 'without a server name' => ['spf=pass smtp.mailfrom=supplier.example; dmarc=pass action=none header.from=supplier.example', false];
+        yield 'Gmail or Microsoft 365, whose topmost header is their own' => ['mx.google.com; dmarc=pass header.from=supplier.example', true, true];
+        yield 'a generic IMAP server, naming the recipient\'s own domain' => ['mx.company.example; dmarc=pass header.from=supplier.example', false, false];
+        yield 'a generic IMAP server, naming the sender\'s domain' => ['mx.supplier.example; dmarc=pass header.from=supplier.example', false, false];
     }
 
-    #[DataProvider('authenticationResultsOnAServerOfItsOwn')]
-    public function testOnlyTheReceivingServersAuthenticationLetsARuleBeatTheServersSpamVerdict(string $results, bool $trusted): void
+    #[DataProvider('authenticationResults')]
+    public function testOnlyTheProvidersOwnAuthenticationLetsARuleBeatTheServersSpamVerdict(string $results, bool $trusted, bool $ruleWins): void
     {
         $rule = new SenderRule($this->user, 'billing@supplier.example', $this->builtin['todo'], null);
-        $mail = $this->mail(['from' => 'billing@supplier.example', 'junk' => true, 'receivingDomains' => ['company.example'], 'headers' => ['authentication-results' => $results]]);
+        $mail = $this->mail(['from' => 'billing@supplier.example', 'junk' => true, 'authenticationResultsTrusted' => $trusted, 'headers' => ['authentication-results' => $results]]);
 
         $classification = new RuleBasedClassifier()->classify($mail, $this->context([], [$rule]));
 
-        self::assertSame($trusted ? $this->builtin['todo'] : $this->builtin['spam'], $classification->smartInbox);
+        self::assertSame($ruleWins ? $this->builtin['todo'] : $this->builtin['spam'], $classification->smartInbox);
     }
 
     public function testAuthenticatedJunkWithoutARuleIsStillSpam(): void
@@ -245,10 +243,10 @@ final class RuleBasedClassifierTest extends TestCase
      */
     private function mail(array $overrides): MailToClassify
     {
-        /** @var array{from: string, to: list<string>, cc: list<string>, headers: array<string, string>, junk: bool, folderRoles: list<FolderRole>, isReply: bool, receivingDomains: list<string>|null} $mail */
-        $mail = [...['from' => 'anna@partner.example', 'to' => [self::ME], 'cc' => [], 'headers' => [], 'junk' => false, 'folderRoles' => [FolderRole::Inbox], 'isReply' => false, 'receivingDomains' => null], ...$overrides];
+        /** @var array{from: string, to: list<string>, cc: list<string>, headers: array<string, string>, junk: bool, folderRoles: list<FolderRole>, isReply: bool, authenticationResultsTrusted: bool} $mail */
+        $mail = [...['from' => 'anna@partner.example', 'to' => [self::ME], 'cc' => [], 'headers' => [], 'junk' => false, 'folderRoles' => [FolderRole::Inbox], 'isReply' => false, 'authenticationResultsTrusted' => false], ...$overrides];
 
-        return new MailToClassify('m1', $mail['from'], null, $mail['to'], $mail['cc'], 'Subject', 'Snippet', $mail['headers'], $mail['junk'], $mail['folderRoles'], $mail['isReply'], $mail['receivingDomains']);
+        return new MailToClassify('m1', $mail['from'], null, $mail['to'], $mail['cc'], 'Subject', 'Snippet', $mail['headers'], $mail['junk'], $mail['folderRoles'], $mail['isReply'], $mail['authenticationResultsTrusted']);
     }
 
     /**

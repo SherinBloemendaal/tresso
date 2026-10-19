@@ -67,7 +67,9 @@ final readonly class ThreadCorrection
             $this->classification->placeByUser($thread, $message, $smartInbox, $verdict);
 
             $rule = null;
+            $failsAuthentication = false;
             if (null !== $message) {
+                $failsAuthentication = $this->classification->failsAuthentication($message);
                 $sender = $message->getFromAddress();
                 $rule = $this->rules->findOneBy(['owner' => $owner, 'sender' => $sender]);
                 if (null === $rule) {
@@ -88,7 +90,7 @@ final readonly class ThreadCorrection
                 $smartInbox->getId()->toRfc4122(),
                 $verdict->value,
                 ClassificationReason::USER,
-                null === $rule ? null : RememberedSender::fromEntity($rule),
+                null === $rule ? null : RememberedSender::fromEntity($rule, $failsAuthentication),
             );
         });
     }
