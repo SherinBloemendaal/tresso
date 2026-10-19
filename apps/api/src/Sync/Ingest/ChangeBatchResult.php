@@ -14,6 +14,13 @@ final readonly class ChangeBatchResult
         public int $unknown,
         /** Messages deleted because they are in no folder anymore. */
         public int $deleted,
+        /**
+         * The remote uids behind $unknown, so a worker that sends flags first (Gmail, Microsoft Graph) downloads only
+         * the messages the API does not have yet.
+         *
+         * @var list<string>
+         */
+        public array $unknownUids = [],
     ) {
     }
 }

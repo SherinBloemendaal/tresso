@@ -275,7 +275,7 @@ final class SyncIngestTest extends DatabaseTestCase
             'cursor' => 'modseq=9',
         ]);
 
-        self::assertSame(['updated' => 1, 'removed' => 2, 'unknown' => 1, 'deleted' => 1], $result);
+        self::assertSame(['updated' => 1, 'removed' => 2, 'unknown' => 1, 'deleted' => 1, 'unknownUids' => ['99']], $result);
         $keep = $this->entityManager()->getRepository(Message::class)->findOneBy(['messageIdHeader' => 'keep@x']);
         self::assertInstanceOf(Message::class, $keep);
         self::assertTrue($keep->isSeen());
@@ -300,7 +300,7 @@ final class SyncIngestTest extends DatabaseTestCase
             ['fromUid' => 21, 'toUid' => 30, 'uids' => []],
         ]]);
 
-        self::assertSame(['updated' => 0, 'removed' => 2, 'unknown' => 0, 'deleted' => 1], $result);
+        self::assertSame(['updated' => 0, 'removed' => 2, 'unknown' => 0, 'deleted' => 1, 'unknownUids' => []], $result);
         $remaining = array_map(static fn (MessageLocation $l): string => $l->getRemoteUid(), $this->entityManager()->getRepository(MessageLocation::class)->findBy(['folder' => $this->folderEntity('INBOX')], ['remoteUid' => 'ASC']));
         self::assertSame(['10', '12', '40'], $remaining, 'Uid 40 is outside every range and stays.');
         self::assertNotNull($this->entityManager()->getRepository(Message::class)->findOneBy(['messageIdHeader' => 'also-archived@x']));
@@ -377,6 +377,54 @@ final class SyncIngestTest extends DatabaseTestCase
     {
         $this->client->jsonRequest('POST', $this->url('status'), ['workerId' => 'w1', 'status' => 'paused'], $this->worker);
 
+        self::assertResponseStatusCodeSame(422);
+    }
+
+    public function testFlagChangesNameTheMessagesTheApiDoesNotHave(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $this->messages('INBOX', [$this->message('18c2a')]);
+
+        $result = $this->changes('INBOX', ['flags' => [
+            ['remoteUid' => '18c2a', 'flags' => ['seen' => true]],
+            ['remoteUid' => '18c2b', 'flags' => ['seen' => true]],
+            ['remoteUid' => '18c2b', 'flags' => ['seen' => false]],
+            ['remoteUid' => '18c2c', 'flags' => ['flagged' => true]],
+        ]]);
+
+        self::assertSame(['updated' => 1, 'removed' => 0, 'unknown' => 2, 'deleted' => 0, 'unknownUids' => ['18c2b', '18c2c']], $result);
+    }
+
+    public function testRemoteUidsArePagedInByteOrder(): void
+    {
+        $this->folders(['INBOX' => 1, 'Archive' => 1]);
+        $this->messages('INBOX', [$this->message('b'), $this->message('B'), $this->message('a'), $this->message('10'), $this->message('9')]);
+        $this->messages('Archive', [$this->message('zz')]);
+
+        $this->client->request('GET', $this->url('folders/remote-uids').'?'.http_build_query(['workerId' => 'w1', 'folder' => 'INBOX', 'limit' => 3]), server: $this->worker);
+        self::assertResponseIsSuccessful();
+        self::assertSame(['accountId' => $this->accountId, 'folder' => 'INBOX', 'remoteUids' => ['10', '9', 'B'], 'next' => 'B'], $this->decodedResponse());
+
+        $this->client->request('GET', $this->url('folders/remote-uids').'?'.http_build_query(['workerId' => 'w1', 'folder' => 'INBOX', 'limit' => 3, 'after' => 'B']), server: $this->worker);
+        self::assertSame(['a', 'b'], $this->decodedResponse()['remoteUids'] ?? null);
+        self::assertArrayHasKey('next', $this->decodedResponse());
+        self::assertNull($this->decodedResponse()['next']);
+    }
+
+    public function testRemoteUidsNeedALeaseAFolderAndASaneLimit(): void
+    {
+        $this->folders(['INBOX' => 1]);
+
+        $this->client->request('GET', $this->url('folders/remote-uids').'?'.http_build_query(['workerId' => 'w2', 'folder' => 'INBOX']), server: $this->worker);
+        self::assertResponseStatusCodeSame(404);
+
+        $this->client->request('GET', $this->url('folders/remote-uids').'?'.http_build_query(['workerId' => 'w1']), server: $this->worker);
+        self::assertResponseStatusCodeSame(400);
+
+        $this->client->request('GET', $this->url('folders/remote-uids').'?'.http_build_query(['workerId' => 'w1', 'folder' => 'INBOX', 'limit' => 5001]), server: $this->worker);
+        self::assertResponseStatusCodeSame(400);
+
+        $this->client->request('GET', $this->url('folders/remote-uids').'?'.http_build_query(['workerId' => 'w1', 'folder' => 'Nope']), server: $this->worker);
         self::assertResponseStatusCodeSame(422);
     }
 
