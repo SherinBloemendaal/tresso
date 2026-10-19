@@ -1,13 +1,30 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import { errorMessage } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
+import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
+import NoticeStack from '@/components/NoticeStack.vue'
 
 const auth = useAuthStore()
 const mail = useMailStore()
+const compose = useComposeStore()
+// The editor is large; it loads the first time a message is written.
+const ComposeWindow = defineAsyncComponent(() => import('@/components/ComposeWindow.vue'))
 const error = ref<string | null>(null)
+
+// "C" writes a new message, unless the user is typing somewhere.
+function shortcut(event: KeyboardEvent): void {
+  const target = event.target as HTMLElement | null
+  const typing = target !== null && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+  if (!typing && auth.isAuthenticated && !event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c' && compose.draft === null) {
+    event.preventDefault()
+    compose.openNew()
+  }
+}
+onMounted(() => window.addEventListener('keydown', shortcut))
+onBeforeUnmount(() => window.removeEventListener('keydown', shortcut))
 
 // The mail copy runs for the whole session, so every screen (inbox, settings) sees live changes.
 watch(
@@ -32,6 +49,10 @@ watch(
 
 <template>
   <RouterView />
+  <template v-if="auth.isAuthenticated">
+    <ComposeWindow v-if="compose.draft" />
+    <NoticeStack />
+  </template>
   <p v-if="error || mail.syncState === 'error'" class="problem" role="alert">
     {{ error ?? `Sync stopped: ${mail.syncError}` }}
   </p>

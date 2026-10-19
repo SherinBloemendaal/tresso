@@ -9,6 +9,7 @@ const router = createRouter({
     { path: '/inbox/:threadId', name: 'unified-thread', component: HomeView },
     { path: '/accounts/:accountId', name: 'account', component: HomeView },
     { path: '/accounts/:accountId/:threadId', name: 'account-thread', component: HomeView },
+    { path: '/outbox', name: 'outbox', component: () => import('@/views/OutboxView.vue'), meta: { requiresAuth: true } },
     {
       path: '/settings',
       component: () => import('@/views/SettingsLayout.vue'),

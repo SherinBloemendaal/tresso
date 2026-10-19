@@ -4,6 +4,8 @@ import { RouterLink } from 'vue-router'
 import type { SyncedMailAccount } from '@tresso/core'
 import AppIcon from '@/components/AppIcon.vue'
 import SenderAvatar from '@/components/SenderAvatar.vue'
+import { useComposeStore } from '@/stores/compose'
+import { useMailStore } from '@/stores/mail'
 
 const props = defineProps<{
   displayName: string
@@ -14,6 +16,11 @@ const props = defineProps<{
   live: boolean
 }>()
 const emit = defineEmits<{ signOut: [] }>()
+
+const mail = useMailStore()
+const compose = useComposeStore()
+const outboxCount = computed(() => mail.outbox.length)
+const failedCount = computed(() => mail.outbox.filter((message) => message.status === 'failed').length)
 
 const totalUnread = computed(() => [...props.unreadCounts.values()].reduce((sum, count) => sum + count, 0))
 
@@ -36,11 +43,18 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
       <button type="button" class="button button-quiet sign-out" @click="emit('signOut')">Sign out</button>
     </div>
 
+    <button type="button" class="button button-primary compose" @click="compose.openNew()">Compose <kbd>C</kbd></button>
+
     <div class="group">
       <RouterLink :to="{ name: 'unified' }" class="item" :aria-current="mailbox === null ? 'page' : undefined">
         <AppIcon name="inbox" />
         <span class="label">Unified Inbox</span>
         <span v-if="totalUnread > 0" class="count">{{ totalUnread }}<span class="visually-hidden"> unread</span></span>
+      </RouterLink>
+      <RouterLink v-if="outboxCount > 0" :to="{ name: 'outbox' }" class="item">
+        <AppIcon name="outbox" />
+        <span class="label">Outbox</span>
+        <span class="count" :class="{ failed: failedCount > 0 }">{{ outboxCount }}</span>
       </RouterLink>
     </div>
 
@@ -108,6 +122,20 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
 .sign-out {
   height: 32px;
   padding: 0 8px;
+}
+.compose {
+  height: 40px;
+  margin: 0 4px;
+}
+.compose kbd {
+  font: 500 11px var(--font-mono);
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--surface) 25%, transparent);
+}
+.count.failed {
+  color: var(--danger);
+  font-weight: 700;
 }
 .group {
   display: flex;

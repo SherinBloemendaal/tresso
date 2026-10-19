@@ -6,11 +6,13 @@ import {
   type ChangePage,
   type MessageBody,
   type RealtimeAccess,
+  type SendMessageRequest,
   type SyncedMailAccount,
   type SyncedMessage,
+  type SyncedOutgoingMessage,
   type SyncedThread,
 } from '@tresso/core'
-import { deleteMailDatabase, MailDatabase, type Conversation } from '@/mail/db'
+import { deleteMailDatabase, MailDatabase, type Contact, type Conversation, type Draft } from '@/mail/db'
 import { useAuthStore } from '@/stores/auth'
 
 const PAGE_SIZE = 500
@@ -28,6 +30,8 @@ export const useMailStore = defineStore('mail', () => {
   const accounts = ref<SyncedMailAccount[]>([])
   const conversations = ref<Conversation[]>([])
   const unreadCounts = ref<Map<string, number>>(new Map())
+  /** Outgoing mail that is scheduled, on its way or failed. */
+  const outbox = ref<SyncedOutgoingMessage[]>([])
   /** null: the Unified Inbox; otherwise one account's inbox. */
   const mailbox = ref<string | null>(null)
   const listLimit = ref(LIST_STEP)
@@ -71,6 +75,7 @@ export const useMailStore = defineStore('mail', () => {
       },
     })
     await pull(() => engine?.sync())
+    await refresh()
     realtime.start()
   }
 
@@ -86,6 +91,11 @@ export const useMailStore = defineStore('mail', () => {
     }
   }
 
+  /** Pulls the delta now (on top of realtime), e.g. when the user asks to refresh. */
+  function syncNow(): Promise<void> {
+    return pull(() => engine?.sync())
+  }
+
   async function stop(): Promise<void> {
     await realtime?.stop()
     realtime = null
@@ -98,6 +108,7 @@ export const useMailStore = defineStore('mail', () => {
     accounts.value = []
     conversations.value = []
     unreadCounts.value = new Map()
+    outbox.value = []
   }
 
   /** Stops syncing and removes the local copy, so nothing stays behind on a shared computer. */
@@ -114,11 +125,13 @@ export const useMailStore = defineStore('mail', () => {
     if (database === null) {
       return
     }
-    const [nextAccounts, nextConversations, nextCounts] = await Promise.all([
+    const [nextAccounts, nextConversations, nextCounts, nextOutbox] = await Promise.all([
       database.mailAccounts(),
       database.inbox(mailbox.value, listLimit.value + 1),
       database.unreadInboxCounts(),
+      database.outbox(),
     ])
+    outbox.value = nextOutbox
     accounts.value = nextAccounts
     hasMore.value = nextConversations.length > listLimit.value
     conversations.value = nextConversations.slice(0, listLimit.value)
@@ -149,6 +162,39 @@ export const useMailStore = defineStore('mail', () => {
     return auth.api<MessageBody>(`/api/v1/messages/${encodeURIComponent(messageId)}/body${query}`)
   }
 
+  function send(request: SendMessageRequest): Promise<SyncedOutgoingMessage> {
+    return auth.send<SyncedOutgoingMessage>('POST', '/api/v1/outgoing-messages', request)
+  }
+
+  function cancelOutgoing(id: string): Promise<SyncedOutgoingMessage> {
+    return auth.send<SyncedOutgoingMessage>('POST', `/api/v1/outgoing-messages/${encodeURIComponent(id)}/cancel`, {})
+  }
+
+  async function outgoing(id: string): Promise<SyncedOutgoingMessage | null> {
+    return (await db.value?.outgoing(id)) ?? null
+  }
+
+  async function suggestContacts(query: string): Promise<Contact[]> {
+    return (await db.value?.suggestContacts(query, 8)) ?? []
+  }
+
+  async function saveDraft(draft: Draft): Promise<void> {
+    // Drafts come from reactive state; IndexedDB stores only plain data.
+    await db.value?.saveDraft(JSON.parse(JSON.stringify(draft)) as Draft)
+  }
+
+  async function drafts(): Promise<Draft[]> {
+    return (await db.value?.drafts()) ?? []
+  }
+
+  async function draft(id: string): Promise<Draft | null> {
+    return (await db.value?.draft(id)) ?? null
+  }
+
+  async function deleteDraft(id: string): Promise<void> {
+    await db.value?.deleteDraft(id)
+  }
+
   watch(
     () => auth.isAuthenticated,
     (authenticated) => {
@@ -162,6 +208,7 @@ export const useMailStore = defineStore('mail', () => {
     accounts,
     conversations,
     unreadCounts,
+    outbox,
     mailbox,
     hasMore,
     syncState,
@@ -170,11 +217,20 @@ export const useMailStore = defineStore('mail', () => {
     ready,
     start,
     stop,
+    syncNow,
     forget,
     refresh,
     showMailbox,
     showMore,
     thread,
     body,
+    send,
+    cancelOutgoing,
+    outgoing,
+    suggestContacts,
+    saveDraft,
+    drafts,
+    draft,
+    deleteDraft,
   }
 })

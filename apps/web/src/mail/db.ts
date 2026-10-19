@@ -5,6 +5,7 @@ import type {
   SyncedFolder,
   SyncedMailAccount,
   SyncedMessage,
+  SyncedOutgoingMessage,
   SyncedThread,
   SyncStore,
 } from '@tresso/core'
@@ -32,6 +33,35 @@ export interface Conversation {
   unreadInbox: 0 | 1
 }
 
+/** Someone the user exchanged mail with, for recipient suggestions. */
+export interface Contact {
+  /** Lower-cased address. */
+  key: string
+  address: string
+  name: string | null
+  /** Epoch ms of the newest message with them. */
+  lastSeen: number
+  messages: number
+}
+
+/** A message being written, kept on this device until it is sent or discarded. */
+export interface Draft {
+  id: string
+  mailAccountId: string | null
+  to: Address[]
+  cc: Address[]
+  bcc: Address[]
+  subject: string
+  html: string
+  inReplyToMessageId: string | null
+  kind: 'new' | 'reply' | 'replyAll' | 'forward'
+  /** Set once sent: the draft stays until the message is confirmed sent, so a failure can be edited and resent. */
+  outgoingId: string | null
+  /** The outgoing status the user was last told about, so each outcome is announced once. */
+  noticedStatus: string | null
+  updatedAt: number
+}
+
 interface MailSchema extends DBSchema {
   meta: { key: string; value: number }
   mailAccounts: { key: string; value: SyncedMailAccount }
@@ -42,6 +72,9 @@ interface MailSchema extends DBSchema {
     value: SyncedMessage
     indexes: { byThread: string; byAccount: string; byFolder: string }
   }
+  outgoing: { key: string; value: SyncedOutgoingMessage; indexes: { byAccount: string; bySendAt: string } }
+  contacts: { key: string; value: Contact; indexes: { byLastSeen: number } }
+  drafts: { key: string; value: Draft; indexes: { byUpdatedAt: number } }
   conversations: {
     key: string
     value: Conversation
@@ -57,8 +90,8 @@ interface MailSchema extends DBSchema {
 type Stores = StoreNames<MailSchema>[]
 type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
-const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations']
-const VERSION = 1
+const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts']
+const VERSION = 2
 const SENDERS_PER_CONVERSATION = 3
 
 export function databaseName(userId: string): string {
@@ -75,20 +108,33 @@ export class MailDatabase implements SyncStore {
 
   static async open(userId: string): Promise<MailDatabase> {
     const db = await openDB<MailSchema>(databaseName(userId), VERSION, {
-      upgrade(database) {
-        database.createObjectStore('meta')
-        database.createObjectStore('mailAccounts', { keyPath: 'id' })
-        database.createObjectStore('folders', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
-        database.createObjectStore('threads', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
-        const messages = database.createObjectStore('messages', { keyPath: 'id' })
-        messages.createIndex('byThread', 'threadId')
-        messages.createIndex('byAccount', 'mailAccountId')
-        messages.createIndex('byFolder', 'folderIds', { multiEntry: true })
-        const conversations = database.createObjectStore('conversations', { keyPath: 'threadId' })
-        conversations.createIndex('byAccount', 'mailAccountId')
-        conversations.createIndex('byInboxDate', ['inbox', 'lastMessageAt'])
-        conversations.createIndex('byAccountInboxDate', ['mailAccountId', 'inbox', 'lastMessageAt'])
-        conversations.createIndex('byAccountUnreadInbox', ['mailAccountId', 'unreadInbox'])
+      upgrade(database, oldVersion, _newVersion, transaction) {
+        if (oldVersion < 1) {
+          database.createObjectStore('meta')
+          database.createObjectStore('mailAccounts', { keyPath: 'id' })
+          database.createObjectStore('folders', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+          database.createObjectStore('threads', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+          const messages = database.createObjectStore('messages', { keyPath: 'id' })
+          messages.createIndex('byThread', 'threadId')
+          messages.createIndex('byAccount', 'mailAccountId')
+          messages.createIndex('byFolder', 'folderIds', { multiEntry: true })
+          const conversations = database.createObjectStore('conversations', { keyPath: 'threadId' })
+          conversations.createIndex('byAccount', 'mailAccountId')
+          conversations.createIndex('byInboxDate', ['inbox', 'lastMessageAt'])
+          conversations.createIndex('byAccountInboxDate', ['mailAccountId', 'inbox', 'lastMessageAt'])
+          conversations.createIndex('byAccountUnreadInbox', ['mailAccountId', 'unreadInbox'])
+        }
+        if (oldVersion < 2) {
+          const outgoing = database.createObjectStore('outgoing', { keyPath: 'id' })
+          outgoing.createIndex('byAccount', 'mailAccountId')
+          outgoing.createIndex('bySendAt', 'sendAt')
+          database.createObjectStore('contacts', { keyPath: 'key' }).createIndex('byLastSeen', 'lastSeen')
+          database.createObjectStore('drafts', { keyPath: 'id' }).createIndex('byUpdatedAt', 'updatedAt')
+          // Outgoing mail and contacts come from the delta: an existing copy syncs again from the start to fill them.
+          if (oldVersion >= 1) {
+            void transaction.objectStore('meta').delete('cursor')
+          }
+        }
       },
     })
 
@@ -130,6 +176,9 @@ export class MailDatabase implements SyncStore {
           }
           break
         }
+        case 'outgoingMessage':
+          await tx.objectStore('outgoing').delete(deleted.id)
+          break
       }
     }
 
@@ -156,6 +205,12 @@ export class MailDatabase implements SyncStore {
       }
       await tx.objectStore('messages').put(message)
       affected.add(message.threadId)
+      if (previous === undefined) {
+        await rememberContacts(tx, message)
+      }
+    }
+    for (const outgoing of page.outgoingMessages) {
+      await tx.objectStore('outgoing').put(outgoing)
     }
 
     const inboxFolders = new Set(
@@ -203,6 +258,49 @@ export class MailDatabase implements SyncStore {
     return counts
   }
 
+  /** Outgoing mail that is not settled: scheduled, on its way, or failed. Newest first. */
+  async outbox(): Promise<SyncedOutgoingMessage[]> {
+    const all = await this.db.getAll('outgoing')
+
+    return all.filter((message) => message.status !== 'sent' && message.status !== 'cancelled').sort((a, b) => b.sendAt.localeCompare(a.sendAt))
+  }
+
+  async outgoing(id: string): Promise<SyncedOutgoingMessage | null> {
+    return (await this.db.get('outgoing', id)) ?? null
+  }
+
+  /** Contacts matching the start of a name or address, most recent first. */
+  async suggestContacts(query: string, limit: number): Promise<Contact[]> {
+    const needle = query.trim().toLowerCase()
+    const result: Contact[] = []
+    const index = this.db.transaction('contacts').store.index('byLastSeen')
+    for (let cursor = await index.openCursor(null, 'prev'); cursor !== null && result.length < limit; cursor = await cursor.continue()) {
+      const contact = cursor.value
+      const words = [contact.key, ...(contact.name ?? '').toLowerCase().split(/\s+/)]
+      if (needle === '' || words.some((word) => word.startsWith(needle))) {
+        result.push(contact)
+      }
+    }
+
+    return result
+  }
+
+  async saveDraft(draft: Draft): Promise<void> {
+    await this.db.put('drafts', draft)
+  }
+
+  async drafts(): Promise<Draft[]> {
+    return (await this.db.getAllFromIndex('drafts', 'byUpdatedAt')).reverse()
+  }
+
+  async draft(id: string): Promise<Draft | null> {
+    return (await this.db.get('drafts', id)) ?? null
+  }
+
+  async deleteDraft(id: string): Promise<void> {
+    await this.db.delete('drafts', id)
+  }
+
   async thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null> {
     const tx = this.db.transaction(['threads', 'messages'])
     const thread = await tx.objectStore('threads').get(threadId)
@@ -218,11 +316,30 @@ export class MailDatabase implements SyncStore {
 
 async function deleteAccount(tx: WriteTx, accountId: string): Promise<void> {
   await tx.objectStore('mailAccounts').delete(accountId)
-  for (const store of ['folders', 'threads', 'messages', 'conversations'] as const) {
+  for (const store of ['folders', 'threads', 'messages', 'conversations', 'outgoing'] as const) {
     const index = tx.objectStore(store).index('byAccount')
     for (let cursor = await index.openCursor(accountId); cursor !== null; cursor = await cursor.continue()) {
       await cursor.delete()
     }
+  }
+}
+
+/** Everyone on a message becomes a suggestion, the newest name winning. */
+async function rememberContacts(tx: WriteTx, message: SyncedMessage): Promise<void> {
+  const at = Date.parse(message.receivedAt)
+  const people = [message.from, ...message.recipients.to, ...message.recipients.cc]
+  for (const person of people) {
+    const key = person.address.trim().toLowerCase()
+    if (key === '' || !key.includes('@')) continue
+    const known = await tx.objectStore('contacts').get(key)
+    const newer = known === undefined || at >= known.lastSeen
+    await tx.objectStore('contacts').put({
+      key,
+      address: newer ? person.address : known.address,
+      name: (newer ? person.name : known.name) ?? known?.name ?? null,
+      lastSeen: Math.max(at, known?.lastSeen ?? 0),
+      messages: (known?.messages ?? 0) + 1,
+    })
   }
 }
 
