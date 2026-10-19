@@ -1,0 +1,128 @@
+/* Design tokens from the Tresso foundations board. Color is reserved for the three verdicts and for focus. */
+:root {
+  --ground: #f3f4f6;
+  --surface: #ffffff;
+  --line: #e3e5e9;
+  --line-strong: #d5d8de;
+  --ink: #16181d;
+  --ink-2: #4a505c;
+  --ink-3: #6b7280;
+  --danger: #b42318;
+  --danger-soft: #fdecea;
+  --focus: #2341d6;
+  --do: #2341d6;
+  --do-soft: #e8ecfc;
+  --selected: #f5f7fe;
+  --delegate: #a44a06;
+  --delegate-soft: #fceee2;
+  --know: #256b5d;
+  --know-soft: #e3f2ee;
+  --unread: #2341d6;
+  --raised: 0 1px 2px rgb(22 24 29 / 6%), 0 8px 24px rgb(22 24 29 / 10%);
+
+  --font-display: 'Bricolage Grotesque', system-ui, sans-serif;
+  --font-ui: 'Instrument Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  --radius-control: 6px;
+  --radius-card: 10px;
+  --radius-panel: 14px;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #0f1115;
+    --surface: #171a20;
+    --line: #2a2f38;
+    --line-strong: #3a3f4a;
+    --ink: #eceef2;
+    --ink-2: #b5bbc6;
+    --ink-3: #8a92a0;
+    --danger: #f97066;
+    --danger-soft: #3a1d1b;
+    --focus: #8fa2ff;
+    --do: #8fa2ff;
+    --do-soft: #1f2645;
+    --selected: #1c2133;
+    --delegate: #f29a55;
+    --delegate-soft: #3a2616;
+    --know: #6cc7b2;
+    --know-soft: #16302b;
+    --unread: #8fa2ff;
+    --raised: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px rgb(0 0 0 / 40%);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 14px/20px var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+a {
+  color: var(--focus);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-control);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.button-primary {
+  background: var(--ink);
+  color: var(--surface);
+}
+
+.button-quiet {
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.button-quiet:hover {
+  background: var(--ground);
+}
