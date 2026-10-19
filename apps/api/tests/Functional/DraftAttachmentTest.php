@@ -480,6 +480,19 @@ final class DraftAttachmentTest extends DatabaseTestCase
         self::assertStringContainsString('src="cid:logo@finance.example"', $this->decodedHtmlOf($raw), 'The text still shows the image.');
     }
 
+    public function testAnInlineImageTheTextNoLongerShowsGoesOutAsAFile(): void
+    {
+        $logo = $this->receiveLogo('logo@finance.example');
+        $id = $this->newDraft(['to' => [['address' => 'anna@finance.example', 'name' => null]], 'kind' => 'reply']);
+        $this->client->jsonRequest('POST', '/api/v1/drafts/'.$id.'/forwarded-attachments', ['attachmentId' => $logo], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+
+        $raw = $this->rawOf($this->send($id, html: '<p>The quote went.</p>'));
+
+        self::assertStringNotContainsString('multipart/related', $raw, 'Nothing would show it: hidden, the recipient could not see it was sent.');
+        self::assertStringContainsString('Content-Disposition: attachment; name=logo.png; filename=logo.png', $raw);
+    }
+
     public function testAnInlineImageWhoseIdNoHeaderCanCarryGoesOutUnderOneOfTresso(): void
     {
         // Gmail's ids have no "@"; a Content-ID header needs one.

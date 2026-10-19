@@ -111,12 +111,14 @@ final readonly class MimeComposer
             // A type that is not one makes an unusable part (or a broken header); such a file goes out as plain bytes.
             $type = 1 === preg_match(OutgoingAttachment::CONTENT_TYPE, $attachment->contentType) ? $attachment->contentType : 'application/octet-stream';
             $part = new DataPart($content, $attachment->filename, $type);
-            if (null === $attachment->contentId) {
+            $contentId = null === $attachment->contentId ? null : $contentIds[$attachment->contentId];
+            // An image goes with the text only while the text refers to it (cid:{contentId}), so mail apps show it in
+            // place; one it no longer shows goes out as a file the recipient can see, not as a hidden part.
+            if (null === $contentId || !str_contains($html, 'cid:'.htmlspecialchars($contentId, \ENT_QUOTES | \ENT_HTML5, 'UTF-8'))) {
                 $files[] = $part;
                 continue;
             }
-            // The quoted text refers to it as cid:{contentId}; mail apps show it in place.
-            $inline[] = $part->asInline()->setContentId($contentIds[$attachment->contentId]);
+            $inline[] = $part->asInline()->setContentId($contentId);
         }
         // Built here rather than by Symfony, which keeps an image with the text only when an img src or a background
         // attribute names it: one an inline style shows would go out as a file.

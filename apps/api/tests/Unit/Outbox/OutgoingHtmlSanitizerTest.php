@@ -32,6 +32,11 @@ final class OutgoingHtmlSanitizerTest extends TestCase
         self::assertStringContainsString('url(cid:bg@x)', $html);
     }
 
+    public function testReadsAnIdWithAnAmpersandWhole(): void
+    {
+        self::assertSame('<img src="cid:h2@inline.tresso.invalid" />', $this->sanitizer->sanitize('<img src="cid:a&amp;b">', ['a&b' => 'h2@inline.tresso.invalid']));
+    }
+
     public function testRefersToAnImageByTheIdItGoesOutUnder(): void
     {
         self::assertSame('<img src="cid:a1b2@inline.tresso.invalid" />', $this->sanitizer->sanitize('<img src="cid:ii_mgx81bq20">', ['ii_mgx81bq20' => 'a1b2@inline.tresso.invalid']));
