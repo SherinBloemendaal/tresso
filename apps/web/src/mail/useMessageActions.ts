@@ -1,10 +1,8 @@
 import { ref, type Ref } from 'vue'
-import type { MessageAction, SyncedFolder } from '@tresso/core'
+import { PartialActionError, undoPlan, type AppliedAction, type MessageAction, type SyncedFolder, type UndoMove } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
-import type { AppliedAction } from '@/mail/db'
-import { undoPlan, type UndoMove } from '@/mail/undo'
 import { useComposeStore } from '@/stores/compose'
-import { PartialActionError, useMailStore } from '@/stores/mail'
+import { useMailStore } from '@/stores/mail'
 
 /**
  * Message actions as screens use them: errors become notices, one action runs at a time, and archiving, trashing or

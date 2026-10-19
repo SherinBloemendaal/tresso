@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { SyncedFolder, SyncedMessage } from '@tresso/core'
-import { undoPlan } from '../undo'
+import type { SyncedFolder, SyncedMessage } from './sync/types'
+import { undoPlan } from './actions'
 
 const folders: SyncedFolder[] = [
   { id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' },

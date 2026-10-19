@@ -4,6 +4,9 @@ import {
   RealtimeClient,
   SyncEngine,
   MAX_MESSAGES_PER_ACTION,
+  appliedFor,
+  PartialActionError,
+  type AppliedAction,
   type ChangePage,
   type MessageAction,
   type MessageActionRequest,
@@ -20,7 +23,7 @@ import {
   type SyncedSignature,
   type SyncedThread,
 } from '@tresso/core'
-import { appliedFor, deleteMailDatabase, MailDatabase, type AppliedAction, type Contact, type Conversation, type Draft } from '@/mail/db'
+import { deleteMailDatabase, MailDatabase, type Contact, type Conversation, type Draft } from '@/mail/db'
 import { ApiError } from '@/api/errors'
 import { freshArrivals, mailNotifications } from '@/mail/mailNotifications'
 import { notifier } from '@/platform/notifier'
@@ -28,20 +31,6 @@ import { useAuthStore } from '@/stores/auth'
 
 const PAGE_SIZE = 500
 
-/**
- * A large selection went partly through: `accepted` is what the server took, `rejected` how many of the requested
- * messages it did not, and `reason` why.
- */
-export class PartialActionError extends Error {
-  constructor(
-    readonly reason: unknown,
-    readonly accepted: AppliedAction,
-    readonly rejected: number,
-  ) {
-    super(reason instanceof Error ? reason.message : String(reason))
-    this.name = 'PartialActionError'
-  }
-}
 const LIST_STEP = 100
 
 export type SyncState = 'idle' | 'syncing' | 'error'

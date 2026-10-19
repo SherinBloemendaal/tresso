@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import type { MessageAction } from '@tresso/core'
-import type { AppliedAction, Conversation } from '@/mail/db'
+import type { AppliedAction, MessageAction } from '@tresso/core'
+import type { Conversation } from '@/mail/db'
 import { shortcutAllowed, useMessageActions } from '@/mail/useMessageActions'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'

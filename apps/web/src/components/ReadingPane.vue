@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { MessageAction, SyncedMessage, SyncedThread } from '@tresso/core'
-import type { AppliedAction } from '@/mail/db'
+import type { AppliedAction } from '@tresso/core'
 import { shortcutAllowed, useMessageActions } from '@/mail/useMessageActions'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
