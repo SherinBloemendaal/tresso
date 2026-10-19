@@ -119,6 +119,9 @@ npm run dev:mobile
 | Redis | `localhost:63790` |
 | GreenMail (test mail server) | IMAP `localhost:3143`, IMAPS 3993, SMTP 3025, SMTPS 3465 |
 
+The sync worker in the dev stack has `MAIL_ALLOW_UNSAFE_SERVERS=1` so it can reach GreenMail on the Docker network;
+in production that must stay off. The integration tests empty the `kim@tresso.test` mailbox.
+
 GreenMail has two mailboxes for development, `kim@tresso.test` (password `dev-password-kim`) and `lisa@tresso.test`
 (`dev-password-lisa`). Connect them in the app with host `greenmail`, IMAP port 3143 and SMTP port 3025, security
 `none`.
@@ -145,6 +148,7 @@ Then run the checks for the part you changed:
 | API static analysis | `docker compose exec api vendor/bin/phpstan analyse` |
 | API docs (dev only) | http://localhost:8080/docs |
 | Sync worker | `docker run --rm -v "$PWD/apps/sync":/src -w /src golang:1.27 go test -race ./...` |
+| Sync worker against GreenMail | `docker run --rm --network tresso_default -e GREENMAIL_HOST=greenmail -v "$PWD/apps/sync":/src -w /src golang:1.27 go test -race -tags integration ./...` |
 | Shared core | `npm test --workspace @tresso/core` |
 | Web | `npm run test:unit --workspace @tresso/web` and `npm run type-check --workspace @tresso/web` |
 | Mobile | `npm run type-check --workspace @tresso/mobile` |

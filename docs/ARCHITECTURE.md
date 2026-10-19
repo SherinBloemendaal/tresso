@@ -126,8 +126,20 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
 
 - **Leasing:** workers call `POST /internal/sync/leases` to claim a batch of accounts. Leases expire and are
   renewed by heartbeat, so a crashed worker's accounts move to another worker automatically.
-- **Change detection:** IMAP `IDLE` + `CONDSTORE`/`QRESYNC` (MODSEQ based deltas), Gmail `history.list` with
-  Pub/Sub push, Microsoft Graph delta queries with change notifications.
+- **Change detection (IMAP):** `IDLE` on the inbox for instant new mail; other folders every 5 minutes. With
+  `CONDSTORE`, flag changes since the last MODSEQ; without it, a full flag check, after an IDLE update at most once a
+  minute (a throttled update is postponed, never dropped). Changes that happen between a sync and the next IDLE are
+  caught by comparing the inbox's EXISTS, UIDNEXT and MODSEQ at re-selection.
+- **Deletions without QRESYNC:** the worker reports presence ranges ("between UID a and b only these exist") in
+  chunks of 5000; the API removes the rest. Every folder is checked at session start and every 30 minutes.
+- **Gmail and Microsoft 365** (phase 1.6): Gmail `history.list` with Pub/Sub push, Microsoft Graph delta queries with
+  change notifications.
+- **Connections** go through a guarded dialer that resolves the host and refuses private, loopback, link-local,
+  CGNAT, NAT64, 6to4 and documentation ranges at connect time (the API checks at save time, the worker again on every
+  connection, so DNS changes cannot redirect it). TLS 1.2+ with certificate verification, or STARTTLS.
+- **Failures:** sessions reconnect with exponential backoff (2 s to 5 min). A refused login reports `auth_failed` and
+  stops until the user changes the credentials; three failed sessions in a row report `error` with a user-safe
+  detail.
 - **Ingest:** raw MIME goes directly to object storage (`raw/<sha256[0:2]>/<sha256>`, content-addressed, so
   duplicates are stored once); attachments too (`attachments/<sha256[0:2]>/<sha256>`). Parsed metadata goes to the
   ingest protocol (scope `sync:ingest`, only for the leasing worker, every call safe to repeat):
@@ -144,7 +156,10 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   In-Reply-To/References, and stored messages that refer to this one), merging threads that turn out to be one
   conversation; without any references, a thread from the last 14 days with the same normalized subject that shares
   a participant; otherwise a new thread.
-- **Backfill:** newest first, so the inbox is usable within seconds while history fills in behind.
+- **Backfill:** newest first, in budgeted steps per folder, so the inbox is usable within seconds while history fills
+  in behind and new mail is never stuck behind it. Fetches are grouped by count (50) and size (20 MB).
+- **Cursor:** per folder, opaque to the API: UIDVALIDITY, UIDNEXT, backfill position and HIGHESTMODSEQ. It only
+  advances after the API accepted the work it covers, so a crash never skips mail.
 - **Outbound:** flag/move/delete/send commands are queued per account by the API and executed by the leasing
   worker, then confirmed back.
 
