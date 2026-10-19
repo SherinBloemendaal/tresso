@@ -215,6 +215,13 @@ class MailboxChange
         return $workerId === $this->claimedBy && null !== $this->claimedUntil && $this->claimedUntil > $now;
     }
 
+    /** Hands the change back unattempted, e.g. because an earlier change of the message has to go first. */
+    public function release(): void
+    {
+        $this->claimedBy = null;
+        $this->claimedUntil = null;
+    }
+
     /** The attempt failed for a reason that may pass; offered again after $retryAt. */
     public function retryLater(string $error, \DateTimeImmutable $retryAt): void
     {

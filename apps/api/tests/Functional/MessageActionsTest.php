@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Functional;
 
 use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\Uid\UuidV7;
 
 final class MessageActionsTest extends DatabaseTestCase
 {
@@ -200,6 +201,141 @@ final class MessageActionsTest extends DatabaseTestCase
         $changes = $this->claim();
         self::assertSame(['folder' => 'Archive', 'uidValidity' => 2, 'remoteUid' => '7'], $changes[0]['source']);
         self::assertSame(['folder' => 'Trash'], $changes[0]['target']);
+    }
+
+    public function testTrashingOnGmailFindsTheOtherLabelsGoneAndLeavesOneCopy(): void
+    {
+        $this->folders($this->accountId, [
+            ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1],
+            ['remoteName' => 'Archive', 'displayName' => 'Archive', 'role' => 'archive', 'uidValidity' => 2],
+            ['remoteName' => 'Trash', 'displayName' => 'Trash', 'role' => 'trash', 'uidValidity' => 3],
+            ['remoteName' => 'Projects', 'displayName' => 'Projects', 'role' => 'custom', 'uidValidity' => 4],
+            ['remoteName' => '[Gmail]/All Mail', 'displayName' => 'All Mail', 'role' => 'all', 'uidValidity' => 5],
+        ]);
+        $this->ingest($this->accountId, '[Gmail]/All Mail', '40', '<plan@finance.example>');
+        $this->act('trash');
+
+        $changes = $this->claim();
+        self::assertCount(2, $changes);
+        $this->report($changes[0]['id'], 'done', '9');
+        // Moving the first copy to Trash took every label away on Gmail.
+        $this->report($changes[1]['id'], 'gone');
+
+        self::assertSame(['Trash' => '9'], $this->locations());
+        self::assertSame(0, $this->pendingChanges());
+    }
+
+    public function testAMoveThatRanBeforeButWentUnreportedIsNotUndone(): void
+    {
+        $this->act('archive');
+        $this->report($this->claim()[0]['id'], 'gone');
+
+        self::assertSame([$this->folderId('Archive')], $this->message()['folderIds'], 'nothing is put back in the inbox');
+        $this->ingest($this->accountId, 'Archive', '7', '<plan@finance.example>');
+        self::assertSame(['Archive' => '7'], $this->locations(), 'the same message, found where the move took it');
+    }
+
+    public function testAChangeTriedAgainKeepsTheMessagesLaterChangesBehindIt(): void
+    {
+        $this->act('markRead');
+        $this->act('markUnread');
+
+        $changes = $this->claim();
+        self::assertSame([true, false], array_column($changes, 'seen'), 'the changes of a message come in order');
+        $this->report($changes[0]['id'], 'retry', error: 'NO [INUSE] busy');
+        self::assertSame([], $this->claim(), 'the unread is handed back and waits for the read');
+
+        $this->makeDue();
+        self::assertSame([true, false], array_column($this->claim(), 'seen'), 'the read goes first again');
+    }
+
+    public function testChangesThatWaitDoNotHoldUpOtherMessages(): void
+    {
+        $this->ingest($this->accountId, 'INBOX', '2', '<other@finance.example>');
+        $this->act('markRead');
+        $this->report($this->claim()[0]['id'], 'retry', error: 'NO [INUSE] busy');
+        for ($i = 0; $i < 101; ++$i) {
+            $this->act(0 === $i % 2 ? 'flag' : 'unflag');
+        }
+        $this->act('flag', ids: [$this->message('<other@finance.example>')['id']]);
+
+        $changes = $this->claim();
+
+        self::assertCount(1, $changes);
+        self::assertSame(['folder' => 'INBOX', 'uidValidity' => 1, 'remoteUid' => '2'], $changes[0]['locations'][0]);
+    }
+
+    public function testACopyFoundBeforeItsMoveWasReportedStillLandsForTheNextMove(): void
+    {
+        $this->act('move', $this->folderId('Projects'));
+        $first = $this->claim()[0]['id'];
+        $this->act('archive');
+        $this->act('move', $this->folderId('Trash'));
+
+        // The server moved it (no UIDPLUS) and the folder sync saw it in Projects before the report came in.
+        $this->ingest($this->accountId, 'Projects', '5', '<plan@finance.example>');
+        self::assertSame([$this->folderId('Trash')], $this->message()['folderIds'], 'it does not show up in Projects');
+        $this->report($first, 'done');
+
+        $changes = $this->claim();
+        self::assertSame(['folder' => 'Projects', 'uidValidity' => 4, 'remoteUid' => '5'], $changes[0]['source']);
+    }
+
+    public function testACopyAboutToMoveOnDoesNotShowUpWhereItPassesThrough(): void
+    {
+        $this->act('move', $this->folderId('Projects'));
+        $first = $this->claim()[0]['id'];
+        $this->act('move', $this->folderId('Trash'));
+        $this->report($first, 'done', '5');
+
+        $this->ingest($this->accountId, 'Projects', '5', '<plan@finance.example>');
+
+        self::assertSame([$this->folderId('Trash')], $this->message()['folderIds']);
+    }
+
+    public function testAPlaceholderThatNeverLandsIsDroppedAfterAWhile(): void
+    {
+        $this->ingest($this->accountId, 'Projects', '3', '<plan@finance.example>');
+        $this->act('archive');
+        $this->report($this->claim()[0]['id'], 'done');
+        self::assertCount(2, $this->locations(), 'the placeholder waits for the folder sync');
+        $old = new UuidV7(UuidV7::generate(new \DateTimeImmutable('-2 hours')));
+        $this->connection()->executeStatement("UPDATE message_location SET remote_uid = :old WHERE remote_uid LIKE 'pending:%'", ['old' => 'pending:'.$old->toRfc4122()]);
+
+        $this->claim();
+
+        self::assertSame(['Projects' => '3'], $this->locations());
+    }
+
+    public function testAResetTargetFolderKeepsTheMoveAndADeletedOneUndoesIt(): void
+    {
+        $this->act('archive');
+        $this->folders($this->accountId, [
+            ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1],
+            ['remoteName' => 'Archive', 'displayName' => 'Archive', 'role' => 'archive', 'uidValidity' => 20],
+            ['remoteName' => 'Trash', 'displayName' => 'Trash', 'role' => 'trash', 'uidValidity' => 3],
+            ['remoteName' => 'Projects', 'displayName' => 'Projects', 'role' => 'custom', 'uidValidity' => 4],
+        ]);
+        self::assertSame([$this->folderId('Archive')], $this->message()['folderIds'], 'the move survives a reset of its folder');
+        self::assertSame(1, $this->pendingChanges());
+
+        $this->folders($this->accountId, [
+            ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1],
+            ['remoteName' => 'Trash', 'displayName' => 'Trash', 'role' => 'trash', 'uidValidity' => 3],
+        ]);
+        self::assertSame(['INBOX' => '1'], $this->locations(), 'with its folder gone, the message is back where it was');
+        self::assertSame(0, $this->pendingChanges());
+    }
+
+    public function testUndoingAFlagChangeLeavesWhatALaterChangeSets(): void
+    {
+        $this->act('markRead');
+        $this->act('markUnread');
+        $this->act('markRead');
+
+        $this->report($this->claim()[0]['id'], 'failed', error: 'NO Permission denied');
+
+        self::assertTrue($this->message()['flags']['seen'], 'the last read still stands');
     }
 
     public function testArchivingWithoutAnArchiveFolderUsesAllMailAndOtherwiseExplainsWhy(): void

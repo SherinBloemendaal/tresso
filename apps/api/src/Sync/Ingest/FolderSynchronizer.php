@@ -8,6 +8,8 @@ use ApiPlatform\Validator\Exception\ValidationException;
 use App\ApiResource\Input\Sync\FolderInput;
 use App\Entity\Folder;
 use App\Entity\MailAccount;
+use App\Entity\MailboxChange;
+use App\Mailbox\MailboxChanges;
 use App\Sync\Change\ChangeSequencer;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
@@ -18,7 +20,8 @@ use Symfony\Component\Validator\ConstraintViolationList;
  * Makes the stored folders match the server's folder list.
  *
  * - New folders are created, renamed ones keep their messages (the remote name is the key).
- * - Folders missing from the list were deleted on the server: they go, with their message locations.
+ * - Folders missing from the list were deleted on the server: they go, with their message locations; moves from
+ *   Tresso into them are undone first.
  * - A changed UIDVALIDITY invalidates every UID in that folder: its locations are dropped and the cursor reset, so
  *   the worker downloads the folder again (messages that still exist elsewhere are linked, not duplicated).
  */
@@ -29,6 +32,7 @@ final readonly class FolderSynchronizer
         private Connection $connection,
         private MessageJanitor $janitor,
         private ChangeSequencer $sequencer,
+        private MailboxChanges $changes,
     ) {
     }
 
@@ -86,6 +90,7 @@ final readonly class FolderSynchronizer
         }
 
         foreach ($existing as $deleted) {
+            $this->changes->folderRemoved($deleted);
             $affected = [...$affected, ...$this->removeLocations($deleted)];
             $this->entityManager->remove($deleted);
         }
@@ -99,14 +104,17 @@ final readonly class FolderSynchronizer
     }
 
     /**
+     * Forgets the folder's copies. Placeholder copies of moves from Tresso stay: the moves still go to this folder,
+     * and the sync finds the copies again under their new uids.
+     *
      * @return list<string> ids of the messages that were in the folder
      */
     private function removeLocations(Folder $folder): array
     {
         /** @var list<string> */
         return $this->connection->fetchFirstColumn(
-            'DELETE FROM message_location WHERE folder_id = :folder RETURNING message_id',
-            ['folder' => $folder->getId()->toRfc4122()],
+            'DELETE FROM message_location WHERE folder_id = :folder AND remote_uid NOT LIKE :placeholder RETURNING message_id',
+            ['folder' => $folder->getId()->toRfc4122(), 'placeholder' => MailboxChange::PLACEHOLDER_PREFIX.'%'],
         );
     }
 

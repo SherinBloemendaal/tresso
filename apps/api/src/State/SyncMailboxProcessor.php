@@ -17,6 +17,7 @@ use App\Sync\Mailbox\MailboxWork;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
+use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 use Symfony\Component\Uid\Uuid;
 
 /**
@@ -51,10 +52,14 @@ final readonly class SyncMailboxProcessor implements ProcessorInterface
                 throw new ConflictHttpException('This worker does not hold the claim on the change (any more).');
             }
 
+            if (MailboxReportInput::GONE === $data->outcome && MailboxChangeKind::Move !== $change->getKind()) {
+                throw new UnprocessableEntityHttpException('Only a move can find its copy gone.');
+            }
             match ($data->outcome) {
                 MailboxReportInput::DONE => $this->changes->done($change, $data->remoteUid),
-                MailboxReportInput::RETRY => $this->changes->failed($change, $data->error ?? 'The change could not be made.', false, $now),
-                default => $this->changes->failed($change, $data->error ?? 'The mail server refused the change.', true, $now),
+                MailboxReportInput::GONE => $this->changes->gone($change),
+                MailboxReportInput::RETRY => $this->changes->failed($change, $data->workerId, $data->error ?? 'The change could not be made.', false, $now),
+                default => $this->changes->failed($change, $data->workerId, $data->error ?? 'The mail server refused the change.', true, $now),
             };
 
             return new MailboxReportResult(true);
@@ -65,7 +70,7 @@ final readonly class SyncMailboxProcessor implements ProcessorInterface
     }
 
     /**
-     * @return array{id: string, kind: string, seen: ?bool, flagged: ?bool, locations: list<array{folder: string, uidValidity: ?int, remoteUid: string}>, source: ?array{folder: string, uidValidity: ?int, remoteUid: string}, target: ?array{folder: string}}
+     * @return array{id: string, messageId: string, messageIdHeader: ?string, kind: string, seen: ?bool, flagged: ?bool, locations: list<array{folder: string, uidValidity: ?int, remoteUid: string}>, source: ?array{folder: string, uidValidity: ?int, remoteUid: string}, target: ?array{folder: string}}
      */
     private function describe(MailboxChange $change): array
     {
@@ -75,6 +80,8 @@ final readonly class SyncMailboxProcessor implements ProcessorInterface
 
         return [
             'id' => $change->getId()->toRfc4122(),
+            'messageId' => $change->getMessage()->getId()->toRfc4122(),
+            'messageIdHeader' => $change->getMessage()->getMessageIdHeader(),
             'kind' => $change->getKind()->value,
             'seen' => $change->getSeen(),
             'flagged' => $change->getFlagged(),
