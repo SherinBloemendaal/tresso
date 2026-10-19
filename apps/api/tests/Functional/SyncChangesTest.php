@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional;
 
+use App\Realtime\ChangeNotifier;
 use App\Sync\Change\ChangeSequencer;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\DBAL\Exception as DBALException;
@@ -227,7 +228,7 @@ final class SyncChangesTest extends DatabaseTestCase
 
         try {
             $writer->beginTransaction();
-            $seq = new ChangeSequencer($writer)->next($userId);
+            $seq = new ChangeSequencer($writer, static::getContainer()->get(ChangeNotifier::class))->next($userId);
             self::assertSame(1, $seq);
 
             $other->executeStatement("SET lock_timeout = '200ms'");

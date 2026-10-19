@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Sync\Change;
 
+use App\Realtime\ChangeNotifier;
 use Doctrine\DBAL\Connection;
 use Symfony\Component\Uid\Uuid;
 
@@ -14,11 +15,15 @@ use Symfony\Component\Uid\Uuid;
  * writes for one user commit in the order of their numbers: a client that saw number N can never later meet a
  * smaller number that was still uncommitted. That only holds inside a transaction, hence the guard. Different users
  * never wait on each other.
+ *
+ * Every number is also reported to the {@see ChangeNotifier}, which tells the user's clients once it is committed.
  */
 final readonly class ChangeSequencer
 {
-    public function __construct(private Connection $connection)
-    {
+    public function __construct(
+        private Connection $connection,
+        private ChangeNotifier $notifier,
+    ) {
     }
 
     public function next(Uuid $userId): int
@@ -35,7 +40,10 @@ final readonly class ChangeSequencer
             throw new \LogicException(\sprintf('User %s does not exist.', $userId->toRfc4122()));
         }
 
-        return (int) $seq;
+        $seq = (int) $seq;
+        $this->notifier->changed($userId, $seq);
+
+        return $seq;
     }
 
     /**
