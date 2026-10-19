@@ -7,6 +7,7 @@ namespace App\State;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProcessorInterface;
 use App\ApiResource\Input\Sync\Calendar\CalendarListInput;
+use App\ApiResource\Input\Sync\Calendar\CalendarStatusInput;
 use App\ApiResource\Input\Sync\Calendar\InventoryInput;
 use App\ApiResource\Input\Sync\Calendar\ObjectBatchInput;
 use App\ApiResource\Input\Sync\Calendar\OperationResultInput;
@@ -15,6 +16,7 @@ use App\Entity\Calendar;
 use App\Entity\CalendarOperation;
 use App\Entity\MailAccount;
 use App\Sync\Calendar\CalendarListResult;
+use App\Sync\Calendar\CalendarStatusResult;
 use App\Sync\Calendar\CalendarOperations;
 use App\Sync\Calendar\CalendarSynchronizer;
 use App\Sync\Calendar\ClaimedOperation;
@@ -30,7 +32,7 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * @implements ProcessorInterface<CalendarListInput|InventoryInput|ObjectBatchInput|OutboxClaimInput|OperationResultInput, CalendarListResult|InventoryResult|ObjectBatchResult|ClaimResult|OperationResult>
+ * @implements ProcessorInterface<CalendarListInput|CalendarStatusInput|InventoryInput|ObjectBatchInput|OutboxClaimInput|OperationResultInput, CalendarListResult|CalendarStatusResult|InventoryResult|ObjectBatchResult|ClaimResult|OperationResult>
  */
 final readonly class SyncCalendarProcessor implements ProcessorInterface
 {
@@ -42,14 +44,15 @@ final readonly class SyncCalendarProcessor implements ProcessorInterface
     ) {
     }
 
-    public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): CalendarListResult|InventoryResult|ObjectBatchResult|ClaimResult|OperationResult
+    public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): CalendarListResult|CalendarStatusResult|InventoryResult|ObjectBatchResult|ClaimResult|OperationResult
     {
-        $result = $this->entityManager->wrapInTransaction(function () use ($data, $uriVariables): CalendarListResult|InventoryResult|ObjectBatchResult|ClaimResult|OperationResult {
+        $result = $this->entityManager->wrapInTransaction(function () use ($data, $uriVariables): CalendarListResult|CalendarStatusResult|InventoryResult|ObjectBatchResult|ClaimResult|OperationResult {
             $account = $this->leaseGuard->leasedAccount($uriVariables['accountId'] ?? null, $data->workerId);
             $now = new \DateTimeImmutable();
 
             return match (true) {
                 $data instanceof CalendarListInput => $this->synchronizer->syncCalendars($account, $data),
+                $data instanceof CalendarStatusInput => $this->reportStatus($account, $data),
                 $data instanceof InventoryInput => $this->synchronizer->inventory($this->calendar($account, $uriVariables['calendarId'] ?? null), $data),
                 $data instanceof ObjectBatchInput => $this->synchronizer->objects($this->calendar($account, $uriVariables['calendarId'] ?? null), $data),
                 $data instanceof OutboxClaimInput => new ClaimResult(array_map(ClaimedOperation::fromEntity(...), $this->operations->claim($account, $data->workerId, $now))),
@@ -59,6 +62,16 @@ final readonly class SyncCalendarProcessor implements ProcessorInterface
         $this->entityManager->clear();
 
         return $result;
+    }
+
+    private function reportStatus(MailAccount $account, CalendarStatusInput $input): CalendarStatusResult
+    {
+        $status = $input->status ?? throw new \LogicException('Validation guarantees a status.');
+        $detail = trim((string) $input->detail);
+        $account->setCalendarStatus($status, '' === $detail ? null : $detail);
+        $this->entityManager->flush();
+
+        return new CalendarStatusResult($status->value);
     }
 
     private function calendar(MailAccount $account, mixed $id): Calendar

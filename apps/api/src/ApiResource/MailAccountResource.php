@@ -14,6 +14,7 @@ use ApiPlatform\Metadata\Post;
 use App\ApiResource\Input\CreateMailAccount;
 use App\ApiResource\Input\UpdateMailAccount;
 use App\Entity\MailAccount;
+use App\Enum\CalendarSyncStatus;
 use App\Enum\MailAccountStatus;
 use App\Enum\MailProvider;
 use App\Mail\ServerSettings;
@@ -80,6 +81,8 @@ final class MailAccountResource
         public ?ServerSettings $imap,
         public ?ServerSettings $smtp,
         public ?string $calendarUrl,
+        public CalendarSyncStatus $calendarStatus,
+        public ?string $calendarStatusDetail,
         public ?\DateTimeImmutable $lastSyncedAt,
         public \DateTimeImmutable $createdAt,
         /** Set through the signature's "defaultFor" (/api/v1/signatures). */
@@ -100,6 +103,8 @@ final class MailAccountResource
             $account->getImap(),
             $account->getSmtp(),
             $account->getCalendarServer(),
+            $account->getCalendarStatus(),
+            $account->getCalendarStatusDetail(),
             $account->getLastSyncedAt(),
             $account->getCreatedAt(),
             $account->getDefaultSignature()?->getId()->toRfc4122(),

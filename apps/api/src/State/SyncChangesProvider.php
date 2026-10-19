@@ -130,7 +130,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private function mailAccounts(array $range): array
     {
         $rows = $this->connection->fetchAllAssociative(
-            'SELECT a.id, a.email_address, a.display_name, a.provider, a.status, a.status_detail, a.last_synced_at, a.default_signature_id
+            'SELECT a.id, a.email_address, a.display_name, a.provider, a.status, a.status_detail, a.last_synced_at, a.default_signature_id,
+                    a.calendar_status, a.calendar_status_detail
              FROM mail_account a WHERE a.owner_id = :user AND a.change_seq > :since AND a.change_seq <= :until ORDER BY a.change_seq',
             $range,
         );
@@ -144,6 +145,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'statusDetail' => $r['status_detail'],
             'lastSyncedAt' => self::date($r['last_synced_at']),
             'defaultSignatureId' => $r['default_signature_id'],
+            'calendarStatus' => $r['calendar_status'],
+            'calendarStatusDetail' => $r['calendar_status_detail'],
         ], $rows);
     }
 
