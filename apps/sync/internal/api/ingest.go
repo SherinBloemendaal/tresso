@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -105,7 +107,25 @@ type ChangeBatchResult struct {
 	Removed int `json:"removed"`
 	Unknown int `json:"unknown"`
 	Deleted int `json:"deleted"`
+	// UnknownUIDs are the remote uids of flag changes that have no location in the folder: the worker has to ingest
+	// those messages.
+	UnknownUIDs []string `json:"unknownUids"`
 }
+
+// RemoteUIDPage is one page of the remote uids the API stores for a folder, sorted ascending by byte order.
+type RemoteUIDPage struct {
+	RemoteUIDs []string `json:"remoteUids"`
+	Next       *string  `json:"next"` // pass as after for the next page; nil on the last page
+}
+
+// Limits of the ingest API per request.
+const (
+	MaxMessagesPerBatch = 200
+	MaxFlagChanges      = 5000
+	MaxVanished         = 5000
+	MaxCursorLength     = 8192
+	MaxRemoteUIDPage    = 5000
+)
 
 const (
 	StatusActive     = "active"
@@ -140,6 +160,18 @@ func (c *Client) Changes(ctx context.Context, accountID string, batch ChangeBatc
 	}
 	var out ChangeBatchResult
 	err := c.post(ctx, accountPath(accountID, "changes"), batch, &out)
+	return out, err
+}
+
+// RemoteUIDs lists what the API stores for a folder, a page at a time: after is "" for the first page, then the
+// previous page's Next. limit is 1 to MaxRemoteUIDPage.
+func (c *Client) RemoteUIDs(ctx context.Context, accountID, workerID, folder, after string, limit int) (RemoteUIDPage, error) {
+	query := url.Values{"workerId": {workerID}, "folder": {folder}, "limit": {strconv.Itoa(limit)}}
+	if after != "" {
+		query.Set("after", after)
+	}
+	var out RemoteUIDPage
+	err := c.do(ctx, http.MethodGet, accountPath(accountID, "folders/remote-uids")+"?"+query.Encode(), nil, &out)
 	return out, err
 }
 

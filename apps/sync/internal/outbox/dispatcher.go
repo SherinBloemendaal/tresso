@@ -1,6 +1,7 @@
 // Package outbox does the account work users wait for: for each account this worker leases, it sends the mail that is
-// due (SMTP, a copy in Sent, the outcome reported), keeps the Drafts folder in step with the user's drafts, and makes
-// the user's changes to messages (read, flagged, moved) on the server.
+// due through the account's provider (SMTP for IMAP accounts, the Gmail API, Microsoft Graph), files a copy in Sent
+// when the provider does not do so itself, reports the outcome, keeps the Drafts folder in step with the user's
+// drafts, and makes the user's changes to messages (read, flagged, moved) on the server.
 package outbox
 
 import (
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +17,12 @@ import (
 	"github.com/emersion/go-imap/v2"
 
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/gmailsync"
+	"tresso/sync/internal/graphsync"
 	"tresso/sync/internal/imapsync"
+	"tresso/sync/internal/providerhttp"
+	"tresso/sync/internal/providersend"
+	"tresso/sync/internal/providersync"
 	"tresso/sync/internal/smtpsend"
 	"tresso/sync/internal/storage"
 )
@@ -39,7 +46,8 @@ type SentStore interface {
 	Close()
 }
 
-// DraftsStore is the account's Drafts folder.
+// DraftsStore is the account's Drafts folder. Remove finds a copy by its Message-ID; a copy that is not there counts
+// as removed.
 type DraftsStore interface {
 	AppendDraft(raw []byte, at time.Time) error
 	Remove(messageID string) error
@@ -47,31 +55,40 @@ type DraftsStore interface {
 }
 
 // MailboxStore makes changes to the account's messages on the server.
+//
+// SetFlags on a copy that is gone needs nothing and succeeds. Move returns the copy's remote uid in the target folder
+// ("" when unknown); a copy no longer in the source folder is ErrMessageGone (imapsync, gmailsync or graphsync's).
 type MailboxStore interface {
 	SetFlags(location api.MailboxLocation, seen, flagged *bool) error
 	Move(source api.MailboxLocation, target, messageID string) (string, error)
 	Close()
 }
 
-// OpenMailboxFunc connects for making changes; imapsync.OpenMailbox in production.
-type OpenMailboxFunc func(ctx context.Context, credentials api.Credentials) (MailboxStore, error)
+// Sender does one account's work during one run of the dispatcher, so what it sets up (a provider client with its
+// access token and rate limit) is shared by every message and draft of the run.
+type Sender interface {
+	// Send delivers one message. Failures are *smtpsend.Error or *providersend.Error, which say whether sending again
+	// can help; any other error is retried.
+	Send(ctx context.Context, envelope smtpsend.Envelope, raw []byte) error
+	// OpenSent opens the account's Sent folder. For providers that file sent mail themselves it only needs to answer
+	// Contains.
+	OpenSent(ctx context.Context) (SentStore, error)
+	// OpenDrafts opens the account's Drafts folder, creating it when there is none.
+	OpenDrafts(ctx context.Context) (DraftsStore, error)
+	// OpenMailbox opens what makes the user's changes to messages.
+	OpenMailbox(ctx context.Context) (MailboxStore, error)
+}
 
-// OpenDraftsFunc opens the account's Drafts folder, creating it when there is none.
-type OpenDraftsFunc func(ctx context.Context, credentials api.Credentials) (DraftsStore, error)
-
-// SendFunc delivers one message; smtpsend.Send in production.
-type SendFunc func(ctx context.Context, server api.ServerSettings, username, password string, envelope smtpsend.Envelope, raw []byte) error
-
-// OpenSentFunc opens the account's Sent folder; imapsync.OpenSent in production.
-type OpenSentFunc func(ctx context.Context, credentials api.Credentials) (SentStore, error)
+// Transport is how one provider's accounts send. Open prepares a run's Sender and fails when the credentials cannot
+// send at all; it runs before anything is claimed, so work is only claimed by a worker that can actually do it.
+type Transport interface {
+	Open(credentials api.Credentials) (Sender, error)
+}
 
 type Dispatcher struct {
 	api        API
 	store      storage.Reader
-	send       SendFunc
-	openSent   OpenSentFunc
-	openDrafts OpenDraftsFunc
-	openMail   OpenMailboxFunc
+	transports map[string]Transport // by account provider
 	workerID   string
 	logger     *slog.Logger
 
@@ -82,8 +99,8 @@ type Dispatcher struct {
 
 type run struct{ again bool }
 
-func NewDispatcher(client API, store storage.Reader, send SendFunc, openSent OpenSentFunc, openDrafts OpenDraftsFunc, openMail OpenMailboxFunc, workerID string, logger *slog.Logger) *Dispatcher {
-	return &Dispatcher{api: client, store: store, send: send, openSent: openSent, openDrafts: openDrafts, openMail: openMail, workerID: workerID, logger: logger, running: map[string]*run{}}
+func NewDispatcher(client API, store storage.Reader, transports map[string]Transport, workerID string, logger *slog.Logger) *Dispatcher {
+	return &Dispatcher{api: client, store: store, transports: transports, workerID: workerID, logger: logger, running: map[string]*run{}}
 }
 
 // Trigger makes the account's due mail go out. Runs for one account never overlap: a trigger during a run makes that
@@ -127,33 +144,38 @@ func (d *Dispatcher) process(ctx context.Context, accountID string) {
 		logger.Warn("fetching credentials for sending failed", "error", err)
 		return
 	}
-	password, err := credentials.Password()
-	if err != nil {
-		logger.Error("account has no password to send with", "error", err)
+	transport, ok := d.transports[credentials.Provider]
+	if !ok {
+		logger.Error("cannot send for this provider", "provider", credentials.Provider)
 		return
 	}
-	d.sendOutbox(ctx, logger, credentials, password)
-	d.fileDrafts(ctx, logger, credentials)
-	d.changeMailbox(ctx, logger, credentials)
+	sender, err := transport.Open(credentials)
+	if err != nil {
+		logger.Error("account has no credentials to send with", "error", err)
+		return
+	}
+	d.sendOutbox(ctx, logger, sender, credentials)
+	d.fileDrafts(ctx, logger, sender, credentials)
+	d.changeMailbox(ctx, logger, sender, credentials)
 }
 
-func (d *Dispatcher) sendOutbox(ctx context.Context, logger *slog.Logger, credentials api.Credentials, password string) {
+func (d *Dispatcher) sendOutbox(ctx context.Context, logger *slog.Logger, sender Sender, credentials api.Credentials) {
 	messages, err := d.api.ClaimOutbox(ctx, credentials.AccountID, d.workerID)
 	if err != nil {
 		logger.Warn("claiming outgoing mail failed", "error", err)
 		return
 	}
 
-	sent := &lazy[SentStore]{open: func() (SentStore, error) { return d.openSent(ctx, credentials) }}
+	sent := &lazy[SentStore]{open: func() (SentStore, error) { return sender.OpenSent(ctx) }}
 	defer sent.close()
 	for _, message := range messages {
-		d.deliver(ctx, logger.With("outgoing", message.ID), credentials, password, sent, message)
+		d.deliver(ctx, logger.With("outgoing", message.ID), sender, credentials, sent, message)
 	}
 }
 
 // fileDrafts appends the newest copy of each draft and only then removes the copy it replaces, so a failure halfway
 // leaves an extra copy rather than none. A failed step is not reported: the claim expires and the work comes back.
-func (d *Dispatcher) fileDrafts(ctx context.Context, logger *slog.Logger, credentials api.Credentials) {
+func (d *Dispatcher) fileDrafts(ctx context.Context, logger *slog.Logger, sender Sender, credentials api.Credentials) {
 	work, err := d.api.ClaimDrafts(ctx, credentials.AccountID, d.workerID)
 	if err != nil {
 		logger.Warn("claiming draft work failed", "error", err)
@@ -162,7 +184,7 @@ func (d *Dispatcher) fileDrafts(ctx context.Context, logger *slog.Logger, creden
 	if len(work.Files) == 0 && len(work.Removals) == 0 {
 		return
 	}
-	folder := &lazy[DraftsStore]{open: func() (DraftsStore, error) { return d.openDrafts(ctx, credentials) }}
+	folder := &lazy[DraftsStore]{open: func() (DraftsStore, error) { return sender.OpenDrafts(ctx) }}
 	defer folder.close()
 	drafts, err := folder.get()
 	if err != nil {
@@ -179,11 +201,17 @@ func (d *Dispatcher) fileDrafts(ctx context.Context, logger *slog.Logger, creden
 		}
 		if err := drafts.AppendDraft(raw, time.Now()); err != nil {
 			fileLogger.Warn("filing the draft failed", "error", err)
+			if accessLost(err) {
+				return // every other step would be refused the same way
+			}
 			continue
 		}
 		if file.PreviousMessageID != nil {
 			if err := drafts.Remove(*file.PreviousMessageID); err != nil {
 				fileLogger.Warn("removing the previous draft copy failed; it is removed with the next version", "error", err)
+				if accessLost(err) {
+					return
+				}
 				continue
 			}
 		}
@@ -194,6 +222,9 @@ func (d *Dispatcher) fileDrafts(ctx context.Context, logger *slog.Logger, creden
 	for _, removal := range work.Removals {
 		if err := drafts.Remove(removal.MessageID); err != nil {
 			logger.Warn("removing a draft copy failed", "removal", removal.ID, "error", err)
+			if accessLost(err) {
+				return
+			}
 			continue
 		}
 		if err := d.api.ReportDraftRemoved(ctx, credentials.AccountID, removal.ID, d.workerID); err != nil {
@@ -206,7 +237,7 @@ func (d *Dispatcher) fileDrafts(ctx context.Context, logger *slog.Logger, creden
 // reported, so Tresso undoes the change; once a message's change is not done, its later changes wait for the next
 // run. When the connection fails, the rest is left unreported and comes back once the claim expires, without
 // counting as a failed attempt.
-func (d *Dispatcher) changeMailbox(ctx context.Context, logger *slog.Logger, credentials api.Credentials) {
+func (d *Dispatcher) changeMailbox(ctx context.Context, logger *slog.Logger, sender Sender, credentials api.Credentials) {
 	changes, err := d.api.ClaimMailbox(ctx, credentials.AccountID, d.workerID)
 	if err != nil {
 		logger.Warn("claiming changes to messages failed", "error", err)
@@ -215,7 +246,7 @@ func (d *Dispatcher) changeMailbox(ctx context.Context, logger *slog.Logger, cre
 	if len(changes) == 0 {
 		return
 	}
-	connection := &lazy[MailboxStore]{open: func() (MailboxStore, error) { return d.openMail(ctx, credentials) }}
+	connection := &lazy[MailboxStore]{open: func() (MailboxStore, error) { return sender.OpenMailbox(ctx) }}
 	defer connection.close()
 	mailbox, err := connection.get()
 	if err != nil {
@@ -267,7 +298,7 @@ func applyChange(mailbox MailboxStore, change api.MailboxChange) (changeResult, 
 		switch {
 		case err == nil:
 			return changeResult{api.MailboxDone, "", uid}, nil
-		case errors.Is(err, imapsync.ErrMessageGone):
+		case messageGone(err):
 			return changeResult{api.MailboxGone, err.Error(), ""}, nil
 		case errors.Is(err, imapsync.ErrFolderReset):
 			// The uid may name another message now; the folder sync finds the copy again.
@@ -315,14 +346,39 @@ func applyFlags(mailbox MailboxStore, change api.MailboxChange) (changeResult, e
 	return changeResult{api.OutcomeFailed, last.Error(), ""}, nil
 }
 
+// messageGone reports whether the copy a move was to take is no longer in its folder, whatever the provider.
+func messageGone(err error) bool {
+	return errors.Is(err, imapsync.ErrMessageGone) || errors.Is(err, gmailsync.ErrMessageGone) || errors.Is(err, graphsync.ErrMessageGone)
+}
+
 // refused reports whether the server answered rather than the connection failing: only an answer is worth reporting.
+// For Gmail and Graph an answer is an HTTP status about the change. Lost access is never one (see accessLost).
 func refused(err error) bool {
+	if accessLost(err) {
+		return false
+	}
 	var response *imap.Error
-	return errors.As(err, &response)
+	var status *providerhttp.StatusError
+	return errors.As(err, &response) || errors.As(err, &status)
+}
+
+// accessLost reports whether a Gmail or Microsoft account can no longer be used at all: the provider refused even a
+// renewed access token, the API could not renew it, or the token lacks the mail scope (403). None of these says
+// anything about the change itself, so nothing is reported: reporting a failure would make the API undo what the user
+// did. The syncer of the account reports it as auth_failed, and the work comes back once the user signed in again.
+func accessLost(err error) bool {
+	return errors.Is(err, providerhttp.ErrUnauthorized) || errors.Is(err, api.ErrReauthorize) || errors.Is(err, providersync.ErrAccessDenied)
 }
 
 // refusalOutcome tells a refusal that may pass (the server is busy) from one that will not.
 func refusalOutcome(err error) string {
+	var status *providerhttp.StatusError
+	if errors.As(err, &status) {
+		if status.StatusCode == http.StatusTooManyRequests || status.StatusCode >= 500 {
+			return api.OutcomeRetry
+		}
+		return api.OutcomeFailed
+	}
 	var response *imap.Error
 	if errors.As(err, &response) {
 		switch response.Code {
@@ -333,7 +389,7 @@ func refusalOutcome(err error) string {
 	return api.OutcomeFailed
 }
 
-func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, credentials api.Credentials, password string, sent *lazy[SentStore], message api.OutgoingMessage) {
+func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, sender Sender, credentials api.Credentials, sent *lazy[SentStore], message api.OutgoingMessage) {
 	raw, err := d.store.Get(ctx, message.RawObjectKey)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -356,22 +412,15 @@ func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, credentia
 	}
 
 	envelope := smtpsend.Envelope{From: message.EnvelopeFrom, Recipients: message.Recipients}
-	if err := d.send(ctx, credentials.Connection.SMTP, credentials.Connection.Username, password, envelope, raw); err != nil {
-		var sendErr *smtpsend.Error
-		outcome, text := api.OutcomeRetry, "Sending failed; trying again later."
-		if errors.As(err, &sendErr) {
-			text = sendErr.Message
-			if sendErr.Permanent {
-				outcome = api.OutcomeFailed
-			}
-		}
+	if err := sender.Send(ctx, envelope, raw); err != nil {
+		outcome, text := outcomeOf(err)
 		logger.Warn("sending failed", "outcome", outcome, "error", err)
 		d.report(ctx, logger, credentials.AccountID, message.ID, outcome, text, false)
 		return
 	}
 
 	copied := true
-	if !AutoSavesSent(credentials.Connection.SMTP.Host) {
+	if !AutoSavesSent(credentials) {
 		copied = false
 		if store, err := sent.get(); err != nil {
 			logger.Warn("opening the Sent folder failed", "error", err)
@@ -395,10 +444,36 @@ func (d *Dispatcher) report(ctx context.Context, logger *slog.Logger, accountID,
 	}
 }
 
-// AutoSavesSent reports whether the provider files mail sent through its SMTP server in Sent by itself, so a copy
-// from Tresso would show up twice.
-func AutoSavesSent(smtpHost string) bool {
-	host := strings.ToLower(strings.TrimSuffix(smtpHost, "."))
+// outcomeOf maps a send failure to the outcome reported to the API and the text shown to the user.
+func outcomeOf(err error) (outcome, text string) {
+	var smtpErr *smtpsend.Error
+	var providerErr *providersend.Error
+	switch {
+	case errors.As(err, &smtpErr):
+		return outcomeFor(smtpErr.Permanent), smtpErr.Message
+	case errors.As(err, &providerErr):
+		return outcomeFor(providerErr.Permanent), providerErr.Message
+	default:
+		return api.OutcomeRetry, "Sending failed; trying again later."
+	}
+}
+
+func outcomeFor(permanent bool) string {
+	if permanent {
+		return api.OutcomeFailed
+	}
+	return api.OutcomeRetry
+}
+
+// AutoSavesSent reports whether the provider files sent mail in Sent by itself, so a copy from Tresso would show up
+// twice: always for Gmail and Microsoft accounts (their APIs file it), and for IMAP accounts whose SMTP server is
+// Gmail's or Microsoft's.
+func AutoSavesSent(credentials api.Credentials) bool {
+	switch credentials.Provider {
+	case "gmail", "microsoft":
+		return true
+	}
+	host := strings.ToLower(strings.TrimSuffix(credentials.Connection.SMTP.Host, "."))
 	switch host {
 	case "smtp.gmail.com", "smtp.googlemail.com", "smtp.office365.com", "smtp-mail.outlook.com":
 		return true

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLeaseSendsWorkerAndDecodesAccounts(t *testing.T) {
@@ -163,6 +164,82 @@ func TestRevokedTokenIsReplacedAndTheRequestRetried(t *testing.T) {
 	defer srv2.Close()
 	if _, err := New(context.Background(), srv2.URL, srv2.URL+"/oauth/token", "a", "b").Lease(context.Background(), "w1", 1); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Errorf("expected a 401 error, got %v", err)
+	}
+}
+
+func TestOAuthCredentialsAndRefresh(t *testing.T) {
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		_, _ = w.Write([]byte(`{"accountId":"acc-1","emailAddress":"kim@example.test","provider":"gmail","connection":null,` +
+			`"credentials":{"type":"oauth2","accessToken":"ya29.x","expiresAt":"2026-10-19T12:00:00+00:00"}}`))
+	}))
+	defer srv.Close()
+	c := NewWithHTTPClient(srv.URL, srv.Client())
+
+	creds, err := c.Credentials(context.Background(), "acc-1", "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, expiresAt, err := creds.AccessToken()
+	if err != nil || token != "ya29.x" || !expiresAt.Equal(time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("AccessToken = %q, %v, %v", token, expiresAt, err)
+	}
+	if creds.Connection != (Connection{}) {
+		t.Errorf("null connection decoded as %+v", creds.Connection)
+	}
+	if _, err := creds.Password(); err == nil {
+		t.Error("OAuth credentials have no password")
+	}
+	if _, err := c.RefreshCredentials(context.Background(), "acc-1", "w1"); err != nil {
+		t.Fatal(err)
+	}
+	if queries[0] != "workerId=w1" || queries[1] != "workerId=w1&rejected=1" {
+		t.Errorf("queries = %v", queries)
+	}
+	if _, _, err := (Credentials{Secrets: map[string]string{"type": "password", "password": "x"}}).AccessToken(); err == nil {
+		t.Error("password credentials have no access token")
+	}
+}
+
+func TestConflictOnCredentialsMeansReauthorize(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"detail":"The provider refused to renew access."}`))
+	}))
+	defer srv.Close()
+	c := NewWithHTTPClient(srv.URL, srv.Client())
+
+	_, err := c.RefreshCredentials(context.Background(), "acc-1", "w1")
+	var httpErr *HTTPError
+	if !errors.Is(err, ErrReauthorize) || !errors.As(err, &httpErr) || httpErr.Status != http.StatusConflict {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRemoteUIDsAndUnknownUIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/internal/sync/accounts/acc-1/folders/remote-uids":
+			q := r.URL.Query()
+			if q.Get("workerId") != "w1" || q.Get("folder") != "Label_1" || q.Get("after") != "m5" || q.Get("limit") != "5000" {
+				t.Errorf("query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"remoteUids":["m6","m7"],"next":null}`))
+		case "/internal/sync/accounts/acc-1/changes":
+			_, _ = w.Write([]byte(`{"updated":1,"removed":0,"unknown":1,"deleted":0,"unknownUids":["m9"]}`))
+		}
+	}))
+	defer srv.Close()
+	c := NewWithHTTPClient(srv.URL, srv.Client())
+
+	page, err := c.RemoteUIDs(context.Background(), "acc-1", "w1", "Label_1", "m5", MaxRemoteUIDPage)
+	if err != nil || len(page.RemoteUIDs) != 2 || page.Next != nil {
+		t.Fatalf("page = %+v, %v", page, err)
+	}
+	result, err := c.Changes(context.Background(), "acc-1", ChangeBatch{WorkerID: "w1", Folder: "INBOX"})
+	if err != nil || len(result.UnknownUIDs) != 1 || result.UnknownUIDs[0] != "m9" {
+		t.Fatalf("result = %+v, %v", result, err)
 	}
 }
 

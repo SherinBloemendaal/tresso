@@ -15,12 +15,13 @@ import (
 
 	"tresso/sync/internal/api"
 	"tresso/sync/internal/config"
+	"tresso/sync/internal/gmailsync"
+	"tresso/sync/internal/graphsync"
 	"tresso/sync/internal/imapsync"
 	"tresso/sync/internal/lease"
 	"tresso/sync/internal/netguard"
 	"tresso/sync/internal/outbox"
 	"tresso/sync/internal/realtime"
-	"tresso/sync/internal/smtpsend"
 	"tresso/sync/internal/storage"
 )
 
@@ -56,34 +57,33 @@ func run(logger *slog.Logger) error {
 	}
 
 	dialer := netguard.New(cfg.AllowUnsafeServers)
-	imapSyncer := imapsync.New(client, store, dialer, cfg.WorkerID, imapsync.DefaultOptions(), logger.With("worker", cfg.WorkerID))
+	workerLogger := logger.With("worker", cfg.WorkerID)
+	imapSyncer := imapsync.New(client, store, dialer, cfg.WorkerID, imapsync.DefaultOptions(), workerLogger)
+	gmailSyncer := gmailsync.New(client, store, cfg.WorkerID, gmailsync.DefaultOptions(), workerLogger)
+	graphSyncer := graphsync.New(client, store, cfg.WorkerID, graphsync.DefaultOptions(), workerLogger)
 	syncerFor := func(provider string) (lease.Syncer, error) {
 		switch provider {
 		case "imap":
 			return imapSyncer, nil
+		case "gmail":
+			return gmailSyncer, nil
+		case "microsoft":
+			return graphSyncer, nil
 		default:
-			// Gmail and Microsoft Graph follow in phase 1.6.
 			return nil, fmt.Errorf("%w: %s", lease.ErrUnsupportedProvider, provider)
 		}
 	}
 
-	manager := lease.NewManager(client, syncerFor, cfg.WorkerID, cfg.Capacity, cfg.HeartbeatInterval, logger.With("worker", cfg.WorkerID))
+	manager := lease.NewManager(client, syncerFor, cfg.WorkerID, cfg.Capacity, cfg.HeartbeatInterval, workerLogger)
 
 	// Outgoing mail, drafts and changes to messages: the hub says which account has work right away; every heartbeat
 	// repeats it.
-	send := func(ctx context.Context, server api.ServerSettings, username, password string, envelope smtpsend.Envelope, raw []byte) error {
-		return smtpsend.Send(ctx, dialer, server, username, password, envelope, raw)
+	transports := map[string]outbox.Transport{
+		"imap":      outbox.IMAPTransport(dialer),
+		"gmail":     outbox.GmailTransport(client, cfg.WorkerID, gmailsync.DefaultClientOptions()),
+		"microsoft": outbox.GraphTransport(client, cfg.WorkerID, graphsync.DefaultClientOptions()),
 	}
-	openSent := func(ctx context.Context, credentials api.Credentials) (outbox.SentStore, error) {
-		return imapsync.OpenSent(ctx, dialer, credentials)
-	}
-	openDrafts := func(ctx context.Context, credentials api.Credentials) (outbox.DraftsStore, error) {
-		return imapsync.OpenDrafts(ctx, dialer, credentials)
-	}
-	openMailbox := func(ctx context.Context, credentials api.Credentials) (outbox.MailboxStore, error) {
-		return imapsync.OpenMailbox(ctx, dialer, credentials)
-	}
-	dispatcher := outbox.NewDispatcher(client, store, send, openSent, openDrafts, openMailbox, cfg.WorkerID, logger.With("worker", cfg.WorkerID))
+	dispatcher := outbox.NewDispatcher(client, store, transports, cfg.WorkerID, workerLogger)
 	manager.OnOutbox(func(ctx context.Context, accountIDs []string) {
 		for _, id := range accountIDs {
 			dispatcher.Trigger(ctx, id)
