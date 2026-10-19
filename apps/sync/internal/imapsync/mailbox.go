@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 
 	"github.com/emersion/go-imap/v2"
@@ -71,49 +72,93 @@ func (m *Mailbox) SetFlags(location api.MailboxLocation, seen, flagged *bool) er
 	return nil
 }
 
-// Move moves the copy to the target folder and returns its uid there when the server says (UIDPLUS), else "".
+// Move moves the copy to the target folder and returns its uid there, from the server (UIDPLUS) or found by its
+// Message-ID (messageID, without angle brackets; "" when it has none), else "".
 //
-// Servers without MOVE get COPY and \Deleted on the source; it is expunged only with UIDPLUS, so that only this copy
-// goes: expunging the whole folder would also erase messages another mail app merely marked deleted.
-func (m *Mailbox) Move(source api.MailboxLocation, target string) (string, error) {
+// Servers without MOVE get COPY, then \Deleted on the source, each only after the step before succeeded; the source
+// is expunged only with UIDPLUS, so that only this copy goes: expunging the whole folder would also erase messages
+// another mail app merely marked deleted. A copy an earlier attempt already put in the target is not copied again.
+func (m *Mailbox) Move(source api.MailboxLocation, target, messageID string) (string, error) {
+	var copied string
+	if !m.client.Caps().Has(imap.CapMove) && messageID != "" {
+		found, err := m.find(target, messageID)
+		if err != nil {
+			return "", err
+		}
+		copied = found
+	}
+
 	uid, err := m.open(source)
 	if err != nil {
 		return "", err
 	}
 	set := imap.UIDSetNum(uid)
 	// A uid that is gone would make MOVE succeed without doing anything; say so instead.
-	found, err := m.client.Fetch(set, &imap.FetchOptions{UID: true}).Collect()
+	present, err := m.client.Fetch(set, &imap.FetchOptions{UID: true}).Collect()
 	if err != nil {
 		return "", fmt.Errorf("look up the message in %s: %w", source.Folder, err)
 	}
-	if len(found) == 0 {
+	if len(present) == 0 {
 		return "", ErrMessageGone
 	}
 
-	caps := m.client.Caps()
 	var dest imap.NumSet
-	if caps.Has(imap.CapMove) || caps.Has(imap.CapUIDPlus) {
+	if m.client.Caps().Has(imap.CapMove) {
 		data, err := m.client.Move(set, target).Wait()
 		if err != nil {
 			return "", fmt.Errorf("move from %s to %s: %w", source.Folder, target, err)
 		}
 		dest = data.DestUIDs
 	} else {
-		data, err := m.client.Copy(set, target).Wait()
-		if err != nil {
-			return "", fmt.Errorf("copy from %s to %s: %w", source.Folder, target, err)
+		if copied == "" {
+			data, err := m.client.Copy(set, target).Wait()
+			if err != nil {
+				return "", fmt.Errorf("copy from %s to %s: %w", source.Folder, target, err)
+			}
+			dest = data.DestUIDs
 		}
-		dest = data.DestUIDs
 		if err := m.client.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted}}, nil).Close(); err != nil {
 			return "", fmt.Errorf("mark the moved message deleted in %s: %w", source.Folder, err)
 		}
+		if m.client.Caps().Has(imap.CapUIDPlus) {
+			if err := m.client.UIDExpunge(set).Close(); err != nil {
+				return "", fmt.Errorf("expunge the moved message from %s: %w", source.Folder, err)
+			}
+		}
 	}
+
 	if uids, ok := dest.(imap.UIDSet); ok {
 		if nums, ok := uids.Nums(); ok && len(nums) == 1 {
 			return strconv.FormatUint(uint64(nums[0]), 10), nil
 		}
 	}
-	return "", nil
+	if copied != "" || messageID == "" {
+		return copied, nil
+	}
+	return m.find(target, messageID)
+}
+
+// find returns the uid of the newest copy with this Message-ID in the folder, or "".
+func (m *Mailbox) find(folder, messageID string) (string, error) {
+	if m.selected != folder {
+		data, err := m.client.Select(folder, nil).Wait()
+		if err != nil {
+			m.selected = ""
+			return "", fmt.Errorf("select %s: %w", folder, err)
+		}
+		m.selected, m.validity = folder, data.UIDValidity
+	}
+	data, err := m.client.UIDSearch(&imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{{Key: "Message-ID", Value: "<" + messageID + ">"}},
+	}, nil).Wait()
+	if err != nil {
+		return "", fmt.Errorf("search %s: %w", folder, err)
+	}
+	uids := data.AllUIDs()
+	if len(uids) == 0 {
+		return "", nil
+	}
+	return strconv.FormatUint(uint64(slices.Max(uids)), 10), nil
 }
 
 func (m *Mailbox) open(location api.MailboxLocation) (imap.UID, error) {

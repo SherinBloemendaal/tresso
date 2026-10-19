@@ -297,10 +297,10 @@ func TestMakesTheUsersChangesOnTheServer(t *testing.T) {
 			Secrets:    map[string]string{"type": "password", "password": password},
 		},
 		changes: []api.MailboxChange{
-			{ID: "c1", Kind: api.MailboxFlags, Seen: &yes, Flagged: &yes, Locations: []api.MailboxLocation{source}},
-			{ID: "c2", Kind: api.MailboxFlags, Flagged: &no, Locations: []api.MailboxLocation{{Folder: "INBOX", UIDValidity: &wrongValidity, RemoteUID: uid}}},
-			{ID: "c3", Kind: api.MailboxMove, Source: &source, Target: &api.MailboxTarget{Folder: "Archive"}},
-			{ID: "c4", Kind: api.MailboxMove, Source: &source, Target: &api.MailboxTarget{Folder: "Archive"}},
+			{ID: "c1", MessageID: "m1", Kind: api.MailboxFlags, Seen: &yes, Flagged: &yes, Locations: []api.MailboxLocation{source}},
+			{ID: "c2", MessageID: "m2", Kind: api.MailboxFlags, Flagged: &no, Locations: []api.MailboxLocation{{Folder: "INBOX", UIDValidity: &wrongValidity, RemoteUID: uid}}},
+			{ID: "c3", MessageID: "m3", MessageIDHeader: &messageID, Kind: api.MailboxMove, Source: &source, Target: &api.MailboxTarget{Folder: "Archive"}},
+			{ID: "c4", MessageID: "m4", MessageIDHeader: &messageID, Kind: api.MailboxMove, Source: &source, Target: &api.MailboxTarget{Folder: "Archive"}},
 		},
 	}
 	openMailbox := func(ctx context.Context, credentials api.Credentials) (MailboxStore, error) {
@@ -327,8 +327,8 @@ func TestMakesTheUsersChangesOnTheServer(t *testing.T) {
 	if got := client.changed[2]; got.outcome != api.MailboxDone {
 		t.Errorf("move: %+v", got)
 	}
-	if got := client.changed[3]; got.outcome != api.OutcomeFailed {
-		t.Errorf("moving a copy that is gone is refused: %+v", got)
+	if got := client.changed[3]; got.outcome != api.MailboxGone {
+		t.Errorf("a copy that is already gone is reported as such: %+v", got)
 	}
 
 	if n := count(t, check, "INBOX", messageID); n != 0 {
@@ -341,7 +341,7 @@ func TestMakesTheUsersChangesOnTheServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if moved := client.changed[2].remoteUID; moved != "" && moved != strconv.FormatUint(uint64(archived.AllUIDs()[0]), 10) {
+	if moved := client.changed[2].remoteUID; moved != strconv.FormatUint(uint64(archived.AllUIDs()[0]), 10) {
 		t.Errorf("reported uid %s, the copy has %d", moved, archived.AllUIDs()[0])
 	}
 	flags, err := check.Fetch(imap.UIDSetNum(archived.AllUIDs()...), &imap.FetchOptions{Flags: true}).Collect()

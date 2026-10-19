@@ -160,7 +160,7 @@ func (m *fakeMailbox) SetFlags(location api.MailboxLocation, seen, flagged *bool
 	return m.errors["flags "+location.Folder+"/"+location.RemoteUID]
 }
 
-func (m *fakeMailbox) Move(source api.MailboxLocation, target string) (string, error) {
+func (m *fakeMailbox) Move(source api.MailboxLocation, target, _ string) (string, error) {
 	m.log = append(m.log, fmt.Sprintf("move %s/%s to %s", source.Folder, source.RemoteUID, target))
 	if err := m.errors["move "+source.Folder+"/"+source.RemoteUID]; err != nil {
 		return "", err
@@ -380,8 +380,8 @@ func TestMakesTheUsersChangesInOrderAndReportsThem(t *testing.T) {
 	yes := true
 	inbox := location("INBOX", "1")
 	h.api.changes = []api.MailboxChange{
-		{ID: "c1", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{inbox, location("Projects", "4")}},
-		{ID: "c2", Kind: api.MailboxMove, Source: &inbox, Target: &api.MailboxTarget{Folder: "Archive"}},
+		{ID: "c1", MessageID: "m1", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{inbox, location("Projects", "4")}},
+		{ID: "c2", MessageID: "m1", Kind: api.MailboxMove, Source: &inbox, Target: &api.MailboxTarget{Folder: "Archive"}},
 	}
 
 	h.run()
@@ -401,11 +401,11 @@ func TestReportsWhatTheServerRefusesOrPutsOff(t *testing.T) {
 	yes := true
 	inbox, trash, gone := location("INBOX", "1"), location("Trash", "2"), location("INBOX", "3")
 	h.api.changes = []api.MailboxChange{
-		{ID: "refused", Kind: api.MailboxMove, Source: &inbox, Target: &api.MailboxTarget{Folder: "Nowhere"}},
-		{ID: "busy", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{trash}},
-		{ID: "gone", Kind: api.MailboxMove, Source: &gone, Target: &api.MailboxTarget{Folder: "Archive"}},
-		{ID: "reset-flags", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("Old", "5")}},
-		{ID: "reset-move", Kind: api.MailboxMove, Source: ptr(location("Old", "6")), Target: &api.MailboxTarget{Folder: "Archive"}},
+		{ID: "refused", MessageID: "m1", Kind: api.MailboxMove, Source: &inbox, Target: &api.MailboxTarget{Folder: "Nowhere"}},
+		{ID: "busy", MessageID: "m2", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{trash}},
+		{ID: "gone", MessageID: "m3", Kind: api.MailboxMove, Source: &gone, Target: &api.MailboxTarget{Folder: "Archive"}},
+		{ID: "reset-flags", MessageID: "m4", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("Old", "5")}},
+		{ID: "reset-move", MessageID: "m5", Kind: api.MailboxMove, Source: ptr(location("Old", "6")), Target: &api.MailboxTarget{Folder: "Archive"}},
 	}
 	h.mailbox.errors["move INBOX/1"] = &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeTryCreate, Text: "Mailbox does not exist"}
 	h.mailbox.errors["flags Trash/2"] = &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeUnavailable, Text: "Try later"}
@@ -419,7 +419,7 @@ func TestReportsWhatTheServerRefusesOrPutsOff(t *testing.T) {
 	for _, r := range h.api.changed {
 		outcomes[r.id] = r.outcome
 	}
-	want := map[string]string{"refused": api.OutcomeFailed, "busy": api.OutcomeRetry, "gone": api.OutcomeFailed, "reset-flags": api.OutcomeRetry, "reset-move": api.OutcomeFailed}
+	want := map[string]string{"refused": api.OutcomeFailed, "busy": api.OutcomeRetry, "gone": api.MailboxGone, "reset-flags": api.OutcomeRetry, "reset-move": api.OutcomeFailed}
 	if fmt.Sprint(outcomes) != fmt.Sprint(want) {
 		t.Errorf("outcomes = %v, want %v", outcomes, want)
 	}
@@ -432,9 +432,9 @@ func TestAConnectionFailureLeavesTheRestForLater(t *testing.T) {
 	h := newHarness()
 	yes := true
 	h.api.changes = []api.MailboxChange{
-		{ID: "c1", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "1")}},
-		{ID: "c2", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "2")}},
-		{ID: "c3", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "3")}},
+		{ID: "c1", MessageID: "m1", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "1")}},
+		{ID: "c2", MessageID: "m2", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "2")}},
+		{ID: "c3", MessageID: "m3", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "3")}},
 	}
 	h.mailbox.errors["flags INBOX/2"] = io.ErrUnexpectedEOF
 
@@ -447,3 +447,36 @@ func TestAConnectionFailureLeavesTheRestForLater(t *testing.T) {
 }
 
 func ptr[T any](value T) *T { return &value }
+
+func TestAMessagesLaterChangesWaitWhenOneIsNotDone(t *testing.T) {
+	h := newHarness()
+	yes, no := true, false
+	h.api.changes = []api.MailboxChange{
+		{ID: "read", MessageID: "m1", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "1")}},
+		{ID: "unread", MessageID: "m1", Kind: api.MailboxFlags, Seen: &no, Locations: []api.MailboxLocation{location("INBOX", "1")}},
+		{ID: "other", MessageID: "m2", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("INBOX", "2")}},
+	}
+	h.mailbox.errors["flags INBOX/1"] = &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeInUse, Text: "Busy"}
+
+	h.run()
+
+	want := []mailboxReport{{"read", api.OutcomeRetry, "imap: NO [INUSE] Busy", ""}, {"other", api.MailboxDone, "", ""}}
+	if !slices.Equal(h.api.changed, want) {
+		t.Errorf("reports = %+v, want %+v: the unread waits for the read to go first", h.api.changed, want)
+	}
+}
+
+func TestAFlagChangeIsDoneWhenAnyCopyTookIt(t *testing.T) {
+	h := newHarness()
+	yes := true
+	h.api.changes = []api.MailboxChange{
+		{ID: "c1", MessageID: "m1", Kind: api.MailboxFlags, Seen: &yes, Locations: []api.MailboxLocation{location("Gone", "1"), location("INBOX", "2")}},
+	}
+	h.mailbox.errors["flags Gone/1"] = &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeNonExistent, Text: "No such folder"}
+
+	h.run()
+
+	if want := []mailboxReport{{"c1", api.MailboxDone, "", ""}}; !slices.Equal(h.api.changed, want) {
+		t.Errorf("reports = %+v, want %+v", h.api.changed, want)
+	}
+}
