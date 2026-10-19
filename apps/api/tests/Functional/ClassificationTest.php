@@ -242,6 +242,17 @@ final class ClassificationTest extends DatabaseTestCase
         self::assertResponseStatusCodeSame(422);
     }
 
+    public function testSmartInboxesFromBeforeTheSyncReachClientsOnceMailIsClassified(): void
+    {
+        $this->connection()->executeStatement("UPDATE category SET change_seq = 0 FROM app_user u WHERE u.id = category.owner_id AND u.email = 'kim@example.test'");
+        self::assertSame([], $this->changes(0)['smartInboxes']);
+
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+
+        self::assertCount(5, $this->changes(0)['smartInboxes']);
+    }
+
     public function testCommandClassifiesAgain(): void
     {
         $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
