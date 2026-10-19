@@ -1,83 +1,60 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb'
-import { actionResult, summarizeConversation, type AppliedAction } from '@tresso/core'
-import type {
-  Address,
-  ChangePage,
-  MessageAction,
-  SyncedFolder,
-  SyncedMailAccount,
-  SyncedMessage,
-  SyncedDraft,
-  SyncedOutgoingMessage,
-  SyncedSignature,
-  SyncedThread,
-  SyncStore,
+import {
+  actionResult,
+  arrivalOf,
+  contactMatches,
+  deletedDraft,
+  mergeContact,
+  peopleOn,
+  summarizeConversation,
+  syncedDraft,
+  type AppliedAction,
+  type Arrival,
+  type ChangePage,
+  type Contact,
+  type ConversationSummary,
+  type Draft,
+  type MailStore,
+  type MessageAction,
+  type SyncedFolder,
+  type SyncedMailAccount,
+  type SyncedMessage,
+  type SyncedOutgoingMessage,
+  type SyncedSignature,
+  type SyncedDraft,
+  type SyncedThread,
 } from '@tresso/core'
 
+export type { Arrival, Contact, Draft } from '@tresso/core'
+
+/** What a thread looks like in a mailbox list. */
+export type Conversation = ConversationSummary
+
 /**
- * What a thread looks like in a mailbox list, derived from its messages whenever one of them changes. Lists read only
- * these, through indexes, so they stay fast however much mail is stored.
+ * A conversation as IndexedDB keeps it: booleans cannot be index keys, so the inbox flags are numbers, which the
+ * lists read through indexes and so stay fast however much mail is stored.
  */
-export interface Conversation {
-  threadId: string
-  mailAccountId: string
-  subject: string
-  snippet: string
-  /** Epoch ms of the newest message. */
-  lastMessageAt: number
-  messageCount: number
-  unreadCount: number
-  flagged: boolean
-  hasAttachments: boolean
-  /** Newest senders first, without duplicates. */
-  senders: Address[]
-  /** 1 when a message of the thread is in an inbox folder. Booleans cannot be index keys. */
+interface StoredConversation extends Omit<ConversationSummary, 'inbox'> {
+  /** 1 when a message of the thread is in an inbox folder. */
   inbox: 0 | 1
   /** 1 when that thread is in an inbox and has unread mail. */
   unreadInbox: 0 | 1
 }
 
-/** Someone the user exchanged mail with, for recipient suggestions. */
-export interface Contact {
-  /** Lower-cased address. */
-  key: string
-  address: string
-  name: string | null
-  /** Epoch ms of the newest message with them. */
-  lastSeen: number
-  messages: number
-}
-
-/**
- * A message being written: the synced draft plus what only this device knows. Edits are saved here first
- * (`pendingSave`) and then uploaded; `version` is the server version they build on, 0 while the draft has not
- * reached the server.
- */
-export interface Draft {
-  id: string
-  mailAccountId: string | null
-  to: Address[]
-  cc: Address[]
-  bcc: Address[]
-  subject: string
-  /** What the user writes, without signature and quote. */
-  html: string
-  /** The signature added below the text; null for none. */
-  signatureId: string | null
-  /** The original a reply or forward quotes, kept apart from the text. */
-  quoteHtml: string
-  inReplyToMessageId: string | null
-  kind: 'new' | 'reply' | 'replyAll' | 'forward'
-  version: number
-  /** Edits on this device that have not reached the server yet. */
-  pendingSave: boolean
-  /** Set when another device saved a newer version while this one had unsaved edits: the version waiting there. */
-  remoteVersion: number | null
-  /** Set once sent: the draft stays until the message is confirmed sent, so a failure can be edited and resent. */
-  outgoingId: string | null
-  /** The outgoing status the user was last told about, so each outcome is announced once. */
-  noticedStatus: string | null
-  updatedAt: number
+function toSummary(stored: StoredConversation): ConversationSummary {
+  return {
+    threadId: stored.threadId,
+    mailAccountId: stored.mailAccountId,
+    subject: stored.subject,
+    snippet: stored.snippet,
+    lastMessageAt: stored.lastMessageAt,
+    messageCount: stored.messageCount,
+    unreadCount: stored.unreadCount,
+    flagged: stored.flagged,
+    hasAttachments: stored.hasAttachments,
+    senders: stored.senders,
+    inbox: stored.inbox === 1,
+  }
 }
 
 interface MailSchema extends DBSchema {
@@ -95,7 +72,7 @@ interface MailSchema extends DBSchema {
   drafts: { key: string; value: Draft; indexes: { byUpdatedAt: number } }
   conversations: {
     key: string
-    value: Conversation
+    value: StoredConversation
     indexes: {
       byAccount: string
       byInboxDate: [number, number]
@@ -121,32 +98,14 @@ export function deleteMailDatabase(userId: string): Promise<void> {
   return deleteDB(databaseName(userId))
 }
 
-/**
- * A message that needs the user and is new to them: unread, in an inbox, and judged `do` or `delegate` for the first
- * time, either when it arrived or when it was classified later.
- */
-export interface Arrival {
-  messageId: string
-  threadId: string
-  mailAccountId: string
-  from: SyncedMessage['from']
-  subject: string
-  snippet: string
-  receivedAt: string
-  verdict: 'do' | 'delegate'
-}
-
-function needsTheUser(message: SyncedMessage | undefined): boolean {
-  return message?.verdict === 'do' || message?.verdict === 'delegate'
-}
-
-export class MailDatabase implements SyncStore {
+/** The signed-in user's mail in the browser's IndexedDB. The desktop app keeps it in SQLite instead (SqliteMailStore). */
+export class IndexedDbMailStore implements MailStore {
   /** Collected by {@link apply}, handed out by {@link takeArrivals}. */
   private arrivals: Arrival[] = []
 
   private constructor(private readonly db: IDBPDatabase<MailSchema>) {}
 
-  static async open(userId: string): Promise<MailDatabase> {
+  static async open(userId: string): Promise<IndexedDbMailStore> {
     const db = await openDB<MailSchema>(databaseName(userId), VERSION, {
       async upgrade(database, oldVersion, _newVersion, transaction) {
         if (oldVersion < 1) {
@@ -181,10 +140,10 @@ export class MailDatabase implements SyncStore {
       },
     })
 
-    return new MailDatabase(db)
+    return new IndexedDbMailStore(db)
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.db.close()
   }
 
@@ -227,11 +186,9 @@ export class MailDatabase implements SyncStore {
           break
         case 'draft': {
           const local = await tx.objectStore('drafts').get(deleted.id)
-          if (local?.outgoingId) {
-            // Sent: kept here until the outcome is known, so a failure can be edited and sent again.
-            await tx.objectStore('drafts').put({ ...local, version: 0, pendingSave: false, remoteVersion: null })
-          } else if (local !== undefined && !local.pendingSave) {
-            await tx.objectStore('drafts').delete(deleted.id)
+          if (local !== undefined) {
+            const kept = deletedDraft(local)
+            await (kept === null ? tx.objectStore('drafts').delete(deleted.id) : tx.objectStore('drafts').put(kept))
           }
           break
         }
@@ -271,22 +228,9 @@ export class MailDatabase implements SyncStore {
       if (previous === undefined) {
         await rememberContacts(tx, message)
       }
-      if (
-        (message.verdict === 'do' || message.verdict === 'delegate') &&
-        !needsTheUser(previous) &&
-        !message.flags.seen &&
-        message.folderIds.some((id) => inboxFolders.has(id))
-      ) {
-        arrivals.push({
-          messageId: message.id,
-          threadId: message.threadId,
-          mailAccountId: message.mailAccountId,
-          from: message.from,
-          subject: message.subject,
-          snippet: message.snippet,
-          receivedAt: message.receivedAt,
-          verdict: message.verdict,
-        })
+      const arrival = arrivalOf(previous, message, inboxFolders)
+      if (arrival !== null) {
+        arrivals.push(arrival)
       }
     }
     for (const outgoing of page.outgoingMessages) {
@@ -387,7 +331,7 @@ export class MailDatabase implements SyncStore {
   }
 
   /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
-  async inbox(mailAccountId: string | null, limit: number): Promise<Conversation[]> {
+  async inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]> {
     const tx = this.db.transaction('conversations')
     const index = mailAccountId === null ? tx.store.index('byInboxDate') : tx.store.index('byAccountInboxDate')
     const range =
@@ -395,9 +339,9 @@ export class MailDatabase implements SyncStore {
         ? IDBKeyRange.bound([1, -Infinity], [1, Infinity])
         : IDBKeyRange.bound([mailAccountId, 1, -Infinity], [mailAccountId, 1, Infinity])
 
-    const conversations: Conversation[] = []
+    const conversations: ConversationSummary[] = []
     for (let cursor = await index.openCursor(range, 'prev'); cursor !== null && conversations.length < limit; cursor = await cursor.continue()) {
-      conversations.push(cursor.value)
+      conversations.push(toSummary(cursor.value))
     }
 
     return conversations
@@ -407,7 +351,7 @@ export class MailDatabase implements SyncStore {
    * Inbox threads (of one account, or of all) matching a test, newest first, however many there are: for selecting
    * beyond the part of the list that is loaded.
    */
-  async inboxThreadIds(mailAccountId: string | null, matches: (conversation: Conversation) => boolean): Promise<string[]> {
+  async inboxThreadIds(mailAccountId: string | null, matches: (conversation: ConversationSummary) => boolean): Promise<string[]> {
     const tx = this.db.transaction('conversations')
     const index = mailAccountId === null ? tx.store.index('byInboxDate') : tx.store.index('byAccountInboxDate')
     const range =
@@ -417,7 +361,7 @@ export class MailDatabase implements SyncStore {
 
     const ids: string[] = []
     for (let cursor = await index.openCursor(range, 'prev'); cursor !== null; cursor = await cursor.continue()) {
-      if (matches(cursor.value)) {
+      if (matches(toSummary(cursor.value))) {
         ids.push(cursor.value.threadId)
       }
     }
@@ -490,14 +434,11 @@ export class MailDatabase implements SyncStore {
 
   /** Contacts matching the start of a name or address, most recent first. */
   async suggestContacts(query: string, limit: number): Promise<Contact[]> {
-    const needle = query.trim().toLowerCase()
     const result: Contact[] = []
     const index = this.db.transaction('contacts').store.index('byLastSeen')
     for (let cursor = await index.openCursor(null, 'prev'); cursor !== null && result.length < limit; cursor = await cursor.continue()) {
-      const contact = cursor.value
-      const words = [contact.key, ...(contact.name ?? '').toLowerCase().split(/\s+/)]
-      if (needle === '' || words.some((word) => word.startsWith(needle))) {
-        result.push(contact)
+      if (contactMatches(cursor.value, query)) {
+        result.push(cursor.value)
       }
     }
 
@@ -565,44 +506,17 @@ async function deleteAccount(tx: WriteTx, accountId: string): Promise<void> {
   }
 }
 
-/**
- * A draft from the server. Unsaved edits on this device are never overwritten: when the server moved past the
- * version they build on, the newer version is noted as a conflict for the user to settle.
- */
 async function applyDraft(tx: WriteTx, draft: SyncedDraft): Promise<void> {
-  const local = await tx.objectStore('drafts').get(draft.id)
-  if (local?.pendingSave) {
-    if (draft.version > local.version) {
-      await tx.objectStore('drafts').put({ ...local, remoteVersion: draft.version })
-    }
-    return
+  const next = syncedDraft(await tx.objectStore('drafts').get(draft.id), draft)
+  if (next !== null) {
+    await tx.objectStore('drafts').put(next)
   }
-  await tx.objectStore('drafts').put({
-    ...draft,
-    updatedAt: Date.parse(draft.updatedAt),
-    pendingSave: false,
-    remoteVersion: null,
-    outgoingId: local?.outgoingId ?? null,
-    noticedStatus: local?.noticedStatus ?? null,
-  })
 }
 
-/** Everyone on a message becomes a suggestion, the newest name winning. */
 async function rememberContacts(tx: WriteTx, message: SyncedMessage): Promise<void> {
   const at = Date.parse(message.receivedAt)
-  const people = [message.from, ...message.recipients.to, ...message.recipients.cc]
-  for (const person of people) {
-    const key = person.address.trim().toLowerCase()
-    if (key === '' || !key.includes('@')) continue
-    const known = await tx.objectStore('contacts').get(key)
-    const newer = known === undefined || at >= known.lastSeen
-    await tx.objectStore('contacts').put({
-      key,
-      address: newer ? person.address : known.address,
-      name: (newer ? person.name : known.name) ?? known?.name ?? null,
-      lastSeen: Math.max(at, known?.lastSeen ?? 0),
-      messages: (known?.messages ?? 0) + 1,
-    })
+  for (const { key, person } of peopleOn(message)) {
+    await tx.objectStore('contacts').put(mergeContact(await tx.objectStore('contacts').get(key), key, person, at))
   }
 }
 
