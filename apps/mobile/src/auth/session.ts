@@ -19,6 +19,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Messages per field path (e.g. "subject"), from the API's validation violations. */
+    readonly violations: Record<string, string> = {},
   ) {
     super(message)
     this.name = 'ApiError'
@@ -106,7 +108,8 @@ export class Session {
       throw new ApiError(401, 'Your session has expired. Sign in again.')
     }
     if (!response.ok) {
-      throw new ApiError(response.status, await problemDetail(response))
+      const problem = await problemOf(response)
+      throw new ApiError(response.status, problem.detail, problem.violations)
     }
     return (response.status === 204 ? undefined : await response.json()) as T
   }
@@ -158,17 +161,26 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-async function problemDetail(response: Response): Promise<string> {
+/** What the API said went wrong (RFC 9457 problem details), with its validation violations per field. */
+async function problemOf(response: Response): Promise<{ detail: string; violations: Record<string, string> }> {
+  const violations: Record<string, string> = {}
   try {
-    const body = (await response.json()) as { detail?: unknown; title?: unknown }
+    const body = (await response.json()) as { detail?: unknown; title?: unknown; violations?: unknown }
+    if (Array.isArray(body.violations)) {
+      for (const violation of body.violations as { propertyPath?: unknown; message?: unknown }[]) {
+        if (typeof violation.propertyPath === 'string' && typeof violation.message === 'string' && !(violation.propertyPath in violations)) {
+          violations[violation.propertyPath] = violation.message
+        }
+      }
+    }
     if (typeof body.detail === 'string' && body.detail !== '') {
-      return body.detail
+      return { detail: body.detail, violations }
     }
     if (typeof body.title === 'string' && body.title !== '') {
-      return body.title
+      return { detail: body.title, violations }
     }
   } catch {
     // Not a problem document; fall through to the status.
   }
-  return `The request failed (${response.status}).`
+  return { detail: `The request failed (${response.status}).`, violations }
 }

@@ -30,7 +30,7 @@ const LIST_LIMIT = 200
 /** Wait before asking again who is signed in, after that failed (offline at start, server down). */
 const ME_RETRY_MS = 10_000
 
-interface Mail extends Omit<MailState, 'userId'> {
+interface Mail extends MailState {
   mailAccounts(): Promise<SyncedMailAccount[]>
   folders(): Promise<SyncedFolder[]>
   /**
@@ -52,6 +52,8 @@ interface Mail extends Omit<MailState, 'userId'> {
   send(request: SendMessageRequest): Promise<SyncedOutgoingMessage>
   /** Stops a message that has not gone out yet. */
   cancelOutgoing(id: string): Promise<SyncedOutgoingMessage>
+  /** The copy changed outside the sync (a draft written here): screens read it again. */
+  touch(): void
 }
 
 function json(method: string, body?: unknown): RequestInit {
@@ -170,9 +172,11 @@ export function MailProvider({ children }: { children: ReactNode }) {
     (id: string) => auth.session.api<SyncedOutgoingMessage>(`/api/v1/outgoing-messages/${encodeURIComponent(id)}/cancel`, json('POST', {})),
     [auth.session],
   )
-  const { ready, version, syncState, syncError, live } = state
+  const touch = useCallback(() => session.changed(), [session])
+  const { userId, ready, version, syncState, syncError, live } = state
   const mail = useMemo<Mail>(
     () => ({
+      userId,
       ready,
       version,
       syncState,
@@ -191,8 +195,9 @@ export function MailProvider({ children }: { children: ReactNode }) {
       suggestContacts,
       send,
       cancelOutgoing,
+      touch,
     }),
-    [ready, version, syncState, syncError, lookupError, live, mailAccounts, folders, act, inbox, thread, body, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing],
+    [userId, touch, ready, version, syncState, syncError, lookupError, live, mailAccounts, folders, act, inbox, thread, body, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>
