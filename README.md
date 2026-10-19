@@ -145,7 +145,7 @@ Then run the checks for the part you changed:
 | Part | Command |
 |---|---|
 | API tests (per file) | `docker compose exec -e APP_ENV=test api php bin/phpunit tests/Functional/SyncLeaseTest.php` |
-| API static analysis | `docker compose exec api vendor/bin/phpstan analyse` |
+| API static analysis | `docker compose exec api sh -c 'bin/console cache:warmup --env=test && vendor/bin/phpstan analyse'` |
 | API docs (dev only) | http://localhost:8080/docs |
 | Sync worker | `docker run --rm -v "$PWD/apps/sync":/src -w /src golang:1.27 go test -race ./...` |
 | Sync worker against GreenMail | `docker run --rm --network tresso_default -e GREENMAIL_HOST=greenmail -v "$PWD/apps/sync":/src -w /src golang:1.27 go test -race -tags integration ./...` |
@@ -165,8 +165,9 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/) with
   `docker compose restart api`.
 - Secrets in `compose.yaml` and the committed `.env` files are development values only. Real secrets go in
   `.env.local` files or the deployment environment. In production set at least `APP_SECRET`, `OAUTH_PASSPHRASE`,
-  `OAUTH_ENCRYPTION_KEY`, `SYNC_WORKER_CLIENT_SECRET`, `DATA_KEYS` and `DATA_KEY_CURRENT`, and keep
-  `MAIL_ALLOW_UNSAFE_SERVERS=0`.
+  `OAUTH_ENCRYPTION_KEY`, `SYNC_WORKER_CLIENT_SECRET`, `DATA_KEYS` and `DATA_KEY_CURRENT`, the Mercure hub
+  settings (`MERCURE_PUBLIC_URL`, `MERCURE_INTERNAL_URL`, `MERCURE_CORS_ORIGINS` and two different keys of at least
+  32 bytes in `MERCURE_PUBLISHER_JWT_KEY` and `MERCURE_SUBSCRIBER_JWT_KEY`), and keep `MAIL_ALLOW_UNSAFE_SERVERS=0`.
 - Desktop and mobile sign in through the `tresso://auth/callback` scheme. Until the native apps phase, the desktop
   shell signs in through the web dev server.
 

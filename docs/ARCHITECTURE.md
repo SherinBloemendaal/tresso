@@ -179,7 +179,22 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   threads and messages are gone.
 - Clients store data in a local cache (desktop via Rust/Tauri SQLite, mobile via expo-sqlite, web via IndexedDB),
   start with `since=0`, keep the cursor, and fetch message bodies lazily.
-- Realtime (phase 1.3b): the hub tells the client "new changes up to N", the client pulls the delta.
+- Realtime: the Mercure hub built into FrankenPHP tells clients "your changes reached N"; the client then pulls the
+  delta. The notification carries no data, so a missed one only delays the client until the next one or its next
+  reconnect, when it pulls the delta anyway.
+  - `GET /api/v1/realtime/token` (scope `mail:read`) returns `hubUrl`, the user's private `topic`, a subscriber
+    `token` and its `expiresAt`. Clients subscribe with `GET {hubUrl}?match={topic}` and the token in the
+    `Authorization: Bearer` header, and fetch a new token before it expires. Browsers read the event stream through
+    `fetch()`, because `EventSource` cannot send headers; the hub accepts no token in the URL (RFC 9700), and its
+    cookie alternative does not fit clients on another origin than the hub.
+  - Every update is private, of type `changes`, with data `{"cursor": N}`.
+  - The hub runs in issuer mode: it trusts tokens from issuer `tresso-api` with the hub's public URL as audience.
+    Tokens are JWT access tokens (`typ: at+jwt`) whose grants are RFC 9396 `authorization_details`, limited to exact
+    topics. Subscriber and publisher tokens use different keys, so a subscriber key can never publish.
+  - Change numbers are published only after the transaction that allocated them committed (a DBAL driver
+    middleware reports commits and rollbacks), and only after the response went out (`kernel.terminate`; console
+    commands and Messenger messages publish when they finish). A rolled-back write publishes nothing. A failed
+    publish is logged, never raised.
 
 ### 3.6 Processing pipeline (per new message)
 
