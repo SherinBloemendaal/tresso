@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    name: API (PHPUnit, PHPStan)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: app
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U app -d app" --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:8.8-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://app:app@localhost:5432/app?serverVersion=18&charset=utf8
+      REDIS_URL: redis://localhost:6379
+      MESSENGER_TRANSPORT_DSN: redis://localhost:6379/messages
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: pdo_pgsql, redis, intl, sodium, zip, apcu
+          tools: composer:v2
+          coverage: none
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+      - name: Generate OAuth2 signing keys
+        # Same as docker/api/entrypoint.sh: the passphrase comes from the .env files.
+        run: |
+          OAUTH_PASSPHRASE="$(php -r 'require "vendor/autoload.php"; (new Symfony\Component\Dotenv\Dotenv())->bootEnv(".env"); echo $_SERVER["OAUTH_PASSPHRASE"];')"
+          export OAUTH_PASSPHRASE
+          mkdir -p config/jwt
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -aes-256-cbc -pass env:OAUTH_PASSPHRASE -out config/jwt/private.pem
+          openssl pkey -in config/jwt/private.pem -passin env:OAUTH_PASSPHRASE -pubout -out config/jwt/public.pem
+      - name: Prepare test database
+        env:
+          APP_ENV: test
+        run: |
+          php bin/console doctrine:database:create --if-not-exists
+          php bin/console doctrine:migrations:migrate --no-interaction
+          php bin/console doctrine:schema:validate
+      - name: PHPUnit
+        run: php bin/phpunit
+      - name: PHPStan
+        run: |
+          php bin/console cache:warmup --env=dev
+          php -d memory_limit=1G vendor/bin/phpstan analyse --no-progress
+
+  sync:
+    name: Sync worker (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/sync
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache-dependency-path: apps/sync/go.sum
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  typescript:
+    name: TypeScript (core, web, mobile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Core
+        run: |
+          npm test --workspace @tresso/core
+          npm run type-check --workspace @tresso/core
+      - name: Web
+        working-directory: apps/web
+        run: |
+          npx vitest run
+          npx vue-tsc --build
+          npx oxlint .
+          npx eslint .
+      - name: Mobile
+        run: npm run type-check --workspace @tresso/mobile
+
+  desktop:
+    name: Desktop (Tauri)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v5
+      - name: System libraries for Tauri
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: cargo check --locked
