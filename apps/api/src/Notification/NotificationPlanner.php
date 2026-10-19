@@ -8,7 +8,6 @@ use App\Calendar\ICalendar\CalendarDocument;
 use App\Calendar\ICalendar\InvalidCalendarData;
 use App\Calendar\ICalendar\Occurrences;
 use App\Calendar\ICalendar\RecurrenceKey;
-use App\Calendar\OccurrenceExpander;
 use App\Calendar\SelfAddresses;
 use App\Entity\CalendarEvent;
 use App\Entity\CalendarObject;
@@ -47,6 +46,8 @@ final readonly class NotificationPlanner
     public const string LEAVE_ESTIMATED_SLOT = 'leave:estimated';
     /** Plans this far in the past are left out: too late to matter. */
     private const string TOO_LATE = '-2 minutes';
+    /** Occurrences one series is planned for within the horizon: an hourly series has under 250. */
+    private const int MAX_PER_SERIES = 500;
 
     public function __construct(
         private EntityManagerInterface $entityManager,
@@ -131,9 +132,11 @@ final readonly class NotificationPlanner
         $wanted = [];
         if ($object->getCalendar()->isVisible()) {
             try {
-                foreach (Occurrences::instances(CalendarDocument::parse($object->getIcal()), $now->modify('-1 day'), $until, $context->zone, OccurrenceExpander::MAX_PER_SERIES) as $instance) {
+                foreach (Occurrences::instances(CalendarDocument::parse($object->getIcal()), $now->modify('-1 day'), $until, $context->zone, self::MAX_PER_SERIES) as $source => $instance) {
                     $key = CalendarDocument::recurrenceKey($instance);
-                    $row = $rows[$key] ?? $rows[''] ?? null;
+                    // The row the occurrence takes its fields from: its own override, one changing this and future
+                    // occurrences, or the series.
+                    $row = $rows[$source] ?? $rows[''] ?? null;
                     if (null === $row) {
                         continue;
                     }

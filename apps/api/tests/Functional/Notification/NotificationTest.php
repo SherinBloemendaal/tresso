@@ -557,6 +557,31 @@ final class NotificationTest extends DatabaseTestCase
         self::assertSame($local->modify('-10 minutes')->setTimezone(new \DateTimeZone('UTC'))->format(\DATE_ATOM), $this->atom($this->notifications()[0]['fireAt']));
     }
 
+    public function testAChangeToThisAndFutureOccurrencesIsWhatTheirRemindersSay(): void
+    {
+        $first = new \DateTimeImmutable('+1 day 10:00', new \DateTimeZone('UTC'));
+        $second = $first->modify('+1 day');
+        $calendar = static::getContainer()->get(\App\Repository\CalendarRepository::class)->findOneOwnedBy($this->user(), $this->calendarId);
+        self::assertNotNull($calendar);
+        $alarm = ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT10M', 'END:VALARM'];
+        $ical = implode("\r\n", ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Test//EN',
+            'BEGIN:VEVENT', 'UID:range@test', 'DTSTAMP:20261019T080000Z', 'DTSTART:'.$first->format('Ymd\THis\Z'), 'DURATION:PT30M', 'RRULE:FREQ=DAILY;COUNT=3', 'SUMMARY:Sync', ...$alarm, 'END:VEVENT',
+            'BEGIN:VEVENT', 'UID:range@test', 'DTSTAMP:20261019T080000Z', 'RECURRENCE-ID;RANGE=THISANDFUTURE:'.$second->format('Ymd\THis\Z'), 'DTSTART:'.$second->modify('+1 hour')->format('Ymd\THis\Z'), 'DURATION:PT30M', 'SUMMARY:Sync, later', ...$alarm, 'END:VEVENT',
+            'END:VCALENDAR', '']);
+        $entityManager = static::getContainer()->get(EntityManagerInterface::class);
+        $entityManager->wrapInTransaction(static fn () => static::getContainer()->get(\App\Calendar\CalendarStore::class)->save(new \App\Entity\CalendarObject($calendar, 'range@test', ''), \App\Calendar\ICalendar\CalendarDocument::parse($ical)));
+        $this->runQueuedPlanning();
+
+        $planned = array_map(fn (array $n): array => [$n['title'], $this->atom($n['fireAt'])], $this->notifications());
+        usort($planned, static fn (array $a, array $b): int => $a[1] <=> $b[1]);
+
+        self::assertSame([
+            ['Sync', $first->modify('-10 minutes')->format(\DATE_ATOM)],
+            ['Sync, later', $second->modify('+50 minutes')->format(\DATE_ATOM)],
+            ['Sync, later', $second->modify('+1 day 50 minutes')->format(\DATE_ATOM)],
+        ], $planned);
+    }
+
     public function testOneUserWhosePlanningFailsDoesNotStopTheSweep(): void
     {
         $this->createUser('lisa@example.test', 'Lisa');
