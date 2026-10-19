@@ -411,8 +411,17 @@ the first screen. When the keychain refuses, the app says that the sign-in will 
 The API and the Mercure hub accept the app's origins (`tauri://localhost`, and `http://tauri.localhost` on Windows),
 and the main window may only open http(s) pages in the browser and read the link it was opened with.
 
+The desktop app keeps the mail copy in SQLite instead of the web view's IndexedDB (`apps/web/src/mail/store.ts`
+picks the store). Rust commands (`apps/desktop/src-tauri/src/sql.rs`, rusqlite with SQLite bundled) open one database
+per user in the app's data folder with two connections: one writes, one reads, in WAL mode, so the lists read the last
+committed state while a page of the delta is stored. The client queues its writes, so the writer never meets another
+one. A web view that reloads leaves handles behind; opening the same copy again drops them, rolling back what they
+left open. Sign-out closes the copy and then deletes its files. The first time the desktop app opens a user's copy,
+drafts that exist only in the old IndexedDB copy (unsaved edits, messages whose outcome is pending) are carried over,
+and that copy is removed.
+
 The desktop app notifies natively about mail that needs the user: a message that is unread, in an inbox and judged
-`do` or `delegate` for the first time, whether it arrived judged or was classified later (`MailDatabase.apply`
+`do` or `delegate` for the first time, whether it arrived judged or was classified later (the mail store's `apply`
 records these arrivals, `apps/web/src/mail/mailNotifications.ts` words them). Nothing pops up for the mail synced at
 start or while the app has focus, nor for old mail reaching the device late (received more than 15 minutes before
 notifications were switched on), and more than three at once become one summary. The browser build shows none: the
@@ -434,15 +443,12 @@ connection rests and the copy catches up when the app comes back. `MailSession` 
 time, awaiting every step: a copy is deleted only after it is closed (on sign-out, or when another user signs in),
 and a small index database lists every copy on the device, so one that could not be deleted is removed the next
 time. The last signed-in user is remembered, so their copy opens before the server confirms who is signed in, also
-offline. A copy made by another schema version is dropped and rebuilt. The storage runs behind a small `Sql` interface,
-so its tests run the same SQL on sql.js. Message bodies show in a web view with the same Content-Security-Policy as
+offline. The copy is the same `SqliteMailStore` the desktop app uses (see below). Message bodies show in a web view with the same Content-Security-Policy as
 the web client's frame; only links the reader taps open, in the browser, and remote images load only when the
 reader asks. Opening a conversation on the phone reads it, and its action bar archives, trashes, marks unread and
 flags it, with the same exact undo as the web client: the way an action changes messages (`actionResult`) and how to
 undo it (`undoPlan`) live in `packages/core`, and `MailSession.act` applies it to the copy first and puts back what
-the server did not take. Outgoing mail,
-drafts and signatures are not kept on the phone yet; when they are, its schema version goes up and the copy syncs
-again from the start.
+the server did not take.
 
 Shared TypeScript lives in `packages/core` (MIT): domain types, the OAuth flow, and the client side of the sync
 protocol, so every client syncs the same way:
@@ -453,9 +459,20 @@ protocol, so every client syncs the same way:
   before it expires, and asks for a pull on every (re)connect, because missed notifications are not replayed.
 - `mailFrameDocument` wraps a sanitized body in the document for the sandboxed frame, with its Content-Security-Policy.
 
-The web client keeps its copy in IndexedDB, one database per user, deleted on sign-out. Next to the synced records it
-stores a summary per thread (senders, snippet, unread count, whether it is in an inbox), recomputed whenever one of
-its messages changes, so the inbox lists read a few dozen rows through an index however much mail is stored.
+Every client keeps a copy of the user's mail behind one interface, `MailStore` in `packages/core`: the browser in
+IndexedDB (`apps/web/src/mail/db.ts`), the desktop app and the phone in SQLite (`SqliteMailStore` in
+`packages/core/src/store/sqlite.ts`, behind a small `Sql` interface each client implements). One database per user,
+deleted on sign-out after it is closed. Next to the synced records each stores a summary per thread (senders,
+snippet, unread count, whether it is in an inbox), recomputed whenever one of its messages changes, so the inbox lists
+read a few dozen rows through an index however much mail is stored, plus the people the user exchanged mail with and
+the drafts. How arrivals, contacts and drafts follow the delta is shared (`packages/core/src/store/rules.ts`), and
+both stores run the same tests (`describeMailStore`, exported as `@tresso/core/testing`; the SQLite store on sql.js).
+
+The SQLite store writes one change at a time (a device may give each exclusive transaction its own connection without
+a busy timeout), refuses writes once closing and waits for the ones under way, and stores each page with its cursor
+in one transaction. A copy made by another schema version is dropped and rebuilt, keeping the drafts that exist only
+on the device. A resync (after a change the server refused could not be put back) makes the next pull start from the
+beginning, and holds across a restart and against a pull that was already running.
 
 Drafts in the web client are saved on the device first and uploaded right after (one upload at a time per
 draft). Edits made here are never overwritten by the delta: when another device saved a newer version, the compose
@@ -467,7 +484,7 @@ unread, flag and move it (shortcuts E, #, U and S, not while typing or writing),
 goes back to the list with an undo. The undo moves back only what the action moved, each message from where it went
 into the one folder it came from (`fromFolderId` on the move); for a message that was in several folders (Gmail's
 All Mail aside) no exact undo exists, so none is offered. Each action changes the local copy first
-(`MailDatabase.applyAction`), so lists update at once; when the server does not take it (for a large selection, the
+(`applyAction` of the mail store), so lists update at once; when the server does not take it (for a large selection, the
 batches it did not take), it is put back, except on messages the delta updated since.
 
 Bulk actions in the web client: conversations are selected with their checkboxes (shift selects a range), by age
@@ -482,7 +499,7 @@ saying how many messages that were in several folders it leaves.
 Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
 addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is
 sent with a `sendAt` a few seconds ahead, so "Undo" can cancel it; "Send later" picks a time. The draft is saved in
-IndexedDB while typing and kept until the message is confirmed sent, so a failed message can be edited and sent
+local copy while typing and kept until the message is confirmed sent, so a failed message can be edited and sent
 again; the outcome of each sent message is announced once. Recipient suggestions come from the people in synced
 mail, stored locally per user.
 
