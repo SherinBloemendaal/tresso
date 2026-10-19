@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import type { Me } from '@tresso/core'
 import { useAuth } from '@/auth/AuthProvider'
+import { InboxList } from '@/components/InboxList'
+import { useMail } from '@/mail/MailProvider'
 import { useTheme, type Theme } from '@/theme'
 
 export default function Start() {
@@ -19,7 +20,7 @@ export default function Start() {
   }
 
   return (
-    <SafeAreaView style={styles.screen}>
+    <SafeAreaView style={auth.isAuthenticated ? styles.signedIn : styles.screen}>
       {auth.isAuthenticated ? <SignedIn styles={styles} /> : <SignIn styles={styles} />}
       {auth.storageError !== null && (
         <Text style={styles.error} accessibilityRole="alert">
@@ -74,43 +75,38 @@ function SignIn({ styles }: { styles: Styles }) {
 
 function SignedIn({ styles }: { styles: Styles }) {
   const auth = useAuth()
-  const [me, setMe] = useState<Me | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const mail = useMail()
+  const [accounts, setAccounts] = useState(0)
+  const { mailAccounts, version } = mail
 
   useEffect(() => {
     let current = true
-    auth.session
-      .me()
-      .then((loaded) => current && setMe(loaded))
-      .catch((e: unknown) => current && setError(e instanceof Error ? e.message : String(e)))
+    void mailAccounts().then((list) => current && setAccounts(list.length))
     return () => {
       current = false
     }
-  }, [auth.session])
+  }, [mailAccounts, version])
 
   return (
-    <View style={styles.content}>
-      {me === null && error === null && <ActivityIndicator accessibilityLabel="Loading your account" />}
-      {me !== null && (
-        <>
-          <Text style={styles.title} accessibilityRole="header">
-            {me.displayName}
-          </Text>
-          <Text style={styles.body}>{me.email}</Text>
-        </>
-      )}
-      {error !== null && (
-        <Text style={styles.error} accessibilityRole="alert">
-          {error}
-        </Text>
-      )}
-      <Pressable
-        style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}
-        onPress={() => void auth.signOut()}
-        accessibilityRole="button"
-      >
-        <Text style={styles.secondaryLabel}>Sign out</Text>
-      </Pressable>
+    <View style={styles.fill}>
+      <InboxList
+        header={
+          <View style={styles.header}>
+            <View style={styles.titles}>
+              <Text style={styles.heading} accessibilityRole="header">
+                Unified Inbox
+              </Text>
+              <Text style={styles.body}>
+                {accounts === 1 ? '1 account' : `${accounts} accounts`}
+                {mail.live ? '' : ' · not live'}
+              </Text>
+            </View>
+            <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => void auth.signOut()} accessibilityRole="button">
+              <Text style={styles.secondaryLabel}>Sign out</Text>
+            </Pressable>
+          </View>
+        }
+      />
     </View>
   )
 }
@@ -118,6 +114,11 @@ function SignedIn({ styles }: { styles: Styles }) {
 function makeStyles(theme: Theme) {
   return StyleSheet.create({
     screen: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: theme.ground },
+    signedIn: { flex: 1, backgroundColor: theme.surface },
+    fill: { flex: 1 },
+    header: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 20, paddingTop: 16, paddingBottom: 8 },
+    titles: { flex: 1, gap: 2 },
+    heading: { color: theme.ink, fontSize: 28, lineHeight: 34, fontWeight: '700' },
     content: { alignItems: 'center', gap: 16 },
     title: { color: theme.ink, fontSize: 24, lineHeight: 30, fontWeight: '700', textAlign: 'center' },
     body: { color: theme.ink2, fontSize: 16 },
