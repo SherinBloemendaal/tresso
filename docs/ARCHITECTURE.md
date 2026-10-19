@@ -417,8 +417,10 @@ per user in the app's data folder with two connections: one writes, one reads, i
 committed state while a page of the delta is stored. The commands run off the main thread, so the window stays
 responsive while SQLite works or waits. The client queues its writes, so the writer never meets another one; a
 transaction a failed write left open is rolled back before the next one begins. A web view that reloads leaves handles
-behind; opening the same copy again drops them, rolling back what they left open. Sign-out closes the copy and then
-deletes its files, refused while any connection (a read still running) uses them. The first time the desktop app opens a user's copy,
+behind; opening the same copy from the new page load drops them, rolling back what they left open, while overlapping
+opens of one page load keep their handles. Sign-out closes the copy and then deletes its files, refused while any
+connection (a read still running) uses them; a delete and an open of the same file never interleave. A sign-out while
+the copy is still opening waits for it to be closed again before deleting it. The first time the desktop app opens a user's copy,
 drafts that exist only in the old IndexedDB copy (unsaved edits, messages whose outcome is pending) are carried over,
 each removed from the old copy once moved, and then that copy is removed.
 
