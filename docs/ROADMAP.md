@@ -49,11 +49,11 @@ Built next to phase 1, each step its own pull request. See "3.13 Calendar" in th
 
 - [x] C1 Architecture: data model, sync sources, invitations, client sync, reminders and notifications, online
   meetings, AI interfaces
-- [ ] C2 Calendar core: calendars (provider and local Tresso calendar) and events with RFC 5545 recurrence,
+- [x] C2 Calendar core: calendars (provider and local Tresso calendar) and events with RFC 5545 recurrence,
   overrides, exceptions, time zones, attendees, reminders and conference data; occurrences in a range; create, edit
   and delete with "this / this and following / all"; RSVP with iTIP replies through the outbox; calendars and
   events in the delta; `text/calendar` parts parsed by the worker and applied as invitations; CalDAV sync for IMAP
-  accounts (discovery, sync-token or ctag, outbound writes)
+  accounts (discovery, sync-token or ctag, outbound writes, a calendar status per account)
 - [ ] C3 Reminders and notifications: server-side scheduling with a sweep, idempotent delivery per device, web push,
   Expo push, desktop realtime and email channels, multiple reminders per event with their own channels, default
   rules per calendar and kind of event, leave-now with fixed or estimated travel time, quiet hours and focus rules,

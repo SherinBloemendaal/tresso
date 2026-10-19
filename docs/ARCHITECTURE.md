@@ -756,33 +756,45 @@ Writes to provider calendars are optimistic: the row changes at once (clients se
 **calendar operation** (`PUT` or `DELETE` of one resource, with the `etag` it was based on) is queued for the
 worker that leases the account, exactly like the outbox for mail. The worker reports the new `etag` and href. A
 conflict (`412`) makes the worker fetch the current resource: the provider's version wins and the user's change is
-reported back as failed, visible on the event. A provider refusal (read-only, quota) reverts the row.
+reported back as failed, visible on the event (`syncError`). A refusal (read-only, quota) is shown the same way, and
+the provider's version replaces the row when the worker could read it. While a write for a resource is pending,
+provider changes to that resource wait, so a sync never overwrites a change that is on its way.
 
 #### Sync sources
 
 The worker that leases an account runs the calendar syncer next to the mail syncer (`lease.Syncer` for the account
 is a group of both); they share the account's credentials and lease but fail independently: a calendar server that
-refuses the login does not stop mail, and reports a calendar status of its own.
+refuses the login does not stop mail. The account carries a calendar status of its own (`calendarStatus`:
+`unknown`, `active`, `unsupported`, `auth_failed` or `error`, with a detail the user can act on), reported once per
+problem by `POST /internal/sync/accounts/{id}/calendar-status` and set back to `active` by a calendar list the API
+accepted.
 
-- **CalDAV** for IMAP accounts (`apps/sync/internal/caldavsync`, on `emersion/go-webdav`, through the guarded
-  dialer):
+- **CalDAV** for IMAP accounts (`apps/sync/internal/caldavsync` on a small WebDAV client in `internal/caldav`, through
+  the guarded dialer). The client keeps objects as raw iCalendar text in both directions and reads colors, ctags and
+  privileges, which general WebDAV libraries do not; credentials follow a redirect only to the same site:
   - Discovery: the account's stored CalDAV URL, else RFC 6764 (`_caldavs._tcp` SRV and TXT records, then
     `https://<domain>/.well-known/caldav`, for the address's domain and the IMAP host's domain), else known
-    provider hosts from the server settings detector (iCloud, Fastmail, Yahoo, mailbox.org and others). Then
+    provider hosts by IMAP host (iCloud, Fastmail, Yahoo, mailbox.org and others; Gmail and Microsoft 365 sync
+    through their own APIs instead). The user can also set the address on the account (`calendarUrl`). Then
     `current-user-principal`, `calendar-home-set` and the calendars with their name, color, supported components
     (only `VEVENT` calendars are synced), privileges, `getctag` and `sync-token`. The URL that worked is reported
-    back and stored with the account; a server without CalDAV is reported once as `unsupported`, retried daily.
+    back and stored with the account; a server without CalDAV is reported as `unsupported` and looked for again
+    daily.
   - Changes: `sync-collection` (RFC 6578) with the stored token when the server supports it; otherwise the `getctag`
     is compared and, when it changed, the resource etags are listed and only changed resources fetched with
     `calendar-multiget`. Every 2 minutes, and right after a write. Missing tokens (`valid-sync-token` error) fall back
-    to a full listing.
+    to a full listing. A full listing goes to `POST .../calendars/{calendarId}/inventory` (every href with its etag),
+    which removes what is gone and answers which hrefs to fetch.
   - Ingest: `POST /internal/sync/accounts/{id}/calendars` (the complete calendar list, answers each calendar's
     cursor; calendars missing from the list are deleted) and `POST /internal/sync/accounts/{id}/calendars/{calendarId}/objects`
     (up to 100 changed resources as `href`, `etag` and raw iCalendar, removed hrefs, and the new cursor). The API
     parses every resource with sabre/vobject, so there is one iCalendar implementation on the server. The cursor only
     advances after the API accepted the work it covers.
-  - Outbound: `POST /internal/sync/accounts/{id}/calendar-operations/claim` and `.../report`, the same claim and
-    report cycle as the outbox, announced on the Mercure topic `urn:tresso:sync:outbox` together with mail.
+  - Outbound: `POST /internal/sync/accounts/{id}/calendar-operations/claim` and `.../calendar-operations/{id}/result`
+    (`done`, `conflict` with the server's current version, `failed`, or `retry` up to 6 attempts), the same claim and
+    report cycle as the outbox, announced on the Mercure topic `urn:tresso:sync:outbox` and in every heartbeat
+    together with mail. New events are written with `If-None-Match: *` to `<calendar>/<uid>.ics`, updates and
+    deletes with `If-Match`.
   - Scheduling: servers that implement RFC 6638 (`calendar-auto-schedule` in the `DAV` header) send invitations and
     replies themselves; for others the API sends them as iTIP mail (below).
 - **Google Calendar API** and **Microsoft Graph** for accounts connected through the provider OAuth layer (see
@@ -799,7 +811,7 @@ refuses the login does not stop mail, and reports a calendar status of its own.
   reports them with the message as `calendarParts`: the `METHOD` and the raw iCalendar. They are still stored as
   attachments, so the original can be downloaded.
 - The API records an **invitation** per message (`message_id`, `method`, `uid`, `sequence`, `recurrence_id`, the
-  iCalendar) and applies it after ingest, off the ingest transaction (Messenger, transport `low`):
+  iCalendar) and applies it once the ingest has committed (Messenger, transport `async`):
   - `REQUEST` (new or updated invitation): if the user has the event with that `UID` in a provider calendar, the
     provider owns it (CalDAV servers with scheduling, Google and Microsoft put invitations into the calendar
     themselves) and nothing is written. Otherwise the event is created or updated in the account's default
