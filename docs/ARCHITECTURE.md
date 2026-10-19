@@ -24,8 +24,8 @@ Tresso is open core.
 
 | Edition | What it is | License |
 |---|---|---|
-| **Tresso** (this repository) | A complete, self-hostable email client for one person: accounts, mail, smart inboxes with rules, the three verdicts, todos, signatures, settings, web, desktop and mobile apps | AGPL-3.0; shared libraries in `packages/` are MIT |
-| **Tresso Cloud** | The hosted service. Adds AI classification and summaries, teams and delegation, API keys, webhooks and MCP, developer tools, statistics and Year in mail | Proprietary, separate repository |
+| **Tresso** (this repository) | A complete, self-hostable email client for one person: accounts, mail, calendar, smart inboxes with rules, the three verdicts, todos, signatures, settings, web, desktop and mobile apps | AGPL-3.0; shared libraries in `packages/` are MIT |
+| **Tresso Cloud** | The hosted service. Adds AI classification and summaries, AI calendar assistance, teams and delegation, API keys, webhooks and MCP, developer tools, statistics and Year in mail | Proprietary, separate repository |
 
 The open code never depends on Tresso Cloud. Cloud features attach through two generic, git-ignored hooks in the
 API:
@@ -49,7 +49,7 @@ rule-based classification); an add-on may provide a richer one. Anyone can build
  │ API: Symfony 8 on FrankenPHP (worker mode)                  │
  │  - OAuth2 authorization server (league/oauth2-server)       │
  │  - Domain: accounts, mail metadata, categories, todos,      │
- │    signatures, settings                                     │
+ │    calendars, signatures, settings                          │
  │  - Delta sync endpoint for clients                          │
  │  - Mercure hub (built into FrankenPHP) for realtime         │
  └───────┬──────────────────────┬───────────────────┬──────────┘
@@ -95,8 +95,8 @@ Symfony is the single OAuth2 authorization server (`league/oauth2-server-bundle`
 Only first-party clients are approved automatically. Third-party apps, personal access tokens and MCP clients are
 Tresso Cloud features.
 
-Scopes: `mail:read`, `mail:write`, `mail:send`, `todos:read`, `todos:write`, `settings:read`, `settings:write`,
-`signatures:read`, `signatures:write`. The scopes `teams:read`, `teams:write` and `webhooks:manage` are reserved for
+Scopes: `mail:read`, `mail:write`, `mail:send`, `todos:read`, `todos:write`, `calendar:read`, `calendar:write`,
+`settings:read`, `settings:write`, `signatures:read`, `signatures:write`. The scopes `teams:read`, `teams:write` and `webhooks:manage` are reserved for
 add-ons.
 
 Users log in with email + password (Argon2id) and, later, Google / Microsoft sign-in as identity providers.
@@ -335,6 +335,184 @@ mail, stored locally per user.
   first and paged. Clients never talk to Meilisearch: the API always filters on the owner and the owner's current
   accounts, and resolves `in:` to the owner's own folder and account ids. Highlights come back as text segments, never
   as markup. The web client searches from the conversation list (shortcut `/`) and opens a result's thread.
+
+### 3.13 Calendar
+
+The calendar lives next to mail, because so much of it arrives by mail: invitations, reschedules, "can we meet
+Thursday", deadlines. It follows the same rules as mail: the server holds the truth, clients keep a local copy
+through the delta, providers are synced by the Go workers, and the open edition is complete on its own while AI
+features attach through interfaces.
+
+#### Data model
+
+- **Calendar** (`calendar`, synced): belongs to a user (`owner_id`) and either to a mail account (a provider
+  calendar) or to no account (the user's local **Tresso** calendar, created with the user, always writable, never
+  synced to a provider). Fields: `source` (`local`, `caldav`, `google`, `microsoft`), `remote_id` (CalDAV collection
+  URL, Google calendar id, Graph calendar id), name, color, default time zone, `writable` (from the provider's
+  privileges), `is_default` (one per account: where new events and accepted invitations go), and the user's own
+  `visible` and color override, which never go back to the provider. The provider sync cursor (sync-token, ctag,
+  Google `nextSyncToken`, Graph delta link) is internal and not a client change.
+- **Event** (`calendar_event`, synced) is one iCalendar `VEVENT`: a single event, the master of a recurring series,
+  or an override of one occurrence. Rows are unique on `(calendar_id, uid, recurrence_id)`, so a series and its
+  overrides share the `UID` exactly as RFC 5545 has it. Fields:
+  - `uid`, `sequence`, `recurrence_id` (the original start of the overridden occurrence as a UTC instant, or the
+    date for all-day series; null on masters and single events), `status` (`confirmed`, `tentative`, `cancelled`).
+  - `summary`, `description`, `location`, `url`, `transparency` (`busy`/`free`), `visibility`
+    (`public`/`private`/`confidential`).
+  - Time: `start` and `end` as wall-clock values with their IANA time zone (`start_tz`, `end_tz`; null means floating),
+    or dates when `all_day` is set (`DTEND` exclusive, as in RFC 5545). `DURATION` is converted to an end on ingest.
+    Windows time zone names from Exchange and Outlook are mapped to IANA names on ingest; unknown `VTIMEZONE`
+    definitions are matched by their rules, and the original definition stays in the stored iCalendar.
+  - Recurrence: `rrule` (the `RRULE` value as text), `rdates` and `exdates` (lists of instants or dates).
+  - Two UTC columns only for range queries: `starts_at` and `ends_at` of the first occurrence, and `series_ends_at`
+    (end of the last occurrence; null when the series never ends). All-day and floating events are stored with
+    UTC as their zone in these columns and are widened by 14 hours on each side when queried, then filtered in the
+    reader's zone.
+  - `organizer` and `attendees` (JSON: address, name, role, `partstat`, `rsvp`, kind), plus `self_partstat`, the
+    response of the account owner, kept as a column so "needs action" can be found and indexed.
+  - `reminders` (JSON list of `VALARM`s: trigger relative to start or end, or absolute, and action) and
+    `conference` (JSON: provider `teams`, `meet` or `other`, join URL, conference id, dial-in), read from
+    `X-MICROSOFT-*`/`X-GOOGLE-CONFERENCE`, Graph `onlineMeeting` and Google `conferenceData`.
+  - `message_id`: the invitation this event came from, when it came by mail.
+  - Provider state, internal: `remote_href` and `etag` (CalDAV resource; overrides share their master's resource)
+    or the Google/Graph event id. For CalDAV the complete original resource is kept (`ical`), so properties Tresso
+    does not model (`X-` properties, `VTIMEZONE`s, `ATTACH`) survive an edit: writes change the parsed object and
+    serialize it again instead of building a new one.
+- Parsing, serializing and recurrence expansion use `sabre/vobject` (iCalendar and RRULE per RFC 5545, Windows
+  zone mapping). Clients expand recurrence for their local copy with `ical.js` in `packages/core`; the API's range
+  endpoint is the reference both are tested against.
+
+#### API
+
+Scopes `calendar:read` and `calendar:write`, in the user scopes of the first-party clients.
+
+| Call | Purpose |
+|---|---|
+| `GET /api/v1/calendars` | The user's calendars. `PATCH` changes name and color (written to the provider when it allows it), visibility and the default calendar. `POST`/`DELETE` only for local calendars. |
+| `GET /api/v1/calendar-occurrences?from&to&calendarId[]` | Occurrences in a range (at most 400 days), recurrence expanded: per occurrence the event id, the `recurrenceId`, start, end and the event's fields, overrides applied and exceptions removed. |
+| `GET /api/v1/calendar-events/{id}` | One event as stored (series or override). |
+| `POST /api/v1/calendar-events` | Create in a writable calendar. |
+| `PATCH /api/v1/calendar-events/{id}?scope=&recurrenceId=` | Edit; for a series `scope` is `this`, `following` or `all`. |
+| `DELETE /api/v1/calendar-events/{id}?scope=&recurrenceId=` | Delete with the same scopes. |
+| `POST /api/v1/calendar-events/{id}/response` | RSVP: `accepted`, `tentative` or `declined`, optional comment, for the series or one occurrence, optionally without telling the organizer. |
+
+Edits of recurring events follow what Google Calendar, Outlook and Apple Calendar agree on:
+
+- **This occurrence:** an override with the occurrence's `recurrence_id` is created or changed. Deleting one adds an
+  `EXDATE` and removes its override.
+- **This and following:** the series is split. The original gets an `UNTIL` just before the occurrence (a `COUNT`
+  is converted to the equivalent `UNTIL`); a new series with a new `UID` starts at the occurrence with the edited
+  fields and takes over the later overrides and exceptions, moved by the same time shift. Deleting cuts the
+  series with `UNTIL`.
+- **All:** the master changes. A start time shift moves every override's `recurrence_id` and every `EXDATE` by the
+  same amount, so exceptions stay attached to their occurrences; overrides keep their own changed fields.
+- Every change to an event with attendees raises `SEQUENCE` when it changes time, place or the recurrence, which is
+  what tells attendees' clients that an update supersedes the previous one (RFC 5546).
+
+Writes to provider calendars are optimistic: the row changes at once (clients see it in the delta), and an outbound
+**calendar operation** (`PUT` or `DELETE` of one resource, with the `etag` it was based on) is queued for the
+worker that leases the account, exactly like the outbox for mail. The worker reports the new `etag` and href. A
+conflict (`412`) makes the worker fetch the current resource: the provider's version wins and the user's change is
+reported back as failed, visible on the event. A provider refusal (read-only, quota) reverts the row.
+
+#### Sync sources
+
+The worker that leases an account runs the calendar syncer next to the mail syncer (`lease.Syncer` for the account
+is a group of both); they share the account's credentials and lease but fail independently: a calendar server that
+refuses the login does not stop mail, and reports a calendar status of its own.
+
+- **CalDAV** for IMAP accounts (`apps/sync/internal/caldavsync`, on `emersion/go-webdav`, through the guarded
+  dialer):
+  - Discovery: the account's stored CalDAV URL, else RFC 6764 (`_caldavs._tcp` SRV and TXT records, then
+    `https://<domain>/.well-known/caldav`, for the address's domain and the IMAP host's domain), else known
+    provider hosts from the server settings detector (iCloud, Fastmail, Yahoo, mailbox.org and others). Then
+    `current-user-principal`, `calendar-home-set` and the calendars with their name, color, supported components
+    (only `VEVENT` calendars are synced), privileges, `getctag` and `sync-token`. The URL that worked is reported
+    back and stored with the account; a server without CalDAV is reported once as `unsupported`, retried daily.
+  - Changes: `sync-collection` (RFC 6578) with the stored token when the server supports it; otherwise the `getctag`
+    is compared and, when it changed, the resource etags are listed and only changed resources fetched with
+    `calendar-multiget`. Every 2 minutes, and right after a write. Missing tokens (`valid-sync-token` error) fall back
+    to a full listing.
+  - Ingest: `POST /internal/sync/accounts/{id}/calendars` (the complete calendar list, answers each calendar's
+    cursor; calendars missing from the list are deleted) and `POST /internal/sync/accounts/{id}/calendars/{calendarId}/objects`
+    (up to 100 changed resources as `href`, `etag` and raw iCalendar, removed hrefs, and the new cursor). The API
+    parses every resource with sabre/vobject, so there is one iCalendar implementation on the server. The cursor only
+    advances after the API accepted the work it covers.
+  - Outbound: `POST /internal/sync/accounts/{id}/calendar-operations/claim` and `.../report`, the same claim and
+    report cycle as the outbox, announced on the Mercure topic `urn:tresso:sync:outbox` together with mail.
+  - Scheduling: servers that implement RFC 6638 (`calendar-auto-schedule` in the `DAV` header) send invitations and
+    replies themselves; for others the API sends them as iTIP mail (below).
+- **Google Calendar API** and **Microsoft Graph** for accounts connected through the provider OAuth layer (see
+  1.6): Google `events.list` with `syncToken` and push channels (`events.watch`), Graph `calendarView/delta` per
+  calendar with change notifications. Both report the same normalized events as CalDAV, converted to iCalendar by
+  the worker so the API has one ingest path. Writes go through the provider's own API (`events.patch`,
+  `PATCH /me/events/{id}`), and RSVPs through its response calls (`attendees[].responseStatus` with
+  `sendUpdates`, Graph `accept`/`tentativelyAccept`/`decline`), because both providers then send the reply mail
+  themselves.
+
+#### Invitations in mail
+
+- The worker's MIME parser reads `text/calendar` parts (inline or attached, any charset, at most 256 KB) and
+  reports them with the message as `calendarParts`: the `METHOD` and the raw iCalendar. They are still stored as
+  attachments, so the original can be downloaded.
+- The API records an **invitation** per message (`message_id`, `method`, `uid`, `sequence`, `recurrence_id`, the
+  iCalendar) and applies it after ingest, off the ingest transaction (Messenger, transport `low`):
+  - `REQUEST` (new or updated invitation): if the user has the event with that `UID` in a provider calendar, the
+    provider owns it (CalDAV servers with scheduling, Google and Microsoft put invitations into the calendar
+    themselves) and nothing is written. Otherwise the event is created or updated in the account's default
+    calendar (or the Tresso calendar when the account has none) with the user's `partstat` `NEEDS-ACTION`, so it
+    shows in the calendar as unanswered. An older `SEQUENCE` than the stored one is ignored.
+  - `CANCEL`: the event or occurrence is marked cancelled, under the same ownership rule.
+  - `REPLY` (the user organizes): the attendee's `partstat` is updated on the user's event.
+  - `COUNTER`, `REFRESH`, `ADD` and `DECLINECOUNTER` are shown on the message only.
+- `GET /api/v1/messages/{id}/invitation` returns the invitation as clients show it: the event (expanded summary of
+  the recurrence), whether it is new, updated or cancelled, the user's current response, conflicts with other busy
+  events in the same time, and the event id in the user's calendar when there is one.
+- An RSVP updates the user's `partstat` on the event and sends the reply the way the calendar's source needs it
+  (provider API, CalDAV server scheduling, or iTIP). An iTIP `REPLY` goes through the outbox like any mail: a
+  message to the organizer from the invited account, with a `text/calendar; method=REPLY` part holding only the
+  replying attendee, the event's `UID`, `SEQUENCE`, `RECURRENCE-ID` when answering one occurrence, and the
+  optional comment, and a short human-readable text part. Its subject follows the common form ("Accepted:
+  Weekly sync").
+- An event the user organizes with attendees sends `REQUEST` on creation and on changes that raise `SEQUENCE`,
+  and `CANCEL` on deletion, through the same path when the provider does not do it.
+
+#### Client sync
+
+- The delta carries `calendars` and `calendarEvents` (series, overrides and single events as stored, without the
+  raw iCalendar and provider state). Deleting a calendar implies its events are gone; deleting a mail account
+  implies its calendars are gone.
+- Clients keep them in their local store and expand recurrence locally (`packages/core`, `ical.js`), so the views
+  work offline and switching weeks costs no request. The local copy is limited to events whose series touches the
+  last 2 years or the future, which the API filters with `series_ends_at`; older history is read through the range
+  endpoint.
+- Reminders are scheduled by the clients from the synced events (web notifications while open, local notifications
+  on mobile and desktop). Server-sent reminder push follows with phase 3 push.
+
+#### Online meetings
+
+A `ConferenceProvider` interface creates the meeting for an event when the user asks for one: Microsoft Teams
+through Graph (`isOnlineMeeting` with `onlineMeetingProvider: teamsForBusiness` on Graph calendars; otherwise
+`POST /me/onlineMeetings`), and Google Meet through `conferenceData.createRequest` on Google calendars. Which
+providers an event can use depends on the calendar's account; clients read them from the calendar
+(`conferenceProviders`). Join links found in descriptions and locations of other events (Zoom, Teams, Meet, Webex)
+are recognized so every event with a meeting gets a join button.
+
+#### AI features (open interfaces, Tresso Cloud implementations)
+
+The open edition defines the interfaces and, where a deterministic version is useful on its own, implements it.
+Tresso Cloud (`packages/api-bundle` in its repository) replaces them with AI versions by decorating the services;
+`GET /api/v1/calendar/capabilities` tells clients which features are available, so they show only what works.
+
+| Interface | Open edition | Tresso Cloud |
+|---|---|---|
+| `EventDraftInterpreter`: free text ("lunch with Sam Thursday 12:30 at Café Loos") to an event draft | none (capability off) | AI interpretation in the user's language and time zone |
+| `MeetingTimeFinder`: proposed slots for a duration, attendees and a window | free/busy of the user's own calendars within working hours | adds attendees' availability where it is known and ranks by preferences and habits |
+| `EventExtractor`: events and deadlines in a message | the message's `text/calendar` parts | AI extraction from the text, deadlines offered as todos |
+| `MeetingBriefWriter`: a brief before a meeting (who, previous threads, open todos, attachments) | none (capability off) | AI brief from the related mail and todos |
+
+Drafts from these features are never saved by themselves: the client shows them in the event editor or as
+suggestions, and the user saves. Content sent to an AI provider follows Tresso Cloud's data processing terms.
 
 ## 4. Scale notes
 
