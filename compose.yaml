@@ -54,7 +54,7 @@ services:
       context: .
       dockerfile: docker/api/Dockerfile
       target: dev
-    command: ["php", "bin/console", "messenger:consume", "async", "search", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    command: ["php", "bin/console", "messenger:consume", "async", "search", "classify", "--time-limit=3600", "--memory-limit=256M", "-vv"]
     environment: *api-env
     volumes:
       - ./apps/api:/app
