@@ -163,6 +163,8 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/) with
 
 - FrankenPHP keeps the app in memory. After clearing the cache inside the container, restart it with
   `docker compose restart api`.
+- After `compose.yaml` changes (new environment variables, for example), recreate the services with
+  `docker compose up -d`: `restart` keeps a container's old environment.
 - Secrets in `compose.yaml` and the committed `.env` files are development values only. Real secrets go in
   `.env.local` files or the deployment environment. In production set at least `APP_SECRET`, `OAUTH_PASSPHRASE`,
   `OAUTH_ENCRYPTION_KEY`, `SYNC_WORKER_CLIENT_SECRET`, `DATA_KEYS` and `DATA_KEY_CURRENT`, the Mercure hub
