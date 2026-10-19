@@ -1,0 +1,89 @@
+import { describe, expect, it } from 'vitest'
+import type { SyncedMessage } from './sync/types'
+import { forwardSubject, parseAddresses, quotedOriginal, replyRecipients, replySubject } from './compose'
+
+function message(overrides: Partial<SyncedMessage> = {}): SyncedMessage {
+  return {
+    id: 'm1',
+    mailAccountId: 'a1',
+    threadId: 't1',
+    folderIds: [],
+    subject: 'Q4 budget',
+    from: { address: 'anna@finance.example', name: 'Anna de Vries' },
+    recipients: {
+      to: [{ address: 'kim@company.example', name: 'Kim' }, { address: 'pieter@company.example', name: 'Pieter' }],
+      cc: [{ address: 'Lisa@Company.example', name: 'Lisa' }],
+      bcc: [],
+      replyTo: [],
+    },
+    snippet: '',
+    sentAt: null,
+    receivedAt: '2026-10-19T08:00:00+00:00',
+    flags: { seen: true, flagged: false, answered: false, draft: false },
+    hasAttachments: false,
+    categoryId: null,
+    verdict: null,
+    summary: null,
+    ...overrides,
+  }
+}
+
+describe('subjects', () => {
+  it('adds one prefix whatever the original had', () => {
+    expect(replySubject('Q4 budget')).toBe('Re: Q4 budget')
+    expect(replySubject('RE: Re: AW: Q4 budget')).toBe('Re: Q4 budget')
+    expect(replySubject('Re[2]: Q4 budget')).toBe('Re: Q4 budget')
+    expect(forwardSubject('Fw: FWD: Q4 budget')).toBe('Fwd: Q4 budget')
+  })
+})
+
+describe('replyRecipients', () => {
+  it('replies to the sender', () => {
+    expect(replyRecipients(message(), ['kim@company.example'], false)).toEqual({ to: [{ address: 'anna@finance.example', name: 'Anna de Vries' }], cc: [] })
+  })
+
+  it('prefers Reply-To', () => {
+    const withReplyTo = message({ recipients: { ...message().recipients, replyTo: [{ address: 'team@finance.example', name: null }] } })
+    expect(replyRecipients(withReplyTo, ['kim@company.example'], false).to).toEqual([{ address: 'team@finance.example', name: null }])
+  })
+
+  it('reply all copies everyone except the user, without duplicates', () => {
+    const result = replyRecipients(message(), ['KIM@company.example'], true)
+
+    expect(result.to.map((a) => a.address)).toEqual(['anna@finance.example'])
+    expect(result.cc.map((a) => a.address)).toEqual(['pieter@company.example', 'Lisa@Company.example'])
+  })
+
+  it('replying to your own message goes to its recipients', () => {
+    const own = message({ from: { address: 'kim@company.example', name: 'Kim' }, recipients: { to: [{ address: 'anna@finance.example', name: null }], cc: [{ address: 'pieter@company.example', name: null }], bcc: [], replyTo: [] } })
+
+    expect(replyRecipients(own, ['kim@company.example'], true)).toEqual({ to: [{ address: 'anna@finance.example', name: null }], cc: [{ address: 'pieter@company.example', name: null }] })
+  })
+})
+
+describe('quotedOriginal', () => {
+  it('quotes a reply and escapes the header', () => {
+    const html = quotedOriginal(message({ from: { address: 'a@x.example', name: '<b>Evil</b>' } }), { html: '<p>Hi</p>', text: null }, 'reply', 'en-GB')
+
+    expect(html).toContain('&lt;b&gt;Evil&lt;/b&gt; &lt;a@x.example&gt; wrote:')
+    expect(html).toContain('<blockquote><p>Hi</p></blockquote>')
+  })
+
+  it('writes the forwarded headers and falls back to escaped text', () => {
+    const html = quotedOriginal(message(), { html: null, text: 'Line 1\n<script>' }, 'forward', 'en-GB')
+
+    expect(html).toContain('Subject: Q4 budget')
+    expect(html).toContain('Cc: Lisa &lt;Lisa@Company.example&gt;')
+    expect(html).toContain('<p>Line 1<br>&lt;script&gt;</p>')
+  })
+})
+
+describe('parseAddresses', () => {
+  it('reads pasted lists', () => {
+    expect(parseAddresses('Anna de Vries <anna@finance.example>; pieter@company.example, "Lisa B" <lisa@x.example>')).toEqual([
+      { address: 'anna@finance.example', name: 'Anna de Vries' },
+      { address: 'pieter@company.example', name: null },
+      { address: 'lisa@x.example', name: 'Lisa B' },
+    ])
+  })
+})

@@ -67,7 +67,28 @@ export interface SyncedMessage {
   summary: string | null
 }
 
-export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message'
+export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage'
+
+export type OutgoingStatus = 'scheduled' | 'queued' | 'sending' | 'sent' | 'failed' | 'cancelled'
+
+export interface OutgoingRecipients {
+  to: Address[]
+  cc: Address[]
+  bcc: Address[]
+}
+
+/** Mail on its way out; `lastError` explains a retry or failure, or a sent message whose Sent copy is missing. */
+export interface SyncedOutgoingMessage {
+  id: string
+  mailAccountId: string
+  status: OutgoingStatus
+  subject: string
+  recipients: OutgoingRecipients
+  sendAt: string
+  sentAt: string | null
+  lastError: string | null
+  inReplyToMessageId: string | null
+}
 
 export interface Deleted {
   type: DeletedType
@@ -81,6 +102,7 @@ export interface ChangePage {
   folders: SyncedFolder[]
   threads: SyncedThread[]
   messages: SyncedMessage[]
+  outgoingMessages: SyncedOutgoingMessage[]
   deleted: Deleted[]
 }
 
