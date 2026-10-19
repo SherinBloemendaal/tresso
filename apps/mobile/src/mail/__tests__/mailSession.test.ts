@@ -189,4 +189,10 @@ describe('MailSession', () => {
     expect(await seen(`m${MAX_MESSAGES_PER_ACTION}`)).toBe(false)
     await mail.switchTo(null)
   })
+
+  it('refuses an action while no copy is open, instead of pretending it worked', async () => {
+    const { mail } = session(device())
+
+    await expect(mail.act(['m1'], 'archive')).rejects.toThrow('Your mail is not open on this phone yet.')
+  })
 })

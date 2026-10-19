@@ -136,9 +136,6 @@ export interface Arrival {
   verdict: 'do' | 'delegate'
 }
 
-
-
-
 function needsTheUser(message: SyncedMessage | undefined): boolean {
   return message?.verdict === 'do' || message?.verdict === 'delegate'
 }
@@ -342,7 +339,6 @@ export class MailDatabase implements SyncStore {
 
     return { before, after }
   }
-
 
   /**
    * Puts back what {@link applyAction} changed, on the messages the delta has not updated since. It is only given
@@ -609,7 +605,6 @@ async function rememberContacts(tx: WriteTx, message: SyncedMessage): Promise<vo
     })
   }
 }
-
 
 async function refreshConversation(tx: WriteTx, threadId: string, inboxFolders: Set<string>): Promise<void> {
   const thread = await tx.objectStore('threads').get(threadId)

@@ -89,7 +89,8 @@ export function useMessageActions() {
       const plan = undoPlan(applied, action, folders)
       const left = plan.unrestorable
       const caveat = left === 0 || plan.moves.length === 0 ? '' : ` Undo cannot put ${left === 1 ? 'one message' : `${left} messages`} back.`
-      notify({ text: `${label}.${caveat}`, tone: 'info', action: plan.moves.length > 0 ? { label: 'Undo', run: () => void undo(plan.moves) } : undefined })
+      const what = action === 'archive' ? 'archive' : action === 'trash' ? 'move to Trash' : 'move'
+      notify({ text: `${label}.${caveat}`, tone: 'info', action: plan.moves.length > 0 ? { label: 'Undo', accessibilityLabel: `Undo ${what}`, run: () => void undo(plan.moves) } : undefined })
       return applied
     },
     [run, undo, notify],
