@@ -162,6 +162,17 @@ describe('MailDatabase on the device', () => {
     expect((await db.thread('t2'))?.messages[0]).toMatchObject({ folderIds: ['work-inbox'], flags: { seen: true } })
   })
 
+  it('stores a page and an action that arrive together one after the other, as the device allows one writer', async () => {
+    await Promise.all([
+      db.apply(page({ cursor: 11, messages: [message('m5', 't1', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00')] })),
+      db.applyAction(['m4'], 'flag'),
+      db.resyncFromStart(),
+    ])
+
+    expect(await db.cursor()).toBe(0)
+    expect((await db.thread('t1'))?.messages.map((m) => m.id)).toContain('m5')
+  })
+
   it('refuses pages once closing, after storing the one in progress', async () => {
     const storing = db.apply(page({ cursor: 11, messages: [message('m5', 't1', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00')] }))
     await db.shut()
