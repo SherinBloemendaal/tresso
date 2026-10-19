@@ -358,4 +358,23 @@ final class ProviderConnectTest extends DatabaseTestCase
         self::assertNotNull($revoke);
         self::assertSame('token=google-refresh-1', $revoke['body']);
     }
+
+    public function testRemovingAnAccountKeepsAGoogleAccountAnotherUserStillConnected(): void
+    {
+        $kimsAccount = $this->connectGoogle()->getId()->toRfc4122();
+        $this->createUser('lisa@example.test', 'Lisa');
+        $kim = $this->user;
+        $this->user = $this->userHeaders('lisa@example.test', ['settings:read', 'settings:write']);
+        $query = $this->start('google');
+        $this->googleTokens(access: 'google-access-lisa', refresh: 'google-refresh-lisa');
+        $this->returnFromProvider('google', $query['state'], 'code-lisa', 'lisa@example.test');
+        self::assertSame(2, $this->entityManager()->getRepository(ProviderGrant::class)->count([]));
+        $this->router()->respond(self::GOOGLE_REVOKE, '');
+
+        $this->client->request('DELETE', '/api/v1/mail-accounts/'.$kimsAccount, server: $kim);
+
+        self::assertResponseStatusCodeSame(204);
+        self::assertSame([], $this->router()->requestsTo(self::GOOGLE_REVOKE), 'revoking would end Lisa\'s access too');
+        self::assertSame(1, $this->entityManager()->getRepository(ProviderGrant::class)->count([]));
+    }
 }

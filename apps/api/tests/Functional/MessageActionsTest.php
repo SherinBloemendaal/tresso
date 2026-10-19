@@ -467,6 +467,17 @@ final class MessageActionsTest extends DatabaseTestCase
         self::assertSame('An IMAP uid is a number.', $this->decodedResponse()['detail'] ?? null);
     }
 
+    public function testTheStoredUidListingLeavesOutCopiesStillOnTheirWay(): void
+    {
+        $this->act('move', $this->folderId('Projects'));
+        self::assertSame(['Projects'], array_keys($this->locations()));
+
+        $this->client->request('GET', '/internal/sync/accounts/'.$this->accountId.'/folders/remote-uids?'.http_build_query(['workerId' => 'w1', 'folder' => 'Projects']), server: $this->worker);
+
+        self::assertResponseIsSuccessful();
+        self::assertSame([], $this->decodedResponse()['remoteUids'] ?? null, 'a resync must not take the placeholder for a deleted message');
+    }
+
     public function testAMoveCanTakeOnlyTheCopiesInOneFolder(): void
     {
         $this->ingest($this->accountId, 'Projects', '3', '<plan@finance.example>');

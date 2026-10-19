@@ -7,6 +7,7 @@ namespace App\State;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProviderInterface;
 use App\ApiResource\SyncRemoteUids;
+use App\Entity\MailboxChange;
 use App\Sync\Ingest\FolderLookup;
 use App\Sync\LeaseGuard;
 use Doctrine\DBAL\Connection;
@@ -45,14 +46,17 @@ final readonly class SyncRemoteUidsProvider implements ProviderInterface
         }
         $folder = $this->folders->get($account, $remoteName);
 
-        // COLLATE "C": byte order, the same order the worker sorts in and that the "after" comparison uses.
+        // COLLATE "C": byte order, the same order the worker sorts in and that the "after" comparison uses. Placeholder
+        // copies of moves still on their way are not on the server yet: listed, they would look deleted there.
         /** @var list<string> $uids */
         $uids = $this->connection->fetchFirstColumn(
             'SELECT remote_uid FROM message_location
-             WHERE folder_id = :folder AND (CAST(:after AS TEXT) IS NULL OR remote_uid COLLATE "C" > CAST(:after AS TEXT) COLLATE "C")
+             WHERE folder_id = :folder
+               AND NOT starts_with(remote_uid, :placeholder)
+               AND (CAST(:after AS TEXT) IS NULL OR remote_uid COLLATE "C" > CAST(:after AS TEXT) COLLATE "C")
              ORDER BY remote_uid COLLATE "C"
              LIMIT :limit',
-            ['folder' => $folder->getId()->toRfc4122(), 'after' => $after, 'limit' => (int) $limit + 1],
+            ['folder' => $folder->getId()->toRfc4122(), 'placeholder' => MailboxChange::PLACEHOLDER_PREFIX, 'after' => $after, 'limit' => (int) $limit + 1],
         );
 
         $next = null;
