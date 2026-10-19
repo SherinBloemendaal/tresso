@@ -5,13 +5,17 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing": "./src/store/contract.ts",
+    "./testing/sql": "./src/store/memorySql.ts"
   },
   "scripts": {
     "test": "vitest run",
     "type-check": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/sql.js": "^1.4.11",
+    "sql.js": "^1.15.0",
     "typescript": "~6.0.0",
     "vitest": "^4.1.11"
   }
