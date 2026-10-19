@@ -16,7 +16,7 @@ final class MessageBatchInput extends WorkerRequest
     public string $folder = '';
 
     /** Opaque to the API; stored on the folder and handed back to the next worker. */
-    #[Assert\Length(max: 2048)]
+    #[Assert\Length(max: 8192)]
     public ?string $cursor = null;
 
     /** @var list<MessageInput> */

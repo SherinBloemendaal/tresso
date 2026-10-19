@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace App\Tests\Unit\Crypto;
 
 use App\Entity\MailAccount;
+use App\Entity\ProviderGrant;
 use App\Entity\User;
 use App\Enum\MailProvider;
+use App\Enum\OAuthProvider;
 use App\Security\Crypto\CredentialVault;
 use App\Security\Crypto\CryptoException;
 use App\Security\Crypto\DataKeyManager;
@@ -56,6 +58,20 @@ final class CredentialVaultTest extends TestCase
 
         $this->expectException(CryptoException::class);
         $this->vault->open($personal);
+    }
+
+    public function testGrantTokensAreSealedAndBoundToTheirGrant(): void
+    {
+        $grant = new ProviderGrant($this->owner, OAuthProvider::Google, 'sub-1', 'kim@gmail.example');
+        $this->vault->sealGrant($grant, ['refreshToken' => 'refresh-1', 'accessToken' => 'access-1']);
+
+        self::assertStringNotContainsString('refresh-1', $grant->getEncryptedTokens());
+        self::assertSame(['refreshToken' => 'refresh-1', 'accessToken' => 'access-1'], $this->vault->openGrant($grant));
+
+        $other = new ProviderGrant($this->owner, OAuthProvider::Google, 'sub-2', 'other@gmail.example');
+        $other->setEncryptedTokens($grant->getEncryptedTokens());
+        $this->expectException(CryptoException::class);
+        $this->vault->openGrant($other);
     }
 
     public function testAccountWithoutCredentialsThrows(): void

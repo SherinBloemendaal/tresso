@@ -1,0 +1,361 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Tests\Functional;
+
+use App\Entity\MailAccount;
+use App\Entity\ProviderAuthorizationRequest;
+use App\Entity\ProviderGrant;
+
+/**
+ * Connecting Gmail and Microsoft 365 accounts through the providers' OAuth flow, with the token endpoints mocked.
+ */
+final class ProviderConnectTest extends DatabaseTestCase
+{
+    use AuthenticatesUsers;
+    use ConnectsProviderAccounts;
+
+    private const string WEB = 'http://localhost:5173';
+    private const string GOOGLE_REVOKE = 'https://oauth2.googleapis.com/revoke';
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->bootstrapOAuthClients();
+        $this->createUser('kim@example.test', 'Kim Visser');
+        $this->user = $this->userHeaders('kim@example.test', ['settings:read', 'settings:write']);
+    }
+
+    public function testConfiguredProvidersAreListed(): void
+    {
+        $this->client->request('GET', '/api/v1/oauth-providers', server: $this->user);
+
+        self::assertResponseIsSuccessful();
+        self::assertSame([
+            ['id' => 'google', 'name' => 'Google', 'features' => ['mail']],
+            ['id' => 'microsoft', 'name' => 'Microsoft', 'features' => ['mail']],
+        ], $this->decodedResponse());
+    }
+
+    public function testStartReturnsTheProvidersAuthorizationUrlWithPkce(): void
+    {
+        $query = $this->start('google');
+
+        self::assertSame('test-google-client', $query['client_id']);
+        self::assertSame('http://localhost/connect/google/callback', $query['redirect_uri']);
+        self::assertSame('code', $query['response_type']);
+        self::assertSame('openid email profile '.self::GMAIL_SCOPE, $query['scope']);
+        self::assertSame('S256', $query['code_challenge_method']);
+        self::assertSame('offline', $query['access_type']);
+        self::assertSame('consent', $query['prompt']);
+        self::assertSame('true', $query['include_granted_scopes']);
+        self::assertMatchesRegularExpression('/^[A-Za-z0-9_-]{43}$/', $query['state']);
+        self::assertMatchesRegularExpression('/^[A-Za-z0-9_-]{43}$/', $query['code_challenge']);
+
+        $stored = $this->entityManager()->find(ProviderAuthorizationRequest::class, hash('sha256', $query['state']));
+        self::assertInstanceOf(ProviderAuthorizationRequest::class, $stored, 'Only the hash of the state is stored.');
+        self::assertSame(
+            $query['code_challenge'],
+            rtrim(strtr(base64_encode(hash('sha256', $stored->getCodeVerifier(), true)), '+/', '-_'), '='),
+        );
+    }
+
+    public function testMicrosoftAuthorizationAsksForGraphMailScopes(): void
+    {
+        $query = $this->start('microsoft');
+
+        self::assertSame('test-microsoft-client', $query['client_id']);
+        self::assertSame('openid email profile offline_access https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read', $query['scope']);
+        self::assertSame('query', $query['response_mode']);
+        self::assertSame('select_account', $query['prompt']);
+    }
+
+    public function testStartValidatesItsInput(): void
+    {
+        $this->client->jsonRequest('POST', '/api/v1/provider-authorizations', ['provider' => 'yahoo'], $this->user);
+        self::assertResponseStatusCodeSame(400);
+
+        $this->client->jsonRequest('POST', '/api/v1/provider-authorizations', ['provider' => 'google', 'mailAccountId' => '0199f5e2-7c4e-7000-8000-000000000000'], $this->user);
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame(['mailAccountId'], $this->violationPaths());
+
+        $this->client->jsonRequest('POST', '/api/v1/provider-authorizations', ['provider' => 'google'], $this->workerHeaders('sync:lease'));
+        self::assertResponseStatusCodeSame(403);
+    }
+
+    public function testGoogleSignInConnectsAGmailAccount(): void
+    {
+        $query = $this->start('google');
+        $this->googleTokens();
+
+        $location = $this->returnFromProvider('google', $query['state']);
+
+        $account = $this->onlyAccount();
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connected='.$account->getId()->toRfc4122(), $location);
+        self::assertSame('kim@gmail.example', $account->getEmailAddress());
+        self::assertSame('Kim Visser', $account->getDisplayName());
+        self::assertSame('gmail', $account->getProvider()->value);
+        self::assertNull($account->getEncryptedCredentials());
+
+        $token = $this->router()->requestsTo(self::GOOGLE_TOKEN)[0] ?? null;
+        self::assertNotNull($token);
+        parse_str($token['body'], $body);
+        self::assertSame('authorization_code', $body['grant_type'] ?? null);
+        self::assertSame('code-1', $body['code'] ?? null);
+        self::assertSame('http://localhost/connect/google/callback', $body['redirect_uri'] ?? null);
+        self::assertSame('test-google-client', $body['client_id'] ?? null);
+        self::assertSame('test-google-secret', $body['client_secret'] ?? null);
+        $verifier = $body['code_verifier'] ?? null;
+        self::assertIsString($verifier);
+        self::assertSame($query['code_challenge'], rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '='));
+
+        $grant = $account->getProviderGrant();
+        self::assertInstanceOf(ProviderGrant::class, $grant);
+        self::assertSame('google-sub-1', $grant->getSubject());
+        self::assertContains(self::GMAIL_SCOPE, $grant->getScopes());
+        self::assertStringNotContainsString('google-refresh-1', $grant->getEncryptedTokens(), 'Tokens are sealed.');
+        self::assertSame('google-refresh-1', $this->vault()->openGrant($grant)['refreshToken'] ?? null);
+
+        $this->client->request('GET', '/api/v1/mail-accounts/'.$account->getId()->toRfc4122(), server: $this->user);
+        self::assertResponseIsSuccessful();
+        $resource = $this->decodedResponse();
+        self::assertSame('gmail', $resource['provider'] ?? null);
+        foreach (['imap', 'smtp', 'username'] as $field) {
+            self::assertArrayHasKey($field, $resource);
+            self::assertNull($resource[$field], $field.' is null for provider accounts.');
+        }
+        self::assertSame(0, $this->entityManager()->getRepository(ProviderAuthorizationRequest::class)->count([]), 'The state works once.');
+    }
+
+    public function testMicrosoftSignInConnectsAMicrosoftAccount(): void
+    {
+        $query = $this->start('microsoft');
+        $this->router()->respond(self::MICROSOFT_TOKEN, (string) json_encode([
+            'token_type' => 'Bearer',
+            'access_token' => 'ms-access-1',
+            'expires_in' => 3600,
+            'refresh_token' => 'ms-refresh-1',
+            // Microsoft answers with short scope names for Graph.
+            'scope' => 'Mail.ReadWrite Mail.Send User.Read openid profile email',
+            'id_token' => $this->idToken(['aud' => 'test-microsoft-client', 'tid' => 'tenant-1', 'oid' => 'object-1', 'sub' => 'pairwise']),
+        ]));
+        $this->router()->respond(self::GRAPH_ME, (string) json_encode(['mail' => 'Kim@Contoso.example', 'userPrincipalName' => 'kim@contoso.onmicrosoft.example', 'displayName' => 'Kim at Contoso']));
+
+        $location = $this->returnFromProvider('microsoft', $query['state']);
+
+        $account = $this->onlyAccount();
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=microsoft&connected='.$account->getId()->toRfc4122(), $location);
+        self::assertSame('kim@contoso.example', $account->getEmailAddress());
+        self::assertSame('Kim at Contoso', $account->getDisplayName());
+        self::assertSame('microsoft', $account->getProvider()->value);
+        $grant = $account->getProviderGrant();
+        self::assertInstanceOf(ProviderGrant::class, $grant);
+        self::assertSame('tenant-1:object-1', $grant->getSubject());
+        self::assertSame(['email', 'mail.readwrite', 'mail.send', 'openid', 'profile', 'user.read'], $grant->getScopes());
+
+        parse_str($this->router()->requestsTo(self::MICROSOFT_TOKEN)[0]['body'] ?? '', $body);
+        $scope = $body['scope'] ?? null;
+        self::assertIsString($scope);
+        self::assertStringContainsString('https://graph.microsoft.com/Mail.ReadWrite', $scope);
+        $me = $this->router()->requestsTo(self::GRAPH_ME)[0] ?? null;
+        self::assertNotNull($me);
+        self::assertContains('Authorization: Bearer ms-access-1', $me['headers']);
+    }
+
+    public function testAStateWorksOnce(): void
+    {
+        $query = $this->start('google');
+        $this->googleTokens();
+        $this->returnFromProvider('google', $query['state']);
+
+        $location = $this->returnFromProvider('google', $query['state'], 'code-2');
+
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=expired', $location);
+        self::assertCount(1, $this->router()->requestsTo(self::GOOGLE_TOKEN), 'A replayed callback never reaches the provider.');
+    }
+
+    public function testExpiredOrForeignStatesAreRefused(): void
+    {
+        $query = $this->start('google');
+        $this->googleTokens();
+        $this->connection()->executeStatement("UPDATE provider_authorization_request SET expires_at = now() - interval '1 second'");
+
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=expired', $this->returnFromProvider('google', $query['state']));
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=expired', $this->returnFromProvider('google', 'made-up-state'));
+
+        $microsoft = $this->start('microsoft');
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=expired', $this->returnFromProvider('google', $microsoft['state']), 'A state is only valid for its provider.');
+        self::assertSame([], $this->router()->requestsTo(self::GOOGLE_TOKEN));
+        self::assertSame(0, $this->entityManager()->getRepository(MailAccount::class)->count([]));
+    }
+
+    public function testTheCallbackNeedsTheBrowserOfTheUserWhoStarted(): void
+    {
+        $query = $this->start('google');
+        $this->googleTokens();
+        $this->createUser('mallory@example.test', 'Mallory');
+
+        // Someone else's browser opens the link: the account must not land in Kim's Tresso.
+        $location = $this->returnFromProvider('google', $query['state'], signInAs: 'mallory@example.test');
+
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=different_user', $location);
+        self::assertSame(0, $this->entityManager()->getRepository(MailAccount::class)->count([]));
+        self::assertSame([], $this->router()->requestsTo(self::GOOGLE_TOKEN));
+    }
+
+    public function testASignedOutBrowserSignsInFirst(): void
+    {
+        $query = $this->start('google');
+        $this->client->getCookieJar()->clear();
+
+        $this->client->request('GET', '/connect/google/callback?'.http_build_query(['state' => $query['state'], 'code' => 'code-1']));
+
+        self::assertResponseRedirects('http://localhost/login');
+        self::assertSame(1, $this->entityManager()->getRepository(ProviderAuthorizationRequest::class)->count([]), 'The sign-in can still finish after logging in.');
+    }
+
+    public function testRefusingAtTheProviderSaysSo(): void
+    {
+        $query = $this->start('google');
+
+        $this->signInBrowser('kim@example.test');
+        $this->client->request('GET', '/connect/google/callback?'.http_build_query(['state' => $query['state'], 'error' => 'access_denied']));
+
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=denied', $this->client->getResponse()->headers->get('Location'));
+        self::assertResponseHeaderSame('Referrer-Policy', 'no-referrer');
+    }
+
+    public function testUntickedMailPermissionIsRefused(): void
+    {
+        $query = $this->start('google');
+        $this->googleTokens(scope: 'openid https://www.googleapis.com/auth/userinfo.email');
+
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=scopes_missing', $this->returnFromProvider('google', $query['state']));
+        self::assertSame(0, $this->entityManager()->getRepository(MailAccount::class)->count([]));
+        self::assertSame(0, $this->entityManager()->getRepository(ProviderGrant::class)->count([]));
+    }
+
+    public function testUnverifiedGoogleAddressIsRefused(): void
+    {
+        $query = $this->start('google');
+        $this->googleTokens(claims: ['email_verified' => false]);
+
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=unverified_address', $this->returnFromProvider('google', $query['state']));
+    }
+
+    public function testIdTokenForAnotherAppIsRefused(): void
+    {
+        $query = $this->start('google');
+        $this->googleTokens(claims: ['aud' => 'someone-elses-client']);
+
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=failed', $this->returnFromProvider('google', $query['state']));
+        self::assertSame(0, $this->entityManager()->getRepository(MailAccount::class)->count([]));
+    }
+
+    public function testRefusedCodeAndProviderOutageAreReported(): void
+    {
+        $query = $this->start('google');
+        $this->router()->respondOnce(self::GOOGLE_TOKEN, '{"error":"invalid_grant"}', 400);
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=expired', $this->returnFromProvider('google', $query['state']));
+
+        $query = $this->start('google');
+        $this->router()->respondOnce(self::GOOGLE_TOKEN, 'Service Unavailable', 503);
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=failed', $this->returnFromProvider('google', $query['state']));
+    }
+
+    public function testAnAddressConnectedWithAPasswordIsNotTakenOver(): void
+    {
+        $this->client->jsonRequest('POST', '/api/v1/mail-accounts', [
+            'emailAddress' => 'kim@gmail.example',
+            'displayName' => 'Gmail',
+            'username' => 'kim@gmail.example',
+            'password' => 'app-password',
+            'imap' => ['host' => 'imap.gmail.example', 'port' => 993, 'security' => 'tls'],
+            'smtp' => ['host' => 'smtp.gmail.example', 'port' => 465, 'security' => 'tls'],
+        ], $this->user);
+        self::assertResponseStatusCodeSame(201);
+
+        $query = $this->start('google');
+        $this->googleTokens();
+
+        self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=already_connected', $this->returnFromProvider('google', $query['state']));
+        self::assertSame('imap', $this->onlyAccount()->getProvider()->value);
+    }
+
+    public function testSigningInAgainRestoresAFailedAccount(): void
+    {
+        $account = $this->connectGoogle();
+        $id = $account->getId()->toRfc4122();
+        $this->connection()->executeStatement("UPDATE mail_account SET status = 'auth_failed', status_detail = 'x'");
+
+        $query = $this->start('google', $id);
+        self::assertSame('kim@gmail.example', $query['login_hint']);
+        $this->googleTokens(access: 'google-access-2', refresh: 'google-refresh-2');
+
+        self::assertSame(self::WEB.'/settings/accounts?provider=google&connected='.$id, $this->returnFromProvider('google', $query['state'], 'code-2'));
+        $this->entityManager()->clear();
+        $account = $this->onlyAccount();
+        self::assertSame('active', $account->getStatus()->value);
+        self::assertNull($account->getStatusDetail());
+        $grant = $account->getProviderGrant();
+        self::assertInstanceOf(ProviderGrant::class, $grant);
+        self::assertSame('google-refresh-2', $this->vault()->openGrant($grant)['refreshToken'] ?? null);
+        self::assertSame(1, $this->entityManager()->getRepository(ProviderGrant::class)->count([]));
+    }
+
+    public function testSigningInAgainWithAnotherProviderAccountIsRefused(): void
+    {
+        $id = $this->connectGoogle()->getId()->toRfc4122();
+
+        $query = $this->start('google', $id);
+        $this->googleTokens(claims: ['sub' => 'google-sub-2', 'email' => 'someone-else@gmail.example']);
+
+        self::assertSame(self::WEB.'/settings/accounts?provider=google&connectError=wrong_account', $this->returnFromProvider('google', $query['state']));
+        $this->entityManager()->clear();
+        self::assertSame(1, $this->entityManager()->getRepository(ProviderGrant::class)->count([]));
+    }
+
+    public function testSigningInAgainKeepsAProviderWithoutANewRefreshToken(): void
+    {
+        $this->connectGoogle();
+        $query = $this->start('google');
+        $this->googleTokens(access: 'google-access-2', refresh: null);
+
+        $this->returnFromProvider('google', $query['state'], 'code-2');
+
+        $this->entityManager()->clear();
+        $grant = $this->onlyAccount()->getProviderGrant();
+        self::assertInstanceOf(ProviderGrant::class, $grant);
+        $tokens = $this->vault()->openGrant($grant);
+        self::assertSame('google-refresh-1', $tokens['refreshToken'] ?? null);
+        self::assertSame('google-access-2', $tokens['accessToken'] ?? null);
+    }
+
+    public function testProviderAccountsHaveNoPasswordOrServersToChange(): void
+    {
+        $id = $this->connectGoogle()->getId()->toRfc4122();
+
+        $this->client->request('PATCH', '/api/v1/mail-accounts/'.$id, server: $this->user + ['CONTENT_TYPE' => 'application/merge-patch+json'], content: (string) json_encode(['password' => 'x', 'imap' => ['host' => 'imap.example', 'port' => 993, 'security' => 'tls']]));
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame(['password', 'imap'], $this->violationPaths());
+
+        $this->client->request('PATCH', '/api/v1/mail-accounts/'.$id, server: $this->user + ['CONTENT_TYPE' => 'application/merge-patch+json'], content: (string) json_encode(['displayName' => 'Personal', 'status' => 'paused']));
+        self::assertResponseIsSuccessful();
+        self::assertSame('Personal', $this->decodedResponse()['displayName'] ?? null);
+    }
+
+    public function testRemovingTheLastAccountEndsTheGrant(): void
+    {
+        $id = $this->connectGoogle()->getId()->toRfc4122();
+        $this->router()->respond(self::GOOGLE_REVOKE, '');
+
+        $this->client->request('DELETE', '/api/v1/mail-accounts/'.$id, server: $this->user);
+
+        self::assertResponseStatusCodeSame(204);
+        self::assertSame(0, $this->entityManager()->getRepository(ProviderGrant::class)->count([]));
+        $revoke = $this->router()->requestsTo(self::GOOGLE_REVOKE)[0] ?? null;
+        self::assertNotNull($revoke);
+        self::assertSame('token=google-refresh-1', $revoke['body']);
+    }
+}

@@ -27,7 +27,7 @@ security:
             pattern: ^/(api|internal)/
             stateless: true
             oauth2: true
-        # Browser session used only to sign in and approve OAuth2 authorization requests.
+        # Browser session used only to sign in, approve OAuth2 authorization requests and finish provider sign-ins.
         main:
             lazy: true
             provider: app_user_provider
@@ -41,6 +41,8 @@ security:
     access_control:
         - { path: ^/login$, roles: PUBLIC_ACCESS }
         - { path: ^/oauth/authorize, roles: ROLE_USER }
+        # Google and Microsoft redirect here after a sign-in; the browser session ties it to the user who started it.
+        - { path: ^/connect/, roles: ROLE_USER }
         - { path: ^/internal/, roles: IS_AUTHENTICATED_FULLY }
         - { path: ^/api/, roles: IS_AUTHENTICATED_FULLY }
 

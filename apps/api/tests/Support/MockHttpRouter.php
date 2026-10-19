@@ -17,8 +17,11 @@ final class MockHttpRouter
     /** @var array<string, array{body: string, status: int}> */
     private array $routes = [];
 
-    /** @var list<string> */
-    private array $requested = [];
+    /** @var array<string, list<array{body: string, status: int}>> */
+    private array $queued = [];
+
+    /** @var list<array{method: string, url: string, body: string, headers: list<string>}> */
+    private array $requests = [];
 
     public function __construct(private readonly RecordingMercureHub $hub)
     {
@@ -33,8 +36,15 @@ final class MockHttpRouter
             return ($this->hub)($method, $url, $options);
         }
 
-        $this->requested[] = $url;
-        $route = $this->routes[strtok($url, '?') ?: $url] ?? ['body' => '', 'status' => 404];
+        $body = $options['body'] ?? '';
+        /** @var list<string> $headers normalized "Name: value" lines */
+        $headers = $options['headers'] ?? [];
+        $this->requests[] = ['method' => $method, 'url' => $url, 'body' => \is_string($body) ? $body : '', 'headers' => $headers];
+
+        $key = strtok($url, '?') ?: $url;
+        $route = isset($this->queued[$key]) && [] !== $this->queued[$key]
+            ? array_shift($this->queued[$key])
+            : ($this->routes[$key] ?? ['body' => '', 'status' => 404]);
 
         return new MockResponse($route['body'], ['http_code' => $route['status']]);
     }
@@ -45,9 +55,25 @@ final class MockHttpRouter
         $this->routes[$url] = ['body' => $body, 'status' => $status];
     }
 
+    /** Answers the next request to the URL (without query) with this, before any {@see self::respond()} route. */
+    public function respondOnce(string $url, string $body, int $status = 200): void
+    {
+        $this->queued[$url][] = ['body' => $body, 'status' => $status];
+    }
+
     /** @return list<string> */
     public function requested(): array
     {
-        return $this->requested;
+        return array_column($this->requests, 'url');
+    }
+
+    /**
+     * Requests to a URL (without query), oldest first.
+     *
+     * @return list<array{method: string, url: string, body: string, headers: list<string>}>
+     */
+    public function requestsTo(string $url): array
+    {
+        return array_values(array_filter($this->requests, static fn (array $request): bool => (strtok($request['url'], '?') ?: $request['url']) === $url));
     }
 }

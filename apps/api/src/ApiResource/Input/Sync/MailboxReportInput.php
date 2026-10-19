@@ -24,7 +24,8 @@ final class MailboxReportInput extends WorkerRequest
     #[Assert\Length(max: 2000)]
     public ?string $error = null;
 
+    /** An IMAP uid (a number), or the message id at Gmail or Microsoft Graph. */
     #[Assert\Length(max: 255)]
-    #[Assert\Regex(pattern: '/^[0-9]{1,18}$/', message: 'An IMAP uid is a number.')]
+    #[Assert\Regex(pattern: '/^[\x21-\x7E]+$/', message: 'A remote uid is printable ASCII without spaces.')]
     public ?string $remoteUid = null;
 }
