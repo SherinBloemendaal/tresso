@@ -268,16 +268,50 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   released by a delayed Messenger message, and every heartbeat both releases due mail and lists the leased accounts
   with mail to send, so a lost notification only delays sending. The leasing worker claims due messages (5 minute
   claim), sends over SMTP (whole message refused when one recipient is refused), or for Gmail and Microsoft 365
-  through their APIs (Gmail `users.messages.send`, Graph `sendMail` with the MIME message, which Graph limits to about
-  3 MB; the envelope-only Bcc recipients are added as a Bcc header, which both providers strip; Gmail replies carry
-  the thread id of the message they answer), files a copy in Sent (except at providers that do that themselves, Gmail
-  and Microsoft included) and reports sent, retry (4xx, connection problems, a wrong password: up to 6
-  attempts over about 4.5 hours) or failed (5xx). A message claimed again after an unreported attempt is first
-  looked up in Sent by Message-ID, so it is never sent twice. Gmail and Microsoft may replace the Message-ID, so
-  their sends also carry `X-Tresso-Outgoing-Id` (a SHA-256 of the outbox id and Message-ID, nothing internal), and the
-  lookup searches mail sent to the first recipient since the outbox entry was written; when it cannot decide, the
-  message waits instead of going out twice. Status reaches clients in the delta as
-  `outgoingMessages`.
+  through their APIs (Gmail `users.messages.send`; Microsoft through a draft, see below; the envelope-only Bcc
+  recipients are added as a Bcc header, which both providers strip; Gmail replies carry the thread id of the message
+  they answer), files a copy in Sent (except at providers that do that themselves, Gmail and Microsoft included) and
+  reports sent, retry (4xx, connection problems, a wrong password: up to 6 attempts over about 4.5 hours) or failed
+  (5xx). A message claimed again after an unreported attempt is first looked up, so it is never sent twice; the
+  outcome and its text reach the user in the delta as `outgoingMessages` (`lastError`).
+  - IMAP accounts: the Sent folder by Message-ID.
+  - Gmail may replace the Message-ID, so its sends carry `X-Tresso-Outgoing-Id` (a SHA-256 of the outbox id and the
+    Message-ID, nothing internal). The lookup tries the Message-ID, then searches `from:me` (Trash and Spam included,
+    which `in:sent` would miss) since the outbox entry was written (its id is a UUIDv7), narrowed to the first
+    recipient and the subject, and reads that header on every match, however many. Gmail search cannot match custom
+    headers, so the recipient and the subject are the narrowing; each match read costs 5 quota units.
+  - Microsoft may keep neither the Message-ID nor X- headers on the Sent Items copy, so mail goes out through a
+    draft: created from the MIME (`POST /me/messages`), marked with a named string extended property of Tresso's own
+    property set (`TressoOutgoing`, the same SHA-256 value), and sent (`POST /me/messages/{id}/send`). Custom extended
+    properties stay on the item, so the lookup is one filtered request over the whole mailbox,
+    `singleValueExtendedProperties/Any(ep: ep/id eq '...' and ep/value eq '...')`. Copies sent before this (with
+    `sendMail`), or whose draft Exchange would not mark (a 4xx on the PATCH: the draft is then sent unmarked, logged
+    once per account), are found by Message-ID and by `X-Tresso-Outgoing-Id` on the Sent Items since the entry was
+    written, sent to the first recipient (all of them when Graph refuses that filter), a thousand a page. Drafts and
+    the Outbox never count as sent. A draft an earlier attempt left (marked, or with our Message-ID) counts as stopped
+    only when it is in Drafts and unchanged for 15 minutes: Exchange accepts a send (202) and sends a little later,
+    and until then the item is still a draft, in Drafts or the Outbox. A stopped one is deleted and the message sent
+    anew; a younger one, or one in the Outbox, leaves the question open. A draft whose send was refused (4xx) is
+    deleted at once. Graph takes at most 4 MB per request,
+    so a message of about 3 MB (base64 included) is the limit, as with `sendMail`. Docs: [extended properties
+    overview](https://learn.microsoft.com/en-us/graph/api/resources/extended-properties-overview), [create
+    (PATCH)](https://learn.microsoft.com/en-us/graph/api/singlevaluelegacyextendedproperty-post-singlevalueextendedproperties),
+    [filter](https://learn.microsoft.com/en-us/graph/api/singlevaluelegacyextendedproperty-get), [send a
+    draft](https://learn.microsoft.com/en-us/graph/api/message-send), [MIME
+    messages](https://learn.microsoft.com/en-us/graph/outlook-send-mime-message).
+  - When the lookup cannot decide, nothing is sent. Only a refusal (a 4xx other than 429) fails the message at once,
+    with "Tresso could not check whether an earlier attempt already sent this message; it was not sent again. Check
+    Sent and send it again if needed." Anything else (429 or 5xx after the retries, no answer, "not decided yet": a
+    copy that may still be sending, a leftover that could not be deleted) is a retry, so the next attempt looks again.
+    A retry's text shows in the outbox while the message waits, so it stays neutral ("Tresso is checking whether an
+    earlier attempt already went out and will try again shortly."), or users would send the message again while the
+    original is still going to be sent. The claimed message says whether the attempt is the API's last
+    (`lastAttempt`); its retry ends the message, so it carries the final text: the one above, or, when the earlier
+    copy may still go out, "An earlier attempt may still be waiting in the Outbox and could still be delivered; it
+    was not sent again. Check the Outbox and Sent before you send it again." Lost access only waits: the check runs
+    again once the user signed in.
+  - Gmail narrows by subject only when it has a letter or digit; Gmail matches subjects by word, so a subject of
+    punctuation alone would match nothing.
 - **Drafts:** `/api/v1/drafts` (scopes `mail:read`, `mail:write`) stores the message being written with a `version`
   per save; an update names the version it builds on (`expectedVersion`) and is refused with 409 when another
   device saved in between, so nothing is overwritten silently. Clients choose the draft's id (`draftId` on create),
@@ -287,8 +321,13 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   leaves an extra copy rather than none. Copies of drafts that were sent (`draftId` on the outgoing message),
   deleted or moved to another account are queued for removal. The work comes with the outbox run: the same
   realtime notification and heartbeat hint, the same claim and report cycle. Gmail accounts file copies with
-  `users.drafts.create` and remove them by Message-ID (`rfc822msgid:`); Microsoft 365 accounts create them with the
-  MIME message (`POST /me/messages`) and remove them from Drafts permanently.
+  `users.drafts.create` and remove them by Message-ID (`rfc822msgid:`), or, should Gmail have replaced it, by the
+  `X-Tresso-Draft-Copy` header (a SHA-256 of the Message-ID). Gmail cannot search custom headers and batching does not
+  lower quota, so that header is read only on drafts since the draft was started and at most a week back; a copy not
+  found counts as removed (a copy older than a week whose Message-ID Gmail replaced stays as an extra draft). Microsoft
+  365 accounts create copies from the MIME message (`POST /me/messages`), mark them with the `TressoDraftCopy` extended
+  property and remove them from Drafts permanently, found by that property in one request (older copies by
+  Message-ID or the header).
 - **Message actions:** `POST /api/v1/message-actions` (scope `mail:write`) marks up to 500 messages read or unread,
   flags or unflags them, archives them (out of the inbox into Archive, or All Mail where there is no Archive folder,
   as on Gmail), trashes them or moves them to a folder of their account (every copy, or with `fromFolderId` only the
