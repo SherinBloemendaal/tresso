@@ -46,7 +46,7 @@ final readonly class OutgoingHtmlSanitizer
     {
         $standIns = (string) preg_replace_callback(
             // Only where an image is shown (src, background, url() in a style): a cid: link stays one the cleaner removes.
-            '~(\s(?:src|background)\s*=\s*["\']?|url\(\s*(?:["\']|&quot;|&#0*39;|&apos;)?)cid:([^"\'\s<>()&]+)~i',
+            '~(\s(?:src|background)\s*=\s*["\']?|url\(\s*(?:["\']|&quot;|&#0*39;|&apos;)?)cid:((?:(?!&(?:quot|apos|#0*39|#0*34);)[^"\'\s<>()])+)~i',
             static fn (array $match): string => $match[1].self::CID_STAND_IN.rawurlencode(html_entity_decode($match[2], \ENT_QUOTES | \ENT_HTML5, 'UTF-8')),
             $html,
         );
