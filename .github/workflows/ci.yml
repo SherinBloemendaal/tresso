@@ -34,10 +34,19 @@ jobs:
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 20
+      # The search tests index into a real Meilisearch.
+      meilisearch:
+        image: getmeili/meilisearch:v1.55
+        env:
+          MEILI_MASTER_KEY: ci-master-key
+          MEILI_NO_ANALYTICS: 'true'
+        ports: ['7700:7700']
     env:
       DATABASE_URL: postgresql://app:app@localhost:5432/app?serverVersion=18&charset=utf8
       REDIS_URL: redis://localhost:6379
       MESSENGER_TRANSPORT_DSN: redis://localhost:6379/messages
+      MEILISEARCH_URL: http://localhost:7700
+      MEILISEARCH_KEY: ci-master-key
     steps:
       - uses: actions/checkout@v5
       - uses: shivammathur/setup-php@v2
@@ -63,6 +72,8 @@ jobs:
           php bin/console doctrine:database:create --if-not-exists
           php bin/console doctrine:migrations:migrate --no-interaction
           php bin/console doctrine:schema:validate
+      - name: Wait for Meilisearch
+        run: timeout 60 bash -c 'until curl -fs http://localhost:7700/health; do sleep 1; done'
       - name: PHPUnit
         run: php bin/phpunit
       - name: PHPStan
