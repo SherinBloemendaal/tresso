@@ -1,7 +1,7 @@
 import type { AppliedAction, MessageAction } from '../actions'
 import type { ConversationSummary } from '../sync/conversation'
 import type { SyncStore } from '../sync/engine'
-import type { Address, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedThread } from '../sync/types'
+import type { Address, DraftAttachment, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedThread } from '../sync/types'
 
 /** Someone the user exchanged mail with, for recipient suggestions. */
 export interface Contact {
@@ -44,6 +44,8 @@ export interface Draft {
   /** The outgoing status the user was last told about, so each outcome is announced once. */
   noticedStatus: string | null
   updatedAt: number
+  /** The files on the server's copy, as last heard of; they change through the attachment endpoints. */
+  attachments: DraftAttachment[]
 }
 
 /**

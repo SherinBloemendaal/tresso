@@ -2,7 +2,7 @@ import { actionResult, type AppliedAction, type MessageAction } from '../actions
 import { summarizeConversation, type ConversationSummary } from '../sync/conversation'
 import type { ChangePage, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedThread } from '../sync/types'
 import { CopyClosingError, type Arrival, type Contact, type Draft, type MailStore } from './mailStore'
-import { arrivalOf, contactMatches, deletedDraft, draftOnlyHere, mergeContact, peopleOn, syncedDraft } from './rules'
+import { arrivalOf, contactMatches, deletedDraft, draftOnlyHere, mergeContact, peopleOn, storedDraft, syncedDraft } from './rules'
 import type { Sql, SqlValue } from './sql'
 
 /**
@@ -436,7 +436,7 @@ export class SqliteMailStore implements MailStore {
   }
 
   async drafts(): Promise<Draft[]> {
-    return (await this.reader.all<JsonRow>('SELECT json FROM drafts ORDER BY updated_at DESC, id DESC')).map((row) => parse<Draft>(row))
+    return (await this.reader.all<JsonRow>('SELECT json FROM drafts ORDER BY updated_at DESC, id DESC')).map((row) => storedDraft(parse<Draft>(row)))
   }
 
   draft(id: string): Promise<Draft | null> {
@@ -512,7 +512,7 @@ async function rewrite(tx: Sql, messages: SyncedMessage[]): Promise<void> {
 
 async function readDraft(sql: Pick<Sql, 'first'>, id: string): Promise<Draft | null> {
   const row = await sql.first<JsonRow>('SELECT json FROM drafts WHERE id = ?', [id])
-  return row === null ? null : parse<Draft>(row)
+  return row === null ? null : storedDraft(parse<Draft>(row))
 }
 
 async function writeDraft(sql: Sql, draft: Draft): Promise<void> {

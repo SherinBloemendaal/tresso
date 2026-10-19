@@ -62,7 +62,13 @@ export function contactMatches(contact: Contact, query: string): boolean {
  */
 export function syncedDraft(local: Draft | null | undefined, draft: SyncedDraft): Draft | null {
   if (local?.pendingSave) {
-    return draft.version > local.version ? { ...local, remoteVersion: draft.version } : null
+    // The text waits for its upload; the files are the server's either way.
+    const remoteVersion = draft.version > local.version ? draft.version : local.remoteVersion
+    const attachments = draft.attachments ?? []
+    if (remoteVersion === local.remoteVersion && JSON.stringify(attachments) === JSON.stringify(local.attachments ?? [])) {
+      return null
+    }
+    return { ...local, remoteVersion, attachments }
   }
   return {
     ...draft,
@@ -71,18 +77,25 @@ export function syncedDraft(local: Draft | null | undefined, draft: SyncedDraft)
     remoteVersion: null,
     outgoingId: local?.outgoingId ?? null,
     noticedStatus: local?.noticedStatus ?? null,
+    attachments: draft.attachments ?? [],
   }
 }
 
 /**
- * What a draft the server deleted leaves on this device: a sent one stays until its outcome is known, so a failure can
- * be edited and sent again; unsaved edits stay too. Returns the draft to keep, or null to delete it.
+ * What a draft the server deleted leaves on this device: a sent one stays until its outcome is known (the server keeps
+ * it meanwhile, version and files, so an undo or a failure brings it back); unsaved edits stay too. Returns the draft
+ * to keep, or null to delete it.
  */
 export function deletedDraft(local: Draft): Draft | null {
   if (local.outgoingId) {
-    return { ...local, version: 0, pendingSave: false, remoteVersion: null }
+    return { ...local, pendingSave: false, remoteVersion: null }
   }
   return local.pendingSave ? local : null
+}
+
+/** A draft as stored by an earlier version of the app, with what it did not know yet. */
+export function storedDraft(draft: Draft): Draft {
+  return draft.attachments === undefined ? { ...draft, attachments: [] } : draft
 }
 
 /** Whether a draft holds something that exists nowhere else: edits not uploaded, or a message whose outcome is pending. */

@@ -1,13 +1,39 @@
 import { composeBody, forwardSubject, quotedOriginal, replyRecipients, replySubject, type DraftRequest, type SendMessageRequest } from './compose'
 import type { Draft, MailStore } from './store/mailStore'
-import type { DraftKind, MessageBody, SyncedDraft, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature } from './sync/types'
+import type { DraftAttachment, DraftAttachmentLink, DraftKind, MessageBody, SyncedDraft, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature } from './sync/types'
+
+/**
+ * A file to attach, as the platform has it: the browser's File on the web, a picked file's URI on the phone. `body` is
+ * handed to the platform's own upload unchanged.
+ */
+export interface AttachmentFile {
+  name: string
+  type: string
+  size: number
+  body: unknown
+}
 
 /** The drafts API. Errors carry the HTTP status as `status`, as both clients' API errors do. */
 export interface DraftApi {
   create(id: string, request: DraftRequest): Promise<SyncedDraft>
   update(id: string, request: DraftRequest, expectedVersion: number): Promise<SyncedDraft>
-  get(id: string): Promise<SyncedDraft>
+  /** The draft with fresh download links for its files. */
+  get(id: string): Promise<SyncedDraft & { attachments: DraftAttachmentLink[] }>
   remove(id: string): Promise<void>
+  /** POST /api/v1/drafts/{id}/attachments, multipart */
+  attach(id: string, file: AttachmentFile): Promise<DraftAttachmentLink>
+  /** POST /api/v1/drafts/{id}/forwarded-attachments: a file of a received message. */
+  forward(id: string, attachmentId: string): Promise<DraftAttachmentLink>
+  /** DELETE /api/v1/drafts/{id}/attachments/{attachmentId} */
+  detach(id: string, attachmentId: string): Promise<void>
+}
+
+/** Files are kept with the server's copy of a draft: without a connection there is nowhere to put them. */
+export class AttachmentsNeedTheServer extends Error {
+  constructor() {
+    super('Attaching files needs a connection. Try again when you are online.')
+    this.name = 'AttachmentsNeedTheServer'
+  }
 }
 
 function statusOf(error: unknown): number | null {
@@ -35,6 +61,7 @@ export function newDraft(kind: DraftKind, mailAccountId: string | null, signatur
     outgoingId: null,
     noticedStatus: null,
     updatedAt: Date.now(),
+    attachments: [],
   }
 }
 
@@ -225,7 +252,7 @@ export class DraftSync {
     const next: Draft =
       keep === 'mine'
         ? { ...local, version: remote.version, remoteVersion: null, pendingSave: true }
-        : { ...remote, updatedAt: Date.parse(remote.updatedAt), pendingSave: false, remoteVersion: null, outgoingId: null, noticedStatus: null }
+        : { ...remote, attachments: (remote.attachments ?? []).map(withoutLink), updatedAt: Date.parse(remote.updatedAt), pendingSave: false, remoteVersion: null, outgoingId: null, noticedStatus: null }
     await store.saveDraft(next)
     if (keep === 'mine') {
       await this.upload(id)
@@ -257,6 +284,60 @@ export class DraftSync {
     }
   }
 
+  /**
+   * Attaches a file to the draft. The server keeps files with its copy of the draft, so the draft goes up first; the
+   * attachment is noted on the copy here too.
+   *
+   * @throws AttachmentsNeedTheServer when the draft cannot reach the server
+   */
+  async attach(id: string, file: AttachmentFile): Promise<DraftAttachmentLink> {
+    await this.ensureOnServer(id)
+    const attachment = await this.api.attach(id, file)
+    await this.note(id, (attachments) => [...attachments.filter((other) => other.id !== attachment.id), withoutLink(attachment)])
+    return attachment
+  }
+
+  /** Attaches a file of a received message, for a forward; the same file twice is attached once. */
+  async forward(id: string, attachmentId: string): Promise<DraftAttachmentLink> {
+    await this.ensureOnServer(id)
+    const attachment = await this.api.forward(id, attachmentId)
+    await this.note(id, (attachments) => [...attachments.filter((other) => other.id !== attachment.id), withoutLink(attachment)])
+    return attachment
+  }
+
+  /** Removes a file from the draft; one that is gone already is fine. */
+  async detach(id: string, attachmentId: string): Promise<void> {
+    try {
+      await this.api.detach(id, attachmentId)
+    } catch (error) {
+      if (statusOf(error) !== 404) {
+        throw error
+      }
+    }
+    await this.note(id, (attachments) => attachments.filter((attachment) => attachment.id !== attachmentId))
+  }
+
+  /** Fresh download links for the draft's files (the copy here keeps none: they expire). */
+  async links(id: string): Promise<DraftAttachmentLink[]> {
+    return (await this.api.get(id)).attachments ?? []
+  }
+
+  private async ensureOnServer(id: string): Promise<void> {
+    await this.upload(id).catch(() => undefined)
+    const stored = await this.store()?.draft(id)
+    if (!stored || stored.version === 0) {
+      throw new AttachmentsNeedTheServer()
+    }
+  }
+
+  private async note(id: string, change: (attachments: DraftAttachment[]) => DraftAttachment[]): Promise<void> {
+    const store = this.store()
+    const stored = await store?.draft(id)
+    if (store && stored) {
+      await store.saveDraft({ ...stored, attachments: change(stored.attachments) })
+    }
+  }
+
   /** Saves the draft and uploads it, reporting whether the server has it (so sending can take its Drafts copy away). */
   async uploadForSending(draft: Draft): Promise<boolean> {
     const store = this.store()
@@ -270,4 +351,8 @@ export class DraftSync {
       .then(async () => ((await store.draft(draft.id))?.version ?? 0) > 0)
       .catch(() => false)
   }
+}
+
+function withoutLink(attachment: DraftAttachmentLink | DraftAttachment): DraftAttachment {
+  return { id: attachment.id, filename: attachment.filename, contentType: attachment.contentType, size: attachment.size, scanStatus: attachment.scanStatus }
 }

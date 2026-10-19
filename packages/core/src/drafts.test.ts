@@ -1,56 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { DraftRequest } from './compose'
-import { defaultSignatureOf, DraftSync, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome, type DraftApi } from './drafts'
+import { defaultSignatureOf, DraftSync, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome } from './drafts'
+import { ApiFailure, FakeDraftApi } from './drafts.fake'
 import { accounts, draft, message, signature } from './store/contract'
 import { memorySql } from './store/memorySql'
 import { SqliteMailStore } from './store/sqlite'
-import type { SyncedDraft, SyncedOutgoingMessage } from './sync/types'
-
-class ApiFailure extends Error {
-  constructor(readonly status: number) {
-    super(`HTTP ${status}`)
-  }
-}
-
-/** The drafts API as the server answers it: versions go up with every save, and stale versions are refused. */
-class FakeDraftApi implements DraftApi {
-  readonly drafts = new Map<string, SyncedDraft>()
-  readonly calls: string[] = []
-  /** Runs while a request is under way, to make edits meanwhile. */
-  during: (() => Promise<void>) | null = null
-
-  async create(id: string, request: DraftRequest): Promise<SyncedDraft> {
-    this.calls.push(`create ${id}`)
-    await this.during?.()
-    return this.store(id, request, 1)
-  }
-
-  async update(id: string, request: DraftRequest, expectedVersion: number): Promise<SyncedDraft> {
-    this.calls.push(`update ${id} @${expectedVersion}`)
-    await this.during?.()
-    const current = this.drafts.get(id)
-    if (current === undefined) throw new ApiFailure(404)
-    if (current.version !== expectedVersion) throw new ApiFailure(409)
-    return this.store(id, request, current.version + 1)
-  }
-
-  async get(id: string): Promise<SyncedDraft> {
-    const current = this.drafts.get(id)
-    if (current === undefined) throw new ApiFailure(404)
-    return current
-  }
-
-  async remove(id: string): Promise<void> {
-    this.calls.push(`remove ${id}`)
-    if (!this.drafts.delete(id)) throw new ApiFailure(404)
-  }
-
-  private store(id: string, request: DraftRequest, version: number): SyncedDraft {
-    const saved: SyncedDraft = { id, ...request, version, updatedAt: '2026-10-19T08:00:00Z' }
-    this.drafts.set(id, saved)
-    return saved
-  }
-}
+import type { SyncedOutgoingMessage } from './sync/types'
 
 describe('DraftSync', () => {
   let store: SqliteMailStore
