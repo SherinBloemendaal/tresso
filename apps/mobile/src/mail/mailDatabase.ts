@@ -48,16 +48,18 @@ export class MailDatabase implements SyncStore {
   private constructor(private readonly sql: Sql) {}
 
   static async open(sql: Sql): Promise<MailDatabase> {
-    await sql.exec(SCHEMA)
+    await sql.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)')
     const version = await sql.first<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['schema'])
-    if (version !== null && Number(version.value) !== SCHEMA_VERSION) {
+    if (version === null || Number(version.value) !== SCHEMA_VERSION) {
+      // A copy of another shape is dropped and built again, in one go, so tables never keep an old shape.
       await sql.transaction(async (tx) => {
         for (const table of TABLES) {
-          await tx.run(`DELETE FROM ${table}`)
+          await tx.exec(`DROP TABLE IF EXISTS ${table}`)
         }
+        await tx.exec(SCHEMA)
+        await tx.run('INSERT INTO meta (key, value) VALUES (?, ?)', ['schema', String(SCHEMA_VERSION)])
       })
     }
-    await sql.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['schema', String(SCHEMA_VERSION)])
     return new MailDatabase(sql)
   }
 

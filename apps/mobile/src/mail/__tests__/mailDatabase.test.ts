@@ -138,13 +138,17 @@ describe('MailDatabase on the device', () => {
     expect((await db.thread('t1'))?.messages.map((m) => m.id)).toEqual(['m2', 'm1'])
   })
 
-  it('empties a copy made by another version, so it syncs again from the start', async () => {
+  it('rebuilds a copy made by another version, so it syncs again from the start and has the current shape', async () => {
     await sql.run("UPDATE meta SET value = '0' WHERE key = 'schema'")
+    // An older shape of a table.
+    await sql.exec('DROP TABLE conversations; CREATE TABLE conversations (thread_id TEXT PRIMARY KEY NOT NULL)')
 
     const reopened = await MailDatabase.open(sql)
 
     expect(await reopened.cursor()).toBe(0)
     expect(await reopened.inbox(null, 10)).toEqual([])
     expect(await sql.first<{ value: string }>("SELECT value FROM meta WHERE key = 'schema'")).toEqual({ value: String(SCHEMA_VERSION) })
+    await reopened.apply(page({ cursor: 1, mailAccounts: accounts, folders, threads: [thread('t1', 'work')], messages: [message('m1', 't1', 'work', ['work-inbox'], '2026-10-19T08:00:00+00:00')] }))
+    expect((await reopened.inbox(null, 10)).map((c) => c.threadId)).toEqual(['t1'])
   })
 })

@@ -1,23 +1,16 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { AppState } from 'react-native'
-import { RealtimeClient, SyncEngine, type ChangePage, type ConversationSummary, type MessageBody, type SyncedMailAccount, type RealtimeAccess, type SyncedMessage, type SyncedThread } from '@tresso/core'
+import { fetch as streamingFetch } from 'expo/fetch'
+import type { ChangePage, ConversationSummary, MessageBody, RealtimeAccess, SyncedMailAccount, SyncedMessage, SyncedThread } from '@tresso/core'
 import { useAuth } from '@/auth/AuthProvider'
-import { MailDatabase } from '@/mail/mailDatabase'
+import { MailSession, type MailState } from '@/mail/mailSession'
 import { deleteSql, openSql } from '@/mail/sql'
 
-const PAGE_SIZE = 500
 const LIST_LIMIT = 200
+/** Wait before asking again who is signed in, after that failed (offline at start, server down). */
+const ME_RETRY_MS = 10_000
 
-export type SyncState = 'idle' | 'syncing' | 'error'
-
-interface Mail {
-  ready: boolean
-  /** Goes up whenever the local copy changed, so screens read it again. */
-  version: number
-  syncState: SyncState
-  syncError: string | null
-  /** The realtime connection is up, so changes arrive as they happen. */
-  live: boolean
+interface Mail extends Omit<MailState, 'userId'> {
   mailAccounts(): Promise<SyncedMailAccount[]>
   inbox(mailAccountId: string | null): Promise<ConversationSummary[]>
   thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null>
@@ -27,149 +20,81 @@ interface Mail {
 
 const MailContext = createContext<Mail | null>(null)
 
-function databaseName(userId: string): string {
-  return `mail-${userId}.db`
-}
-
 /**
- * The signed-in user's mail on the device: a SQLite copy kept current through the delta endpoint, with realtime
- * notifications from the hub triggering pulls while the app is in the foreground. Screens read from the copy only.
- * Signing out stops syncing and removes the copy.
+ * The signed-in user's mail on the device (see {@link MailSession}): screens read from the copy only. Signing out
+ * closes the copy and removes it.
  */
 export function MailProvider({ children }: { children: ReactNode }) {
   const auth = useAuth()
-  const [signedInId, setSignedInId] = useState<string | null>(null)
-  // Whose copy is open: nobody's while signed out, also before the next sign-in has said who it is.
-  const userId = auth.isAuthenticated ? signedInId : null
-  const [ready, setReady] = useState(false)
-  const [version, setVersion] = useState(0)
-  const [syncState, setSyncState] = useState<SyncState>('idle')
-  const [syncError, setSyncError] = useState<string | null>(null)
-  const [live, setLive] = useState(false)
-  const database = useRef<MailDatabase | null>(null)
-  const engine = useRef<SyncEngine | null>(null)
-  const realtime = useRef<RealtimeClient | null>(null)
-  const previousUser = useRef<string | null>(null)
+  const [state, setState] = useState<MailState>({ userId: null, ready: false, version: 0, syncState: 'idle', syncError: null, live: false })
+  const [lookupError, setLookupError] = useState<string | null>(null)
+  const session = useMemo(
+    () =>
+      new MailSession({
+        openSql,
+        deleteSql,
+        fetchPage: (since, limit) => auth.session.api<ChangePage>(`/api/v1/sync/changes?since=${since}&limit=${limit}`),
+        fetchAccess: () => auth.session.api<RealtimeAccess>('/api/v1/realtime/token'),
+        // expo/fetch streams response bodies, which the realtime connection reads.
+        fetch: streamingFetch as unknown as typeof fetch,
+        onState: setState,
+      }),
+    [auth.session],
+  )
 
-  // Who is signed in decides whose copy is open.
+  // Who is signed in decides whose copy is open; asked again until it is known.
   useEffect(() => {
+    if (auth.restoring) {
+      return
+    }
     if (!auth.isAuthenticated) {
+      void session.switchTo(null)
       return
     }
     let current = true
-    auth.session
-      .me()
-      .then((me) => current && setSignedInId(me.id))
-      .catch((error: unknown) => current && setSyncError(error instanceof Error ? error.message : String(error)))
+    let retry: ReturnType<typeof setTimeout> | undefined
+    const lookUp = () => {
+      auth.session
+        .me()
+        .then((me) => {
+          if (current) {
+            setLookupError(null)
+            void session.switchTo(me.id)
+          }
+        })
+        .catch((error: unknown) => {
+          if (current) {
+            setLookupError(error instanceof Error ? error.message : String(error))
+            retry = setTimeout(lookUp, ME_RETRY_MS)
+          }
+        })
+    }
+    lookUp()
     return () => {
       current = false
-      // Signing out forgets who it was, so the next sign-in starts from nobody.
-      setSignedInId(null)
+      clearTimeout(retry)
     }
-  }, [auth.isAuthenticated, auth.session])
+  }, [auth.restoring, auth.isAuthenticated, auth.session, session])
 
-  const pull = useCallback(async (run: () => Promise<void> | undefined) => {
-    setSyncState('syncing')
-    try {
-      await run()
-      setSyncState('idle')
-      setSyncError(null)
-    } catch (error) {
-      setSyncState('error')
-      setSyncError(error instanceof Error ? error.message : String(error))
-    }
-  }, [])
-
+  // In the background the connection rests; back in front, the copy catches up and listens again.
   useEffect(() => {
-    if (userId === null) {
-      // Signed out: the copy of whoever was signed in goes, so nothing stays behind on the device.
-      const leaving = previousUser.current
-      previousUser.current = null
-      if (leaving !== null) {
-        void deleteSql(databaseName(leaving)).catch(() => {})
-      }
-      return
-    }
-    previousUser.current = userId
-    let stopped = false
-    let close: (() => Promise<void>) | null = null
+    const subscription = AppState.addEventListener('change', (next) => session.setForeground(next === 'active'))
+    return () => subscription.remove()
+  }, [session])
 
-    void (async () => {
-      const sql = await openSql(databaseName(userId))
-      close = sql.close
-      if (stopped) {
-        await sql.close()
-        return
-      }
-      const db = await MailDatabase.open(sql)
-      database.current = db
-      setReady(true)
-      setVersion((v) => v + 1)
-      const sync = new SyncEngine({
-        store: db,
-        pageSize: PAGE_SIZE,
-        fetchPage: (since, limit) => auth.session.api<ChangePage>(`/api/v1/sync/changes?since=${since}&limit=${limit}`),
-        onApplied: () => setVersion((v) => v + 1),
-      })
-      engine.current = sync
-      realtime.current = new RealtimeClient({
-        fetchAccess: () => auth.session.api<RealtimeAccess>('/api/v1/realtime/token'),
-        onCursor: (cursor) => void pull(() => sync.notify(cursor)),
-        onConnected: () => {
-          setLive(true)
-          void pull(() => sync.sync())
-        },
-        onError: () => setLive(false),
-      })
-      await pull(() => sync.sync())
-      if (!stopped && AppState.currentState === 'active') {
-        realtime.current.start()
-      }
-    })()
-
-    // In the background the connection rests; back in front, the copy catches up and listens again.
-    const subscription = AppState.addEventListener('change', (state) => {
-      const client = realtime.current
-      if (client === null) {
-        return
-      }
-      if (state === 'active') {
-        client.start()
-        void pull(() => engine.current?.sync())
-      } else {
-        setLive(false)
-        void client.stop()
-      }
-    })
-
-    return () => {
-      stopped = true
-      subscription.remove()
-      setReady(false)
-      setLive(false)
-      const client = realtime.current
-      realtime.current = null
-      engine.current = null
-      database.current = null
-      void (async () => {
-        await client?.stop()
-        await close?.()
-      })()
-    }
-  }, [userId, auth.session, pull])
-
-  const mailAccounts = useCallback(async () => (await database.current?.mailAccounts()) ?? [], [])
-  const inbox = useCallback(async (mailAccountId: string | null) => (await database.current?.inbox(mailAccountId, LIST_LIMIT)) ?? [], [])
-  const thread = useCallback(async (threadId: string) => (await database.current?.thread(threadId)) ?? null, [])
+  const mailAccounts = useCallback(async () => (await session.database?.mailAccounts()) ?? [], [session])
+  const inbox = useCallback(async (mailAccountId: string | null) => (await session.database?.inbox(mailAccountId, LIST_LIMIT)) ?? [], [session])
+  const thread = useCallback(async (threadId: string) => (await session.database?.thread(threadId)) ?? null, [session])
   const body = useCallback(
     (messageId: string, allowRemoteContent: boolean) =>
       auth.session.api<MessageBody>(`/api/v1/messages/${encodeURIComponent(messageId)}/body${allowRemoteContent ? '?remoteContent=allow' : ''}`),
     [auth.session],
   )
-  const syncNow = useCallback(() => pull(() => engine.current?.sync()), [pull])
+  const syncNow = useCallback(() => session.syncNow(), [session])
+  const { ready, version, syncState, syncError, live } = state
   const mail = useMemo<Mail>(
-    () => ({ ready, version, syncState, syncError, live, mailAccounts, inbox, thread, body, syncNow }),
-    [ready, version, syncState, syncError, live, mailAccounts, inbox, thread, body, syncNow],
+    () => ({ ready, version, syncState, syncError: syncError ?? lookupError, live, mailAccounts, inbox, thread, body, syncNow }),
+    [ready, version, syncState, syncError, lookupError, live, mailAccounts, inbox, thread, body, syncNow],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>
