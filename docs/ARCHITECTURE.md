@@ -720,7 +720,7 @@ Scopes `calendar:read` and `calendar:write`, in the user scopes of the first-par
 | Call | Purpose |
 |---|---|
 | `GET /api/v1/calendars` | The user's calendars. `PATCH` changes the user's color, visibility and the default calendar, and the name of local calendars (provider calendars are renamed at the provider). `POST`/`DELETE` only for local calendars. |
-| `GET /api/v1/calendar-occurrences?from&to&timeZone&calendarId[]` | Occurrences in a range (at most 400 days), recurrence expanded: per occurrence the event id, the `recurrenceId`, start, end and the event's fields, overrides applied and exceptions removed. |
+| `GET /api/v1/calendar-occurrences?from&to&timeZone&calendarId[]` | Occurrences in a range (at most 400 days), recurrence expanded: per occurrence the event id, the `recurrenceId`, start, end and the event's fields, overrides applied and exceptions removed. Series are expanded one occurrence at a time, at most 2000 per series and 10,000 per answer (more is a 422 asking for a shorter range). Series that repeat more often than hourly are refused when stored, from the editor and from providers alike. |
 | `GET /api/v1/calendar-events/{id}` | One event as stored (series or override). |
 | `POST /api/v1/calendar-events` | Create in a writable calendar. |
 | `PUT /api/v1/calendar-events/{id}?scope=&recurrenceId=&notify=` | Save the editor's complete event; for a series `scope` is `this`, `following` or `all`, and `recurrenceId` the occurrence the user edited. A different `calendarId` moves the event (whole series only). |
@@ -757,13 +757,16 @@ provider changes to that resource wait, so a sync never overwrites a change that
 The worker that leases an account runs the calendar syncer next to the mail syncer (`lease.Syncer` for the account
 is a group of both); they share the account's credentials and lease but fail independently: a calendar server that
 refuses the login does not stop mail. The account carries a calendar status of its own (`calendarStatus`:
-`unknown`, `active`, `unsupported`, `auth_failed` or `error`, with a detail the user can act on), reported once per
+`unknown`, `active`, `unsupported`, `auth_failed`, `unconfirmed` or `error`, with a detail the user can act on), reported once per
 problem by `POST /internal/sync/accounts/{id}/calendar-status` and set back to `active` by a calendar list the API
 accepted.
 
 - **CalDAV** for IMAP accounts (`apps/sync/internal/caldavsync` on a small WebDAV client in `internal/caldav`, through
   the guarded dialer). The client keeps objects as raw iCalendar text in both directions and reads colors, ctags and
-  privileges, which general WebDAV libraries do not; credentials follow a redirect only to the same site:
+  privileges, which general WebDAV libraries do not. The mail password goes only where it belongs: it is sent after
+  a server asks for it (401), and only to a trusted host: the IMAP host, the CalDAV address the user entered (or
+  that was found on a trusted host before), and the CalDAV site of a known provider (iCloud's hosts vary). A trusted
+  host may redirect to another host of its own site; hrefs and redirects to other sites never get it:
   - Discovery: the account's stored CalDAV URL, else RFC 6764 (`_caldavs._tcp` SRV and TXT records, then
     `https://<domain>/.well-known/caldav`, for the address's domain and the IMAP host's domain), else known
     provider hosts by IMAP host (iCloud, Fastmail, Yahoo, mailbox.org and others; Gmail and Microsoft 365 sync
@@ -771,14 +774,17 @@ accepted.
     `current-user-principal`, `calendar-home-set` and the calendars with their name, color, supported components
     (only `VEVENT` calendars are synced), privileges, `getctag` and `sync-token`. The URL that worked is reported
     back and stored with the account; a server without CalDAV is reported as `unsupported` and looked for again
-    daily.
+    daily. Guessed candidates (the web host of the mail domain, hosts named in DNS) are not trusted: when one asks
+    for the login and no trusted one works, the status becomes `unconfirmed` with that address, and the user
+    confirms it by entering it as the account's `calendarUrl`.
   - Changes: `sync-collection` (RFC 6578) with the stored token when the server supports it; otherwise the `getctag`
     is compared and, when it changed, the resource etags are listed and only changed resources fetched with
     `calendar-multiget`. Every 2 minutes, and right after a write. Missing tokens (`valid-sync-token` error) fall back
     to a full listing. A full listing goes to `POST .../calendars/{calendarId}/inventory` (every href with its etag),
     which removes what is gone and answers which hrefs to fetch.
   - Ingest: `POST /internal/sync/accounts/{id}/calendars` (the complete calendar list, answers each calendar's
-    cursor; calendars missing from the list are deleted) and `POST /internal/sync/accounts/{id}/calendars/{calendarId}/objects`
+    cursor; calendars missing from the list are deleted, except after an empty list, after the first list from
+    another server, and while they have writes to make) and `POST /internal/sync/accounts/{id}/calendars/{calendarId}/objects`
     (up to 100 changed resources as `href`, `etag` and raw iCalendar, removed hrefs, and the new cursor). The API
     parses every resource with sabre/vobject, so there is one iCalendar implementation on the server. The cursor only
     advances after the API accepted the work it covers.
@@ -786,7 +792,9 @@ accepted.
     (`done`, `conflict` with the server's current version, `failed`, or `retry` up to 6 attempts), the same claim and
     report cycle as the outbox, announced on the Mercure topic `urn:tresso:sync:outbox` and in every heartbeat
     together with mail. New events are written with `If-None-Match: *` to `<calendar>/<uid>.ics`, updates and
-    deletes with `If-Match`.
+    deletes with `If-Match`. Writes of one event are handed out one at a time and in order; a put carries the
+    event's text, resource and etag as they are when it is claimed, so a quick second edit uses the etag the first
+    one got back.
   - Scheduling: servers that implement RFC 6638 (`calendar-auto-schedule` in the `DAV` header) send invitations and
     replies themselves; for others the API sends them as iTIP mail (below).
 - **Google Calendar API** and **Microsoft Graph** for accounts connected through the provider OAuth layer (see
@@ -803,11 +811,18 @@ accepted.
   reports them with the message as `calendarParts`: the `METHOD` and the raw iCalendar. They are still stored as
   attachments, so the original can be downloaded.
 - The API records an **invitation** per message (`message_id`, `method`, `uid`, `sequence`, `recurrence_id`, the
-  iCalendar) and applies it once the ingest has committed (Messenger, transport `async`):
+  iCalendar) and applies it once the ingest has committed (Messenger, transport `async`). Calendar mail in Spam or
+  Trash is not recorded; it is applied only from the inbox, and not when the message arrived before the account was
+  connected (the first sync must not replay years of invitations). Anyone can send calendar mail, so:
+  - a `REQUEST` or `CANCEL` counts only from the event's organizer (as stored, or as the message names for an event
+    that is new; a delegate named in `SENT-BY` may send for them), never changes who organizes the event, never
+    touches an event the user organizes or that has no organizer, and may raise `SEQUENCE` by at most 100;
+  - a `REPLY` counts only when its single attendee is the sender and already an attendee of the event.
   - `REQUEST` (new or updated invitation): if the user has the event with that `UID` in a provider calendar, the
     provider owns it (CalDAV servers with scheduling, Google and Microsoft put invitations into the calendar
     themselves) and nothing is written. Otherwise the event is created or updated in the account's default
-    calendar (or the Tresso calendar when the account has none) with the user's `partstat` `NEEDS-ACTION`, so it
+    calendar (or the Tresso calendar when the account has none, created then for users from before calendars) with the
+    user's `partstat` `NEEDS-ACTION`, so it
     shows in the calendar as unanswered. An older `SEQUENCE` than the stored one is ignored.
   - `CANCEL`: the event or occurrence is marked cancelled, under the same ownership rule.
   - `REPLY` (the user organizes): the attendee's `partstat` is updated on the user's event.
@@ -821,6 +836,8 @@ accepted.
   replying attendee, the event's `UID`, `SEQUENCE`, `RECURRENCE-ID` when answering one occurrence, and the
   optional comment, and a short human-readable text part. Its subject follows the common form ("Accepted:
   Weekly sync").
+- An event with attendees always names its organizer: the one it has, else the chosen mail account, else the
+  calendar's account, on creation and when guests are added later.
 - An event the user organizes with attendees sends `REQUEST` on creation and on changes that raise `SEQUENCE`,
   and `CANCEL` on deletion, through the same path when the provider does not do it.
 
@@ -832,7 +849,7 @@ accepted.
 - Clients keep them in their local store and expand recurrence locally (`packages/core`, `ical.js`), so the views
   work offline and switching weeks costs no request. The local copy is limited to events whose series touches the
   last 2 years or the future, which the API filters with `series_ends_at`; older history is read through the range
-  endpoint.
+  endpoint. An event changed to end before that window comes as a deletion, so copies drop it.
 - Reminders are scheduled and sent by the server (next section), so they reach every device, also when no app is
   open.
 
