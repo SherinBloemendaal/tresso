@@ -43,11 +43,11 @@ final class CalendarEventApiTest extends DatabaseTestCase
 
     public function testCreatesAnEventAndListsItsOccurrence(): void
     {
-        $event = $this->create(['location' => 'Room 4', 'useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 10, 'channels' => ['push', 'email']]], 'travelMinutes' => 20, 'description' => 'Agenda: https://meet.google.com/abc-defg-hij']);
+        $event = $this->create(['location' => 'Room 4', 'useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 10, 'channels' => ['phone', 'email']]], 'travelMinutes' => 20, 'description' => 'Agenda: https://meet.google.com/abc-defg-hij']);
 
         self::assertSame(['dateTime' => '2026-10-19T09:00:00', 'timeZone' => 'Europe/Amsterdam'], $event['start'] ?? null);
         self::assertSame('Room 4', $event['location'] ?? null);
-        self::assertSame([['action' => 'display', 'trigger' => '-PT10M', 'relatedTo' => 'start', 'at' => null, 'channels' => ['push', 'email']]], $event['reminders'] ?? null);
+        self::assertSame([['action' => 'display', 'trigger' => '-PT10M', 'relatedTo' => 'start', 'at' => null, 'channels' => ['phone', 'email']]], $event['reminders'] ?? null);
         self::assertFalse($event['defaultReminders'] ?? null);
         self::assertSame(20, $event['travelMinutes'] ?? null);
         self::assertSame(['provider' => 'meet', 'url' => 'https://meet.google.com/abc-defg-hij', 'id' => null, 'dialIn' => null], $event['conference'] ?? null);

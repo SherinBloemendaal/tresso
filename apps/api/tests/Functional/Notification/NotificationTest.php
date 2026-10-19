@@ -47,7 +47,7 @@ final class NotificationTest extends DatabaseTestCase
     {
         $rules = $this->getJson('/api/v1/reminder-rules', $this->kim);
         self::assertSame(['Timed events', 'All-day events'], array_column($rules, 'name'));
-        self::assertSame([[['minutesBefore' => 10, 'dayBeforeAt' => null, 'channels' => ['push']]], [['minutesBefore' => null, 'dayBeforeAt' => '09:00', 'channels' => ['push']]]], array_column($rules, 'reminders'));
+        self::assertSame([[['minutesBefore' => 10, 'dayBeforeAt' => null, 'channels' => ['phone', 'desktop']]], [['minutesBefore' => null, 'dayBeforeAt' => '09:00', 'channels' => ['phone', 'desktop']]]], array_column($rules, 'reminders'));
 
         $settings = $this->getJson('/api/v1/notification-settings', $this->kim);
         self::assertFalse($settings['quietHoursEnabled']);
@@ -63,7 +63,7 @@ final class NotificationTest extends DatabaseTestCase
         $planned = $this->notifications();
         self::assertCount(1, $planned);
         self::assertSame('reminder', $planned[0]['kind']);
-        self::assertSame(['push'], $planned[0]['channels']);
+        self::assertSame(['phone', 'desktop'], $planned[0]['channels']);
         self::assertSame($start->modify('-10 minutes')->format(\DATE_ATOM), $this->atom($planned[0]['fireAt']));
         self::assertNull($planned[0]['deliveredAt']);
     }
@@ -71,7 +71,7 @@ final class NotificationTest extends DatabaseTestCase
     public function testDeliversOnceToEveryDeviceAndByEmail(): void
     {
         $this->registerDevices();
-        $this->createEvent($this->inMinutes(6), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 5, 'channels' => ['push', 'email']]]]);
+        $this->createEvent($this->inMinutes(6), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 5, 'channels' => ['phone', 'desktop', 'email']]]]);
         $id = $this->onlyNotificationId();
 
         $this->fire($id);
@@ -98,6 +98,38 @@ final class NotificationTest extends DatabaseTestCase
         self::assertSame([$id], array_column($delta['notifications'], 'id'), 'The desktop app finds the delivered notification in the delta.');
     }
 
+    public function testAReminderForThePhoneReachesOnlyThePhone(): void
+    {
+        $this->registerDevices();
+        $this->createEvent($this->inMinutes(6), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 5, 'channels' => ['phone']]]]);
+
+        $this->fire($this->onlyNotificationId());
+
+        self::assertCount(1, array_filter($this->http()->calls(), static fn (array $call): bool => str_starts_with($call['url'], 'https://exp.host/')));
+        self::assertCount(0, array_filter($this->http()->calls(), static fn (array $call): bool => self::PUSH_ENDPOINT === $call['url']));
+        self::assertEmailCount(0);
+    }
+
+    public function testTheUserChoosesTheChannelsPerKindOfNotification(): void
+    {
+        $this->patchSettings(['channelsByKind' => ['leave_now' => ['phone', 'email'], 'brief' => []]]);
+        self::assertEquals(['leave_now' => ['phone', 'email'], 'brief' => []], $this->getJson('/api/v1/notification-settings', $this->kim)['channelsByKind']);
+
+        $this->patchSettings(['channelsByKind' => ['brief' => null]]);
+        self::assertEquals(['leave_now' => ['phone', 'email']], $this->getJson('/api/v1/notification-settings', $this->kim)['channelsByKind'], 'Null goes back to the default.');
+
+        $this->createEvent($this->inMinutes(3 * 60), ['location' => 'Herengracht 1, Amsterdam', 'travelMinutes' => 20]);
+        $leave = array_values(array_filter($this->notifications(), static fn (array $n): bool => 'leave_now' === $n['kind']));
+        self::assertSame(['phone', 'email'], $leave[0]['channels']);
+    }
+
+    public function testRefusesUnknownChannels(): void
+    {
+        $this->client->request('PATCH', '/api/v1/notification-settings', server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['channelsByKind' => ['brief' => ['pager']]], \JSON_THROW_ON_ERROR));
+
+        self::assertResponseStatusCodeSame(422);
+    }
+
     public function testForgetsSubscriptionsThePushServiceNoLongerKnows(): void
     {
         $this->registerDevices();
@@ -117,7 +149,7 @@ final class NotificationTest extends DatabaseTestCase
 
         $this->createEvent($this->inMinutes(11), ['summary' => 'During quiet hours']);
         // Its reminder falls in the quiet hours, the event itself after them.
-        $this->createEvent($this->inMinutes(90), ['summary' => 'After quiet hours', 'useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 60, 'channels' => ['push']]]]);
+        $this->createEvent($this->inMinutes(90), ['summary' => 'After quiet hours', 'useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 60, 'channels' => ['phone', 'desktop']]]]);
         $byTitle = array_column($this->notifications(), null, 'title');
 
         $this->fire(self::string($byTitle['During quiet hours']['id']));
@@ -195,7 +227,7 @@ final class NotificationTest extends DatabaseTestCase
             'name' => 'Meetings',
             'allDay' => false,
             'withAttendees' => true,
-            'reminders' => [['minutesBefore' => 15, 'channels' => ['push']]],
+            'reminders' => [['minutesBefore' => 15, 'channels' => ['phone', 'desktop']]],
             'briefMinutes' => 10,
             'followUp' => true,
         ], $this->kim);

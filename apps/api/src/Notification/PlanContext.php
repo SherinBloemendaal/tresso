@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Notification;
 
+use App\Entity\NotificationPreferences;
 use App\Entity\ReminderRule;
 use App\Entity\User;
 use App\Entity\UserLocation;
@@ -23,6 +24,7 @@ final readonly class PlanContext
         public array $rules,
         public array $self,
         public ?UserLocation $location,
+        public NotificationPreferences $preferences,
     ) {
     }
 }

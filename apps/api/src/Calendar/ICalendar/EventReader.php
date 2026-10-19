@@ -6,6 +6,7 @@ namespace App\Calendar\ICalendar;
 
 use App\Enum\EventStatus;
 use App\Enum\EventVisibility;
+use App\Enum\NotificationChannel;
 use App\Enum\ParticipationStatus;
 use App\Enum\Transparency;
 use Sabre\VObject\Component\VCalendar;
@@ -295,7 +296,8 @@ final class EventReader
     }
 
     /**
-     * Tresso's channels for an alarm (X-TRESSO-CHANNELS), else what its action means: email for EMAIL, push otherwise.
+     * Tresso's channels for an alarm (X-TRESSO-CHANNELS), else what its action means: email for EMAIL, the phone and
+     * the desktop otherwise.
      *
      * @return list<string>
      */
@@ -305,14 +307,14 @@ final class EventReader
         if (null !== $listed) {
             $channels = array_values(array_unique(array_filter(
                 array_map(static fn (string $channel): string => strtolower(trim($channel)), explode(',', $listed)),
-                static fn (string $channel): bool => \in_array($channel, ['push', 'email'], true),
+                static fn (string $channel): bool => \in_array($channel, NotificationChannel::values(), true),
             )));
             if ([] !== $channels) {
                 return $channels;
             }
         }
 
-        return 'email' === $action ? ['email'] : ['push'];
+        return 'email' === $action ? [NotificationChannel::Email->value] : [NotificationChannel::Phone->value, NotificationChannel::Desktop->value];
     }
 
     /** Tresso's own travel time, else Apple Calendar's travel duration. */

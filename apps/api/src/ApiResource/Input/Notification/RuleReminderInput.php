@@ -18,9 +18,9 @@ final class RuleReminderInput
     public ?string $dayBeforeAt = null;
 
     /** @var list<string> */
-    #[Assert\Count(min: 1, max: 2)]
-    #[Assert\All([new Assert\Choice(choices: ['push', 'email'])])]
-    public array $channels = ['push'];
+    #[Assert\Count(min: 1, max: 3)]
+    #[Assert\All([new Assert\Choice(choices: ['phone', 'desktop', 'email'])])]
+    public array $channels = ['phone', 'desktop'];
 
     #[Assert\IsTrue(message: 'Give minutesBefore or dayBeforeAt, not both.')]
     public function isOneWhen(): bool
