@@ -1,9 +1,9 @@
 import 'fake-indexeddb/auto'
 import { describe, expect, it } from 'vitest'
 import { openDB } from 'idb'
-import { databaseName, deleteMailDatabase, MailDatabase } from '../db'
+import { databaseName, deleteMailDatabase, IndexedDbMailStore } from '../db'
 
-describe('MailDatabase upgrade to synced drafts', () => {
+describe('IndexedDbMailStore upgrade to synced drafts', () => {
   it('uploads drafts that were kept on the device before', async () => {
     // A version 3 copy, as the previous build left it: drafts lived only on the device.
     const v3 = await openDB(databaseName('upgrade-drafts'), 3, {
@@ -35,17 +35,17 @@ describe('MailDatabase upgrade to synced drafts', () => {
     await v3.put('meta', 9, 'cursor')
     v3.close()
 
-    const db = await MailDatabase.open('upgrade-drafts')
+    const db = await IndexedDbMailStore.open('upgrade-drafts')
 
     expect(await db.draft('written')).toMatchObject({ subject: 'Written before', version: 0, pendingSave: true, remoteVersion: null })
     expect(await db.draft('sending')).toMatchObject({ version: 0, pendingSave: false, outgoingId: 'o1' })
     expect(await db.cursor()).toBe(0)
-    db.close()
+    await db.close()
     await deleteMailDatabase('upgrade-drafts')
   })
 })
 
-describe('MailDatabase upgrade', () => {
+describe('IndexedDbMailStore upgrade', () => {
   it('moves a version 1 copy to version 2 and syncs it again from the start', async () => {
     const legacy = await openDB(databaseName('upgrade-user'), 1, {
       upgrade(database) {
@@ -67,12 +67,12 @@ describe('MailDatabase upgrade', () => {
     await legacy.put('meta', 42, 'cursor')
     legacy.close()
 
-    const db = await MailDatabase.open('upgrade-user')
+    const db = await IndexedDbMailStore.open('upgrade-user')
 
     expect(await db.cursor()).toBe(0)
     expect(await db.outbox()).toEqual([])
     expect(await db.drafts()).toEqual([])
-    db.close()
+    await db.close()
     await deleteMailDatabase('upgrade-user')
   })
 })

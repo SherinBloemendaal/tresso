@@ -5,6 +5,7 @@ import {
   SyncEngine,
   MAX_MESSAGES_PER_ACTION,
   appliedFor,
+  CopyClosingError,
   PartialActionError,
   type AppliedAction,
   type ChangePage,
@@ -14,6 +15,7 @@ import {
   type MessageBody,
   type RealtimeAccess,
   type DraftRequest,
+  type MailStore,
   type SendMessageRequest,
   type SyncedDraft,
   type SyncedFolder,
@@ -23,7 +25,8 @@ import {
   type SyncedSignature,
   type SyncedThread,
 } from '@tresso/core'
-import { deleteMailDatabase, MailDatabase, type Contact, type Conversation, type Draft } from '@/mail/db'
+import type { Contact, Conversation, Draft } from '@/mail/db'
+import { deleteMailStore, openMailStore } from '@/mail/store'
 import { ApiError } from '@/api/errors'
 import { freshArrivals, mailNotifications } from '@/mail/mailNotifications'
 import { notifier } from '@/platform/notifier'
@@ -59,7 +62,7 @@ export const useMailStore = defineStore('mail', () => {
   const live = ref(false)
   const ready = ref(false)
 
-  const db = shallowRef<MailDatabase | null>(null)
+  const db = shallowRef<MailStore | null>(null)
   let userId: string | null = null
   let engine: SyncEngine | null = null
   let realtime: RealtimeClient | null = null
@@ -75,7 +78,7 @@ export const useMailStore = defineStore('mail', () => {
     }
     await stop()
     userId = forUserId
-    db.value = await MailDatabase.open(forUserId)
+    db.value = await openMailStore(forUserId)
     await refresh()
     ready.value = true
 
@@ -117,6 +120,11 @@ export const useMailStore = defineStore('mail', () => {
         notifyingSince = Date.now()
       }
     } catch (error) {
+      if (error instanceof CopyClosingError) {
+        // A page that arrived while the copy closed (a sign-out or another user): nothing is wrong.
+        syncState.value = 'idle'
+        return
+      }
       syncState.value = 'error'
       syncError.value = error instanceof Error ? error.message : String(error)
     }
@@ -150,8 +158,9 @@ export const useMailStore = defineStore('mail', () => {
     realtime = null
     engine = null
     notifyingSince = null
-    db.value?.close()
+    const database = db.value
     db.value = null
+    await database?.close()
     userId = null
     live.value = false
     ready.value = false
@@ -168,7 +177,7 @@ export const useMailStore = defineStore('mail', () => {
     const forUserId = userId
     await stop()
     if (forUserId !== null) {
-      await deleteMailDatabase(forUserId)
+      await deleteMailStore(forUserId)
     }
   }
 
