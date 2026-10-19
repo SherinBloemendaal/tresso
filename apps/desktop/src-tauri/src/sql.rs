@@ -20,6 +20,8 @@ type Live = Arc<Mutex<HashMap<PathBuf, usize>>>;
 
 struct Database {
   path: PathBuf,
+  /// The web view page load that opened it (see `open`).
+  page: String,
   writer: Mutex<Connection>,
   reader: Mutex<Connection>,
   live: Live,
@@ -103,24 +105,41 @@ fn bind(params: Vec<Value>) -> Result<Vec<SqlValue>, String> {
 }
 
 impl Databases {
-  /// Opens (or creates) a mail copy in `folder` and returns its handle.
-  fn open(&self, folder: &Path, name: &str) -> Result<u32, String> {
+  /// Opens (or creates) a mail copy in `folder` for the web view page load `page`, and returns its handle.
+  fn open(&self, folder: &Path, name: &str, page: &str) -> Result<u32, String> {
     let path = file(folder, name)?;
-    std::fs::create_dir_all(folder).map_err(|error| format!("Creating the mail folder failed: {error}"))?;
-    let writer = connect(&path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    writer
-      .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
-      .map_err(|error| format!("Preparing the mail copy failed: {error}"))?;
-    let reader = connect(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    *self.live.lock().map_err(unavailable)?.entry(path.clone()).or_insert(0) += 1;
-    let database = Arc::new(Database { path: path.clone(), writer: Mutex::new(writer), reader: Mutex::new(reader), live: Arc::clone(&self.live) });
+    let database = {
+      // Held while connecting, so a delete of the same file cannot remove it between its check and this open.
+      let mut live = self.live.lock().map_err(unavailable)?;
+      std::fs::create_dir_all(folder).map_err(|error| format!("Creating the mail folder failed: {error}"))?;
+      let writer = connect(&path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+      writer
+        .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+        .map_err(|error| format!("Preparing the mail copy failed: {error}"))?;
+      let reader = connect(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+      *live.entry(path.clone()).or_insert(0) += 1;
+      Arc::new(Database {
+        path: path.clone(),
+        page: page.to_string(),
+        writer: Mutex::new(writer),
+        reader: Mutex::new(reader),
+        live: Arc::clone(&self.live),
+      })
+    };
 
     let handle = self.next.fetch_add(1, Ordering::Relaxed);
-    let mut open = self.open.lock().map_err(unavailable)?;
-    // Handles of the same copy left by a web view that reloaded can never be used again: they go, and a transaction one
-    // of them left open is rolled back as its connection closes.
-    open.retain(|_, database| database.path != path);
-    open.insert(handle, database);
+    let evicted: Vec<Arc<Database>> = {
+      let mut open = self.open.lock().map_err(unavailable)?;
+      // Handles of the same copy left by an earlier page load (the web view reloaded) can never be used again: they
+      // go, and a transaction one of them left open is rolled back as its connection closes. Handles of this page
+      // load stay, even when two of its opens overlap.
+      let stale: Vec<u32> = open.iter().filter(|(_, other)| other.path == path && other.page != page).map(|(id, _)| *id).collect();
+      let evicted = stale.iter().filter_map(|id| open.remove(id)).collect();
+      open.insert(handle, database);
+      evicted
+    };
+    // Dropped outside the lock: closing their connections takes the `live` lock.
+    drop(evicted);
     Ok(handle)
   }
 
@@ -205,7 +224,9 @@ impl Databases {
   /// Removes a closed copy from `folder`. A copy any connection still uses is refused.
   fn delete(&self, folder: &Path, name: &str) -> Result<(), String> {
     let path = file(folder, name)?;
-    if self.live.lock().map_err(unavailable)?.contains_key(&path) {
+    // Held until the files are gone, so an open of the same copy waits instead of writing into a removed file.
+    let live = self.live.lock().map_err(unavailable)?;
+    if live.contains_key(&path) {
       return Err("The mail copy is still open.".to_string());
     }
     for suffix in ["", "-wal", "-shm"] {
@@ -225,8 +246,8 @@ fn folder(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 #[tauri::command(async)]
-pub fn sql_open(app: AppHandle, state: State<'_, Databases>, name: String) -> Result<u32, String> {
-  state.open(&folder(&app)?, &name)
+pub fn sql_open(app: AppHandle, state: State<'_, Databases>, name: String, page: String) -> Result<u32, String> {
+  state.open(&folder(&app)?, &name, &page)
 }
 
 /// Runs statements without results (several may be given at once, without parameters).
@@ -324,17 +345,17 @@ mod tests {
     let databases = Databases::default();
     let folder = folder();
     for name in ["", "../x", "a/b", "a.b", "a b", &"x".repeat(129)] {
-      assert!(databases.open(&folder, name).is_err(), "{name:?} was accepted");
+      assert!(databases.open(&folder, name, "page").is_err(), "{name:?} was accepted");
       assert!(databases.delete(&folder, name).is_err(), "{name:?} was accepted");
     }
-    assert!(databases.open(&folder, "tresso-mail-0a1B_c").is_ok());
+    assert!(databases.open(&folder, "tresso-mail-0a1B_c", "page").is_ok());
   }
 
   #[test]
   fn readers_see_only_committed_writes() {
     let databases = Databases::default();
     let folder = folder();
-    let handle = databases.open(&folder, "copy").unwrap();
+    let handle = databases.open(&folder, "copy", "page").unwrap();
     databases.exec(handle, "CREATE TABLE t (v TEXT)").unwrap();
 
     databases.begin(handle).unwrap();
@@ -354,7 +375,7 @@ mod tests {
   fn rolls_back_a_transaction_left_open_before_starting_the_next() {
     let databases = Databases::default();
     let folder = folder();
-    let handle = databases.open(&folder, "copy").unwrap();
+    let handle = databases.open(&folder, "copy", "page").unwrap();
     databases.exec(handle, "CREATE TABLE t (v TEXT)").unwrap();
     databases.begin(handle).unwrap();
     databases.run(handle, "INSERT INTO t (v) VALUES ('left')", vec![]).unwrap();
@@ -372,12 +393,12 @@ mod tests {
   fn drops_handles_of_a_reloaded_web_view_and_their_open_transaction() {
     let databases = Databases::default();
     let folder = folder();
-    let stale = databases.open(&folder, "copy").unwrap();
+    let stale = databases.open(&folder, "copy", "before reload").unwrap();
     databases.exec(stale, "CREATE TABLE t (v TEXT)").unwrap();
     databases.begin(stale).unwrap();
     databases.run(stale, "INSERT INTO t (v) VALUES ('half')", vec![]).unwrap();
 
-    let fresh = databases.open(&folder, "copy").unwrap();
+    let fresh = databases.open(&folder, "copy", "after reload").unwrap();
 
     assert!(databases.exec(stale, "SELECT 1").is_err());
     assert_eq!(count(&databases, fresh, On::Reader), 0);
@@ -386,10 +407,25 @@ mod tests {
   }
 
   #[test]
+  fn keeps_both_handles_when_opens_of_one_page_load_overlap() {
+    let databases = Databases::default();
+    let folder = folder();
+    let first = databases.open(&folder, "copy", "page").unwrap();
+    let second = databases.open(&folder, "copy", "page").unwrap();
+
+    databases.exec(first, "CREATE TABLE t (v TEXT)").unwrap();
+    assert_eq!(count(&databases, second, On::Reader), 0);
+    databases.close(first).unwrap();
+    assert!(databases.delete(&folder, "copy").is_err());
+    databases.close(second).unwrap();
+    databases.delete(&folder, "copy").unwrap();
+  }
+
+  #[test]
   fn deletes_a_copy_only_once_nothing_uses_it() {
     let databases = Databases::default();
     let folder = folder();
-    let handle = databases.open(&folder, "copy").unwrap();
+    let handle = databases.open(&folder, "copy", "page").unwrap();
     databases.exec(handle, "CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('x')").unwrap();
     assert!(databases.delete(&folder, "copy").is_err());
 
