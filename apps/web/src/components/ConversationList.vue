@@ -4,6 +4,7 @@ import { RouterLink, type RouteLocationRaw } from 'vue-router'
 import type { Conversation } from '@/mail/db'
 import { dayLabel, senderName, shortTime } from '@/mail/format'
 import AppIcon from '@/components/AppIcon.vue'
+import SearchField from '@/components/SearchField.vue'
 import SenderAvatar from '@/components/SenderAvatar.vue'
 
 const props = defineProps<{
@@ -37,6 +38,7 @@ const days = computed(() => {
   <section class="list" :aria-label="title">
     <header class="header">
       <h1>{{ title }}</h1>
+      <SearchField />
     </header>
 
     <div class="scroll">
@@ -88,6 +90,9 @@ const days = computed(() => {
   border-right: 1px solid var(--line);
 }
 .header {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 20px 20px 12px;
   border-bottom: 1px solid var(--line);
 }

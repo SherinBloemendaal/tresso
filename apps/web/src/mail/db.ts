@@ -239,6 +239,10 @@ export class MailDatabase implements SyncStore {
     return accounts.sort((a, b) => a.displayName.localeCompare(b.displayName) || a.emailAddress.localeCompare(b.emailAddress))
   }
 
+  async folders(): Promise<SyncedFolder[]> {
+    return this.db.getAll('folders')
+  }
+
   async signatures(): Promise<SyncedSignature[]> {
     const signatures = await this.db.getAll('signatures')
 

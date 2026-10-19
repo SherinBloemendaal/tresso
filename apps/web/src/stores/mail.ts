@@ -7,6 +7,7 @@ import {
   type MessageBody,
   type RealtimeAccess,
   type SendMessageRequest,
+  type SyncedFolder,
   type SyncedMailAccount,
   type SyncedMessage,
   type SyncedOutgoingMessage,
@@ -162,6 +163,10 @@ export const useMailStore = defineStore('mail', () => {
     return (await db.value?.thread(threadId)) ?? null
   }
 
+  async function folders(): Promise<SyncedFolder[]> {
+    return (await db.value?.folders()) ?? []
+  }
+
   function body(messageId: string, allowRemoteContent: boolean): Promise<MessageBody> {
     const query = allowRemoteContent ? '?remoteContent=allow' : ''
 
@@ -230,6 +235,7 @@ export const useMailStore = defineStore('mail', () => {
     showMailbox,
     showMore,
     thread,
+    folders,
     body,
     send,
     cancelOutgoing,
