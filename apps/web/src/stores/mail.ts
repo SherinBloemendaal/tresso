@@ -375,6 +375,11 @@ export const useMailStore = defineStore('mail', () => {
     () => void refresh(),
   )
 
+  /** The open copy, for the composer; null while nobody is signed in. */
+  function currentStore(): MailStore | null {
+    return db.value
+  }
+
   /** Brings the draft's unsaved edits to the server (see DraftSync.upload). */
   function uploadDraft(id: string): Promise<void> {
     return draftSync.upload(id)
@@ -460,6 +465,8 @@ export const useMailStore = defineStore('mail', () => {
     deleteDraft,
     uploadDraft,
     uploadDraftForSending,
+    draftSync,
+    currentStore,
     uploadPendingDrafts,
     resolveDraftConflict,
     deleteDraftEverywhere,
