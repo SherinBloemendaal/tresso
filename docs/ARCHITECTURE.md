@@ -287,6 +287,14 @@ the first screen. When the keychain refuses, the app says that the sign-in will 
 The API and the Mercure hub accept the app's origins (`tauri://localhost`, and `http://tauri.localhost` on Windows),
 and the main window may only open http(s) pages in the browser and read the link it was opened with.
 
+The mobile app (Expo Router, screens in `apps/mobile/src/app`) is the `mobile` OAuth client with the same redirect
+URI. expo-auth-session opens the authorization page in the system's authentication browser
+(ASWebAuthenticationSession on iOS, Custom Tabs on Android) with PKCE and checks the state; the code is exchanged
+through `packages/core`. `Session` (`apps/mobile/src/auth/session.ts`, plain TypeScript, unit tested) keeps the tokens
+in expo-secure-store (Keychain on iOS, Keystore-encrypted on Android) as three entries, because some iOS releases
+refuse values above about 2 KB, refreshes them before they expire with one shared request (refresh tokens rotate),
+and never lets a refresh that finishes after sign-out sign the user back in.
+
 Shared TypeScript lives in `packages/core` (MIT): domain types, the OAuth flow, and the client side of the sync
 protocol, so every client syncs the same way:
 
