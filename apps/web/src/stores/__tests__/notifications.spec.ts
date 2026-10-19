@@ -17,11 +17,11 @@ vi.mock('@/platform/notifier', () => ({
 
 const { useMailStore } = await import('../mail')
 
-const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }
+const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }
 const inbox = { id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' as const }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], deleted: [], ...extra }
 }
 
 function message(id: string, receivedAt: string, verdict: SyncedMessage['verdict'] = 'do'): SyncedMessage {
@@ -41,6 +41,7 @@ function message(id: string, receivedAt: string, verdict: SyncedMessage['verdict
     smartInboxId: null,
     verdict,
     summary: null,
+    calendarMethod: null,
   }
 }
 

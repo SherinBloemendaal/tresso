@@ -5,7 +5,7 @@ import { MAX_MESSAGES_PER_ACTION, type ChangePage, type SyncedMessage } from '@t
 import { deleteMailDatabase } from '@/mail/db'
 import { useMailStore } from '../mail'
 
-const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }
+const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }
 
 function message(id: string): SyncedMessage {
   return {
@@ -24,6 +24,7 @@ function message(id: string): SyncedMessage {
     smartInboxId: null,
     verdict: null,
     summary: null,
+    calendarMethod: null,
   }
 }
 
@@ -52,6 +53,8 @@ describe('message actions in large selections', () => {
             signatures: [],
             drafts: [],
             smartInboxes: [],
+            calendars: [],
+            calendarEvents: [],
             deleted: [],
           }
           return new Response(JSON.stringify(since === 0 ? first : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [] }))

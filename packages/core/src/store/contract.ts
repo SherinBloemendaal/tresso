@@ -5,12 +5,12 @@ import type { Draft, MailStore } from './mailStore'
 
 /** Test data for the mail stores. */
 export function page(changes: Partial<ChangePage> & { cursor: number }): ChangePage {
-  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [], ...changes }
+  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], deleted: [], ...changes }
 }
 
 export const accounts = [
-  { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: 'sig-work' },
-  { id: 'home', emailAddress: 'kim@mail.example', displayName: 'Personal', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null },
+  { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: 'sig-work', calendarStatus: 'unknown' as const, calendarStatusDetail: null },
+  { id: 'home', emailAddress: 'kim@mail.example', displayName: 'Personal', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null },
 ]
 
 export const folders = [
@@ -48,6 +48,7 @@ export function message(id: string, threadId: string, mailAccountId: string, fol
     smartInboxId: null,
     verdict: null,
     summary: null,
+    calendarMethod: null,
     ...extra,
   }
 }
@@ -421,7 +422,7 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
       await db.apply(page({ cursor: 11, signatures: [{ ...signature('sig-work', 'Work'), html: '<p>Kim Visser</p>' }] }))
       expect((await db.signatures()).find((s) => s.id === 'sig-work')?.html).toBe('<p>Kim Visser</p>')
 
-      await db.apply(page({ cursor: 12, deleted: [{ type: 'signature', id: 'sig-work' }], mailAccounts: [{ ...accounts[0]!, defaultSignatureId: null }] }))
+      await db.apply(page({ cursor: 12, deleted: [{ type: 'signature', id: 'sig-work' }], mailAccounts: [{ ...accounts[0]!, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }] }))
       expect((await db.signatures()).map((s) => s.id)).toEqual(['sig-short'])
       expect((await db.mailAccounts()).find((a) => a.id === 'work')?.defaultSignatureId).toBeNull()
       expect(await db.cursor()).toBe(12)

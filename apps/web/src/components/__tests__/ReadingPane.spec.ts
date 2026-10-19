@@ -10,7 +10,7 @@ import { useMailStore } from '@/stores/mail'
 import { useSelectionStore } from '@/stores/selection'
 import ReadingPane from '../ReadingPane.vue'
 
-const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }
+const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }
 const folders = [
   { id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' as const },
   { id: 'sent', mailAccountId: 'work', name: 'Sent', displayName: 'Sent', role: 'sent' as const },
@@ -36,11 +36,12 @@ function message(id: string, folderIds: string[], receivedAt: string, seen: bool
     smartInboxId: null,
     verdict: null,
     summary: null,
+    calendarMethod: null,
   }
 }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], deleted: [], ...extra }
 }
 
 async function settle(): Promise<void> {

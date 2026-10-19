@@ -136,7 +136,7 @@ describe('SettingsSignaturesView', () => {
     await wrapper.findAll('.check')[2]!.get('input').setValue(true)
     afterSync = () => {
       mail.signatures = [...mail.signatures, signature('sig-new', 'Short reply', '<p>K.</p>')]
-      mail.accounts = mail.accounts.map((a) => (a.id === 'home' ? { ...a, defaultSignatureId: 'sig-new' } : a))
+      mail.accounts = mail.accounts.map((a) => (a.id === 'home' ? { ...a, defaultSignatureId: 'sig-new', calendarStatus: 'unknown' as const, calendarStatusDetail: null } : a))
     }
     await wrapper.get('form').trigger('submit')
     await settle()
@@ -178,7 +178,7 @@ describe('SettingsSignaturesView', () => {
     expect(wrapper.get('[role="alertdialog"]').text()).toContain('Delete Support?')
     afterSync = () => {
       mail.signatures = mail.signatures.filter((s) => s.id !== 'sig-support')
-      mail.accounts = mail.accounts.map((a) => (a.defaultSignatureId === 'sig-support' ? { ...a, defaultSignatureId: null } : a))
+      mail.accounts = mail.accounts.map((a) => (a.defaultSignatureId === 'sig-support' ? { ...a, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null } : a))
     }
     await wrapper.get('[role="alertdialog"] button.button-danger').trigger('click')
     await settle()
