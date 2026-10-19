@@ -98,7 +98,27 @@ export interface SyncedSignature {
   updatedAt: string
 }
 
-export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage' | 'signature'
+export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage' | 'signature' | 'draft'
+
+export type DraftKind = 'new' | 'reply' | 'replyAll' | 'forward'
+
+/** A message being written, the same on every device. `version` rises with every save. */
+export interface SyncedDraft {
+  id: string
+  mailAccountId: string | null
+  kind: DraftKind
+  to: Address[]
+  cc: Address[]
+  bcc: Address[]
+  subject: string
+  /** What the user writes, without signature and quote. */
+  html: string
+  signatureId: string | null
+  quoteHtml: string
+  inReplyToMessageId: string | null
+  version: number
+  updatedAt: string
+}
 
 export interface Deleted {
   type: DeletedType
@@ -114,6 +134,7 @@ export interface ChangePage {
   messages: SyncedMessage[]
   outgoingMessages: SyncedOutgoingMessage[]
   signatures: SyncedSignature[]
+  drafts: SyncedDraft[]
   deleted: Deleted[]
 }
 
