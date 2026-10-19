@@ -15,7 +15,7 @@ use Symfony\Component\Messenger\Event\WorkerMessageHandledEvent;
  */
 final readonly class PublishChangesSubscriber implements EventSubscriberInterface
 {
-    public function __construct(private ChangeNotifier $notifier)
+    public function __construct(private RealtimeNotifier $notifier)
     {
     }
 

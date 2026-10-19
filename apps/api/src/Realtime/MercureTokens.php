@@ -20,6 +20,8 @@ final readonly class MercureTokens
 {
     public const string ISSUER = 'tresso-api';
     public const string AUTHORIZATION_DETAIL_TYPE = 'https://mercure.rocks/authorization-detail';
+    /** Where the sync workers hear about accounts with mail to send. */
+    public const string OUTBOX_TOPIC = 'urn:tresso:sync:outbox';
     private const string SUBSCRIBER_TTL = 'PT1H';
     private const string PUBLISHER_TTL = 'PT5M';
 
@@ -72,6 +74,16 @@ final readonly class MercureTokens
     public static function changesTopic(Uuid $userId): string
     {
         return 'urn:tresso:user:'.$userId->toRfc4122().':changes';
+    }
+
+    /** For a sync worker: subscribe to the outbox topic. */
+    public function workerToken(string $clientId): Token
+    {
+        if ('' === $clientId) {
+            throw new \InvalidArgumentException('A worker token needs the OAuth client it is issued to.');
+        }
+
+        return $this->issue($this->subscriberKey, $clientId, $clientId, ['subscribe'], [self::OUTBOX_TOPIC], self::SUBSCRIBER_TTL);
     }
 
     public function subscriberToken(Uuid $userId, string $clientId): Token

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Unit\Realtime;
 
-use App\Realtime\ChangeNotifier;
+use App\Realtime\RealtimeNotifier;
 use App\Realtime\MercurePublisher;
 use App\Realtime\MercureTokens;
 use PHPUnit\Framework\TestCase;
@@ -12,7 +12,7 @@ use Symfony\Component\HttpClient\MockHttpClient;
 use Symfony\Component\HttpClient\Response\MockResponse;
 use Symfony\Component\Uid\Uuid;
 
-final class ChangeNotifierTest extends TestCase
+final class RealtimeNotifierTest extends TestCase
 {
     /** @var list<array<string, string>> */
     private array $posts = [];
@@ -21,7 +21,7 @@ final class ChangeNotifierTest extends TestCase
 
     private int $hubStatus = 200;
 
-    private ChangeNotifier $notifier;
+    private RealtimeNotifier $notifier;
 
     protected function setUp(): void
     {
@@ -39,7 +39,7 @@ final class ChangeNotifierTest extends TestCase
         });
         $this->logger = new RecordingLogger();
         $tokens = new MercureTokens('http://localhost:8080/.well-known/mercure', str_repeat('p', 32), str_repeat('s', 32));
-        $this->notifier = new ChangeNotifier(new MercurePublisher($http, $tokens, $this->logger, 'http://api/.well-known/mercure'));
+        $this->notifier = new RealtimeNotifier(new MercurePublisher($http, $tokens, $this->logger, 'http://api/.well-known/mercure'));
     }
 
     public function testPublishesTheHighestCommittedCursorPerUser(): void
@@ -110,6 +110,6 @@ final class ChangeNotifierTest extends TestCase
         $this->notifier->publish();
 
         self::assertCount(1, $this->posts);
-        self::assertSame(['Publishing the change cursor to Mercure failed.'], $this->logger->messages);
+        self::assertSame(['Publishing to Mercure failed.'], $this->logger->messages);
     }
 }

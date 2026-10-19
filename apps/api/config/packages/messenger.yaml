@@ -12,7 +12,8 @@ framework:
             failed: '%env(MESSENGER_TRANSPORT_DSN)%_failed'
             sync: 'sync://'
 
-        routing: {}
+        routing:
+            App\Outbox\ReleaseOutgoingMessage: async
 
 when@test:
     framework:

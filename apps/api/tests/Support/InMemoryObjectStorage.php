@@ -22,6 +22,16 @@ final class InMemoryObjectStorage implements ObjectStorage
         return $this->objects[$key] ?? throw ObjectNotFound::forKey($key);
     }
 
+    public function write(string $key, string $content, string $contentType): void
+    {
+        $this->objects[$key] = $content;
+    }
+
+    public function has(string $key): bool
+    {
+        return isset($this->objects[$key]);
+    }
+
     public function stream(string $key): iterable
     {
         return str_split($this->read($key), 8192);

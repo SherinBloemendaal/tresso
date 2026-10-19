@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional;
 
-use App\Realtime\ChangeNotifier;
+use App\Realtime\RealtimeNotifier;
 use App\Realtime\MercureTokens;
 use App\Repository\UserRepository;
 use App\Sync\Change\ChangeSequencer;
@@ -116,7 +116,7 @@ final class RealtimeTest extends DatabaseTestCase
         } catch (\RuntimeException $caught) {
             self::assertSame($failed, $caught);
         }
-        static::getContainer()->get(ChangeNotifier::class)->publish();
+        static::getContainer()->get(RealtimeNotifier::class)->publish();
 
         self::assertSame([], $this->hub()->takePublished());
     }
@@ -125,7 +125,7 @@ final class RealtimeTest extends DatabaseTestCase
     {
         $sequencer = static::getContainer()->get(ChangeSequencer::class);
         $seq = static::getContainer()->get(EntityManagerInterface::class)->wrapInTransaction(fn (): int => $sequencer->next($this->kimId()));
-        static::getContainer()->get(ChangeNotifier::class)->publish();
+        static::getContainer()->get(RealtimeNotifier::class)->publish();
 
         $published = $this->hub()->takePublished();
         self::assertCount(1, $published);

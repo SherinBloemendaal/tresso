@@ -51,6 +51,11 @@ final readonly class S3ObjectStorage implements ObjectStorage
         return $this->open($key)->getBody()->getChunks();
     }
 
+    public function write(string $key, string $content, string $contentType): void
+    {
+        $this->client->putObject(['Bucket' => $this->bucket, 'Key' => $key, 'Body' => $content, 'ContentType' => $contentType])->resolve();
+    }
+
     private function open(string $key): GetObjectOutput
     {
         $output = $this->client->getObject(['Bucket' => $this->bucket, 'Key' => $key]);

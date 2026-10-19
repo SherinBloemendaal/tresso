@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Sync\Change;
 
-use App\Realtime\ChangeNotifier;
+use App\Realtime\RealtimeNotifier;
 use Doctrine\DBAL\Connection;
 use Symfony\Component\Uid\Uuid;
 
@@ -16,13 +16,13 @@ use Symfony\Component\Uid\Uuid;
  * smaller number that was still uncommitted. That only holds inside a transaction, hence the guard. Different users
  * never wait on each other.
  *
- * Every number is also reported to the {@see ChangeNotifier}, which tells the user's clients once it is committed.
+ * Every number is also reported to the {@see RealtimeNotifier}, which tells the user's clients once it is committed.
  */
 final readonly class ChangeSequencer
 {
     public function __construct(
         private Connection $connection,
-        private ChangeNotifier $notifier,
+        private RealtimeNotifier $notifier,
     ) {
     }
 
