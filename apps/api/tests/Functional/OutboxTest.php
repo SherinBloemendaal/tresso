@@ -202,6 +202,7 @@ final class OutboxTest extends DatabaseTestCase
         self::assertSame('kim@company.example', $claimed[0]['envelopeFrom']);
         self::assertSame(['anna@finance.example', 'pieter@company.example', 'archive@company.example'], $claimed[0]['recipients']);
         self::assertSame(1, $claimed[0]['attempt']);
+        self::assertFalse($claimed[0]['lastAttempt']);
         self::assertSame('sending', $this->outgoingStatus($id));
         self::assertSame([], $this->claim(), 'A claimed message is not handed out twice.');
 
@@ -254,7 +255,9 @@ final class OutboxTest extends DatabaseTestCase
         $id = $this->sendId(['to' => [['address' => 'anna@finance.example']]]);
         for ($attempt = 1; $attempt <= OutgoingMessage::MAX_ATTEMPTS; ++$attempt) {
             $this->makeDue($id);
-            self::assertCount(1, $this->claim(), "Attempt $attempt");
+            $claimed = $this->claim();
+            self::assertCount(1, $claimed, "Attempt $attempt");
+            self::assertSame(OutgoingMessage::MAX_ATTEMPTS === $attempt, $claimed[0]['lastAttempt'], "Attempt $attempt says whether it is the last");
             $this->report($id, ['outcome' => 'retry', 'error' => '451 Local error']);
         }
 
