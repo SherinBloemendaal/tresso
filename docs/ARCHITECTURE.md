@@ -186,8 +186,18 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   leaves an extra copy rather than none. Copies of drafts that were sent (`draftId` on the outgoing message),
   deleted or moved to another account are queued for removal. The work comes with the outbox run: the same
   realtime notification and heartbeat hint, the same claim and report cycle.
-- **Outbound changes:** flag/move/delete commands will follow the same pattern: queued per account by the API,
-  executed by the leasing worker, confirmed back.
+- **Message actions:** `POST /api/v1/message-actions` (scope `mail:write`) marks up to 500 messages read or unread,
+  flags or unflags them, archives them (out of the inbox into Archive, or All Mail where there is no Archive folder,
+  as on Gmail), trashes them or moves them to a folder of their account. The change shows in Tresso at once and is
+  queued per account as a `mailbox_change`; the outbox run claims an account's changes in the order they were made
+  (`/internal/sync/accounts/{id}/mailbox-changes/claim`) and reports each (`.../{change}/report`: done, retry or
+  failed). A flag change goes on every copy of the message; a move takes one copy out of its folder at once and leaves
+  a placeholder copy (remote uid `pending:<change id>`) in the target, which becomes the real copy under the uid the
+  server reports (UIDPLUS) or the folder sync finds. While a flag change is unconfirmed the folder sync leaves
+  \Seen and \Flagged as the user set them; changes to a copy that is still on its way wait until it landed. A change
+  the server refuses, or that still fails after six attempts with backoff, is undone, so Tresso shows the message as
+  the server has it. The worker moves with MOVE, or COPY and \Deleted where the server has no MOVE; it expunges only
+  that copy (UIDPLUS) and never the whole folder, which would also erase messages another app merely marked deleted.
 
 ### 3.5 Client sync protocol
 
