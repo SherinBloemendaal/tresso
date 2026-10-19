@@ -5,17 +5,23 @@ declare(strict_types=1);
 namespace App\Entity;
 
 use App\Enum\FolderRole;
+use App\Sync\Change\TracksChanges;
+use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Uid\Uuid;
 
 #[ORM\Entity]
 #[ORM\UniqueConstraint(columns: ['mail_account_id', 'remote_name'])]
-class Folder
+#[ORM\Index(columns: ['mail_account_id', 'change_seq'])]
+class Folder implements TracksChanges
 {
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
     private Uuid $id;
+
+    #[ORM\Column(type: Types::BIGINT, options: ['default' => 0])]
+    private int $changeSeq = 0;
 
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(nullable: false, onDelete: 'CASCADE')]
@@ -93,5 +99,30 @@ class Folder
     {
         $this->uidValidity = $uidValidity;
         $this->syncCursor = $syncCursor;
+    }
+
+    public function getChangeOwner(): User
+    {
+        return $this->mailAccount->getOwner();
+    }
+
+    public static function clientFields(): ?array
+    {
+        return ['remoteName', 'displayName', 'role'];
+    }
+
+    public static function changeType(): string
+    {
+        return 'folder';
+    }
+
+    public function getChangeSeq(): int
+    {
+        return $this->changeSeq;
+    }
+
+    public function setChangeSeq(int $changeSeq): void
+    {
+        $this->changeSeq = $changeSeq;
     }
 }

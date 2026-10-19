@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Entity;
 
 use App\Mail\SubjectNormalizer;
+use App\Sync\Change\TracksChanges;
+use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Uid\Uuid;
@@ -12,11 +14,15 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Entity]
 #[ORM\Index(columns: ['mail_account_id', 'last_message_at'])]
 #[ORM\Index(columns: ['mail_account_id', 'normalized_subject'])]
-class Thread
+#[ORM\Index(columns: ['mail_account_id', 'change_seq'])]
+class Thread implements TracksChanges
 {
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
     private Uuid $id;
+
+    #[ORM\Column(type: Types::BIGINT, options: ['default' => 0])]
+    private int $changeSeq = 0;
 
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(nullable: false, onDelete: 'CASCADE')]
@@ -91,5 +97,30 @@ class Thread
         if (null !== $lastMessageAt) {
             $this->lastMessageAt = $lastMessageAt;
         }
+    }
+
+    public function getChangeOwner(): User
+    {
+        return $this->mailAccount->getOwner();
+    }
+
+    public static function clientFields(): ?array
+    {
+        return ['subject', 'messageCount', 'lastMessageAt'];
+    }
+
+    public static function changeType(): string
+    {
+        return 'thread';
+    }
+
+    public function getChangeSeq(): int
+    {
+        return $this->changeSeq;
+    }
+
+    public function setChangeSeq(int $changeSeq): void
+    {
+        $this->changeSeq = $changeSeq;
     }
 }

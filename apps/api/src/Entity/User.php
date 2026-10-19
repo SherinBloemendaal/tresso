@@ -39,6 +39,10 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     #[ORM\Column(type: Types::JSON)]
     private array $roles = [];
 
+    /** Last change number handed out for this user's synced data; only ChangeSequencer writes it. */
+    #[ORM\Column(type: Types::BIGINT, options: ['default' => 0])]
+    private int $changeSeq = 0;
+
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
@@ -111,5 +115,19 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     public function getCreatedAt(): \DateTimeImmutable
     {
         return $this->createdAt;
+    }
+
+    public function getChangeSeq(): int
+    {
+        return $this->changeSeq;
+    }
+
+    /**
+     * Only for a user that is being inserted in the current flush: nobody else can see the row yet, so the counter
+     * can advance in memory. Existing users get their numbers from ChangeSequencer.
+     */
+    public function nextChangeSeqForNewUser(): int
+    {
+        return ++$this->changeSeq;
     }
 }

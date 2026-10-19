@@ -43,13 +43,13 @@ final readonly class SyncIngestProcessor implements ProcessorInterface
     {
         $account = $this->leaseGuard->leasedAccount($uriVariables['accountId'] ?? null, $data->workerId);
 
-        $result = match (true) {
+        $result = $this->entityManager->wrapInTransaction(fn (): FolderSyncResult|MessageBatchResult|ChangeBatchResult|AccountStatusResult => match (true) {
             $data instanceof FolderListInput => new FolderSyncResult($this->folders->sync($account, $data->folders)),
             $data instanceof MessageBatchInput => $this->messages->ingest($account, $data),
             $data instanceof ChangeBatchInput => $this->changes->apply($account, $data),
             $data instanceof AccountStatusInput => $this->updateStatus($account, $data),
             default => throw new \LogicException(\sprintf('Unexpected ingest input %s.', $data::class)),
-        };
+        });
 
         // The services also work in SQL; never let a later request in this process see stale entities.
         $this->entityManager->clear();

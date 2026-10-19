@@ -6,6 +6,7 @@ namespace App\Entity;
 
 use App\Enum\Verdict;
 use Doctrine\DBAL\Types\Types;
+use App\Sync\Change\TracksChanges;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Uid\Uuid;
@@ -19,11 +20,15 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Index(columns: ['mail_account_id', 'received_at'])]
 #[ORM\Index(columns: ['mail_account_id', 'message_id_header'])]
 #[ORM\Index(columns: ['thread_id'])]
-class Message
+#[ORM\Index(columns: ['mail_account_id', 'change_seq'])]
+class Message implements TracksChanges
 {
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
     private Uuid $id;
+
+    #[ORM\Column(type: Types::BIGINT, options: ['default' => 0])]
+    private int $changeSeq = 0;
 
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(nullable: false, onDelete: 'CASCADE')]
@@ -288,5 +293,30 @@ class Message
         $this->verdict = $verdict;
         $this->summary = $summary;
         $this->classifiedAt = $at;
+    }
+
+    public function getChangeOwner(): User
+    {
+        return $this->mailAccount->getOwner();
+    }
+
+    public static function clientFields(): ?array
+    {
+        return null;
+    }
+
+    public static function changeType(): string
+    {
+        return 'message';
+    }
+
+    public function getChangeSeq(): int
+    {
+        return $this->changeSeq;
+    }
+
+    public function setChangeSeq(int $changeSeq): void
+    {
+        $this->changeSeq = $changeSeq;
     }
 }

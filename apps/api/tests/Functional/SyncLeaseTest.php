@@ -161,9 +161,10 @@ final class SyncLeaseTest extends DatabaseTestCase
         $owner = new User('owner-'.$email, 'Owner');
         $account = new MailAccount($owner, $email, 'Test', MailProvider::Imap);
         $account->setStatus($status);
-        $entityManager->persist($owner);
-        $entityManager->persist($account);
-        $entityManager->flush();
+        $entityManager->wrapInTransaction(static function () use ($entityManager, $owner, $account): void {
+            $entityManager->persist($owner);
+            $entityManager->persist($account);
+        });
 
         return $account->getId()->toRfc4122();
     }

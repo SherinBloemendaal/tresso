@@ -7,6 +7,8 @@ namespace App\Sync\Ingest;
 use App\ApiResource\Input\Sync\ChangeBatchInput;
 use App\Entity\MailAccount;
 use App\Entity\MessageLocation;
+use App\Sync\Change\ChangeSequencer;
+use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 
@@ -20,6 +22,7 @@ final readonly class ChangeApplier
         private Connection $connection,
         private FolderLookup $folders,
         private MessageJanitor $janitor,
+        private ChangeSequencer $sequencer,
     ) {
     }
 
@@ -40,37 +43,46 @@ final readonly class ChangeApplier
                 ++$updated;
             }
 
-            $removed = 0;
+            /** @var list<string> $affected messages that lost a folder */
+            $affected = [];
             if ([] !== $batch->vanished) {
-                $removed = (int) $this->entityManager->createQuery('DELETE FROM App\Entity\MessageLocation l WHERE l.folder = :folder AND l.remoteUid IN (:uids)')
-                    ->setParameter('folder', $folder->getId(), 'uuid')
-                    ->setParameter('uids', array_values(array_unique($batch->vanished)))
-                    ->execute();
+                $affected = $this->connection->fetchFirstColumn(
+                    'DELETE FROM message_location WHERE folder_id = :folder AND remote_uid IN (:uids) RETURNING message_id',
+                    ['folder' => $folder->getId()->toRfc4122(), 'uids' => array_values(array_unique($batch->vanished))],
+                    ['uids' => ArrayParameterType::STRING],
+                );
             }
 
             foreach ($batch->presence as $range) {
                 // Only numeric (IMAP) uids take part; the regex guard keeps the cast safe.
-                $removed += (int) $this->connection->executeStatement(
+                $affected = [...$affected, ...$this->connection->fetchFirstColumn(
                     "DELETE FROM message_location l
                      WHERE l.folder_id = :folder
                        AND l.remote_uid ~ '^[0-9]{1,18}$'
                        AND CAST(l.remote_uid AS BIGINT) BETWEEN :from AND :to
-                       AND NOT (CAST(l.remote_uid AS BIGINT) = ANY(CAST(:uids AS BIGINT[])))",
+                       AND NOT (CAST(l.remote_uid AS BIGINT) = ANY(CAST(:uids AS BIGINT[])))
+                     RETURNING l.message_id",
                     [
                         'folder' => $folder->getId()->toRfc4122(),
                         'from' => $range->fromUid,
                         'to' => $range->toUid,
                         'uids' => '{'.implode(',', $range->uids).'}',
                     ],
-                );
+                )];
             }
+            /** @var list<string> $affected */
+            $removed = \count($affected);
 
             if (null !== $batch->cursor) {
                 $folder->updateSyncState($folder->getUidValidity(), $batch->cursor);
             }
             $this->entityManager->flush();
 
-            return [$updated, $removed, $unknown, $this->janitor->removeOrphans($account)];
+            $deleted = $this->janitor->removeOrphans($account);
+            // Messages still in other folders changed their membership.
+            $this->sequencer->touchMessages($account->getOwner()->getId(), $affected);
+
+            return [$updated, $removed, $unknown, $deleted];
         });
 
         return new ChangeBatchResult(...$result);

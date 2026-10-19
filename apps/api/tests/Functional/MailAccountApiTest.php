@@ -122,8 +122,7 @@ final class MailAccountApiTest extends DatabaseTestCase
         $id = $this->responseString('id');
 
         $entityManager = static::getContainer()->get(EntityManagerInterface::class);
-        $this->account($id)->setStatus(MailAccountStatus::AuthFailed);
-        $entityManager->flush();
+        $entityManager->wrapInTransaction(fn () => $this->account($id)->setStatus(MailAccountStatus::AuthFailed));
 
         $this->client->request('PATCH', '/api/v1/mail-accounts/'.$id, server: $headers + ['CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode([
             'displayName' => 'Work mail',
