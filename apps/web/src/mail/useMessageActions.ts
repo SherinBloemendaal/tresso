@@ -34,7 +34,7 @@ export function useMessageActions(busy: Ref<boolean> = ref(false)) {
       return await mail.act(messageIds, action, { folderId })
     } catch (error) {
       if (error instanceof PartialActionError) {
-        const rest = messageIds.length - error.accepted.before.length
+        const rest = error.rejected
         compose.notify({ text: `${rest === 1 ? 'One message was' : `${rest} messages were`} not changed: ${errorMessage(error.reason)}`, tone: 'error' })
         return error.accepted
       }
@@ -61,24 +61,25 @@ export function useMessageActions(busy: Ref<boolean> = ref(false)) {
   }
 
   /**
-   * Archives, trashes or moves the messages and says so, with an undo that puts back exactly what can be: messages
-   * that were in several folders cannot (a move takes every copy), and the notice says so.
+   * Archives, trashes or moves the messages and says so, with an undo that puts back exactly what can be (not, for
+   * example, messages that were in several folders, since a move takes every copy); the notice says how many it
+   * cannot. Returns what changed, as {@link run} does.
    */
-  async function relocate(messageIds: string[], action: 'archive' | 'trash' | 'move', folders: SyncedFolder[], folderId?: string): Promise<boolean> {
+  async function relocate(messageIds: string[], action: 'archive' | 'trash' | 'move', folders: SyncedFolder[], folderId?: string): Promise<AppliedAction | null> {
     const applied = await run(messageIds, action, folderId)
     if (applied === null) {
-      return false
+      return null
     }
     const label = action === 'archive' ? 'Archived' : action === 'trash' ? 'Moved to Trash' : `Moved to ${folders.find((folder) => folder.id === folderId)?.displayName ?? 'the folder'}`
     const plan = undoPlan(applied, action, folders)
     const left = plan.unrestorable
-    const caveat = left === 0 || plan.moves.length === 0 ? '' : ` Undo leaves ${left === 1 ? 'one message' : `${left} messages`} that ${left === 1 ? 'was' : 'were'} in several folders.`
+    const caveat = left === 0 || plan.moves.length === 0 ? '' : ` Undo cannot put ${left === 1 ? 'one message' : `${left} messages`} back.`
     compose.notify({
       text: `${label}.${caveat}`,
       tone: 'info',
       action: plan.moves.length > 0 ? { label: 'Undo', run: () => void undo(plan.moves) } : undefined,
     })
-    return true
+    return applied
   }
 
   async function undo(moves: UndoMove[]): Promise<void> {

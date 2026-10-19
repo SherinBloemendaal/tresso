@@ -32,7 +32,29 @@ const ages = [
   { id: String(365 * DAY), label: 'Older than a year' },
 ]
 
-function check(event: MouseEvent | KeyboardEvent, threadId: string): void {
+/** Shift+Space selected a range on this row; the click a browser may send when Space is let go is not a toggle. */
+let rangedByKey: string | null = null
+
+function rangeByKey(threadId: string): void {
+  rangedByKey = threadId
+  selection.extend(threadId, props.conversations.map((c) => c.threadId))
+}
+
+// A browser that sends no click after a handled Shift+Space must not leave the next real click ignored.
+function spaceReleased(threadId: string): void {
+  if (rangedByKey === threadId) {
+    setTimeout(() => {
+      rangedByKey = null
+    })
+  }
+}
+
+function check(event: MouseEvent, threadId: string): void {
+  if (rangedByKey === threadId) {
+    rangedByKey = null
+    return
+  }
+  rangedByKey = null
   if (event.shiftKey) {
     selection.extend(threadId, props.conversations.map((c) => c.threadId))
     return
@@ -88,7 +110,8 @@ const days = computed(() => {
             :aria-label="`Select ${conversation.subject || '(no subject)'}, from ${senderName(conversation.senders[0] ?? { name: null, address: '?' })}, ${shortTime(conversation.lastMessageAt)}`"
             :disabled="selection.busy"
             @click="check($event, conversation.threadId)"
-            @keydown.shift.space.prevent="check($event, conversation.threadId)"
+            @keydown.shift.space.prevent="rangeByKey(conversation.threadId)"
+            @keyup.space="spaceReleased(conversation.threadId)"
           >
             <span class="box" aria-hidden="true" />
           </button>

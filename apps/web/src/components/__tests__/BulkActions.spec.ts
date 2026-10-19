@@ -61,6 +61,7 @@ async function settle(): Promise<void> {
 describe('bulk actions', () => {
   const actions: Record<string, unknown>[] = []
   let later: ChangePage | null
+  let refuse: boolean
   let router: Router
 
   beforeEach(async () => {
@@ -68,6 +69,7 @@ describe('bulk actions', () => {
     setActivePinia(createPinia())
     actions.length = 0
     later = null
+    refuse = false
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -91,6 +93,9 @@ describe('bulk actions', () => {
         }
         if (url.pathname === '/api/v1/message-actions') {
           actions.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+          if (refuse) {
+            return new Response(JSON.stringify({ detail: 'The mail server is not reachable.' }), { status: 503 })
+          }
           return new Response(JSON.stringify({ changed: 1 }))
         }
         return new Response('{}', { status: 404 })
@@ -233,5 +238,31 @@ describe('bulk actions', () => {
 
     await vi.waitFor(() => expect([...useSelectionStore().threadIds]).toEqual(['t1']))
     expect(wrapper.get('[aria-label="Bulk actions"] [role="status"]').text()).toBe('1 selected')
+  })
+
+  it('keeps the selection when the server refuses a bulk action', async () => {
+    const wrapper = mountList()
+    await checkbox(wrapper, 't1').trigger('click')
+    await checkbox(wrapper, 't3').trigger('click')
+    refuse = true
+
+    await wrapper.get('[aria-label="Bulk actions"] button[aria-keyshortcuts="E"]').trigger('click')
+    await vi.waitFor(() => expect(useComposeStore().notices.map((n) => n.text)).toContain('The mail server is not reachable.'))
+    await settle()
+
+    expect([...useSelectionStore().threadIds].sort()).toEqual(['t1', 't3'])
+  })
+
+  it('selects a range with Shift+Space without the release taking it back', async () => {
+    const wrapper = mountList()
+    await checkbox(wrapper, 't1').trigger('click')
+
+    const last = checkbox(wrapper, 't4')
+    await last.trigger('keydown', { key: ' ', shiftKey: true })
+    // Some browsers send a click when Space is let go.
+    await last.trigger('click')
+    await last.trigger('keyup', { key: ' ' })
+
+    expect([...useSelectionStore().threadIds].sort()).toEqual(['t1', 't3', 't4'])
   })
 })
