@@ -65,10 +65,40 @@ type MailboxStore interface {
 }
 
 // OutgoingFinder is a SentStore that can tell whether an earlier attempt sent a message even when the provider gave
-// the sent copy another Message-ID (Gmail and Graph may). An error leaves the question open: the dispatcher then
-// does not send, as sending could send twice.
+// the sent copy another Message-ID (Gmail and Graph may). raw is the message being sent, since the earliest an
+// attempt can have been made. An error leaves the question open: the dispatcher then does not send, as sending could
+// send twice.
 type OutgoingFinder interface {
-	SentBefore(message api.OutgoingMessage, since time.Time) (bool, error)
+	SentBefore(message api.OutgoingMessage, raw []byte, since time.Time) (bool, error)
+}
+
+// providerAnswered reports whether a failed duplicate check is a definite answer from the provider: a refusal (4xx,
+// not 429) that no retry changes. 429 and 5xx, also after providerhttp's retries, are like no answer at all
+// (connection, timeout) or providersend.ErrNotDecided: the next attempt looks again.
+func providerAnswered(err error) bool {
+	var status *providerhttp.StatusError
+	return errors.As(err, &status) && status.StatusCode >= 400 && status.StatusCode < 500 &&
+		status.StatusCode != http.StatusTooManyRequests && !errors.Is(err, providersend.ErrNotDecided)
+}
+
+// Texts of an undecided duplicate check. They show in the outbox while the message waits, so only an attempt that
+// ends the message says what to do; the others say it is being checked, or a user would send it again meanwhile and
+// the next attempt would send the original as well.
+const (
+	// checkingText is the text of a retry that is not the last.
+	checkingText = "Tresso is checking whether an earlier attempt already went out and will try again shortly."
+	// undecidedText ends a message whose earlier attempt could not be checked.
+	undecidedText = "Tresso could not check whether an earlier attempt already sent this message; it was not sent again. Check Sent and send it again if needed."
+	// maySendText ends a message whose earlier attempt may still go out: its copy was still waiting to be sent.
+	maySendText = "An earlier attempt may still be waiting in the Outbox and could still be delivered; it was not sent again. Check the Outbox and Sent before you send it again."
+)
+
+// finalText is the text that ends a message when its duplicate check stays undecided.
+func finalText(err error) string {
+	if errors.Is(err, providersend.ErrMaybeSending) {
+		return maySendText
+	}
+	return undecidedText
 }
 
 // clockSkew is how much earlier than its id says a message may have been written, as clocks differ.
@@ -437,10 +467,28 @@ func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, sender Se
 	if message.Attempt > 1 {
 		if store, err := sent.get(); err == nil {
 			if finder, ok := store.(OutgoingFinder); ok {
-				found, err := finder.SentBefore(message, earliestAttempt(message, time.Now()))
-				if err != nil {
+				found, err := finder.SentBefore(message, raw, earliestAttempt(message, time.Now()))
+				switch {
+				case err != nil && accessLost(err):
+					// Nothing is known yet; once the user signed in again the check runs again.
+					logger.Warn("checking for an earlier attempt failed: access lost", "error", err)
+					d.report(ctx, logger, credentials.AccountID, message.ID, api.OutcomeRetry, "Tresso lost access to this account. Sign in again to send.", false)
+					return
+				case err != nil && providerAnswered(err):
+					// The provider refused the lookup, also after providerhttp's retries: retrying the check would only
+					// use up the attempts of a message nobody can tell is sent. The user decides.
 					logger.Warn("checking for an earlier attempt failed; not sending", "error", err)
-					d.report(ctx, logger, credentials.AccountID, message.ID, api.OutcomeRetry, "Tresso could not check whether an earlier attempt went out; trying again later.", false)
+					d.report(ctx, logger, credentials.AccountID, message.ID, api.OutcomeFailed, undecidedText, false)
+					return
+				case err != nil:
+					// No answer (connection, timeout, 429, 5xx) or not decided yet (a copy the provider may still be
+					// sending): look again next attempt. On the last attempt the API ends the message with this text.
+					text := checkingText
+					if message.LastAttempt {
+						text = finalText(err)
+					}
+					logger.Warn("checking for an earlier attempt did not decide", "lastAttempt", message.LastAttempt, "error", err)
+					d.report(ctx, logger, credentials.AccountID, message.ID, api.OutcomeRetry, text, false)
 					return
 				}
 				if found {

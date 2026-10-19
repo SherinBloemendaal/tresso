@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,6 +26,9 @@ type ClientOptions struct {
 	HTTP    providerhttp.Options
 	// HTTPClient carries the requests; nil uses a default client.
 	HTTPClient *http.Client
+	// Logger and Account say what the client works for, in the few things it logs itself; nil logs to slog.Default.
+	Logger  *slog.Logger
+	Account string
 }
 
 func DefaultClientOptions() ClientOptions {
@@ -37,8 +41,10 @@ func DefaultClientOptions() ClientOptions {
 
 // Client calls Microsoft Graph for one mailbox. Every request asks for immutable ids.
 type Client struct {
-	http *providerhttp.Client
-	base string
+	http    *providerhttp.Client
+	base    string
+	logger  *slog.Logger
+	account string
 }
 
 func NewClient(tokens providerhttp.Tokens, opts ClientOptions) *Client {
@@ -49,7 +55,11 @@ func NewClient(tokens providerhttp.Tokens, opts ClientOptions) *Client {
 	}
 	header.Set("Prefer", preferImmutableID)
 	httpOpts.Header = header
-	return &Client{http: providerhttp.New(opts.HTTPClient, tokens, httpOpts), base: strings.TrimRight(opts.BaseURL, "/")}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Client{http: providerhttp.New(opts.HTTPClient, tokens, httpOpts), base: strings.TrimRight(opts.BaseURL, "/"), logger: logger, account: opts.Account}
 }
 
 type mailFolder struct {

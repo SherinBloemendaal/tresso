@@ -17,6 +17,9 @@ type OutgoingMessage struct {
 	Recipients   []string `json:"recipients"`
 	MessageID    string   `json:"messageId"`
 	Attempt      int      `json:"attempt"`
+	// LastAttempt says this attempt is the API's last: a retry report then ends the message as failed, with the
+	// reported text.
+	LastAttempt bool `json:"lastAttempt"`
 }
 
 // Outcomes of sending a message.

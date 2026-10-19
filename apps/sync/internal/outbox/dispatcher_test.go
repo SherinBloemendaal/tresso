@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"slices"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"tresso/sync/internal/api"
 	"tresso/sync/internal/fakeapi"
 	"tresso/sync/internal/imapsync"
+	"tresso/sync/internal/providerhttp"
 	"tresso/sync/internal/providersend"
 	"tresso/sync/internal/smtpsend"
 	"tresso/sync/internal/storage"
@@ -261,7 +263,7 @@ type fakeFinder struct {
 	since      time.Time
 }
 
-func (f *fakeFinder) SentBefore(message api.OutgoingMessage, since time.Time) (bool, error) {
+func (f *fakeFinder) SentBefore(message api.OutgoingMessage, _ []byte, since time.Time) (bool, error) {
 	f.since = since
 	return f.sentBefore[message.ID], f.err
 }
@@ -655,18 +657,58 @@ func TestProviderRetryFindsAnEarlierSendByItsOutboxID(t *testing.T) {
 	}
 }
 
-func TestProviderRetryDoesNotSendWhenTheCheckFails(t *testing.T) {
+// A check the provider refuses for good (a 4xx) fails the message at once with the clear text. Anything else that
+// leaves the question open (429 and 5xx after providerhttp's retries, connection, timeout, not decided yet) is a Retry:
+// with a neutral text while attempts remain, so nobody sends the message again meanwhile, and with the text that ends
+// the message on the last attempt, which tells "may still be delivered" apart from "could not check". Fails on the
+// earlier code, which showed the final text on every retry and failed at once on a 502.
+func TestUndecidedChecksReportWhatTheUserCanActOn(t *testing.T) {
+	statusErr := func(code int) error { return &providerhttp.StatusError{StatusCode: code} }
+	maySend := fmt.Errorf("%w (draft d1)", providersend.ErrMaybeSending)
+	cases := []struct {
+		name    string
+		err     error
+		last    bool
+		outcome string
+		text    string
+	}{
+		{"refused", statusErr(400), false, api.OutcomeFailed, undecidedText},
+		{"throttled", statusErr(429), false, api.OutcomeRetry, checkingText},
+		{"provider error", statusErr(502), false, api.OutcomeRetry, checkingText},
+		{"provider error, last", statusErr(503), true, api.OutcomeRetry, undecidedText},
+		{"connection", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection reset by peer")}, false, api.OutcomeRetry, checkingText},
+		{"timeout, last", fmt.Errorf("GET /me/messages: %w", context.DeadlineExceeded), true, api.OutcomeRetry, undecidedText},
+		{"leftover not deleted", fmt.Errorf("%w: deleting the leftover draft: %w", providersend.ErrNotDecided, statusErr(400)), false, api.OutcomeRetry, checkingText},
+		{"may still send", maySend, false, api.OutcomeRetry, checkingText},
+		{"may still send, last", maySend, true, api.OutcomeRetry, maySendText},
+	}
+	for _, c := range cases {
+		m := message("m1", 2)
+		m.LastAttempt = c.last
+		h := newHarness(m)
+		h.api.provider = "microsoft"
+		h.finder = &fakeFinder{fakeSent: h.sent, err: c.err}
+
+		h.run()
+
+		if len(h.sends) != 0 {
+			t.Fatalf("%s: sent %d times although the check could not decide", c.name, len(h.sends))
+		}
+		if !slices.Equal(h.api.reports, []report{{"m1", c.outcome, c.text, false}}) {
+			t.Errorf("%s: reports = %+v", c.name, h.api.reports)
+		}
+	}
+}
+
+func TestProviderRetryWaitsWhenAccessIsLostDuringTheCheck(t *testing.T) {
 	h := newHarness(message("m1", 2))
-	h.api.provider = "microsoft"
-	h.finder = &fakeFinder{fakeSent: h.sent, err: errors.New("too many messages to look through")}
+	h.api.provider = "gmail"
+	h.finder = &fakeFinder{fakeSent: h.sent, err: fmt.Errorf("%w: 401", providerhttp.ErrUnauthorized)}
 
 	h.run()
 
-	if len(h.sends) != 0 {
-		t.Fatalf("sent %d times although the check could not decide", len(h.sends))
-	}
-	if len(h.api.reports) != 1 || h.api.reports[0].outcome != api.OutcomeRetry {
-		t.Errorf("reports = %+v", h.api.reports)
+	if len(h.sends) != 0 || len(h.api.reports) != 1 || h.api.reports[0].outcome != api.OutcomeRetry {
+		t.Errorf("sends %d, reports %+v", len(h.sends), h.api.reports)
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -110,18 +109,12 @@ func (c *Client) replyThread(ctx context.Context, raw []byte) (string, error) {
 	return "", nil
 }
 
-// errUndecided means a lookup would have had to go through more messages than it may; the caller must not take it
-// as "not found".
-var errUndecided = errors.New("too many messages to look through")
-
-// maxScan is how many messages a header lookup goes through at most.
-const maxScan = 2000
-
-// findByHeader goes through the messages of a listing (query; label filters in it), newest first, and returns the ids
-// of those whose header name has value. complete is false when it stopped at maxScan messages.
-func (c *Client) findByHeader(ctx context.Context, query url.Values, name, value string) (found []string, complete bool, err error) {
+// findByHeader goes through every message of a listing (query, which bounds and narrows it) and returns the ids of
+// those whose header name has value. Each message read costs a metadata request (5 quota units), so callers narrow
+// the query as far as they can.
+func (c *Client) findByHeader(ctx context.Context, query url.Values, name, value string) ([]string, error) {
 	query.Set("maxResults", "500")
-	scanned := 0
+	var found []string
 	for {
 		var page struct {
 			Messages []struct {
@@ -130,25 +123,22 @@ func (c *Client) findByHeader(ctx context.Context, query url.Values, name, value
 			NextPageToken string `json:"nextPageToken"`
 		}
 		if err := c.get(ctx, "/messages", query, costList, &page); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		for _, m := range page.Messages {
-			if scanned++; scanned > maxScan {
-				return found, false, nil
-			}
 			got, err := c.header(ctx, m.ID, name)
 			if providerhttp.IsStatus(err, http.StatusNotFound) {
 				continue
 			}
 			if err != nil {
-				return nil, false, err
+				return nil, err
 			}
 			if got == value {
 				found = append(found, m.ID)
 			}
 		}
 		if page.NextPageToken == "" {
-			return found, true, nil
+			return found, nil
 		}
 		query.Set("pageToken", page.NextPageToken)
 	}

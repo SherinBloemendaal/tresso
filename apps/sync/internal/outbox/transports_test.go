@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -82,10 +83,34 @@ func TestGmailTransportRenewsTheTokenAndAddsBcc(t *testing.T) {
 }
 
 func TestGraphTransportRenewsTheTokenAndAddsBcc(t *testing.T) {
-	srv, delivered := providerServer(t, "/v1.0/me/sendMail", func(body []byte) string {
-		raw, _ := base64.StdEncoding.DecodeString(string(body))
-		return string(raw)
-	})
+	// Graph sends through a draft: create it from the MIME, mark it, send it.
+	var delivered []string
+	var flow []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer token-2" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		flow = append(flow, r.Method+" "+r.URL.Path)
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1.0/me/messages":
+			raw, _ := base64.StdEncoding.DecodeString(string(body))
+			delivered = append(delivered, string(raw))
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"d1"}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1.0/me/messages/d1":
+			if !strings.Contains(string(body), providersend.OutgoingMarker("o1", "")) {
+				t.Errorf("draft marked with %s", body)
+			}
+			_, _ = w.Write([]byte(`{"id":"d1"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1.0/me/messages/d1/send":
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
 	client := fakeapi.New()
 	opts := graphsync.DefaultClientOptions()
 	opts.BaseURL = srv.URL + "/v1.0"
@@ -97,8 +122,11 @@ func TestGraphTransportRenewsTheTokenAndAddsBcc(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.Refreshes != 1 || len(*delivered) != 1 || !strings.HasPrefix((*delivered)[0], "Bcc: <boss@example.test>\r\nX-Tresso-Outgoing-Id: "+providersend.OutgoingMarker("o1", "")+"\r\nFrom:") {
-		t.Errorf("refreshes %d, delivered %q", client.Refreshes, *delivered)
+	if client.Refreshes != 1 || len(delivered) != 1 || !strings.HasPrefix(delivered[0], "Bcc: <boss@example.test>\r\nX-Tresso-Outgoing-Id: "+providersend.OutgoingMarker("o1", "")+"\r\nFrom:") {
+		t.Errorf("refreshes %d, delivered %q", client.Refreshes, delivered)
+	}
+	if want := []string{"POST /v1.0/me/messages", "PATCH /v1.0/me/messages/d1", "POST /v1.0/me/messages/d1/send"}; !slices.Equal(flow, want) {
+		t.Errorf("flow = %v, want %v", flow, want)
 	}
 }
 
