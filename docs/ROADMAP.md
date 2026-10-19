@@ -16,13 +16,17 @@ edition; where Tresso Cloud adds something in the same phase, it is noted at the
 
 ## Phase 1: Read and send mail
 
-- Connect accounts: IMAP/SMTP, Gmail OAuth, Microsoft 365 OAuth
-- Credential envelope encryption
-- Go sync: leasing, IDLE/CONDSTORE, Gmail history, Graph delta, backfill newest first, raw MIME to S3
-- Ingest endpoint, threading, client delta sync
-- Mercure realtime hub in FrankenPHP (issuer-based JWT config of current Mercure releases)
-- Web client: unified inbox, three-pane layout, read, reply, compose, search
-- HTML signatures per account
+Delivered in steps, each its own pull request:
+
+- [x] 1.1 Accounts and credentials: envelope encryption with key rotation, mail account API (create, list, update,
+  pause, delete), worker credentials endpoint, server-side request forgery checks, GreenMail test server
+- [ ] 1.2 Go IMAP sync: folder discovery, newest-first backfill, raw MIME to S3, parsing, IDLE, CONDSTORE deltas
+- [ ] 1.3 Ingest, threading, client delta sync, Mercure realtime (issuer-based JWT config of current Mercure
+  releases)
+- [ ] 1.4 Web client: sign-in, Unified Inbox, reading pane with sanitized HTML in an isolated frame, remote content
+  blocked by default
+- [ ] 1.5 Compose, reply and forward, HTML signatures per account, sending through the worker, search
+- [ ] 1.6 Gmail and Microsoft 365: OAuth connection, Gmail API and Microsoft Graph sync
 
 ## Phase 2: Do, hand over, know
 
