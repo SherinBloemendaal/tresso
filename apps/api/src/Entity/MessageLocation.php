@@ -79,6 +79,15 @@ class MessageLocation
         return str_starts_with($this->remoteUid, MailboxChange::PLACEHOLDER_PREFIX);
     }
 
+    /** A placeholder that keeps waiting for its copy, under a new placeholder uid. */
+    public function restamp(string $placeholderUid): void
+    {
+        if (!$this->isPlaceholder() || !str_starts_with($placeholderUid, MailboxChange::PLACEHOLDER_PREFIX)) {
+            throw new \LogicException('Only a placeholder copy can wait under another placeholder uid.');
+        }
+        $this->remoteUid = $placeholderUid;
+    }
+
     /** The copy a move put here has landed on the server under this uid. */
     public function landed(string $remoteUid, ?int $modSeq): void
     {

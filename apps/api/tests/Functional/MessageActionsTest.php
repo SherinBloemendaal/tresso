@@ -307,6 +307,59 @@ final class MessageActionsTest extends DatabaseTestCase
         self::assertSame(['Projects' => '3'], $this->locations());
     }
 
+    public function testAMoveMadeOfACopyWhoseMoveWentUnreportedSurvivesItsRepeat(): void
+    {
+        $this->act('archive');
+        $this->claim();
+        $this->act('move', $this->folderId('Projects'));
+        $this->makeClaimsExpire();
+
+        // The archive ran but went unreported; running it again finds the copy gone from INBOX.
+        $changes = $this->claim();
+        self::assertCount(1, $changes, 'the move to Projects waits for the archived copy');
+        $this->report($changes[0]['id'], 'gone');
+        self::assertSame([$this->folderId('Projects')], $this->message()['folderIds'], 'the move to Projects still shows');
+        self::assertSame(1, $this->pendingChanges());
+
+        $this->ingest($this->accountId, 'Archive', '7', '<plan@finance.example>');
+        $changes = $this->claim();
+        self::assertSame(['folder' => 'Archive', 'uidValidity' => 2, 'remoteUid' => '7'], $changes[0]['source']);
+        self::assertSame(['folder' => 'Projects'], $changes[0]['target']);
+    }
+
+    public function testAMoveWhoseSourceNeverShowsUpIsGivenUpAfterAWhile(): void
+    {
+        $this->ingest($this->accountId, 'Projects', '3', '<plan@finance.example>');
+        $this->act('archive');
+        $first = $this->claim()[0]['id'];
+        $this->act('move', $this->folderId('Projects'));
+        $this->report($first, 'done');
+        self::assertSame(1, $this->pendingChanges(), 'the move back to Projects waits for the archived copy to show up');
+
+        $old = new UuidV7(UuidV7::generate(new \DateTimeImmutable('-2 hours')));
+        $this->connection()->executeStatement("UPDATE mailbox_change SET source_remote_uid = :old WHERE source_remote_uid LIKE 'pending:%'", ['old' => 'pending:'.$old->toRfc4122()]);
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+        $this->claim();
+
+        self::assertSame(0, $this->pendingChanges());
+        self::assertSame(['Projects' => '3'], $this->locations());
+    }
+
+    public function testAPlaceholderWaitsFromWhenItsMoveWasDoneNotWhenItWasMade(): void
+    {
+        $this->act('archive');
+        $id = $this->claim()[0]['id'];
+
+        $this->report($id, 'done');
+
+        $uid = $this->locations()['Archive'] ?? '';
+        self::assertStringStartsWith('pending:', $uid);
+        self::assertNotSame('pending:'.$id, $uid, 'it no longer points at the finished move');
+        $stamp = UuidV7::fromString(substr($uid, \strlen('pending:')));
+        self::assertInstanceOf(UuidV7::class, $stamp);
+        self::assertEqualsWithDelta(time(), $stamp->getDateTime()->getTimestamp(), 5);
+    }
+
     public function testAResetTargetFolderKeepsTheMoveAndADeletedOneUndoesIt(): void
     {
         $this->act('archive');
@@ -552,6 +605,12 @@ final class MessageActionsTest extends DatabaseTestCase
         self::assertIsInt($count);
 
         return $count;
+    }
+
+    private function makeClaimsExpire(): void
+    {
+        $this->connection()->executeStatement("UPDATE mailbox_change SET claimed_until = now() - interval '1 second' WHERE claimed_until IS NOT NULL");
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
     }
 
     private function makeDue(): void
