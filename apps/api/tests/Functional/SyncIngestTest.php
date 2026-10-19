@@ -8,6 +8,7 @@ use App\Entity\Attachment;
 use App\Entity\Folder;
 use App\Entity\Message;
 use App\Entity\MessageLocation;
+use App\Entity\MessageText;
 use App\Entity\Thread;
 use App\Repository\AttachmentRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -129,6 +130,28 @@ final class SyncIngestTest extends DatabaseTestCase
         ])]);
 
         self::assertFalse($this->onlyMessage()->hasAttachments());
+    }
+
+    public function testKeepsTheBodyTextForSearch(): void
+    {
+        $this->folders(['INBOX' => 1]);
+
+        $this->messages('INBOX', [$this->message('1', ['bodyText' => 'Could you approve the revised numbers?']), $this->message('2')]);
+
+        $texts = $this->entityManager()->getRepository(MessageText::class)->findAll();
+        self::assertCount(1, $texts, 'A message without text gets no row.');
+        self::assertSame('Could you approve the revised numbers?', $texts[0]->getText());
+        self::assertSame('msg-1@test.example', $texts[0]->getMessage()->getMessageIdHeader());
+    }
+
+    public function testBodyTextLongerThanTheLimitIsRejected(): void
+    {
+        $this->folders(['INBOX' => 1]);
+
+        $this->client->jsonRequest('POST', $this->url('messages'), ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [$this->message('1', ['bodyText' => str_repeat('é', MessageText::MAX_LENGTH + 1)])]], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertStringContainsString('bodyText', (string) $this->client->getResponse()->getContent());
     }
 
     public function testRegularAttachmentsKeepTheirContentId(): void

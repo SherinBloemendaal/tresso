@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\ApiResource\Input\Sync;
 
+use App\Entity\MessageText;
 use Symfony\Component\Validator\Constraints as Assert;
 
 /**
@@ -77,6 +78,10 @@ final class MessageInput
 
     #[Assert\Length(max: 2000)]
     public string $snippet = '';
+
+    /** Plain text of the body for search: quoted replies dropped, whitespace collapsed, cut by the worker. */
+    #[Assert\Length(max: MessageText::MAX_LENGTH)]
+    public string $bodyText = '';
 
     /** @var list<AttachmentInput> */
     #[Assert\Count(max: 500)]

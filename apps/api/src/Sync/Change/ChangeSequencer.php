@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Sync\Change;
 
 use App\Realtime\RealtimeNotifier;
+use App\Search\SearchIndexScheduler;
 use Doctrine\DBAL\Connection;
 use Symfony\Component\Uid\Uuid;
 
@@ -16,13 +17,15 @@ use Symfony\Component\Uid\Uuid;
  * smaller number that was still uncommitted. That only holds inside a transaction, hence the guard. Different users
  * never wait on each other.
  *
- * Every number is also reported to the {@see RealtimeNotifier}, which tells the user's clients once it is committed.
+ * Every number is also reported to the {@see RealtimeNotifier}, which tells the user's clients once it is committed,
+ * and to the {@see SearchIndexScheduler}, which brings the user's search documents up to date after the commit.
  */
 final readonly class ChangeSequencer
 {
     public function __construct(
         private Connection $connection,
         private RealtimeNotifier $notifier,
+        private SearchIndexScheduler $search,
     ) {
     }
 
@@ -42,6 +45,7 @@ final readonly class ChangeSequencer
 
         $seq = (int) $seq;
         $this->notifier->changed($userId, $seq);
+        $this->search->changed($userId);
 
         return $seq;
     }

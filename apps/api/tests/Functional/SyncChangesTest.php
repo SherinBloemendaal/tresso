@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Functional;
 
 use App\Realtime\RealtimeNotifier;
+use App\Search\SearchIndexScheduler;
 use App\Sync\Change\ChangeSequencer;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\DBAL\Exception as DBALException;
@@ -256,9 +257,11 @@ final class SyncChangesTest extends DatabaseTestCase
             'display_name' => 'Lock test', 'roles' => '[]', 'created_at' => '2026-10-19 00:00:00', 'change_seq' => 0,
         ]);
 
+        // The sequencer queues search indexing for after the commit of the app's own connection.
+        $this->connection()->beginTransaction();
         try {
             $writer->beginTransaction();
-            $seq = new ChangeSequencer($writer, static::getContainer()->get(RealtimeNotifier::class))->next($userId);
+            $seq = new ChangeSequencer($writer, static::getContainer()->get(RealtimeNotifier::class), static::getContainer()->get(SearchIndexScheduler::class))->next($userId);
             self::assertSame(1, $seq);
 
             $other->executeStatement("SET lock_timeout = '200ms'");
@@ -275,6 +278,7 @@ final class SyncChangesTest extends DatabaseTestCase
             if ($writer->isTransactionActive()) {
                 $writer->rollBack();
             }
+            $this->connection()->rollBack();
             $writer->delete('app_user', ['id' => $userId->toRfc4122()]);
             $writer->close();
             $other->close();

@@ -9,15 +9,24 @@ framework:
                     max_retries: 5
                     delay: 1000
                     multiplier: 3
+            # Search indexing has its own queue, so a backlog there never delays outgoing mail.
+            search:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%_search'
+                retry_strategy:
+                    max_retries: 5
+                    delay: 1000
+                    multiplier: 3
             failed: '%env(MESSENGER_TRANSPORT_DSN)%_failed'
             sync: 'sync://'
 
         routing:
             App\Outbox\ReleaseOutgoingMessage: async
+            App\Search\IndexUserMail: search
 
 when@test:
     framework:
         messenger:
             transports:
                 async: 'in-memory://'
+                search: 'in-memory://'
                 failed: 'in-memory://'

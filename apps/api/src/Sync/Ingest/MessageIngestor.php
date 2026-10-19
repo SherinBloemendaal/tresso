@@ -13,6 +13,7 @@ use App\Entity\MailAccount;
 use App\Entity\Message;
 use App\Entity\MessageLocation;
 use App\Entity\MessageReference;
+use App\Entity\MessageText;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
@@ -91,6 +92,10 @@ final readonly class MessageIngestor
         $this->applyFlags($message, $input);
         $this->entityManager->persist($message);
         $thread->recordMessage($receivedAt);
+
+        if ('' !== $input->bodyText) {
+            $this->entityManager->persist(new MessageText($message, $input->bodyText));
+        }
 
         foreach ($references as $reference) {
             $this->entityManager->persist(new MessageReference($message, $reference));
