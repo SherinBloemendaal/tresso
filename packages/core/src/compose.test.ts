@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SyncedMessage } from './sync/types'
-import { forwardSubject, parseAddresses, quotedOriginal, replyRecipients, replySubject } from './compose'
+import { composeBody, forwardSubject, parseAddresses, quotedOriginal, replyRecipients, replySubject } from './compose'
 
 function message(overrides: Partial<SyncedMessage> = {}): SyncedMessage {
   return {
@@ -85,5 +85,18 @@ describe('parseAddresses', () => {
       { address: 'pieter@company.example', name: null },
       { address: 'lisa@x.example', name: 'Lisa B' },
     ])
+  })
+})
+
+describe('composeBody', () => {
+  it('puts the signature between the text and the quote', () => {
+    expect(composeBody('<p>Approved.</p>', '<p>Kim</p>', '<blockquote>Q</blockquote>')).toBe(
+      '<p>Approved.</p><div class="tresso-signature"><p>Kim</p></div><div class="tresso-quote"><blockquote>Q</blockquote></div>',
+    )
+  })
+
+  it('leaves out what is empty', () => {
+    expect(composeBody('<p>Hi</p>', null, '')).toBe('<p>Hi</p>')
+    expect(composeBody('<p>Hi</p>', '  ', '')).toBe('<p>Hi</p>')
   })
 })

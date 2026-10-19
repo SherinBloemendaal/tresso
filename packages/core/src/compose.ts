@@ -110,3 +110,19 @@ export function parseAddresses(input: string): Address[] {
   }
   return result
 }
+
+/**
+ * The HTML that is sent: what the user wrote, then the signature, then the quoted original, as mail clients expect
+ * in a reply. The signature and quote are kept apart while writing so changing the sending account can swap the
+ * signature without touching the text.
+ */
+export function composeBody(html: string, signatureHtml: string | null, quoteHtml: string): string {
+  const parts = [html]
+  if (signatureHtml !== null && signatureHtml.trim() !== '') {
+    parts.push(`<div class="tresso-signature">${signatureHtml}</div>`)
+  }
+  if (quoteHtml.trim() !== '') {
+    parts.push(`<div class="tresso-quote">${quoteHtml}</div>`)
+  }
+  return parts.join('')
+}
