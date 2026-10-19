@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,5 +91,28 @@ func TestCredentialsNotLeasedIsAnError(t *testing.T) {
 	_, err := NewWithHTTPClient(srv.URL, srv.Client()).Credentials(context.Background(), "acc-1", "w1")
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("expected a 404 error, got %v", err)
+	}
+}
+
+func TestIngestCallsSendArraysNotNull(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := NewWithHTTPClient(srv.URL, srv.Client())
+
+	_, _ = c.Messages(context.Background(), "a", MessageBatch{WorkerID: "w", Folder: "INBOX", Messages: []Message{{RemoteUID: "1"}}})
+	_, _ = c.Changes(context.Background(), "a", ChangeBatch{WorkerID: "w", Folder: "INBOX", Presence: []PresenceRange{{FromUID: 1, ToUID: 2}}})
+
+	for _, body := range bodies {
+		if strings.Contains(body, "null") && !strings.Contains(body, `"cursor":null`) {
+			t.Errorf("body contains null: %s", body)
+		}
+	}
+	if !strings.Contains(bodies[0], `"references":[]`) || !strings.Contains(bodies[1], `"uids":[]`) || !strings.Contains(bodies[1], `"vanished":[]`) {
+		t.Errorf("empty arrays missing: %v", bodies)
 	}
 }
