@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { usePathname, useRouter } from 'expo-router'
 import { Composer, type ComposerState, type SyncedMailAccount, type SyncedSignature } from '@tresso/core'
 import { ApiError } from '@/auth/session'
@@ -107,11 +107,13 @@ export function ComposerProvider({ children }: { children: ReactNode }) {
 
   // Whoever signs in next starts without the previous user's draft on screen; saved drafts stay in their own copy.
   const signedIn = mail.userId
-  const [shownFor, setShownFor] = useState(signedIn)
-  if (shownFor !== signedIn) {
-    setShownFor(signedIn)
-    composer.reset()
-  }
+  const previousUser = useRef(signedIn)
+  useEffect(() => {
+    if (previousUser.current !== signedIn) {
+      previousUser.current = signedIn
+      composer.reset()
+    }
+  }, [composer, signedIn])
 
   useEffect(() => {
     let opened = composer.state.revision

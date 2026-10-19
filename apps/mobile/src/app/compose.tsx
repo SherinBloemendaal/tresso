@@ -116,7 +116,7 @@ export default function ComposeScreen() {
 
   async function pickTime(): Promise<void> {
     // A chosen time that has passed meanwhile is no place to start from.
-    const initial = later !== null && isFutureTime(later) ? later : (options[0]?.at ?? new Date(Date.now() + 3_600_000))
+    const initial = later !== null && isFutureTime(later) ? later : (sendLaterOptions()[0]?.at ?? new Date(Date.now() + 3_600_000))
     if (Platform.OS === 'android') {
       const at = await pickTimeOnAndroid(initial)
       if (at !== null) {
