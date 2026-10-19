@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Entity;
 
+use App\Enum\CalendarSyncStatus;
 use App\Enum\MailAccountStatus;
 use App\Enum\MailProvider;
 use App\Enum\OAuthProvider;
@@ -67,6 +68,13 @@ class MailAccount implements TracksChanges
     /** Why the account is not syncing, in words the user can act on. */
     #[ORM\Column(length: 500, nullable: true)]
     private ?string $statusDetail = null;
+
+    #[ORM\Column(length: 16, enumType: CalendarSyncStatus::class, options: ['default' => 'unknown'])]
+    private CalendarSyncStatus $calendarStatus = CalendarSyncStatus::Unknown;
+
+    /** Why the calendars do not sync, in words the user can act on. */
+    #[ORM\Column(length: 500, nullable: true)]
+    private ?string $calendarStatusDetail = null;
 
     #[ORM\Column(length: 120, nullable: true)]
     private ?string $leasedBy = null;
@@ -219,6 +227,22 @@ class MailAccount implements TracksChanges
         return $this->statusDetail;
     }
 
+    public function getCalendarStatus(): CalendarSyncStatus
+    {
+        return $this->calendarStatus;
+    }
+
+    public function getCalendarStatusDetail(): ?string
+    {
+        return $this->calendarStatusDetail;
+    }
+
+    public function setCalendarStatus(CalendarSyncStatus $status, ?string $detail = null): void
+    {
+        $this->calendarStatus = $status;
+        $this->calendarStatusDetail = CalendarSyncStatus::Active === $status ? null : $detail;
+    }
+
     public function getLeasedBy(): ?string
     {
         return $this->leasedBy;
@@ -265,7 +289,7 @@ class MailAccount implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        return ['emailAddress', 'displayName', 'provider', 'status', 'statusDetail', 'lastSyncedAt', 'defaultSignature'];
+        return ['emailAddress', 'displayName', 'provider', 'status', 'statusDetail', 'lastSyncedAt', 'defaultSignature', 'calendarStatus', 'calendarStatusDetail'];
     }
 
     public static function changeType(): string

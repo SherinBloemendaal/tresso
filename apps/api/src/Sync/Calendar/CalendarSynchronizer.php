@@ -15,6 +15,7 @@ use App\Entity\Calendar;
 use App\Entity\CalendarObject;
 use App\Entity\CalendarOperation;
 use App\Entity\MailAccount;
+use App\Enum\CalendarSyncStatus;
 use App\Repository\CalendarObjectRepository;
 use App\Repository\CalendarRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -42,6 +43,7 @@ final readonly class CalendarSynchronizer
         if (null !== $input->serverUrl) {
             $account->setCalendarServer($input->serverUrl);
         }
+        $account->setCalendarStatus(CalendarSyncStatus::Active);
 
         $existing = $this->calendars->findByAccount($account);
         $seen = [];

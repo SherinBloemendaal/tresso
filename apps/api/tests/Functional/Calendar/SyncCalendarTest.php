@@ -58,6 +58,26 @@ final class SyncCalendarTest extends DatabaseTestCase
         self::assertSame('https://caldav.company.example/dav/', $this->getJson('/api/v1/mail-accounts/'.$this->accountId, $this->kim)['calendarUrl']);
     }
 
+    public function testTheCalendarStatusTellsTheUserWhatIsWrong(): void
+    {
+        self::assertSame('unknown', $this->getJson('/api/v1/mail-accounts/'.$this->accountId, $this->kim)['calendarStatus']);
+
+        $this->client->jsonRequest('POST', $this->base().'/calendar-status', ['workerId' => 'w1', 'status' => 'auth_failed', 'detail' => 'The calendar server refused the login. iCloud needs an app-specific password.'], $this->worker);
+        self::assertResponseIsSuccessful();
+        $account = $this->getJson('/api/v1/mail-accounts/'.$this->accountId, $this->kim);
+        self::assertSame('auth_failed', $account['calendarStatus']);
+        self::assertSame('The calendar server refused the login. iCloud needs an app-specific password.', $account['calendarStatusDetail']);
+        self::assertSame('active', $account['status'], 'Mail is not affected.');
+
+        $this->reportCalendars();
+        $account = $this->getJson('/api/v1/mail-accounts/'.$this->accountId, $this->kim);
+        self::assertSame('active', $account['calendarStatus']);
+        self::assertNull($account['calendarStatusDetail']);
+
+        $this->client->jsonRequest('POST', $this->base().'/calendar-status', ['workerId' => 'w1', 'status' => 'active'], $this->worker);
+        self::assertResponseStatusCodeSame(422);
+    }
+
     public function testRemovesCalendarsTheProviderNoLongerHas(): void
     {
         $this->reportCalendars();
