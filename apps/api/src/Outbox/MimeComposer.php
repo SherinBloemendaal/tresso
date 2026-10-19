@@ -9,6 +9,7 @@ use App\Entity\MessageReference;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
+use Symfony\Component\Mime\Header\MailboxListHeader;
 use Symfony\Component\Uid\Uuid;
 
 /**
@@ -28,9 +29,38 @@ final readonly class MimeComposer
 
     public function compose(Composition $composition): ComposedMessage
     {
+        $messageId = Uuid::v7()->toRfc4122().'@'.self::domain($composition);
+        // toString() renders the prepared headers, which leave Bcc out.
+        $raw = $this->build($composition, $messageId)->toString();
+        if (1 === preg_match('/^Bcc:/mi', substr($raw, 0, (int) strpos($raw, "\r\n\r\n")))) {
+            throw new \LogicException('A Bcc header ended up in the message.');
+        }
+
+        return new ComposedMessage($raw, $messageId);
+    }
+
+    /**
+     * The copy of a draft for the account's Drafts folder. Unlike a sent message it keeps Bcc, which other mail apps
+     * need to go on writing it, and names the draft it belongs to.
+     */
+    public function composeDraft(Composition $composition, Uuid $draftId, int $version): ComposedMessage
+    {
+        $messageId = $draftId->toRfc4122().'.'.$version.'@'.self::domain($composition);
+        $email = $this->build($composition, $messageId);
+        $email->getHeaders()->addTextHeader('X-Tresso-Draft', $draftId->toRfc4122());
+        $raw = $email->toString();
+        if ([] !== $composition->bcc) {
+            $bcc = new MailboxListHeader('Bcc', self::addresses($composition->bcc));
+            $end = (int) strpos($raw, "\r\n\r\n");
+            $raw = substr($raw, 0, $end)."\r\n".$bcc->toString().substr($raw, $end);
+        }
+
+        return new ComposedMessage($raw, $messageId);
+    }
+
+    private function build(Composition $composition, string $messageId): Email
+    {
         $account = $composition->account;
-        $domain = substr((string) strrchr($account->getEmailAddress(), '@'), 1);
-        $messageId = Uuid::v7()->toRfc4122().'@'.$domain;
         $html = $this->html->sanitize($composition->html);
 
         $email = new Email()
@@ -52,13 +82,12 @@ final readonly class MimeComposer
             $headers->addIdHeader('References', $this->references($original));
         }
 
-        // toString() renders the prepared headers, which leave Bcc out.
-        $raw = $email->toString();
-        if (1 === preg_match('/^Bcc:/mi', substr($raw, 0, (int) strpos($raw, "\r\n\r\n")))) {
-            throw new \LogicException('A Bcc header ended up in the message.');
-        }
+        return $email;
+    }
 
-        return new ComposedMessage($raw, $messageId);
+    private static function domain(Composition $composition): string
+    {
+        return substr((string) strrchr($composition->account->getEmailAddress(), '@'), 1);
     }
 
     /**
