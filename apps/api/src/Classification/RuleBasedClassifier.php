@@ -155,7 +155,7 @@ final readonly class RuleBasedClassifier implements Classifier
     {
         $results = $mail->header('authentication-results') ?? '';
 
-        return 1 === preg_match('/\bdmarc=pass\b/', strtolower($results)) && ReceivingServers::wrote($results, $mail->receivingDomains);
+        return $mail->authenticationResultsTrusted && 1 === preg_match('/\bdmarc=pass\b/', strtolower($results));
     }
 
     private static function isServerSpam(MailToClassify $mail): bool
@@ -172,7 +172,7 @@ final readonly class RuleBasedClassifier implements Classifier
      * DMARC failed and the sender's domain asks receivers to reject or quarantine such mail. Failing DMARC alone is
      * not enough: forwarded mail and mailing lists fail it too.
      */
-    private static function failedAuthentication(MailToClassify $mail): bool
+    public static function failedAuthentication(MailToClassify $mail): bool
     {
         $results = strtolower($mail->header('authentication-results') ?? '');
 

@@ -460,6 +460,74 @@ final class ClassificationTest extends DatabaseTestCase
         }
     }
 
+    public function testAGenericImapServersAuthenticationResultsNeverRescueSpam(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Invoice', ['from' => ['address' => 'billing@supplier.example']])]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$first['threads'][0]['id'].'/classification', ['smartInboxId' => $inboxes['todo']], $this->kim);
+        self::assertResponseIsSuccessful();
+        $this->runClassification();
+
+        // The sender wrote the header itself, naming the recipient's own server: this IMAP server adds none of its own.
+        $this->ingest('messages', ['folder' => 'Junk', 'messages' => [$this->message('1', 'Invoice overdue', [
+            'from' => ['address' => 'billing@supplier.example'],
+            'headers' => ['authentication-results' => 'mx.company.example; spf=pass; dkim=pass; dmarc=pass header.from=supplier.example'],
+        ])]]);
+        $this->runClassification();
+
+        $threads = array_column($this->changes(0)['threads'], null, 'subject');
+        self::assertSame([$inboxes['spam'], 'none', 'server_spam'], $this->classificationOf($threads['Invoice overdue']));
+    }
+
+    public function testCorrectionSaysWhenTheSendersMailFailsAuthentication(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Statement', ['from' => ['address' => 'news@bank.example'], 'headers' => ['authentication-results' => 'mx.company.example; dmarc=fail (p=REJECT) header.from=bank.example']]),
+            $this->message('2', 'Budget'),
+        ]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $threads = array_column($first['threads'], null, 'subject');
+        self::assertSame('authentication_failed', $threads['Statement']['classificationReason']);
+
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threads['Statement']['id'].'/classification', ['smartInboxId' => $inboxes['informational']], $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertSame(['sender' => 'news@bank.example', 'failsAuthentication' => true], array_intersect_key($this->senderRuleOfResponse(), ['sender' => 1, 'failsAuthentication' => 1]));
+
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threads['Budget']['id'].'/classification', ['smartInboxId' => $inboxes['informational']], $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertFalse($this->senderRuleOfResponse()['failsAuthentication'] ?? null);
+    }
+
+    public function testForgettingASenderRuleWaitsForACorrectionOfTheUser(): void
+    {
+        // Made without a correction: in a test everything runs in one transaction, which would keep that lock.
+        $ruleId = Uuid::v7()->toRfc4122();
+        $this->connection()->executeStatement(
+            "INSERT INTO sender_rule (id, owner_id, sender, category_id, verdict, updated_at)
+             SELECT :id, c.owner_id, 'anna@partner.example', c.id, NULL, NOW() FROM category c JOIN app_user u ON u.id = c.owner_id
+             WHERE u.email = 'kim@example.test' AND c.builtin = 'informational'",
+            ['id' => $ruleId],
+        );
+
+        $correcting = DriverManager::getConnection($this->separateConnectionParams());
+        $correcting->executeStatement('SELECT pg_advisory_lock(hashtextextended(:key, 0))', ['key' => 'classify:'.$this->kimsId()->toRfc4122()]);
+        $this->connection()->executeStatement("SET lock_timeout = '300ms'");
+        try {
+            $this->client->request('DELETE', '/api/v1/sender-rules/'.$ruleId, server: $this->kim);
+
+            self::assertResponseStatusCodeSame(500);
+            self::assertStringContainsString('55P03', (string) $this->client->getResponse()->getContent(), 'Forgetting the rule waited for the correction holding the lock.');
+        } finally {
+            $this->connection()->executeStatement('RESET lock_timeout');
+            $correcting->executeStatement('SELECT pg_advisory_unlock_all()');
+            $correcting->close();
+        }
+    }
+
     public function testCorrectionsNeedTheSettingsWriteScope(): void
     {
         $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
@@ -511,6 +579,15 @@ final class ClassificationTest extends DatabaseTestCase
         self::assertEquals(2, $this->connection()->fetchOne('SELECT COUNT(*) FROM message WHERE classified_at IS NULL'));
         self::assertFalse($classification->classifyNew(Uuid::fromString($userId), 1));
         self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM message WHERE classified_at IS NULL'));
+    }
+
+    /** @return array<mixed> */
+    private function senderRuleOfResponse(): array
+    {
+        $rule = $this->decodedResponse()['senderRule'] ?? null;
+        self::assertIsArray($rule);
+
+        return $rule;
     }
 
     private function kimsId(): Uuid

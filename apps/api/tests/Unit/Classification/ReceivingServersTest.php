@@ -13,19 +13,19 @@ use PHPUnit\Framework\TestCase;
 
 final class ReceivingServersTest extends TestCase
 {
-    public function testAnImapAccountTrustsItsOwnDomainAndItsServersDomain(): void
+    public function testAGenericImapServerMayAddNoHeaderOfItsOwnSoItsTopmostHeaderIsNotTrusted(): void
     {
         $account = new MailAccount(new User('kim@example.test', 'Kim'), 'kim@company.example', 'Work', MailProvider::Imap);
-        $account->configureServers(new ServerSettings('imap.host.example.co.uk', 993), new ServerSettings('smtp.host.example.co.uk', 465), 'kim');
+        $account->configureServers(new ServerSettings('imap.company.example', 993), new ServerSettings('smtp.company.example', 465), 'kim');
 
-        self::assertSame(['company.example', 'host.example.co.uk'], ReceivingServers::domainsFor($account));
+        self::assertFalse(ReceivingServers::trustsTopmostHeader($account));
     }
 
     public function testProvidersThatAlwaysAddTheirOwnHeaderAreTrustedAtTheTop(): void
     {
-        $account = new MailAccount(new User('kim@example.test', 'Kim'), 'kim@gmail.example', 'Gmail', MailProvider::Gmail);
+        $user = new User('kim@example.test', 'Kim');
 
-        self::assertNull(ReceivingServers::domainsFor($account));
-        self::assertTrue(ReceivingServers::wrote('spf=pass; dmarc=pass', null));
+        self::assertTrue(ReceivingServers::trustsTopmostHeader(new MailAccount($user, 'kim@gmail.example', 'Gmail', MailProvider::Gmail)));
+        self::assertTrue(ReceivingServers::trustsTopmostHeader(new MailAccount($user, 'kim@outlook.example', 'Outlook', MailProvider::Microsoft)));
     }
 }

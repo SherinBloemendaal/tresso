@@ -8,6 +8,7 @@ use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProcessorInterface;
 use App\ApiResource\SenderRuleResource;
 use App\Classification\ClassificationScheduler;
+use App\Classification\UserLocks;
 use App\Repository\SenderRuleRepository;
 use App\Security\CurrentUser;
 use Doctrine\ORM\EntityManagerInterface;
@@ -25,6 +26,7 @@ final readonly class SenderRuleProcessor implements ProcessorInterface
         private CurrentUser $currentUser,
         private EntityManagerInterface $entityManager,
         private ClassificationScheduler $classification,
+        private UserLocks $locks,
     ) {
     }
 
@@ -32,10 +34,13 @@ final readonly class SenderRuleProcessor implements ProcessorInterface
     {
         $owner = $this->currentUser->get();
         $id = $uriVariables['id'] ?? null;
-        $rule = (\is_string($id) ? $this->rules->findOneOwnedBy($owner, $id) : null)
-            ?? throw new NotFoundHttpException('Sender rule not found.');
 
-        $this->entityManager->wrapInTransaction(function () use ($rule, $owner): void {
+        $this->entityManager->wrapInTransaction(function () use ($id, $owner): void {
+            // A correction for the same sender waits, or is waited for: it never reports a rule that is already gone.
+            $this->locks->classification($owner->getId());
+            $rule = (\is_string($id) ? $this->rules->findOneOwnedBy($owner, $id) : null)
+                ?? throw new NotFoundHttpException('Sender rule not found.');
+            $this->entityManager->refresh($rule);
             $sender = $rule->getSender();
             $this->entityManager->remove($rule);
             $this->entityManager->flush();

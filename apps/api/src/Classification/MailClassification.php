@@ -207,6 +207,17 @@ final readonly class MailClassification
     }
 
     /**
+     * Whether the message failed DMARC with a reject or quarantine policy. Such mail is spam whatever the user
+     * remembered for its sender, because its From address may be forged.
+     */
+    public function failsAuthentication(Message $message): bool
+    {
+        $mail = $this->mailToClassify([$message->getId()->toRfc4122() => $message])[$message->getId()->toRfc4122()] ?? null;
+
+        return null !== $mail && RuleBasedClassifier::failedAuthentication($mail);
+    }
+
+    /**
      * Applies the user's choice to a conversation: it moves to the smart inbox with the verdict, now and for good, and
      * so does its newest incoming message (see {@see newestIncoming()}). The caller holds the user's locks (see
      * {@see UserLocks}) and loaded the thread and the smart inbox after taking them.
@@ -361,7 +372,7 @@ final readonly class MailClassification
                 (bool) $row['junk'],
                 $folderRoles,
                 null !== $message->getInReplyTo(),
-                ReceivingServers::domainsFor($message->getMailAccount()),
+                ReceivingServers::trustsTopmostHeader($message->getMailAccount()),
             );
         }
 
