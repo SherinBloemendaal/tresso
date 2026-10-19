@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -29,6 +30,31 @@ type fakeAPI struct {
 	active   int
 	overlap  bool
 	gate     chan struct{}
+	drafts   api.DraftWork
+	filed    []string
+	removed  []string
+}
+
+func (f *fakeAPI) ClaimDrafts(context.Context, string, string) (api.DraftWork, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	work := f.drafts
+	f.drafts = api.DraftWork{}
+	return work, nil
+}
+
+func (f *fakeAPI) ReportDraftFiled(_ context.Context, _, draftID, _ string, version int, messageID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.filed = append(f.filed, fmt.Sprintf("%s v%d %s", draftID, version, messageID))
+	return nil
+}
+
+func (f *fakeAPI) ReportDraftRemoved(_ context.Context, _, removalID, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removed = append(f.removed, removalID)
+	return nil
 }
 
 func (f *fakeAPI) Credentials(context.Context, string, string) (api.Credentials, error) {
@@ -81,18 +107,37 @@ func (s *fakeSent) Append(raw []byte, _ time.Time) error {
 }
 func (s *fakeSent) Close() {}
 
+type fakeDrafts struct {
+	log        []string
+	failAppend bool
+}
+
+func (s *fakeDrafts) AppendDraft(raw []byte, _ time.Time) error {
+	if s.failAppend {
+		return errors.New("append refused")
+	}
+	s.log = append(s.log, "append "+string(raw))
+	return nil
+}
+func (s *fakeDrafts) Remove(messageID string) error {
+	s.log = append(s.log, "remove "+messageID)
+	return nil
+}
+func (s *fakeDrafts) Close() {}
+
 type harness struct {
-	api   *fakeAPI
-	sent  *fakeSent
-	store *storage.Memory
-	sends []smtpsend.Envelope
-	fail  error
-	mu    sync.Mutex
-	d     *Dispatcher
+	api    *fakeAPI
+	sent   *fakeSent
+	drafts *fakeDrafts
+	store  *storage.Memory
+	sends  []smtpsend.Envelope
+	fail   error
+	mu     sync.Mutex
+	d      *Dispatcher
 }
 
 func newHarness(messages ...api.OutgoingMessage) *harness {
-	h := &harness{api: &fakeAPI{smtpHost: "smtp.company.example", queue: [][]api.OutgoingMessage{messages}}, sent: &fakeSent{contains: map[string]bool{}}, store: storage.NewMemory()}
+	h := &harness{api: &fakeAPI{smtpHost: "smtp.company.example", queue: [][]api.OutgoingMessage{messages}}, sent: &fakeSent{contains: map[string]bool{}}, drafts: &fakeDrafts{}, store: storage.NewMemory()}
 	_ = h.store.PutIfAbsent(context.Background(), "outgoing/ab/raw1", []byte("Subject: Hi\r\n\r\nHello\r\n"), "message/rfc822")
 	send := func(_ context.Context, _ api.ServerSettings, _, _ string, envelope smtpsend.Envelope, _ []byte) error {
 		h.mu.Lock()
@@ -106,7 +151,8 @@ func newHarness(messages ...api.OutgoingMessage) *harness {
 		}
 		return h.sent, nil
 	}
-	h.d = NewDispatcher(h.api, h.store, send, open, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	openDrafts := func(context.Context, api.Credentials) (DraftsStore, error) { return h.drafts, nil }
+	h.d = NewDispatcher(h.api, h.store, send, open, openDrafts, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return h
 }
 
@@ -235,5 +281,37 @@ func TestTriggersDuringARunNeverOverlap(t *testing.T) {
 	}
 	if len(h.api.reports) != 2 {
 		t.Errorf("reports = %+v", h.api.reports)
+	}
+}
+
+func TestFilesTheNewDraftCopyBeforeRemovingTheOldOne(t *testing.T) {
+	h := newHarness()
+	_ = h.store.PutIfAbsent(context.Background(), "drafts/ab/v2", []byte("draft v2"), "message/rfc822")
+	previous := "d1.1@company.example"
+	h.api.drafts = api.DraftWork{
+		Files:    []api.DraftFile{{DraftID: "d1", Version: 2, RawObjectKey: "drafts/ab/v2", MessageID: "d1.2@company.example", PreviousMessageID: &previous}},
+		Removals: []api.DraftRemoval{{ID: "r1", MessageID: "d9.4@company.example"}},
+	}
+
+	h.run()
+
+	if !slices.Equal(h.drafts.log, []string{"append draft v2", "remove d1.1@company.example", "remove d9.4@company.example"}) {
+		t.Errorf("drafts folder = %v", h.drafts.log)
+	}
+	if !slices.Equal(h.api.filed, []string{"d1 v2 d1.2@company.example"}) || !slices.Equal(h.api.removed, []string{"r1"}) {
+		t.Errorf("filed %v, removed %v", h.api.filed, h.api.removed)
+	}
+}
+
+func TestAFailedDraftCopyIsNotReported(t *testing.T) {
+	h := newHarness()
+	_ = h.store.PutIfAbsent(context.Background(), "drafts/ab/v1", []byte("draft v1"), "message/rfc822")
+	h.drafts.failAppend = true
+	h.api.drafts = api.DraftWork{Files: []api.DraftFile{{DraftID: "d1", Version: 1, RawObjectKey: "drafts/ab/v1", MessageID: "d1.1@company.example"}}}
+
+	h.run()
+
+	if len(h.api.filed) != 0 {
+		t.Errorf("filed = %v; the claim must expire so the work comes back", h.api.filed)
 	}
 }

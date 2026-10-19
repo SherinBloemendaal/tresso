@@ -69,14 +69,17 @@ func run(logger *slog.Logger) error {
 
 	manager := lease.NewManager(client, syncerFor, cfg.WorkerID, cfg.Capacity, cfg.HeartbeatInterval, logger.With("worker", cfg.WorkerID))
 
-	// Outgoing mail: the hub says which account has mail to send right away; every heartbeat repeats it.
+	// Outgoing mail and drafts: the hub says which account has work right away; every heartbeat repeats it.
 	send := func(ctx context.Context, server api.ServerSettings, username, password string, envelope smtpsend.Envelope, raw []byte) error {
 		return smtpsend.Send(ctx, dialer, server, username, password, envelope, raw)
 	}
 	openSent := func(ctx context.Context, credentials api.Credentials) (outbox.SentStore, error) {
 		return imapsync.OpenSent(ctx, dialer, credentials)
 	}
-	dispatcher := outbox.NewDispatcher(client, store, send, openSent, cfg.WorkerID, logger.With("worker", cfg.WorkerID))
+	openDrafts := func(ctx context.Context, credentials api.Credentials) (outbox.DraftsStore, error) {
+		return imapsync.OpenDrafts(ctx, dialer, credentials)
+	}
+	dispatcher := outbox.NewDispatcher(client, store, send, openSent, openDrafts, cfg.WorkerID, logger.With("worker", cfg.WorkerID))
 	manager.OnOutbox(func(ctx context.Context, accountIDs []string) {
 		for _, id := range accountIDs {
 			dispatcher.Trigger(ctx, id)
