@@ -54,10 +54,15 @@ Built next to phase 1, each step its own pull request. See "3.13 Calendar" in th
   and delete with "this / this and following / all"; RSVP with iTIP replies through the outbox; calendars and
   events in the delta; `text/calendar` parts parsed by the worker and applied as invitations; CalDAV sync for IMAP
   accounts (discovery, sync-token or ctag, outbound writes, a calendar status per account)
-- [x] C3 Reminders and notifications: server-side scheduling with a sweep, idempotent delivery per device, web push,
-  Expo push, desktop realtime and email channels, multiple reminders per event with their own channels, default
-  rules per calendar and kind of event, leave-now with fixed or estimated travel time, quiet hours and focus rules,
+- [x] C3 Reminders and notifications: server-side scheduling with a sweep, idempotent delivery per device through a
+  dispatcher other features share, phone (Expo), desktop (web push and the desktop app) and email channels with
+  the user's channels per kind, multiple reminders per event with their own channels, default rules per calendar
+  and kind of event, important events, leave-now with a fixed travel time or the phone's estimate by travel mode
+  (the position never stored), quiet hours, working hours for work calendars, focus blocks, snooze choices,
   pre-meeting briefs and follow-up nudges
+- [ ] C3b Digests and attendance: the email digest channel with tomorrow at a glance (end of the working day) and the
+  week ahead, warnings when the user will be late with an offer to tell the organizer, and asking about meetings the
+  user did not join (reschedule or let the organizer know)
 - [ ] C4 Calendar clients: day, week, month and agenda views and the event editor in the web client, the invitation
   card with RSVP in the reading pane, a mini agenda next to mail, notification settings and push registration;
   agenda and event detail on mobile with Expo push, on shared types and recurrence expansion in `packages/core`
