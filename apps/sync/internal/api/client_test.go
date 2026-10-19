@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -114,5 +115,52 @@ func TestIngestCallsSendArraysNotNull(t *testing.T) {
 	}
 	if !strings.Contains(bodies[0], `"references":[]`) || !strings.Contains(bodies[1], `"uids":[]`) || !strings.Contains(bodies[1], `"vanished":[]`) {
 		t.Errorf("empty arrays missing: %v", bodies)
+	}
+}
+
+func TestRevokedTokenIsReplacedAndTheRequestRetried(t *testing.T) {
+	var issued, rejected int
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		issued++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"access_token":"token-%d","token_type":"Bearer","expires_in":3600}`, issued)
+	})
+	mux.HandleFunc("POST /internal/sync/leases", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.Header.Get("Authorization") == "Bearer token-1" {
+			rejected++
+			http.Error(w, "revoked", http.StatusUnauthorized)
+			return
+		}
+		if !strings.Contains(string(body), `"workerId":"w1"`) {
+			t.Errorf("retried request lost its body: %s", body)
+		}
+		_, _ = w.Write([]byte(`{"leaseSeconds":90,"accounts":[]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := New(context.Background(), srv.URL, srv.URL+"/oauth/token", "sync-worker", "secret")
+	if _, err := client.Lease(context.Background(), "w1", 10); err != nil {
+		t.Fatal(err)
+	}
+	if issued != 2 || rejected != 1 {
+		t.Errorf("issued %d tokens, %d rejected; want a fresh token after one rejection", issued, rejected)
+	}
+
+	// A second rejection with the fresh token is reported, not retried forever.
+	mux2 := http.NewServeMux()
+	mux2.HandleFunc("POST /oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"x","token_type":"Bearer","expires_in":3600}`))
+	})
+	mux2.HandleFunc("POST /internal/sync/leases", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusUnauthorized)
+	})
+	srv2 := httptest.NewServer(mux2)
+	defer srv2.Close()
+	if _, err := New(context.Background(), srv2.URL, srv2.URL+"/oauth/token", "a", "b").Lease(context.Background(), "w1", 1); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("expected a 401 error, got %v", err)
 	}
 }
