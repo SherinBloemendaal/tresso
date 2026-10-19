@@ -9,6 +9,8 @@ export const USER_SCOPES = [
   'mail:send',
   'todos:read',
   'todos:write',
+  'calendar:read',
+  'calendar:write',
   'settings:read',
   'settings:write',
   'signatures:read',

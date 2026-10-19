@@ -22,6 +22,8 @@ export interface MailAccount {
   username: string | null
   imap: ServerSettings | null
   smtp: ServerSettings | null
+  /** CalDAV address of the account's calendars, set by the user or found by the sync worker. */
+  calendarUrl: string | null
   lastSyncedAt: string | null
   createdAt: string
   /** Changed through the signature's `defaultFor`. */
@@ -35,6 +37,7 @@ export interface NewMailAccount {
   password: string
   imap: ServerSettings
   smtp: ServerSettings
+  calendarUrl?: string | null
 }
 
 /** JSON merge patch: omitted fields stay as they are. A new password also clears a sign-in failure. */
@@ -45,6 +48,8 @@ export interface MailAccountUpdate {
   imap?: ServerSettings
   smtp?: ServerSettings
   status?: 'active' | 'paused'
+  /** An empty string finds the address automatically again. */
+  calendarUrl?: string
 }
 
 export type SignInMethod = 'password' | 'oauth2'
