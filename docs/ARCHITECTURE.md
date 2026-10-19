@@ -363,8 +363,9 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   N never later meets an uncommitted smaller number. Every write path runs in an explicit transaction; the
   allocator refuses to run outside one. Different users never wait on each other.
 - `GET /api/v1/sync/changes?since=N&limit=500` (scope `mail:read`) returns mail accounts, folders (with role),
-  threads, messages (metadata, flags and folder ids, never bodies) and `deleted` entries above N, plus the new
-  `cursor` and `hasMore`. A page never splits one change number. A deleted mail account implies its folders,
+  threads (with their smart inbox, verdict and classification reason), messages (metadata, flags, folder ids, smart
+  inbox and verdict, never bodies), smart inboxes and `deleted` entries above N, plus the new `cursor` and
+  `hasMore`. A page never splits one change number. A deleted mail account implies its folders,
   threads and messages are gone.
 - Clients store data in a local cache (desktop via Rust/Tauri SQLite, mobile via expo-sqlite, web via IndexedDB),
   start with `since=0`, keep the cursor, and fetch message bodies lazily.
@@ -414,12 +415,45 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
 
 ### 3.7 Classification
 
-- A category = name + instructions + include list + exclude list (domains or addresses) + verdict mapping + flags
-  (auto-create todo, batch delivery, notify).
-- The open edition classifies with deterministic rules: include/exclude lists, `List-Unsubscribe`,
-  `Precedence: bulk`, and authentication results (SPF/DKIM/DMARC) for spam. The `instructions` field is used by AI
-  classifiers such as the one in Tresso Cloud.
-- Classification sits behind an interface, so an add-on can replace or extend it.
+- A smart inbox (the `category` table) = name + instructions + include list + exclude list (addresses or `@domain`,
+  which covers subdomains) + verdict + flags (auto-create todo, batch delivery, notify; used by later steps). Every
+  user has five built-in ones (`todo`, `informational`, `notification`, `advertise`, `spam`), created with the user;
+  they can be changed but not deleted. Mail lands in exactly one smart inbox.
+- `/api/v1/smart-inboxes` (scopes `settings:read`, `settings:write`) lists, creates, updates (JSON merge patch) and
+  deletes them. Names are unique per user (case-insensitive), at most 50 of the user's own, a sender cannot be on both
+  lists. Smart inboxes are in the delta (`smartInboxes`, tombstone type `smartInbox`). Deleting one takes its
+  conversations and messages out of it in the same transaction (so clients see them change) and lets classification
+  place them again.
+- Classification sits behind `App\Classification\Classifier`. The open edition's `RuleBasedClassifier` decides, in
+  this order: a sender rule (a correction the user made earlier, by address, then domain and parent domains), the
+  include lists (the user's own smart inboxes first), then signals in the message, each pointing at a built-in smart
+  inbox: the server's spam verdict (junk folder, `$Junk` keyword, `X-Spam-Flag`, `X-Spam-Status`) and DMARC failing a
+  reject or quarantine policy (spam), `Auto-Submitted` or `Precedence: auto_reply` (notification), marketing senders
+  (`newsletter@`, `news.` and similar) and bulk headers (`Precedence: bulk`, `List-Unsubscribe` with `Feedback-ID`)
+  (advertise), addresses that take no replies (`noreply@`, `notifications@`, `alerts.`) (notification), an
+  unsubscribe link (advertise), a mailing list (informational), and finally mail from a person: to the user directly
+  is something to do (todo), a copy is informational. A smart inbox whose exclude list covers the sender is skipped
+  at every step. The verdict is the smart inbox's unless a sender rule sets one. The `instructions` field is for AI
+  classifiers such as the one in Tresso Cloud, which decorates the `Classifier` service and should keep sender rules
+  and lists in charge.
+- The sync worker sends the headers the rules read (`headers`) and the junk keyword (`junk`) with each message; the
+  API keeps them in `message_signals`, apart from the message row and only for messages that have any.
+- Classification runs after the ingest commits, on its own Messenger transport (`classify`), in batches of 200 per
+  transaction, with runs for one user taking turns on an advisory lock. Each incoming message gets a smart inbox and
+  verdict (clients notify on `do` and `delegate`); its conversation takes those of its newest incoming message. The
+  user's own mail is never classified. A message waits with `classified_at` empty, so a lost run is caught up by the
+  next one.
+- Corrections: `PUT /api/v1/threads/{id}/classification` (scope `mail:write`) with a smart inbox and optionally a
+  verdict puts the conversation and its newest incoming message there for good (reason `user`; automatic
+  classification leaves it alone from then on), remembers the choice for the sender as a sender rule, takes the
+  sender off that smart inbox's exclude list, and classifies the last 30 days again so earlier mail from the sender
+  follows. `GET /api/v1/sender-rules` and `DELETE /api/v1/sender-rules/{id}` (scopes `settings:read`,
+  `settings:write`) list and forget them.
+- Every change to the smart inboxes or sender rules classifies the last 30 days again after the commit.
+  `app:classification:rerun --user=<email>` or `--all`, with `--days` (0 for all mail), does it by hand.
+- Each conversation carries why it is where it is (`classificationReason`: `user`, `sender_rule`, `include_list`,
+  `server_spam`, `authentication_failed`, `automated`, `marketing_sender`, `bulk`, `notification_sender`,
+  `unsubscribe_link`, `mailing_list`, `direct`, `copied`, or a reason of an add-on), which clients explain.
 
 ### 3.8 Virus scanning
 
@@ -528,6 +562,15 @@ a busy timeout), refuses writes once closing and waits for the ones under way, a
 in one transaction. A copy made by another schema version is dropped and rebuilt, keeping the drafts that exist only
 on the device. A resync (after a change the server refused could not be put back) makes the next pull start from the
 beginning, and holds across a restart and against a pull that was already running.
+
+Both stores keep the smart inboxes and list a smart inbox across all accounts through an index on smart inbox,
+whether the conversation is in an inbox or junk folder, and date (`ListScope`: an inbox or a smart inbox).
+Conversations in the Spam smart inbox stay out of the inboxes, also when the server left them there
+(`summarizeConversation`). A correction shows at once (`classifyThread`) and is put back when the server refuses
+(`restoreThread`), unless the delta changed the conversation since. In the web client the sidebar lists the smart
+inboxes with unread counts, the list and the reading pane show the verdict and change it or move the conversation,
+and Settings > Smart inboxes edits them and lists the remembered senders. The IndexedDB copy moved to version 5 and the
+SQLite copy to schema 3; both sync again from the start.
 
 Drafts in the web client are saved on the device first and uploaded right after (one upload at a time per
 draft). Edits made here are never overwritten by the delta: when another device saved a newer version, the compose

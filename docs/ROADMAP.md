@@ -71,9 +71,15 @@ deadlines extracted from mail, meeting briefs.
 
 ## Phase 2: Do, hand over, know
 
-- Built-in smart inboxes (spam, notification, advertise, todo, informational) and custom ones
-  (name, instructions, include/exclude lists, verdict mapping)
-- Rule-based classification behind a classifier interface
+Delivered in steps, each its own pull request:
+
+- [x] 2.1 Smart inboxes and rule-based classification: built-in smart inboxes (spam, notification, advertise, todo,
+  informational) and custom ones (name, instructions, include/exclude lists, verdict mapping), a classifier interface
+  with a rule-based implementation run after ingest, the smart inbox and verdict per conversation in the delta,
+  corrections remembered as sender rules, smart inboxes in the web client's sidebar, lists and settings
+
+Still to come in this phase:
+
 - Todos (synced), "make todo" in the single-email view, automatic todo creation per smart inbox
 - Hand over by forwarding with a note and due date, tracked in "Waiting on" with nudges
 - Triage mode (one email at a time, D / H / K)
