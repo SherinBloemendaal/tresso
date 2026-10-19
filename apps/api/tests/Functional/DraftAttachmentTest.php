@@ -173,12 +173,12 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $key = 'uploads/'.substr($sha, 0, 2).'/'.$sha;
 
         $this->client->request('DELETE', '/api/v1/drafts/'.$second.'/attachments/'.$shared['id'], server: $this->kim);
-        self::assertResponseStatusCodeSame(204);
+        self::assertResponseStatusCodeSame(200);
         $this->collectQueuedUploads();
         self::assertTrue($this->storage()->has($key), 'The other draft still has the same file.');
 
         $this->client->request('DELETE', '/api/v1/drafts/'.$first.'/attachments/'.$kept['id'], server: $this->kim);
-        self::assertResponseStatusCodeSame(204);
+        self::assertResponseStatusCodeSame(200);
         $this->collectQueuedUploads();
         self::assertFalse($this->storage()->has($key));
 
@@ -359,7 +359,8 @@ final class DraftAttachmentTest extends DatabaseTestCase
         self::assertSame(3, $this->decodedResponse()['draftVersion'] ?? null, 'Forwarding it again changes nothing.');
 
         $this->client->request('DELETE', '/api/v1/drafts/'.$id.'/attachments/'.$forwarded, server: $this->kim);
-        self::assertResponseStatusCodeSame(204);
+        self::assertResponseStatusCodeSame(200);
+        self::assertSame(['draftVersion' => 4], $this->decodedResponse(), 'Removing one says the version too.');
         $this->client->request('GET', '/api/v1/drafts/'.$id, server: $this->kim);
         self::assertSame(4, $this->decodedResponse()['version'] ?? null);
     }
@@ -451,6 +452,9 @@ final class DraftAttachmentTest extends DatabaseTestCase
     public function testATooLargeBodyIsReportedAsATooLargeFile(): void
     {
         $id = $this->newDraft();
+        $this->client->jsonRequest('POST', '/api/v1/drafts/'.$id.'/attachments', ['file' => 'x'], $this->kim);
+        self::assertResponseStatusCodeSame(422);
+        self::assertStringContainsString('Send the file as multipart', (string) $this->client->getResponse()->getContent(), 'A body that is no form is not taken for a file too large.');
 
         // What PHP leaves of a request past post_max_size: no fields, no files, only its length.
         $this->client->request('POST', '/api/v1/drafts/'.$id.'/attachments', server: $this->kim + ['CONTENT_TYPE' => 'multipart/form-data; boundary=x', 'CONTENT_LENGTH' => '30000000', 'HTTP_ACCEPT' => 'application/json']);
@@ -459,18 +463,44 @@ final class DraftAttachmentTest extends DatabaseTestCase
         self::assertStringContainsString('The file is too large', (string) $this->client->getResponse()->getContent());
     }
 
-    public function testAForwardedInlineImageGoesOutInlineWithItsContentId(): void
+    public function testAForwardedInlineImageGoesOutInPlace(): void
     {
-        $logo = $this->receiveLogo();
-        $id = $this->newDraft(['to' => [['address' => 'anna@finance.example', 'name' => null]], 'kind' => 'reply', 'quoteHtml' => '<img src="cid:logo@finance.example">']);
+        $logo = $this->receiveLogo('logo@finance.example');
+        $id = $this->newDraft(['to' => [['address' => 'anna@finance.example', 'name' => null]], 'kind' => 'reply', 'quoteHtml' => '<blockquote><img src="cid:logo@finance.example" alt="Logo"></blockquote>']);
 
         $this->client->jsonRequest('POST', '/api/v1/drafts/'.$id.'/forwarded-attachments', ['attachmentId' => $logo], $this->kim);
         self::assertResponseStatusCodeSame(201);
         self::assertSame(['inline' => true, 'contentId' => 'logo@finance.example'], array_intersect_key($this->decodedResponse(), ['inline' => 0, 'contentId' => 0]));
 
-        $raw = $this->rawOf($this->send($id));
+        // The text as the client sends it: what was written, then the quote.
+        $raw = $this->rawOf($this->send($id, html: '<p>Got it.</p><blockquote><img src="cid:logo@finance.example" alt="Logo"></blockquote>'));
+        self::assertStringContainsString('multipart/related', $raw, 'The image belongs with the text, not in the list of files.');
         self::assertStringContainsString('Content-ID: <logo@finance.example>', $raw);
         self::assertStringContainsString('Content-Disposition: inline', $raw);
+        self::assertStringContainsString('src="cid:logo@finance.example"', $this->decodedHtmlOf($raw), 'The text still shows the image.');
+    }
+
+    public function testAnInlineImageWhoseIdNoHeaderCanCarryGoesOutUnderOneOfTresso(): void
+    {
+        // Gmail's ids have no "@"; a Content-ID header needs one.
+        $logo = $this->receiveLogo('ii_mgx81bq20');
+        $id = $this->newDraft(['to' => [['address' => 'anna@finance.example', 'name' => null]], 'kind' => 'reply', 'subject' => 'Logo', 'quoteHtml' => '<img src="cid:ii_mgx81bq20">']);
+        $this->client->jsonRequest('POST', '/api/v1/drafts/'.$id.'/forwarded-attachments', ['attachmentId' => $logo], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+
+        $raw = $this->rawOf($this->send($id, html: '<img src="cid:ii_mgx81bq20">'));
+
+        preg_match('~Content-ID: <([^>]+@inline\.tresso\.invalid)>~', $raw, $match);
+        $contentId = $match[1] ?? null;
+        self::assertIsString($contentId, 'It goes out under an id of its own.');
+        self::assertStringContainsString('src="cid:'.$contentId.'"', $this->decodedHtmlOf($raw));
+
+
+        $kept = $this->newDraft(['kind' => 'reply', 'subject' => 'Kept', 'quoteHtml' => '<img src="cid:ii_mgx81bq20">']);
+        $this->client->jsonRequest('POST', '/api/v1/drafts/'.$kept.'/forwarded-attachments', ['attachmentId' => $logo], $this->kim);
+        $this->connection()->executeStatement("UPDATE draft SET updated_at = now() - interval '1 minute'");
+        $this->entityManager()->clear();
+        self::assertSame([$kept], $this->claimFiling(), 'The copy in the Drafts folder is made all the same.');
     }
 
     public function testADraftThatCannotBeFiledIsTriedAgainOnceItChanges(): void
@@ -537,13 +567,13 @@ final class DraftAttachmentTest extends DatabaseTestCase
         return ['id' => $response['id'], 'url' => $url, 'filename' => $response['filename'], 'contentType' => $response['contentType'], 'size' => $response['size'], 'scanStatus' => $response['scanStatus']];
     }
 
-    private function send(string $draftId, ?string $at = null): string
+    private function send(string $draftId, ?string $at = null, string $html = '<p>See attached.</p>'): string
     {
         $this->client->jsonRequest('POST', '/api/v1/outgoing-messages', [
             'mailAccountId' => $this->accountId,
             'to' => [['address' => 'anna@finance.example']],
             'subject' => 'Notes',
-            'html' => '<p>See attached.</p>',
+            'html' => $html,
             'draftId' => $draftId,
         ] + (null === $at ? [] : ['sendAt' => new \DateTimeImmutable($at)->format(\DATE_ATOM)]), $this->kim);
         self::assertResponseStatusCodeSame(201);
@@ -652,8 +682,16 @@ final class DraftAttachmentTest extends DatabaseTestCase
         return $id;
     }
 
+    /** The HTML part of a message as sent, decoded. */
+    private function decodedHtmlOf(string $raw): string
+    {
+        $message = new \ZBateson\MailMimeParser\MailMimeParser()->parse($raw, false);
+
+        return (string) $message->getHtmlContent();
+    }
+
     /** A message with a logo shown in its body, as a received inline image. */
-    private function receiveLogo(): string
+    private function receiveLogo(string $contentId): string
     {
         $raw = "From: billing@finance.example\r\nSubject: Logo\r\n\r\nSee the logo";
         $rawSha = hash('sha256', $raw);
@@ -674,7 +712,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
             'to' => [['address' => 'kim@company.example']],
             'snippet' => 'See the logo',
             'attachments' => [
-                ['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => \strlen($png), 'sha256' => $sha, 'inline' => true, 'contentId' => 'logo@finance.example'],
+                ['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => \strlen($png), 'sha256' => $sha, 'inline' => true, 'contentId' => $contentId],
             ],
         ]]], $this->worker);
         self::assertResponseIsSuccessful();

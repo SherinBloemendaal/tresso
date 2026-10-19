@@ -15,6 +15,9 @@ final readonly class OutgoingHtmlSanitizer
 {
     private const int MAX_INPUT_BYTES = 2_000_000;
 
+    /** Stands in for a cid: reference while the HTML is cleaned: the sanitizer drops URLs without a host. */
+    private const string CID_STAND_IN = 'https://cid.tresso.invalid/';
+
     private HtmlSanitizer $sanitizer;
 
     public function __construct()
@@ -33,9 +36,30 @@ final readonly class OutgoingHtmlSanitizer
         $this->sanitizer = new HtmlSanitizer($config);
     }
 
-    public function sanitize(string $html): string
+    /**
+     * The HTML cleaned. Images referred to as cid:{id} keep that reference, through `$contentIds` when the part goes out
+     * under another id (one a mail header can carry).
+     *
+     * @param array<string, string> $contentIds
+     */
+    public function sanitize(string $html, array $contentIds = []): string
     {
-        return $this->sanitizer->sanitize($html);
+        $standIns = (string) preg_replace_callback(
+            '~\bcid:([^"\'\s<>]+)~i',
+            static fn (array $match): string => self::CID_STAND_IN.rawurlencode(html_entity_decode($match[1], \ENT_QUOTES | \ENT_HTML5, 'UTF-8')),
+            $html,
+        );
+        $clean = $this->sanitizer->sanitize($standIns);
+
+        return (string) preg_replace_callback(
+            '#'.preg_quote(self::CID_STAND_IN, '#').'([A-Za-z0-9%._~-]+)#',
+            static function (array $match) use ($contentIds): string {
+                $id = rawurldecode($match[1]);
+
+                return 'cid:'.htmlspecialchars($contentIds[$id] ?? $id, \ENT_QUOTES | \ENT_HTML5, 'UTF-8');
+            },
+            $clean,
+        );
     }
 
     /** The plain-text alternative: paragraphs and line breaks kept, links written out. */
