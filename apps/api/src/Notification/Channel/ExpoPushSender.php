@@ -15,6 +15,7 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
 final readonly class ExpoPushSender
 {
     public const string SEND_URL = 'https://exp.host/--/api/v2/push/send';
+    public const string RECEIPTS_URL = 'https://exp.host/--/api/v2/push/getReceipts';
 
     public function __construct(
         private HttpClientInterface $http,
@@ -56,7 +57,9 @@ final readonly class ExpoPushSender
             return PushResult::failed('Expo gave no ticket.');
         }
         if ('ok' === ($ticket['status'] ?? null)) {
-            return PushResult::sent();
+            $id = $ticket['id'] ?? null;
+
+            return PushResult::sent(\is_string($id) && '' !== $id ? $id : null);
         }
         $details = $ticket['details'] ?? null;
         if (\is_array($details) && 'DeviceNotRegistered' === ($details['error'] ?? null)) {
@@ -87,7 +90,51 @@ final readonly class ExpoPushSender
             'sound' => $message->silent ? null : 'default',
             'priority' => $message->silent ? 'normal' : 'high',
             'expiration' => $message->expiresAt->getTimestamp(),
-            'channelId' => $message->androidChannel,
+            'channelId' => $message->channelOnAndroid(),
         ];
+    }
+
+    /**
+     * Reads Expo's receipts for tickets (at most 300 at once): which ones say the device is gone (DeviceNotRegistered),
+     * and which ones Expo has no receipt for yet.
+     *
+     * @param list<string> $tickets
+     *
+     * @return array{gone: list<string>, pending: list<string>}|null null when Expo could not be asked
+     */
+    public function receipts(array $tickets): ?array
+    {
+        if ([] === $tickets) {
+            return ['gone' => [], 'pending' => []];
+        }
+        $headers = ['Accept' => 'application/json', 'Content-Type' => 'application/json'];
+        if (null !== $this->accessToken && '' !== $this->accessToken) {
+            $headers['Authorization'] = 'Bearer '.$this->accessToken;
+        }
+        try {
+            $response = $this->http->request('POST', self::RECEIPTS_URL, ['headers' => $headers, 'body' => json_encode(['ids' => $tickets], \JSON_THROW_ON_ERROR), 'timeout' => 10]);
+            if (200 !== $response->getStatusCode()) {
+                return null;
+            }
+            $answer = $response->toArray(false);
+        } catch (ExceptionInterface) {
+            return null;
+        }
+        $receipts = \is_array($answer['data'] ?? null) ? $answer['data'] : [];
+        $gone = [];
+        $pending = [];
+        foreach ($tickets as $ticket) {
+            $receipt = $receipts[$ticket] ?? null;
+            if (!\is_array($receipt)) {
+                $pending[] = $ticket;
+                continue;
+            }
+            $details = $receipt['details'] ?? null;
+            if ('error' === ($receipt['status'] ?? null) && \is_array($details) && 'DeviceNotRegistered' === ($details['error'] ?? null)) {
+                $gone[] = $ticket;
+            }
+        }
+
+        return ['gone' => $gone, 'pending' => $pending];
     }
 }

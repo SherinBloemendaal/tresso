@@ -37,6 +37,21 @@ class NotificationDeviceRepository extends ServiceEntityRepository
         return Uuid::isValid($id) ? $this->findOneBy(['id' => Uuid::fromString($id), 'user' => $user]) : null;
     }
 
+    /**
+     * @return list<NotificationDevice>
+     */
+    public function findOfOthersByEndpoint(User $user, string $endpoint): array
+    {
+        /** @var list<NotificationDevice> */
+        return $this->createQueryBuilder('d')
+            ->where('d.endpoint = :endpoint')
+            ->andWhere('d.user != :user')
+            ->setParameter('endpoint', $endpoint)
+            ->setParameter('user', $user->getId(), 'uuid')
+            ->getQuery()
+            ->getResult();
+    }
+
     public function findByEndpoint(User $user, string $endpoint): ?NotificationDevice
     {
         return $this->findOneBy(['user' => $user, 'endpoint' => $endpoint]);

@@ -21,6 +21,17 @@ enum NotificationKind: string
     /** After a meeting: notes and follow-up. */
     case FollowUp = 'follow_up';
 
+    /**
+     * The kinds whose channels the user chooses per kind (channelsByKind). Reminders carry their own channels, so they
+     * are not among them; another feature adds its kind here (mail).
+     *
+     * @return list<string>
+     */
+    public static function withChosenChannels(): array
+    {
+        return [self::LeaveNow->value, self::Brief->value, self::FollowUp->value];
+    }
+
     /** Where this kind goes unless the user chose otherwise. Reminders carry their own channels. */
     public function defaultChannels(): NotificationChannelChoice
     {

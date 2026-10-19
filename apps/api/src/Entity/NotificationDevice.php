@@ -14,7 +14,7 @@ use Symfony\Component\Uid\Uuid;
  * A device of the user that gets notifications: a browser subscription, a phone's Expo push token or a desktop app.
  */
 #[ORM\Entity(repositoryClass: NotificationDeviceRepository::class)]
-#[ORM\UniqueConstraint(columns: ['user_id', 'endpoint'])]
+#[ORM\UniqueConstraint(columns: ['endpoint'])]
 class NotificationDevice
 {
     #[ORM\Id]

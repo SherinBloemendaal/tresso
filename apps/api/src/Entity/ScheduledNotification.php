@@ -80,6 +80,13 @@ class ScheduledNotification implements TracksChanges
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $dismissedAt = null;
 
+    /**
+     * A fire time the user or the delivery rules chose (a snooze, the end of quiet hours or of a focus block); a
+     * replan never moves the notification before it.
+     */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $heldUntil = null;
+
     /** Leave now: the travel minutes the phone's last estimate gave; null until one came. */
     #[ORM\Column(nullable: true)]
     private ?int $estimatedMinutes = null;
@@ -107,12 +114,16 @@ class ScheduledNotification implements TracksChanges
     }
 
     /**
-     * Takes over a new plan for a notification not delivered yet. Returns whether the fire time moved.
+     * Takes over a new plan for a notification not delivered yet, but never before a time it is held until. Returns
+     * whether the fire time moved.
      *
      * @param list<string> $channels
      */
     public function replan(\DateTimeImmutable $fireAt, \DateTimeImmutable $occurrenceStartsAt, string $title, string $body, array $channels): bool
     {
+        if (null !== $this->heldUntil && $this->heldUntil > $fireAt) {
+            $fireAt = $this->heldUntil;
+        }
         $moved = $fireAt != $this->fireAt;
         if ($moved) {
             $this->fireAt = self::utc($fireAt);
@@ -174,13 +185,41 @@ class ScheduledNotification implements TracksChanges
     {
         $this->estimatedMinutes = $minutes;
         $this->fireAt = self::utc($leaveAt);
+        // The estimate decides now, not the last time the phone was asked.
+        $this->heldUntil = null;
         $this->body = $body;
     }
 
-    /** Quiet hours move a notification to their end. */
+    /** Quiet hours, working hours or a focus block move a notification to their end; a replan keeps it there. */
     public function postpone(\DateTimeImmutable $fireAt): void
     {
         $this->fireAt = self::utc($fireAt);
+        $this->heldUntil = $this->fireAt;
+    }
+
+    public function getHeldUntil(): ?\DateTimeImmutable
+    {
+        return $this->heldUntil;
+    }
+
+    /**
+     * The occurrence moved after this was delivered: a new round with the new plan, so the devices show it again.
+     *
+     * @param list<string> $channels
+     */
+    public function restart(\DateTimeImmutable $fireAt, \DateTimeImmutable $occurrenceStartsAt, string $title, string $body, array $channels): void
+    {
+        ++$this->round;
+        $this->deliveredAt = null;
+        $this->dismissedAt = null;
+        $this->silent = false;
+        $this->heldUntil = null;
+        $this->estimatedMinutes = null;
+        $this->fireAt = self::utc($fireAt);
+        $this->occurrenceStartsAt = self::utc($occurrenceStartsAt);
+        $this->title = $title;
+        $this->body = $body;
+        $this->channels = $channels;
     }
 
     public function getOccurrenceStartsAt(): \DateTimeImmutable
@@ -233,6 +272,7 @@ class ScheduledNotification implements TracksChanges
     public function snooze(\DateTimeImmutable $until): void
     {
         $this->fireAt = self::utc($until);
+        $this->heldUntil = $this->fireAt;
         $this->deliveredAt = null;
         $this->dismissedAt = null;
         ++$this->round;

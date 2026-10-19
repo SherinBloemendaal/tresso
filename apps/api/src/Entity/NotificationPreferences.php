@@ -105,6 +105,10 @@ class NotificationPreferences
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $plannedUntil = null;
 
+    /** Planning failed for this user: the sweep tries again from here. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $planRetryAt = null;
+
     public function __construct(User $user)
     {
         $this->user = $user;
@@ -324,5 +328,16 @@ class NotificationPreferences
     public function setPlannedUntil(?\DateTimeImmutable $plannedUntil): void
     {
         $this->plannedUntil = $plannedUntil;
+        $this->planRetryAt = null;
+    }
+
+    public function getPlanRetryAt(): ?\DateTimeImmutable
+    {
+        return $this->planRetryAt;
+    }
+
+    public function retryPlanningAt(\DateTimeImmutable $at): void
+    {
+        $this->planRetryAt = $at;
     }
 }

@@ -28,7 +28,7 @@ class ScheduledNotificationRepository extends ServiceEntityRepository
     }
 
     /**
-     * Notifications not delivered yet of these events, by "event id|occurrence|kind|slot".
+     * Every notification of these events, delivered or not, by "event id|occurrence|kind|slot".
      *
      * @param list<CalendarEvent> $events
      *

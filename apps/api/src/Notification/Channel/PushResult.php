@@ -12,12 +12,14 @@ final readonly class PushResult
     private function __construct(
         public string $status,
         public ?string $error,
+        /** Expo's ticket, to read the receipt later. */
+        public ?string $ticket = null,
     ) {
     }
 
-    public static function sent(): self
+    public static function sent(?string $ticket = null): self
     {
-        return new self('sent', null);
+        return new self('sent', null, $ticket);
     }
 
     public static function failed(string $error): self

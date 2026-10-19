@@ -66,6 +66,19 @@ final class NotificationDispatcherTest extends DatabaseTestCase
         self::assertCount(1, array_filter($this->http()->calls(), static fn (array $call): bool => self::PUSH_ENDPOINT === $call['url']));
     }
 
+    public function testASendAlreadyUnderWayIsNotDoubled(): void
+    {
+        $choice = new NotificationChannelChoice(NotificationChannel::Phone);
+        $this->dispatcher()->send($this->user(), $this->message(), 'mail:m1', $choice, new \DateTimeImmutable());
+        // Another worker fired the same notification and is sending right now.
+        $this->connection()->executeStatement("UPDATE notification_delivery SET status = 'sending', updated_at = NOW()");
+
+        $again = $this->dispatcher()->send($this->user(), $this->message(), 'mail:m1', $choice, new \DateTimeImmutable());
+
+        self::assertSame(0, $again);
+        self::assertCount(1, array_filter($this->http()->calls(), static fn (array $call): bool => self::EXPO_SEND === $call['url']));
+    }
+
     public function testSendsOnlyOnTheChosenChannels(): void
     {
         $this->dispatcher()->send($this->user(), $this->message(), 'mail:m1', new NotificationChannelChoice(NotificationChannel::Desktop), new \DateTimeImmutable());

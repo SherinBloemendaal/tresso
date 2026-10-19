@@ -8,6 +8,7 @@ use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProcessorInterface;
 use App\ApiResource\Input\Notification\UpdateNotificationSettings;
 use App\ApiResource\NotificationSettingsResource;
+use App\Calendar\SelfAddresses;
 use App\Entity\NotificationPreferences;
 use App\Enum\SnoozeChoice;
 use App\Enum\TravelMode;
@@ -17,6 +18,7 @@ use App\Realtime\AfterCommitDispatcher;
 use App\Repository\NotificationPreferencesRepository;
 use App\Security\CurrentUser;
 use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 
 /**
  * @implements ProcessorInterface<UpdateNotificationSettings, NotificationSettingsResource>
@@ -28,6 +30,7 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
         private NotificationPreferencesRepository $preferences,
         private CurrentUser $currentUser,
         private AfterCommitDispatcher $afterCommit,
+        private SelfAddresses $selfAddresses,
     ) {
     }
 
@@ -51,7 +54,12 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
                 $preferences->setFocusDuringBusy($data->focusDuringBusy);
             }
             if (null !== $data->emailAddress) {
-                $preferences->setEmailAddress('' === trim($data->emailAddress) ? null : trim($data->emailAddress));
+                $address = '' === trim($data->emailAddress) ? null : mb_strtolower(trim($data->emailAddress));
+                // Only addresses that are the user's own, so notifications cannot be aimed at someone else's inbox.
+                if (null !== $address && !\in_array($address, $this->selfAddresses->of($user), true)) {
+                    throw new UnprocessableEntityHttpException('Notifications can only go to your sign-in address or the address of one of your mail accounts.');
+                }
+                $preferences->setEmailAddress($address);
             }
             $planningBefore = self::planning($preferences);
             if (null !== $data->workDays || null !== $data->workStart || null !== $data->workEnd) {
