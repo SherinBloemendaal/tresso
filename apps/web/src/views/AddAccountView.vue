@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import FieldLabel from '@/forms/FieldLabel.vue'
+import { provideRequiredFields } from '@/forms/required'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useForm } from 'vee-validate'
@@ -19,6 +21,8 @@ const PATIENCE_MS = 45_000
 const auth = useAuthStore()
 const accounts = useAccountsStore()
 const mail = useMailStore()
+
+provideRequiredFields(addressSchema, connectSchema)
 
 const step = ref<Step>('address')
 const suggestion = ref<SuggestedServerSettings | null>(null)
@@ -162,12 +166,12 @@ onBeforeUnmount(() => {
       <h2>Connect a mail account</h2>
       <p class="lead">Work, support, personal: add every account you read. They all land in one Unified Inbox.</p>
       <label class="field">
-        <span>Email address</span>
+        <FieldLabel name="emailAddress">Email address</FieldLabel>
         <input v-model="emailAddress" type="email" autocomplete="email" maxlength="320" :aria-invalid="addressForm.errors.value.emailAddress ? 'true' : undefined" />
         <small v-if="addressForm.errors.value.emailAddress" class="error">{{ addressForm.errors.value.emailAddress }}</small>
       </label>
       <label class="field">
-        <span>Display name</span>
+        <FieldLabel name="displayName">Display name</FieldLabel>
         <input v-model="displayName" maxlength="120" :aria-invalid="addressForm.errors.value.displayName ? 'true' : undefined" />
         <small class="hint">Shown to people you write to.</small>
         <small v-if="addressForm.errors.value.displayName" class="error">{{ addressForm.errors.value.displayName }}</small>
@@ -189,12 +193,12 @@ onBeforeUnmount(() => {
       </p>
 
       <label class="field">
-        <span>Username</span>
+        <FieldLabel name="username">Username</FieldLabel>
         <input v-model="username" autocomplete="off" spellcheck="false" :aria-invalid="connectForm.errors.value.username ? 'true' : undefined" />
         <small v-if="connectForm.errors.value.username" class="error">{{ connectForm.errors.value.username }}</small>
       </label>
       <label class="field">
-        <span>Password or app password</span>
+        <FieldLabel name="password">Password or app password</FieldLabel>
         <input v-model="password" type="password" autocomplete="current-password" :aria-invalid="connectForm.errors.value.password ? 'true' : undefined" />
         <small class="hint">Stored encrypted and only used to sync and send your mail.</small>
         <small v-if="connectForm.errors.value.password" class="error">{{ connectForm.errors.value.password }}</small>
