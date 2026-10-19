@@ -99,7 +99,8 @@ Scopes: `mail:read`, `mail:write`, `mail:send`, `todos:read`, `todos:write`, `ca
 `settings:read`, `settings:write`, `signatures:read`, `signatures:write`. The scopes `teams:read`, `teams:write` and `webhooks:manage` are reserved for
 add-ons.
 
-Users log in with email + password (Argon2id) and, later, Google / Microsoft sign-in as identity providers.
+Users log in with email + password (Argon2id) and, later, Google / Microsoft sign-in as identity providers. (Signing
+in with Google or Microsoft to connect a mail account is separate: see Provider sign-in below.)
 
 ### 3.3 Mail account credentials
 
@@ -126,6 +127,79 @@ Users log in with email + password (Argon2id) and, later, Google / Microsoft sig
   they run through a client that refuses private networks, with short timeouts and a 64 KB limit. Only encrypted
   servers are suggested. Answers are cached per domain in Redis: a day when found, an hour when not.
 
+#### Provider sign-in (Gmail, Microsoft 365)
+
+Gmail and Microsoft 365 accounts connect through the provider's OAuth 2.0 authorization code flow with PKCE (S256),
+as a confidential client (the API holds the client secret). The layer is generic: one **provider grant** per
+signed-in provider account, shared by every feature that uses it. Mail is the first feature; the calendar (Google
+Calendar and Microsoft Graph calendars, with Meet and Teams links) adds its scopes to the same grant.
+
+- **Start:** `POST /api/v1/provider-authorizations` (scope `settings:write`) with `{"provider": "google" | "microsoft",
+  "features": ["mail"], "mailAccountId": <optional, to sign in again>}`. The API stores a pending request (the
+  SHA-256 of a random 256-bit `state`, the PKCE verifier, the user, the requested scopes; 15 minutes, single use) and
+  answers the provider's `authorizationUrl`. `GET /api/v1/oauth-providers` lists the providers this server has an
+  OAuth app for.
+- **Callback:** the provider redirects the browser to `<API_PUBLIC_URL>/connect/<provider>/callback`. That route is
+  behind the browser session of the API (the one used to sign in for `/oauth/authorize`; a signed-out browser signs
+  in first and comes back), and the session user must be the user who started: a sign-in link someone else started
+  cannot attach your provider account to their Tresso account. The API redeems the code with the verifier, reads who
+  signed in (Google: the ID token's `sub` and verified `email`; Microsoft: the ID token's `tid` and `oid`, and the
+  mailbox address from Graph `/me`), checks that the scopes the features need were granted (users can untick them),
+  creates or updates the grant and creates the mail account (or signs an existing one in again), then redirects to
+  the web app: `/settings/accounts/new` (or `/settings/accounts` when signing in again) with `connected=<account id>`
+  or `connectError=<code>` (`denied`, `expired`, `different_user`, `scopes_missing`, `wrong_account`,
+  `already_connected`, `unverified_address`, `no_mailbox`, `failed`). ID tokens come straight from the token endpoint
+  over TLS, so their claims are used without a signature check (OpenID Connect Core 3.1.3.7); the audience is checked.
+- **Grants** (`provider_grant`): owner, provider, the provider's stable account id, the scopes the provider confirmed
+  (Microsoft's normalized to lowercase without the `https://graph.microsoft.com/` prefix) and the tokens, sealed with
+  the owner's DEK like passwords (additional data: the grant id). Mail accounts link to their grant; removing the
+  last account of a grant deletes it and revokes the refresh token at Google (Microsoft has no revocation endpoint for
+  this).
+- **Access tokens for workers:** the credentials endpoint answers `{"type": "oauth2", "accessToken", "expiresAt"}`
+  for these accounts. The API refreshes the access token when it has less than 5 minutes left, under a row lock on the
+  grant (Microsoft replaces the refresh token on every refresh; two concurrent refreshes would lose one). A worker
+  whose token the provider refused asks again with `rejected=1` and gets a new one (unless it was issued in the last
+  minute). Workers never see refresh tokens. `invalid_grant` marks the grant revoked and its accounts `auth_failed`
+  ("Sign in with Google again") and answers 409; a provider outage answers 503 with `Retry-After`.
+- **Scopes now:** Google `openid email profile https://www.googleapis.com/auth/gmail.modify` with
+  `access_type=offline`, `prompt=consent` and `include_granted_scopes=true`. Microsoft `openid email profile
+  offline_access Mail.ReadWrite Mail.Send User.Read` (Graph). `gmail.modify` reads, labels, deletes and sends mail;
+  it is a restricted scope, so a public Google app needs Google's verification and a security assessment.
+- **Incremental consent (for the calendar):** add a `ProviderFeature` case and its scopes in `ProviderScopes`
+  (Google `https://www.googleapis.com/auth/calendar.events`, plus `calendar.readonly` to list calendars; Microsoft
+  `Calendars.ReadWrite` and, for work accounts, `OnlineMeetings.ReadWrite`). A sign-in for an account that has a grant
+  asks for the scopes of every feature the grant covers plus the new ones, Google keeps earlier scopes through
+  `include_granted_scopes`, and the grant stores the union for Microsoft. Callers ask
+  `ProviderAccessTokens::accessToken($grant, $feature)`, which refuses (409 for workers) when the grant lacks the
+  feature's scopes.
+
+##### Registering the OAuth apps
+
+Each installation registers its own apps and puts the values in `apps/api/.env.local` (never committed). A provider
+without a client id is not offered. With the Docker stack, `API_PUBLIC_URL` is `http://localhost:8080`; in
+production it is the public HTTPS address of the API.
+
+Google (Google Cloud console):
+
+1. Create a project, enable the **Gmail API** (APIs and services, Library).
+2. OAuth consent screen (Google Auth Platform, Branding and Audience): app name, support address, authorized domain
+   of the API; user type External (or Internal for one Workspace organization). While the app is in testing, add the
+   addresses that may sign in as test users. Data access: add `openid`, `.../auth/userinfo.email`,
+   `.../auth/userinfo.profile` and `https://www.googleapis.com/auth/gmail.modify`.
+3. Clients, Create client, type **Web application**, authorized redirect URI
+   `<API_PUBLIC_URL>/connect/google/callback` (for the Docker stack `http://localhost:8080/connect/google/callback`).
+4. Set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`.
+
+Microsoft (Microsoft Entra admin center, App registrations):
+
+1. New registration. Supported account types: "Accounts in any organizational directory and personal Microsoft
+   accounts" for `MICROSOFT_OAUTH_TENANT=common` (or single tenant, then set the tenant id). Redirect URI: platform
+   **Web**, `<API_PUBLIC_URL>/connect/microsoft/callback`.
+2. Certificates and secrets: new client secret (note its expiry; renew it before then).
+3. API permissions, Microsoft Graph, delegated: `openid`, `email`, `profile`, `offline_access`, `User.Read`,
+   `Mail.ReadWrite`, `Mail.Send`. Organizations whose users may not consent themselves need an admin to grant consent.
+4. Set `MICROSOFT_OAUTH_CLIENT_ID`, `MICROSOFT_OAUTH_CLIENT_SECRET` and `MICROSOFT_OAUTH_TENANT`.
+
 ### 3.4 Sync workers (`apps/sync`)
 
 Goal: fast synchronisation that scales horizontally to billions of accounts' worth of messages.
@@ -138,8 +212,29 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   caught by comparing the inbox's EXISTS, UIDNEXT and MODSEQ at re-selection.
 - **Deletions without QRESYNC:** the worker reports presence ranges ("between UID a and b only these exist") in
   chunks of 5000; the API removes the rest. Every folder is checked at session start and every 30 minutes.
-- **Gmail and Microsoft 365** (phase 1.6): Gmail `history.list` with Pub/Sub push, Microsoft Graph delta queries with
-  change notifications.
+- **Gmail** (`internal/gmailsync`, Gmail API): labels are folders (remote name = label id; INBOX, SENT, DRAFT, TRASH
+  and SPAM get their roles, user labels are custom), plus a virtual `tresso:all` folder (role `all`) for everything
+  outside Trash and Spam, so archived mail keeps a location. Chats, UNREAD, STARRED, IMPORTANT and CATEGORY_* are not
+  folders; seen = no UNREAD, flagged = STARRED, draft = DRAFT (Gmail has no "answered"). History is account-wide, so
+  one cursor (`historyId`, backfill page token) lives on `tresso:all`; the history id is taken before the backfill
+  starts, so nothing is missed. Backfill fetches `format=raw` newest first, once per message, and files it in every
+  folder its labels map to. Changes come from `history.list` every 30 s; touched messages are re-read (`format=minimal`)
+  and reported per folder. When the history id has expired (404), the folders are listed in full and compared with
+  the API's `GET /internal/sync/accounts/{id}/folders/remote-uids` to find what was deleted.
+- **Microsoft 365 / Outlook.com** (`internal/graphsync`, Microsoft Graph): every request asks for immutable ids
+  (`Prefer: IdType="ImmutableId"`), so a message keeps its id when it moves. Folders are the folder tree (remote name
+  = folder id, display name = path), with roles from the well-known folders. Each folder has its own cursor: the
+  delta link, taken before the backfill, and the backfill position (by received time, so deletions during the
+  backfill do not shift pages). The inbox delta is polled every 30 s, other folders every 5 minutes; a round with
+  removals re-reads the folder tree first and applies every folder's additions before any removal, so a move links
+  the message to its new folder instead of deleting it. An expired delta link (410, `syncStateNotFound`) restarts the
+  folder's delta and compares with the API's remote uids. "Answered" is not available through delta.
+- **Both providers:** flag changes go first (`changes`), and only the uids the API answers as `unknownUids` are
+  downloaded (Gmail raw, Graph `$value`) and ingested; a message entering another folder is downloaded once more and
+  linked to the stored one by Message-ID. Requests are rate limited per account (Gmail 200 quota units/s, Graph
+  15/s), 429 and 5xx are retried with Retry-After, and a refused access token is renewed once through
+  `credentials?rejected=1` (a second refusal, or missing scopes, reports `auth_failed`). Change notifications (Gmail
+  Pub/Sub, Graph webhooks) need a public endpoint and are not used yet; polling covers both.
 - **Connections** go through a guarded dialer that resolves the host and refuses private, loopback, link-local,
   CGNAT, NAT64, 6to4 and documentation ranges at connect time (the API checks at save time, the worker again on every
   connection, so DNS changes cannot redirect it). TLS 1.2+ with certificate verification, or STARTTLS.
@@ -172,8 +267,10 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   Once the transaction commits it tells the workers on the Mercure topic `urn:tresso:sync:outbox`; scheduled mail is
   released by a delayed Messenger message, and every heartbeat both releases due mail and lists the leased accounts
   with mail to send, so a lost notification only delays sending. The leasing worker claims due messages (5 minute
-  claim), sends over SMTP (whole message refused when one recipient is refused), files a copy in Sent (except at
-  providers that do that themselves) and reports sent, retry (4xx, connection problems, a wrong password: up to 6
+  claim), sends over SMTP (whole message refused when one recipient is refused), or for Gmail and Microsoft 365
+  through their APIs (Gmail `users.messages.send`, Graph `sendMail` with the MIME message, which Graph limits to about
+  3 MB; the envelope-only Bcc recipients are added as a Bcc header, which both providers strip), files a copy in Sent
+  (except at providers that do that themselves, Gmail and Microsoft included) and reports sent, retry (4xx, connection problems, a wrong password: up to 6
   attempts over about 4.5 hours) or failed (5xx). A message claimed again after an unreported attempt is first
   looked up in Sent by Message-ID, so it is never sent twice. Status reaches clients in the delta as
   `outgoingMessages`.
@@ -185,7 +282,9 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   Drafts folder, creating the folder when there is none, and only then removes the copy it replaces, so a failure
   leaves an extra copy rather than none. Copies of drafts that were sent (`draftId` on the outgoing message),
   deleted or moved to another account are queued for removal. The work comes with the outbox run: the same
-  realtime notification and heartbeat hint, the same claim and report cycle.
+  realtime notification and heartbeat hint, the same claim and report cycle. Gmail accounts file copies with
+  `users.drafts.create` and remove them by Message-ID (`rfc822msgid:`); Microsoft 365 accounts create them with the
+  MIME message (`POST /me/messages`) and remove them from Drafts permanently.
 - **Message actions:** `POST /api/v1/message-actions` (scope `mail:write`) marks up to 500 messages read or unread,
   flags or unflags them, archives them (out of the inbox into Archive, or All Mail where there is no Archive folder,
   as on Gmail), trashes them or moves them to a folder of their account (every copy, or with `fromFolderId` only the
@@ -204,7 +303,11 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   their folder; when the folder is deleted, its moves are undone; a placeholder whose move is done but that never
   lands within an hour is dropped. The worker moves with MOVE, or COPY and then \Deleted where the server has no MOVE
   (never copying twice on a retry); it expunges only that copy (UIDPLUS) and never the whole folder, which would also
-  erase messages another app merely marked deleted.
+  erase messages another app merely marked deleted. Gmail accounts change labels instead: read and flag through
+  UNREAD and STARRED, archive removes INBOX (the copy in the virtual All Mail folder takes the placeholder's place),
+  trash and untrash through `messages.trash`/`untrash`, and a move adds the target label and removes the source one.
+  Microsoft 365 accounts PATCH `isRead` and `flag` and move with `/move`; immutable ids keep the message's id, so the
+  worker always reports the uid in the target.
 
 ### 3.5 Client sync protocol
 
