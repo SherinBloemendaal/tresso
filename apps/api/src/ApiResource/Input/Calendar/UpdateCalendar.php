@@ -20,6 +20,9 @@ final class UpdateCalendar
 
     public ?bool $visible = null;
 
+    /** A work calendar keeps its notifications to the working hours. */
+    public ?bool $work = null;
+
     /** Makes this the calendar where new events and accepted invitations of its account (or of Tresso) go. */
     public ?bool $isDefault = null;
 }

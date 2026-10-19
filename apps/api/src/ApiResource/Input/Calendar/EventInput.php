@@ -72,7 +72,10 @@ final class EventInput
     #[Assert\Valid]
     public array $reminders = [];
 
-    /** Minutes to travel there, for leave-now reminders; estimated from the location when null. */
+    /** Its reminders reach the user also in quiet and outside working hours. */
+    public bool $important = false;
+
+    /** Minutes to travel there, for leave-now reminders; estimated from the phone's position when null. */
     #[Assert\Range(min: 0, max: 1440)]
     public ?int $travelMinutes = null;
 

@@ -151,6 +151,7 @@ final readonly class CalendarEventResource
         public ?string $syncError,
         public ?int $travelMinutes,
         public bool $defaultReminders,
+        public bool $important,
     ) {
     }
 
@@ -184,6 +185,7 @@ final readonly class CalendarEventResource
             $event->getSyncError(),
             $event->getTravelMinutes(),
             $event->usesDefaultReminders(),
+            $event->isImportant(),
         );
     }
 }

@@ -16,10 +16,10 @@ use App\Entity\NotificationPreferences;
 use App\Entity\ReminderRule;
 use App\Entity\ScheduledNotification;
 use App\Entity\User;
-use App\Entity\UserLocation;
 use App\Enum\EventStatus;
 use App\Enum\NotificationKind;
 use App\Enum\ParticipationStatus;
+use App\Notification\Travel\TravelTimeEstimator;
 use App\Realtime\AfterCommitDispatcher;
 use App\Repository\CalendarEventRepository;
 use App\Repository\NotificationPreferencesRepository;
@@ -39,9 +39,12 @@ use Symfony\Component\Messenger\Stamp\DelayStamp;
 final readonly class NotificationPlanner
 {
     public const string HORIZON = 'P8D';
-    /** Leave-now with an estimate is first looked at this long before the start, then moved to the right time. */
-    public const int LEAVE_CHECK_MINUTES = 120;
-    public const int LEAVE_MARGIN_MINUTES = 5;
+    /**
+     * Leave-now without a set travel time waits for the phone's estimate from this long before the start (the phone
+     * reads its position from then on), and is moved to the moment to leave when one comes.
+     */
+    public const int LEAVE_CHECK_MINUTES = 60;
+    public const string LEAVE_ESTIMATED_SLOT = 'leave:estimated';
     /** Plans this far in the past are left out: too late to matter. */
     private const string TOO_LATE = '-2 minutes';
 
@@ -53,6 +56,7 @@ final readonly class NotificationPlanner
         private ReminderRules $rules,
         private SelfAddresses $selfAddresses,
         private AfterCommitDispatcher $afterCommit,
+        private TravelTimeEstimator $travel,
         private LoggerInterface $logger,
     ) {
     }
@@ -115,7 +119,6 @@ final readonly class NotificationPlanner
             new \DateTimeZone($preferences->getTimeZone()),
             $this->rules->of($user),
             $this->selfAddresses->of($user),
-            $this->entityManager->find(UserLocation::class, $user),
             $preferences,
         );
     }
@@ -148,6 +151,11 @@ final readonly class NotificationPlanner
             $notification = $existing[$key] ?? null;
             unset($existing[$key]);
             if (null !== $notification) {
+                $estimate = $notification->getEstimatedMinutes();
+                if (self::LEAVE_ESTIMATED_SLOT === $plan->slot && null !== $estimate) {
+                    // The phone's estimate stays until it sends another.
+                    $plan = new Plan($plan->occurrenceKey, $plan->kind, $plan->slot, self::leaveAt($plan->startsAt, $estimate, $context), $plan->startsAt, $plan->title, self::leaveBody($estimate, trim($row->getLocation())), $plan->channels);
+                }
                 if (!$notification->isDelivered() && $notification->replan($plan->fireAt, $plan->startsAt, $plan->title, $plan->body, $plan->channels)) {
                     $this->announce($notification);
                 }
@@ -186,19 +194,23 @@ final readonly class NotificationPlanner
         $title = '' === $row->getSummary() ? '(no title)' : $row->getSummary();
         $plans = [];
 
+        $shiftEarly = $context->preferences->isShiftEarlyReminders() && $row->getCalendar()->isWork() && !$row->isAllDay();
         foreach ($this->reminders($row, $rule, $start, $end, $context) as $slot => [$fireAt, $channels]) {
+            if ($shiftEarly) {
+                $fireAt = WorkingHours::shiftEarly($context->preferences, $fireAt, $start) ?? $fireAt;
+            }
             $plans[] = new Plan($key, NotificationKind::Reminder, $slot, $fireAt, $start, $title, self::reminderBody($row, $start, $end, $context->zone), $channels);
         }
 
         $location = trim($row->getLocation());
         $others = ReminderRules::hasOthers($row, $context->self);
-        if (!$row->isAllDay() && '' !== $location && (null !== $row->getTravelMinutes() || true === $rule?->isLeaveNow())) {
+        if ($context->preferences->isLeaveNow() && !$row->isAllDay() && '' !== $location && (null !== $row->getTravelMinutes() || true === $rule?->isLeaveNow())) {
             $travel = $row->getTravelMinutes();
             if (null !== $travel) {
-                $plans[] = new Plan($key, NotificationKind::LeaveNow, 'leave', $start->modify(\sprintf('-%d minutes', $travel + self::LEAVE_MARGIN_MINUTES)), $start, $title, self::leaveBody($travel, $location), self::channels($context, NotificationKind::LeaveNow));
-            } elseif (null !== $context->location) {
-                // Estimated when it fires, and moved to the right moment then.
-                $plans[] = new Plan($key, NotificationKind::LeaveNow, 'leave:estimated', $start->modify(\sprintf('-%d minutes', self::LEAVE_CHECK_MINUTES)), $start, $title, self::leaveBody(null, $location), self::channels($context, NotificationKind::LeaveNow));
+                $plans[] = new Plan($key, NotificationKind::LeaveNow, 'leave', self::leaveAt($start, $travel, $context), $start, $title, self::leaveBody($travel, $location), self::channels($context, NotificationKind::LeaveNow));
+            } elseif ($this->travel->isAvailable($context->preferences->getTravelMode())) {
+                // Waits for the phone's estimate, and is moved to the moment to leave when it comes.
+                $plans[] = new Plan($key, NotificationKind::LeaveNow, self::LEAVE_ESTIMATED_SLOT, $start->modify(\sprintf('-%d minutes', self::LEAVE_CHECK_MINUTES)), $start, $title, self::leaveBody(null, $location), self::channels($context, NotificationKind::LeaveNow));
             }
         }
         if ($others && null !== $rule?->getBriefMinutes()) {
@@ -269,6 +281,12 @@ final readonly class NotificationPlanner
         $location = trim($row->getLocation());
 
         return '' === $location ? $when : $when.', '.$location;
+    }
+
+    /** When to leave: the travel time and the user's extra time before the start. */
+    public static function leaveAt(\DateTimeImmutable $start, int $travelMinutes, PlanContext $context): \DateTimeImmutable
+    {
+        return $start->modify(\sprintf('-%d minutes', $travelMinutes + $context->preferences->getExtraTravelMinutes()));
     }
 
     public static function leaveBody(?int $travelMinutes, string $location): string

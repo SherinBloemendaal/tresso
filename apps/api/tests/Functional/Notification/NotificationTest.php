@@ -263,6 +263,119 @@ final class NotificationTest extends DatabaseTestCase
         self::assertSame('With Anna de Vries.', $delivered[0]['body']);
     }
 
+    public function testSettingsHoldWorkingHoursFocusTravelAndSnoozeChoices(): void
+    {
+        $settings = $this->getJson('/api/v1/notification-settings', $this->kim);
+        self::assertSame([[1, 2, 3, 4, 5], '09:00', '17:30', true, true, true, true, true, 'car', 5, ['minutes_5', 'before_start', 'start', 'meeting_end']], [
+            $settings['workDays'], $settings['workStart'], $settings['workEnd'], $settings['shiftEarlyReminders'], $settings['workCalendarsQuiet'],
+            $settings['holdDuringFocus'], $settings['holdMailInMeetings'], $settings['leaveNow'], $settings['travelMode'], $settings['extraTravelMinutes'], $settings['snoozeChoices'],
+        ]);
+
+        $this->patchSettings(['workDays' => [2, 1], 'workStart' => '08:30', 'travelMode' => 'bike', 'extraTravelMinutes' => 10, 'snoozeChoices' => ['start', 'minutes_10'], 'holdMailInMeetings' => false]);
+
+        $settings = $this->getJson('/api/v1/notification-settings', $this->kim);
+        self::assertSame([[1, 2], '08:30', 'bike', 10, ['start', 'minutes_10'], false], [$settings['workDays'], $settings['workStart'], $settings['travelMode'], $settings['extraTravelMinutes'], $settings['snoozeChoices'], $settings['holdMailInMeetings']]);
+    }
+
+    public function testEarlyRemindersOfWorkCalendarsComeAtTheEndOfTheWorkingDayBefore(): void
+    {
+        $this->patchSettings(['timeZone' => 'Europe/Amsterdam', 'workDays' => [1, 2, 3, 4, 5, 6, 7]]);
+        $this->markWork();
+        $day = new \DateTimeImmutable('+3 days', new \DateTimeZone('Europe/Amsterdam'));
+        $start = $day->setTime(8, 0);
+
+        $this->createEvent($start->setTimezone(new \DateTimeZone('UTC')));
+
+        self::assertSame($day->modify('-1 day')->setTime(17, 30)->format(\DATE_ATOM), $this->atom($this->notifications()[0]['fireAt'], 'Europe/Amsterdam'));
+    }
+
+    public function testWorkCalendarsWaitForWorkingHoursUnlessTheEventIsImportant(): void
+    {
+        $this->registerDevices();
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $this->patchSettings(['workDays' => [1, 2, 3, 4, 5, 6, 7], 'workStart' => $now->modify('+2 hours')->format('H:i'), 'workEnd' => $now->modify('+3 hours')->format('H:i')]);
+        $this->markWork();
+        $this->createEvent($this->inMinutes(4 * 60), ['summary' => 'Review', 'useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 3 * 60 + 55, 'channels' => ['phone', 'desktop']]]]);
+        $this->createEvent($this->inMinutes(4 * 60), ['summary' => 'Release', 'important' => true, 'useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 3 * 60 + 55, 'channels' => ['phone', 'desktop']]]]);
+
+        foreach ($this->notifications() as $notification) {
+            $this->fire(self::string($notification['id']), $now->modify('+5 minutes'));
+        }
+
+        $byTitle = array_column($this->notifications(), null, 'title');
+        self::assertNull($byTitle['Review']['deliveredAt'], 'Outside working hours it waits.');
+        self::assertSame($now->modify('+2 hours')->format('Y-m-d\TH:i'), substr($this->atom($byTitle['Review']['fireAt']), 0, 16));
+        self::assertNotNull($byTitle['Release']['deliveredAt'], 'An important event comes through.');
+        self::assertFalse($byTitle['Release']['silent']);
+    }
+
+    public function testAFocusBlockHoldsNotificationsUntilItEnds(): void
+    {
+        $this->registerDevices();
+        $blockStart = $this->inMinutes(-10);
+        $this->createEvent($blockStart, ['summary' => 'Focus: budget', 'end' => ['dateTime' => $blockStart->modify('+60 minutes')->setTimezone(new \DateTimeZone('Europe/Amsterdam'))->format('Y-m-d\TH:i:s'), 'timeZone' => 'Europe/Amsterdam']]);
+        $this->createEvent($this->inMinutes(2 * 60), ['summary' => 'Dentist', 'useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 115, 'channels' => ['phone']]]]);
+
+        $dentist = array_values(array_filter($this->notifications(), static fn (array $n): bool => 'Dentist' === $n['title']));
+        $this->fire(self::string($dentist[0]['id']));
+
+        $dentist = array_values(array_filter($this->notifications(), static fn (array $n): bool => 'Dentist' === $n['title']));
+        self::assertNull($dentist[0]['deliveredAt']);
+        self::assertSame($blockStart->modify('+60 minutes')->format(\DATE_ATOM), $this->atom($dentist[0]['fireAt']));
+    }
+
+    public function testLeaveNowAsksThePhoneAndMovesToItsEstimate(): void
+    {
+        $this->registerDevices();
+        $this->client->jsonRequest('POST', '/api/v1/reminder-rules', ['name' => 'Places', 'allDay' => false, 'withLocation' => true, 'reminders' => [], 'leaveNow' => true], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+        $this->runQueuedPlanning();
+        $start = $this->inMinutes(90);
+        $eventId = $this->createEvent($start, ['location' => 'Herengracht 1, Amsterdam']);
+        $leave = array_values(array_filter($this->notifications(), static fn (array $n): bool => 'leave_now' === $n['kind']));
+        self::assertSame($start->modify('-60 minutes')->format(\DATE_ATOM), $this->atom($leave[0]['fireAt']), 'It waits for the phone from an hour before.');
+
+        $this->fire(self::string($leave[0]['id']));
+
+        $expo = array_values(array_filter($this->http()->calls(), static fn (array $call): bool => str_starts_with($call['url'], 'https://exp.host/')));
+        self::assertCount(1, $expo);
+        $ask = json_decode($expo[0]['body'], true, flags: \JSON_THROW_ON_ERROR);
+        self::assertIsArray($ask);
+        self::assertArrayNotHasKey('title', $ask, 'Asked silently.');
+        self::assertIsArray($ask['data']);
+        self::assertSame(['leave_estimate', $eventId], [$ask['data']['kind'], $ask['data']['eventId']]);
+        self::assertCount(0, array_filter($this->http()->calls(), static fn (array $call): bool => self::PUSH_ENDPOINT === $call['url']), 'Only the phone is asked.');
+
+        $this->http()->respond('https://nominatim.example.test/search', json_encode([['lat' => '52.360000', 'lon' => '4.880000']], \JSON_THROW_ON_ERROR));
+        $this->http()->respond('https://osrm.example.test/route/v1/driving/4.890000,52.370000;4.880000,52.360000', json_encode(['routes' => [['duration' => 1200]]], \JSON_THROW_ON_ERROR));
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events/'.$eventId.'/leave-estimate', ['latitude' => 52.37, 'longitude' => 4.89], $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertSame(20, $this->decodedResponse()['minutes']);
+
+        $leave = array_values(array_filter($this->notifications(), static fn (array $n): bool => 'leave_now' === $n['kind']));
+        self::assertSame($start->modify('-25 minutes')->format(\DATE_ATOM), $this->atom($leave[0]['fireAt']));
+        self::assertSame('Leave now: about 20 minutes to Herengracht 1, Amsterdam.', $leave[0]['body']);
+        $this->fire(self::string($leave[0]['id']));
+        $leave = array_values(array_filter($this->notifications(), static fn (array $n): bool => 'leave_now' === $n['kind']));
+        self::assertNotNull($leave[0]['deliveredAt']);
+    }
+
+    public function testSnoozesUntilTheStartButNotIntoThePast(): void
+    {
+        $this->registerDevices();
+        $start = $this->inMinutes(30);
+        $this->createEvent($start, ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 25, 'channels' => ['phone']]]]);
+        $id = $this->onlyNotificationId();
+        $this->fire($id);
+
+        $this->client->jsonRequest('POST', '/api/v1/notifications/'.$id.'/snooze', ['until' => 'start'], $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertSame($start->format(\DATE_ATOM), $this->atom($this->decodedResponse()['fireAt']));
+
+        $this->client->jsonRequest('POST', '/api/v1/notifications/'.$id.'/snooze', ['until' => 'meeting_end'], $this->kim);
+        self::assertResponseStatusCodeSame(422, 'Not in a meeting now.');
+    }
+
     public function testRemovingAnEventDropsItsPlannedNotifications(): void
     {
         $event = $this->createEvent($this->inMinutes(2 * 24 * 60));
@@ -353,6 +466,14 @@ final class NotificationTest extends DatabaseTestCase
         $this->runQueuedPlanning();
     }
 
+    private function markWork(): void
+    {
+        $this->client->request('PATCH', '/api/v1/calendars/'.$this->calendarId, server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['work' => true], \JSON_THROW_ON_ERROR));
+        self::assertResponseIsSuccessful();
+        self::assertTrue($this->decodedResponse()['work']);
+        $this->runQueuedPlanning();
+    }
+
     private function registerDevices(): void
     {
         $this->http()->respond(self::PUSH_ENDPOINT, '', 201);
@@ -420,8 +541,8 @@ final class NotificationTest extends DatabaseTestCase
         return static::getContainer()->get(MockHttpRouter::class);
     }
 
-    private function atom(mixed $value): string
+    private function atom(mixed $value, string $zone = 'UTC'): string
     {
-        return new \DateTimeImmutable(self::string($value))->setTimezone(new \DateTimeZone('UTC'))->format(\DATE_ATOM);
+        return new \DateTimeImmutable(self::string($value))->setTimezone(new \DateTimeZone($zone))->format(\DATE_ATOM);
     }
 }

@@ -7,19 +7,19 @@ namespace App\Notification;
 use App\Calendar\Assistant\MeetingBriefWriter;
 use App\Calendar\OccurrenceExpander;
 use App\Entity\ScheduledNotification;
-use App\Entity\UserLocation;
+use App\Enum\NotificationChannel;
 use App\Enum\NotificationKind;
 use App\Notification\Channel\PushMessage;
-use App\Notification\Travel\TravelTimeEstimator;
 use App\Repository\NotificationPreferencesRepository;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * Delivers a calendar notification when its time has come. First, under a lock on the notification: still current,
- * not quiet (or moved to the end of the quiet hours), not drowned out by focus, leave-now re-estimated, and marked
- * delivered. Then the NotificationDispatcher sends it, once per target and round.
+ * Delivers a calendar notification when its time has come. First, under a lock on the notification: still current;
+ * leave-now waiting for the phone's estimate asks the phone for one instead; then quiet hours, the working hours of
+ * work calendars and focus blocks may move it later or make it silent, except for important events; then it is
+ * marked delivered. Then the NotificationDispatcher sends it, once per target and round.
  */
 final readonly class NotificationDeliverer
 {
@@ -27,13 +27,18 @@ final readonly class NotificationDeliverer
     private const int EARLY_SECONDS = 30;
     /** How long push services keep trying. */
     private const string EXPIRES = '+2 hours';
+    /** The silent push that asks a phone for a leave-now estimate. */
+    public const string ESTIMATE_KIND = 'leave_estimate';
+    /** How often the phone is asked again while no estimate came. */
+    private const string ESTIMATE_AGAIN = '+15 minutes';
+    /** An estimate this close to the moment to leave is too late to be of use. */
+    private const int LAST_ESTIMATE_MINUTES = 5;
 
     public function __construct(
         private EntityManagerInterface $entityManager,
         private NotificationPreferencesRepository $preferences,
         private NotificationPlanner $planner,
         private OccurrenceExpander $occurrences,
-        private TravelTimeEstimator $travel,
         private MeetingBriefWriter $briefs,
         private NotificationDispatcher $dispatcher,
     ) {
@@ -44,15 +49,20 @@ final readonly class NotificationDeliverer
         if (!Uuid::isValid($notificationId)) {
             return;
         }
-        $notification = $this->entityManager->wrapInTransaction(fn (): ?ScheduledNotification => $this->prepare(Uuid::fromString($notificationId), $now));
-        if (null !== $notification) {
+        /** @var array{?ScheduledNotification, ?ScheduledNotification} $next */
+        $next = $this->entityManager->wrapInTransaction(fn (): array => $this->prepare(Uuid::fromString($notificationId), $now));
+        [$deliver, $askEstimate] = $next;
+        if (null !== $deliver) {
             $this->dispatcher->send(
-                $notification->getUser(),
-                $this->message($notification, $now),
-                self::deliveryKey($notification),
-                NotificationChannelChoice::fromValues($notification->getChannels()),
+                $deliver->getUser(),
+                $this->message($deliver, $now),
+                self::deliveryKey($deliver),
+                NotificationChannelChoice::fromValues($deliver->getChannels()),
                 $now,
             );
+        }
+        if (null !== $askEstimate) {
+            $this->askForEstimate($askEstimate, $now);
         }
         $this->entityManager->clear();
     }
@@ -64,85 +74,138 @@ final readonly class NotificationDeliverer
     }
 
     /**
-     * The notification to send now, marked delivered; null when there is nothing to send (yet).
+     * What to do now: the notification to send (marked delivered), or the leave-now notification to ask the phone
+     * an estimate for; neither when there is nothing to do (yet).
+     *
+     * @return array{?ScheduledNotification, ?ScheduledNotification}
      */
-    private function prepare(Uuid $id, \DateTimeImmutable $now): ?ScheduledNotification
+    private function prepare(Uuid $id, \DateTimeImmutable $now): array
     {
         $notification = $this->entityManager->find(ScheduledNotification::class, $id, LockMode::PESSIMISTIC_WRITE);
         if (null === $notification || $notification->isDelivered() || null !== $notification->getDismissedAt()) {
-            return null;
+            return [null, null];
         }
         $event = $notification->getEvent();
         if (null === $event) {
             $this->entityManager->remove($notification);
             $this->entityManager->flush();
 
-            return null;
+            return [null, null];
         }
         if ($notification->getFireAt()->getTimestamp() > $now->getTimestamp() + self::EARLY_SECONDS) {
-            return null;
+            return [null, null];
         }
 
         $user = $notification->getUser();
         $preferences = $this->preferences->forUser($user);
 
-        if (NotificationKind::LeaveNow === $notification->getKind() && 'leave:estimated' === $notification->getSlot()) {
-            $leaveAt = $this->leaveAt($notification);
-            if (null === $leaveAt) {
-                // No route: no reminder rather than a wrong one.
+        if (NotificationKind::LeaveNow === $notification->getKind() && NotificationPlanner::LEAVE_ESTIMATED_SLOT === $notification->getSlot() && null === $notification->getEstimatedMinutes()) {
+            // No estimate from the phone yet: ask it, and look again in a while. Without one in time there is no
+            // reminder rather than a guessed one.
+            $latest = $notification->getOccurrenceStartsAt()->modify(\sprintf('-%d minutes', $preferences->getExtraTravelMinutes() + self::LAST_ESTIMATE_MINUTES));
+            if ($now >= $latest) {
                 $notification->dismiss($now);
                 $this->entityManager->flush();
 
-                return null;
+                return [null, null];
             }
-            if ($leaveAt->getTimestamp() > $now->getTimestamp() + 60) {
-                $notification->postpone(min($leaveAt, $now->modify('+15 minutes')));
-                $this->entityManager->flush();
-                $this->planner->announce($notification);
+            $notification->postpone(min($latest, $now->modify(self::ESTIMATE_AGAIN)));
+            $this->entityManager->flush();
+            $this->planner->announce($notification);
 
-                return null;
-            }
+            return [null, $notification];
         }
         if (NotificationKind::Brief === $notification->getKind()) {
             $notification->replan($notification->getFireAt(), $notification->getOccurrenceStartsAt(), $notification->getTitle(), $this->briefs->brief($event, $notification->getOccurrenceKey())->headline(), $notification->getChannels());
         }
 
+        $important = $event->isImportant();
         $silent = false;
-        $quietEnd = QuietHours::endOf($preferences, $now);
+        $quietEnd = $important ? null : QuietHours::endOf($preferences, $now);
         if (null !== $quietEnd) {
             if ($notification->getOccurrenceStartsAt() > $quietEnd && NotificationKind::FollowUp !== $notification->getKind()) {
-                $notification->postpone($quietEnd);
-                $this->entityManager->flush();
-                $this->planner->announce($notification);
-
-                return null;
+                return $this->postpone($notification, $quietEnd);
             }
             $silent = true;
         }
-        if (!$silent && $preferences->isFocusDuringBusy() && NotificationKind::LeaveNow !== $notification->getKind() && null !== $event->getSelfPartstat() && $this->inBusyEvent($notification, $now)) {
+        $workQuiet = !$important && NotificationKind::LeaveNow !== $notification->getKind() && $preferences->isWorkCalendarsQuiet()
+            && $event->getCalendar()->isWork() && !WorkingHours::contains($preferences, $now);
+        if ($workQuiet) {
+            $workStart = WorkingHours::nextStart($preferences, $now);
+            if (null !== $workStart && $notification->getOccurrenceStartsAt() > $workStart && NotificationKind::FollowUp !== $notification->getKind()) {
+                return $this->postpone($notification, $workStart);
+            }
+            $silent = true;
+        }
+        // Meetings with others starting and leave-now come through a focus block; the rest waits for its end.
+        $comesThrough = $important || NotificationKind::LeaveNow === $notification->getKind() || (NotificationKind::Reminder === $notification->getKind() && [] !== $event->getAttendees());
+        if (!$comesThrough && $preferences->isHoldDuringFocus()) {
+            $focusEnd = $this->focusBlockEnd($notification, $now);
+            if (null !== $focusEnd) {
+                return $this->postpone($notification, $focusEnd);
+            }
+        }
+        if (!$silent && !$important && $preferences->isFocusDuringBusy() && NotificationKind::LeaveNow !== $notification->getKind() && null !== $event->getSelfPartstat() && $this->inBusyEvent($notification, $now)) {
             $silent = true;
         }
 
         $notification->markDelivered($now, $silent);
         $this->entityManager->flush();
 
-        return $notification;
+        return [$notification, null];
     }
 
-    private function leaveAt(ScheduledNotification $notification): ?\DateTimeImmutable
+    /**
+     * @return array{null, null}
+     */
+    private function postpone(ScheduledNotification $notification, \DateTimeImmutable $until): array
+    {
+        $notification->postpone($until);
+        $this->entityManager->flush();
+        $this->planner->announce($notification);
+
+        return [null, null];
+    }
+
+    /**
+     * Asks the user's phones, silently, for their position's travel estimate to this event (they answer with POST
+     * /calendar-events/{id}/leave-estimate). The position stays on the phone until it sends that one estimate.
+     */
+    private function askForEstimate(ScheduledNotification $notification, \DateTimeImmutable $now): void
     {
         $event = $notification->getEvent();
-        $location = $this->entityManager->find(UserLocation::class, $notification->getUser());
-        if (null === $event || null === $location || !$this->travel->isAvailable()) {
-            return null;
+        if (null === $event) {
+            return;
         }
-        $minutes = $this->travel->minutes($location->getLatitude(), $location->getLongitude(), $event->getLocation(), $notification->getOccurrenceStartsAt());
-        if (null === $minutes) {
-            return null;
+        $data = ['eventId' => $event->getId()->toRfc4122()];
+        if ('' !== $notification->getOccurrenceKey() && !$event->isOverride()) {
+            $data['recurrenceId'] = $notification->getOccurrenceKey();
         }
-        $notification->replan($notification->getFireAt(), $notification->getOccurrenceStartsAt(), $notification->getTitle(), NotificationPlanner::leaveBody($minutes, $event->getLocation()), $notification->getChannels());
+        $this->dispatcher->send(
+            $notification->getUser(),
+            new PushMessage($notification->getId()->toRfc4122(), self::ESTIMATE_KIND, '', '', null, true, $now->modify('+10 minutes'), $data),
+            \sprintf('leave-estimate:%s:%d', $notification->getId()->toRfc4122(), $now->getTimestamp()),
+            new NotificationChannelChoice(NotificationChannel::Phone),
+            $now,
+        );
+    }
 
-        return $notification->getOccurrenceStartsAt()->modify(\sprintf('-%d minutes', $minutes + NotificationPlanner::LEAVE_MARGIN_MINUTES));
+    /** The end of the focus block the user is in now (busy, only them, titled "Focus ..."), or null. */
+    private function focusBlockEnd(ScheduledNotification $notification, \DateTimeImmutable $now): ?\DateTimeImmutable
+    {
+        $eventId = $notification->getEvent()?->getId()->toRfc4122();
+        foreach ($this->occurrences->expand($notification->getUser(), [], $now, $now->modify('+1 minute'), new \DateTimeZone('UTC')) as $occurrence) {
+            if ($occurrence->eventId === $eventId || $occurrence->allDay || 'busy' !== $occurrence->transparency || 'cancelled' === $occurrence->status || 0 !== $occurrence->attendeeCount) {
+                continue;
+            }
+            if (!str_starts_with(mb_strtolower(trim($occurrence->summary)), 'focus') || !isset($occurrence->end['dateTime'])) {
+                continue;
+            }
+
+            return new \DateTimeImmutable($occurrence->end['dateTime']);
+        }
+
+        return null;
     }
 
     /** Whether the user is in another busy event they take part in right now. */

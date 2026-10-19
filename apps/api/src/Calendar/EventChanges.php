@@ -34,6 +34,8 @@ final readonly class EventChanges
         public ?string $conferenceUrl,
         public bool $useDefaultReminders = true,
         public ?int $travelMinutes = null,
+        /** Important events reach the user also in quiet and outside working hours (PRIORITY 1). */
+        public bool $important = false,
     ) {
         if ($start->isDate !== $end->isDate) {
             throw new \InvalidArgumentException('Start and end must both be dates or both be date-times.');

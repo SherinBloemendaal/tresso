@@ -95,6 +95,7 @@ final class EventReader
             ConferenceDetector::detect($event),
             self::travelMinutes($event),
             self::usesDefaultReminders($event),
+            self::isImportant($event),
         );
     }
 
@@ -315,6 +316,14 @@ final class EventReader
         }
 
         return 'email' === $action ? [NotificationChannel::Email->value] : [NotificationChannel::Phone->value, NotificationChannel::Desktop->value];
+    }
+
+    /** RFC 5545 PRIORITY: 1 to 4 is high; 0 is undefined. */
+    private static function isImportant(VEvent $event): bool
+    {
+        $priority = Props::int($event, 'PRIORITY');
+
+        return $priority >= 1 && $priority <= 4;
     }
 
     /** Tresso's own travel time, else Apple Calendar's travel duration. */

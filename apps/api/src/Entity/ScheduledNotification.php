@@ -80,6 +80,10 @@ class ScheduledNotification implements TracksChanges
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $dismissedAt = null;
 
+    /** Leave now: the travel minutes the phone's last estimate gave; null until one came. */
+    #[ORM\Column(nullable: true)]
+    private ?int $estimatedMinutes = null;
+
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
@@ -94,8 +98,8 @@ class ScheduledNotification implements TracksChanges
         $this->occurrenceKey = $occurrenceKey;
         $this->kind = $kind;
         $this->slot = $slot;
-        $this->fireAt = $fireAt;
-        $this->occurrenceStartsAt = $occurrenceStartsAt;
+        $this->fireAt = self::utc($fireAt);
+        $this->occurrenceStartsAt = self::utc($occurrenceStartsAt);
         $this->title = $title;
         $this->body = $body;
         $this->channels = $channels;
@@ -111,10 +115,10 @@ class ScheduledNotification implements TracksChanges
     {
         $moved = $fireAt != $this->fireAt;
         if ($moved) {
-            $this->fireAt = $fireAt;
+            $this->fireAt = self::utc($fireAt);
         }
         if ($occurrenceStartsAt != $this->occurrenceStartsAt) {
-            $this->occurrenceStartsAt = $occurrenceStartsAt;
+            $this->occurrenceStartsAt = self::utc($occurrenceStartsAt);
         }
         $this->title = $title;
         $this->body = $body;
@@ -158,10 +162,25 @@ class ScheduledNotification implements TracksChanges
         return $this->fireAt;
     }
 
+    public function getEstimatedMinutes(): ?int
+    {
+        return $this->estimatedMinutes;
+    }
+
+    /**
+     * Leave now: a travel estimate came; the reminder moves to the moment to leave.
+     */
+    public function estimate(int $minutes, \DateTimeImmutable $leaveAt, string $body): void
+    {
+        $this->estimatedMinutes = $minutes;
+        $this->fireAt = self::utc($leaveAt);
+        $this->body = $body;
+    }
+
     /** Quiet hours move a notification to their end. */
     public function postpone(\DateTimeImmutable $fireAt): void
     {
-        $this->fireAt = $fireAt;
+        $this->fireAt = self::utc($fireAt);
     }
 
     public function getOccurrenceStartsAt(): \DateTimeImmutable
@@ -202,7 +221,7 @@ class ScheduledNotification implements TracksChanges
 
     public function markDelivered(\DateTimeImmutable $at, bool $silent): void
     {
-        $this->deliveredAt = $at;
+        $this->deliveredAt = self::utc($at);
         $this->silent = $silent;
     }
 
@@ -213,7 +232,7 @@ class ScheduledNotification implements TracksChanges
 
     public function snooze(\DateTimeImmutable $until): void
     {
-        $this->fireAt = $until;
+        $this->fireAt = self::utc($until);
         $this->deliveredAt = null;
         $this->dismissedAt = null;
         ++$this->round;
@@ -226,7 +245,7 @@ class ScheduledNotification implements TracksChanges
 
     public function dismiss(\DateTimeImmutable $at): void
     {
-        $this->dismissedAt = $at;
+        $this->dismissedAt = self::utc($at);
     }
 
     public function getCreatedAt(): \DateTimeImmutable
@@ -258,5 +277,11 @@ class ScheduledNotification implements TracksChanges
     public function setChangeSeq(int $changeSeq): void
     {
         $this->changeSeq = $changeSeq;
+    }
+
+    /** Date-time columns keep the wall clock only, so every moment is stored in UTC. */
+    private static function utc(\DateTimeImmutable $moment): \DateTimeImmutable
+    {
+        return $moment->setTimezone(new \DateTimeZone('UTC'));
     }
 }

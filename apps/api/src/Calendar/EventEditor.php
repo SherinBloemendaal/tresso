@@ -270,6 +270,7 @@ final readonly class EventEditor
         $this->writeAttendees($event, $changes, $self);
         self::writeReminders($event, $changes);
         self::writeTravel($event, $changes->travelMinutes);
+        self::writeImportance($event, $changes->important);
         self::writeConference($event, $changes->conferenceUrl);
 
         self::touch($event, self::significantState($event) !== $before);
@@ -368,6 +369,23 @@ final readonly class EventEditor
         }
     }
 
+    /**
+     * Important is PRIORITY 1 (RFC 5545: 1 to 4 is high). Turning it off removes a high priority and leaves other
+     * clients' medium and low ones alone.
+     */
+    private static function writeImportance(VEvent $event, bool $important): void
+    {
+        $current = Props::int($event, 'PRIORITY');
+        if ($important) {
+            Props::set($event, 'PRIORITY', 1);
+
+            return;
+        }
+        if ($current >= 1 && $current <= 4) {
+            $event->remove('PRIORITY');
+        }
+    }
+
     private static function writeConference(VEvent $event, ?string $url): void
     {
         $existing = null;
@@ -434,7 +452,7 @@ final readonly class EventEditor
         $this->write($master, new EventChanges(
             $changes->summary, $changes->description, $changes->location, $changes->url, $newStart, $newEnd, $changes->rrule,
             $changes->status, $changes->transparency, $changes->visibility, $changes->attendees, $changes->reminders, $changes->conferenceUrl,
-            $changes->useDefaultReminders, $changes->travelMinutes,
+            $changes->useDefaultReminders, $changes->travelMinutes, $changes->important,
         ), $vcalendar, true, $self);
     }
 
@@ -503,7 +521,7 @@ final readonly class EventEditor
         $this->write($newMaster, new EventChanges(
             $changes->summary, $changes->description, $changes->location, $changes->url, $changes->start, $changes->end, $rule,
             $changes->status, $changes->transparency, $changes->visibility, $changes->attendees, $changes->reminders, $changes->conferenceUrl,
-            $changes->useDefaultReminders, $changes->travelMinutes,
+            $changes->useDefaultReminders, $changes->travelMinutes, $changes->important,
         ), $next, true, $self);
         self::withOrganizer($next, $object->getCalendar(), $organizer);
 
