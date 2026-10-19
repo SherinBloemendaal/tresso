@@ -516,15 +516,19 @@ export class MailDatabase implements SyncStore {
 
   /** The messages of these threads, for acting on whole conversations. */
   async messageIdsOfThreads(threadIds: string[]): Promise<string[]> {
-    const tx = this.db.transaction('messages')
-    const ids: string[] = []
-    for (const threadId of threadIds) {
-      for (const key of await tx.store.index('byThread').getAllKeys(threadId)) {
-        ids.push(key)
-      }
-    }
+    return [...(await this.messagesByThread(threadIds)).values()].flat()
+  }
 
-    return ids
+  /** The messages of each thread, read in one transaction however many threads there are. */
+  async messagesByThread(threadIds: string[]): Promise<Map<string, string[]>> {
+    const tx = this.db.transaction('messages')
+    const byThread = new Map<string, string[]>()
+    for (const threadId of threadIds) {
+      byThread.set(threadId, await tx.store.index('byThread').getAllKeys(threadId))
+    }
+    await tx.done
+
+    return byThread
   }
 
   /** Inbox threads with unread mail, per account. */
