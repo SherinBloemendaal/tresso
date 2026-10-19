@@ -4,7 +4,8 @@
  */
 
 export type NotificationKind = 'reminder' | 'leave_now' | 'brief' | 'follow_up'
-export type NotificationChannel = 'push' | 'email'
+/** The phone app (Expo push), the desktop app and browsers (web push), or email. */
+export type NotificationChannel = 'phone' | 'desktop' | 'email'
 export type DeviceKind = 'web_push' | 'expo' | 'desktop'
 
 /** A delivered notification as the delta carries it; every device shows it and clears it once dismissed. */
@@ -71,6 +72,8 @@ export interface NotificationSettings {
   focusDuringBusy: boolean
   emailAddress: string | null
   effectiveEmailAddress: string
+  /** The user's channels per kind of notification; a kind missing here uses its default. */
+  channelsByKind: Record<string, NotificationChannel[]>
 }
 
 export type RuleRole = 'any' | 'organized' | 'invited'
