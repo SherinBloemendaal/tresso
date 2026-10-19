@@ -1,9 +1,12 @@
 package gmailsync
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -11,6 +14,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"tresso/sync/internal/providersend"
 )
 
 // fakeGmail is an in-memory Gmail mailbox behind the Gmail API's endpoints: labels, messages with raw MIME, and a
@@ -34,13 +40,28 @@ type fakeGmail struct {
 	minimalGets  map[string]int
 	sent         []sentRequest
 	authRejected int
+	// rewriteIDs makes sends and new drafts get a Message-ID of Gmail's own, as Gmail may do.
+	rewriteIDs bool
+	drafts     map[string]string // draft id -> message id
+	nextID     int
+	draftLists int
+	// metadataGets counts header lookups (format=metadata), to show how much a duplicate check reads.
+	metadataGets int
 }
 
 type fakeMessage struct {
 	id       string
 	raw      []byte
 	labels   []string
-	received int64 // ms
+	received int64  // ms
+	thread   string // "" means its own id
+}
+
+func (m *fakeMessage) threadID() string {
+	if m.thread != "" {
+		return m.thread
+	}
+	return m.id
 }
 
 type fakeRecord struct {
@@ -168,7 +189,58 @@ func (f *fakeGmail) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && (path == "/gmail/v1/users/me/messages/send" || path == "/upload/gmail/v1/users/me/messages/send"):
 		body, _ := io.ReadAll(r.Body)
 		f.sent = append(f.sent, sentRequest{path: path + "?" + r.URL.RawQuery, contentType: r.Header.Get("Content-Type"), raw: body})
-		writeJSON(w, map[string]string{"id": "sent-1"})
+		raw, threadID := f.decodeMessage(r.Header.Get("Content-Type"), body, false)
+		m := f.store(raw, threadID, "SENT")
+		writeJSON(w, map[string]string{"id": m.id, "threadId": m.threadID()})
+	case r.Method == http.MethodPost && (path == "/gmail/v1/users/me/drafts" || path == "/upload/gmail/v1/users/me/drafts"):
+		body, _ := io.ReadAll(r.Body)
+		f.sent = append(f.sent, sentRequest{path: path + "?" + r.URL.RawQuery, contentType: r.Header.Get("Content-Type"), raw: body})
+		raw, threadID := f.decodeMessage(r.Header.Get("Content-Type"), body, true)
+		m := f.store(raw, threadID, "DRAFT")
+		f.nextID++
+		draftID := "r" + strconv.Itoa(f.nextID)
+		if f.drafts == nil {
+			f.drafts = map[string]string{}
+		}
+		f.drafts[draftID] = m.id
+		writeJSON(w, map[string]any{"id": draftID, "message": map[string]string{"id": m.id, "threadId": m.threadID()}})
+	case r.Method == http.MethodGet && path == "/gmail/v1/users/me/drafts":
+		var out []map[string]any
+		ids := make([]string, 0, len(f.drafts))
+		for id := range f.drafts {
+			ids = append(ids, id)
+		}
+		// Newest first, as Gmail lists them.
+		slices.SortFunc(ids, func(a, b string) int {
+			if c := f.messages[f.drafts[b]].received - f.messages[f.drafts[a]].received; c != 0 {
+				return int(c)
+			}
+			return strings.Compare(b, a)
+		})
+		f.draftLists++
+		for _, id := range ids {
+			m := f.messages[f.drafts[id]]
+			if want, ok := strings.CutPrefix(q.Get("q"), "rfc822msgid:"); ok && providersend.HeaderValue(m.raw, "Message-ID") != "<"+want+">" {
+				continue
+			}
+			if after, ok := strings.CutPrefix(q.Get("q"), "after:"); ok {
+				if seconds, _ := strconv.ParseInt(after, 10, 64); m.received < seconds*1000 {
+					continue
+				}
+			}
+			out = append(out, map[string]any{"id": id, "message": map[string]string{"id": m.id}})
+		}
+		writeJSON(w, map[string]any{"drafts": out})
+	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/gmail/v1/users/me/drafts/"):
+		id := strings.TrimPrefix(path, "/gmail/v1/users/me/drafts/")
+		messageID, ok := f.drafts[id]
+		if !ok {
+			writeError(w, http.StatusNotFound, `{"error":{"code":404}}`)
+			return
+		}
+		delete(f.drafts, id)
+		delete(f.messages, messageID)
+		w.WriteHeader(http.StatusNoContent)
 	case path == "/gmail/v1/users/me/profile":
 		writeJSON(w, map[string]string{"emailAddress": "kim@example.test", "historyId": strconv.Itoa(f.historyID)})
 	case path == "/gmail/v1/users/me/labels":
@@ -209,7 +281,17 @@ func (f *fakeGmail) serve(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, `{"error":{"code":404,"message":"Requested entity was not found."}}`)
 			return
 		}
-		out := map[string]any{"id": m.id, "labelIds": m.labels, "internalDate": strconv.FormatInt(m.received, 10)}
+		out := map[string]any{"id": m.id, "threadId": m.threadID(), "labelIds": m.labels, "internalDate": strconv.FormatInt(m.received, 10)}
+		if q.Get("format") == "metadata" {
+			f.metadataGets++
+			var headers []map[string]string
+			for _, name := range q["metadataHeaders"] {
+				if value := providersend.HeaderValue(m.raw, name); value != "" {
+					headers = append(headers, map[string]string{"name": name, "value": value})
+				}
+			}
+			out["payload"] = map[string]any{"headers": headers}
+		}
 		if q.Get("format") == "raw" {
 			f.rawGets[id]++
 			out["raw"] = base64.URLEncoding.EncodeToString(m.raw)
@@ -256,8 +338,18 @@ func (f *fakeGmail) list(w http.ResponseWriter, q map[string][]string) {
 	var all []*fakeMessage
 	for _, m := range f.messages {
 		search := get("q")
-		if id, ok := strings.CutPrefix(search, "rfc822msgid:"); ok && !strings.Contains(string(m.raw), "<"+id+">") {
+		if id, ok := strings.CutPrefix(search, "rfc822msgid:"); ok && providersend.HeaderValue(m.raw, "Message-ID") != "<"+id+">" {
 			continue
+		}
+		if rest, ok := strings.CutPrefix(search, "in:sent after:"); ok {
+			after, recipients, _ := strings.Cut(rest, " ")
+			seconds, _ := strconv.ParseInt(after, 10, 64)
+			if !slices.Contains(m.labels, "SENT") || m.received < seconds*1000 {
+				continue
+			}
+			if recipients != "" && !f.sentTo(m, recipients) {
+				continue
+			}
 		}
 		// Gmail lists chats unless the query leaves them out.
 		if search == "-in:chats" && slices.Contains(m.labels, "CHAT") {
@@ -283,7 +375,7 @@ func (f *fakeGmail) list(w http.ResponseWriter, q map[string][]string) {
 	end := min(size, len(all))
 	ids := []map[string]string{}
 	for _, m := range all[:end] {
-		ids = append(ids, map[string]string{"id": m.id, "threadId": m.id})
+		ids = append(ids, map[string]string{"id": m.id, "threadId": m.threadID()})
 	}
 	out := map[string]any{"messages": ids}
 	if end < len(all) {
@@ -301,4 +393,95 @@ func writeError(w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = io.WriteString(w, body)
+}
+
+// decodeMessage reads what messages.send or drafts.create got: JSON with base64url raw, or a multipart upload of JSON
+// metadata and the message. draft says the metadata is wrapped as {"message": ...}.
+func (f *fakeGmail) decodeMessage(contentType string, body []byte, draft bool) (raw []byte, threadID string) {
+	type message struct {
+		Raw      string `json:"raw"`
+		ThreadID string `json:"threadId"`
+	}
+	decodeMeta := func(data []byte) message {
+		var m message
+		if draft {
+			var wrapped struct{ Message message }
+			_ = json.Unmarshal(data, &wrapped)
+			return wrapped.Message
+		}
+		_ = json.Unmarshal(data, &m)
+		return m
+	}
+	mediaType, params, _ := mime.ParseMediaType(contentType)
+	if mediaType != "multipart/related" {
+		m := decodeMeta(body)
+		raw, _ = base64.URLEncoding.DecodeString(m.Raw)
+		return raw, m.ThreadID
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	meta, err := reader.NextPart()
+	if err != nil {
+		f.t.Fatalf("multipart upload: %v", err)
+	}
+	metadata, _ := io.ReadAll(meta)
+	part, err := reader.NextPart()
+	if err != nil || part.Header.Get("Content-Type") != "message/rfc822" {
+		f.t.Fatalf("multipart upload without the message: %v", err)
+	}
+	raw, _ = io.ReadAll(part)
+	return raw, decodeMeta(metadata).ThreadID
+}
+
+// store keeps a sent message or draft. With rewriteIDs it gets a Message-ID of the fake's own.
+func (f *fakeGmail) store(raw []byte, threadID, label string) *fakeMessage {
+	f.nextID++
+	id := "g" + strconv.Itoa(f.nextID)
+	if f.rewriteIDs {
+		replaced, err := providersend.SetHeader(raw, "Message-ID", "<"+id+"@mail.gmail.com>")
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		raw = replaced
+	}
+	m := &fakeMessage{id: id, raw: raw, labels: []string{label}, received: time.Now().UnixMilli(), thread: threadID}
+	f.messages[id] = m
+	return m
+}
+
+// sentTo reports whether m was sent to the address of a ` {to:"x" cc:"x" bcc:"x"}` search group.
+func (f *fakeGmail) sentTo(m *fakeMessage, group string) bool {
+	start := strings.Index(group, `to:"`)
+	if start < 0 {
+		f.t.Errorf("unexpected recipient search %q", group)
+		return false
+	}
+	address := group[start+4:]
+	address = address[:strings.IndexByte(address, '"')]
+	for _, header := range []string{"To", "Cc", "Bcc"} {
+		if strings.Contains(strings.ToLower(providersend.HeaderValue(m.raw, header)), strings.ToLower(address)) {
+			return true
+		}
+	}
+	return false
+}
+
+// addDraft files a draft directly, received at ms.
+func (f *fakeGmail) addDraft(raw []byte, ms int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m := f.store(raw, "", "DRAFT")
+	m.received = ms
+	f.nextID++
+	if f.drafts == nil {
+		f.drafts = map[string]string{}
+	}
+	f.drafts["r"+strconv.Itoa(f.nextID)] = m.id
+}
+
+// addSent puts a sent message in the mailbox directly, received at ms.
+func (f *fakeGmail) addSent(raw []byte, ms int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m := f.store(raw, "", "SENT")
+	m.received = ms
 }

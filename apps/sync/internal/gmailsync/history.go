@@ -132,6 +132,14 @@ func (s *session) applyTouched(ctx context.Context, ids []string, mentioned map[
 			if s.isFolder[labelID] {
 				candidates = append(candidates, labelID)
 			}
+			if hidingLabel(labelID) {
+				// Into or out of Trash or Spam: the message left, or came back to, every other folder.
+				candidates = candidates[:0]
+				for _, f := range s.folders {
+					candidates = append(candidates, f.RemoteName)
+				}
+				break
+			}
 		}
 		for _, folder := range candidates {
 			if !in[folder] {
@@ -205,10 +213,14 @@ func (s *session) fullResync(ctx context.Context) error {
 	listings := make(map[string][]string, len(s.folders))
 	for _, f := range s.folders {
 		var ids []string
-		if f.RemoteName == allMailFolder {
+		switch {
+		case f.RemoteName == allMailFolder:
 			ids, err = s.gmail.listAll(ctx, "", false)
-		} else {
+		case hidingLabel(f.RemoteName):
 			ids, err = s.gmail.listAll(ctx, f.RemoteName, true)
+		default:
+			// Without Trash and Spam, which hide a message from its other labels (see foldersOf).
+			ids, err = s.gmail.listAll(ctx, f.RemoteName, false)
 		}
 		if err != nil {
 			return err

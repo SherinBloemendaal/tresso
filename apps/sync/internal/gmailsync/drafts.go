@@ -2,13 +2,14 @@ package gmailsync
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"tresso/sync/internal/providerhttp"
+	"tresso/sync/internal/providersend"
 )
 
 // costDraft is the quota cost of drafts.create and drafts.delete.
@@ -26,51 +27,120 @@ func OpenDrafts(ctx context.Context, client *Client) *DraftsStore {
 	return &DraftsStore{ctx: ctx, client: client}
 }
 
-// AppendDraft creates a draft from raw. Gmail dates the draft itself, so at is not used. Messages above the size a
-// JSON body takes are uploaded as media, as Send does.
+// AppendDraft creates a draft from raw, in the conversation of the message it answers. The copy is marked with its
+// Message-ID in providersend.DraftCopyHeader, as Gmail may give it another one; Remove finds it by either. Gmail dates
+// the draft itself, so at is not used. Large copies are uploaded, as Send does.
 func (s *DraftsStore) AppendDraft(raw []byte, _ time.Time) error {
-	req := providerhttp.Request{Method: http.MethodPost, Cost: costDraft}
-	if len(raw) > uploadThreshold {
-		req.URL = s.client.root + "/upload/gmail/v1/users/me/drafts?uploadType=media"
-		req.ContentType = "message/rfc822"
-		req.Body = raw
-	} else {
-		body, err := json.Marshal(map[string]any{"message": map[string]string{"raw": base64.URLEncoding.EncodeToString(raw)}})
+	if messageID := messageIDOf(raw); messageID != "" {
+		marked, err := providersend.SetHeader(raw, providersend.DraftCopyHeader, providersend.DraftCopyMarker(messageID))
 		if err != nil {
 			return err
 		}
-		req.URL = s.client.base + "/drafts"
-		req.ContentType = "application/json"
-		req.Body = body
+		raw = marked
+	}
+	threadID, err := s.client.replyThread(s.ctx, raw)
+	if err != nil {
+		return mapAccessError(err)
+	}
+	req, err := s.client.messageRequest("/drafts", raw, threadID, costDraft)
+	if err != nil {
+		return err
 	}
 	return mapAccessError(s.client.http.JSON(s.ctx, req, nil))
 }
 
-// Remove deletes every draft whose message has this Message-ID (without angle brackets). A draft that is gone already
-// counts as removed.
+// Remove deletes every draft whose message has this Message-ID (without angle brackets), or carries its marker in
+// providersend.DraftCopyHeader when Gmail replaced the Message-ID. A draft that is gone already counts as removed.
+//
+// The marker is only looked for among drafts that came after the copy could have been made (draftsSince), newest
+// first and at most maxScan of them. A copy not found there was never filed or is gone: it counts as removed, so the
+// removal never comes back for ever.
 func (s *DraftsStore) Remove(messageID string) error {
-	query := url.Values{"q": {"rfc822msgid:" + messageID}, "maxResults": {"100"}}
+	targets, err := s.drafts(url.Values{"q": {"rfc822msgid:" + messageID}}, 0)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		recent, err := s.drafts(url.Values{"q": {fmt.Sprintf("after:%d", draftsSince(messageID, time.Now()).Unix())}}, maxScan)
+		if err != nil {
+			return err
+		}
+		marker := providersend.DraftCopyMarker(messageID)
+		for _, d := range recent {
+			value, err := s.client.header(s.ctx, d.messageID, providersend.DraftCopyHeader)
+			if providerhttp.IsStatus(err, http.StatusNotFound) {
+				continue
+			}
+			if err != nil {
+				return mapAccessError(err)
+			}
+			if value == marker {
+				targets = append(targets, d)
+			}
+		}
+	}
+	for _, d := range targets {
+		_, err := s.client.http.Do(s.ctx, providerhttp.Request{Method: http.MethodDelete, URL: s.client.base + "/drafts/" + url.PathEscape(d.id), Cost: costDraft})
+		if err != nil && !providerhttp.IsStatus(err, http.StatusNotFound) {
+			return mapAccessError(err)
+		}
+	}
+	return nil
+}
+
+type draftRef struct{ id, messageID string }
+
+// draftCopyWindow bounds how far back a draft copy is looked for when its Message-ID does not say when the draft was
+// started.
+const draftCopyWindow = 30 * 24 * time.Hour
+
+// draftClockMargin allows for the clock of the device that chose the draft's id: clients make draft ids, so a device
+// whose clock runs ahead would otherwise start the search after its copies were filed.
+const draftClockMargin = 24 * time.Hour
+
+// draftsSince is the earliest a copy with this Message-ID can have been filed: the API composes a draft copy's
+// Message-ID from the draft's id (<draft id>.<version>@domain), and a UUIDv7 id says when the draft was started.
+func draftsSince(messageID string, now time.Time) time.Time {
+	draftID, _, _ := strings.Cut(messageID, ".")
+	if started, ok := providersend.UUIDv7Time(draftID); ok {
+		return started.Add(-draftClockMargin)
+	}
+	return now.Add(-draftCopyWindow)
+}
+
+// drafts lists the drafts matching query, newest first; at most limit of them when limit is above 0.
+func (s *DraftsStore) drafts(query url.Values, limit int) ([]draftRef, error) {
+	query.Set("maxResults", "500")
+	var out []draftRef
 	for {
 		var page struct {
 			Drafts []struct {
-				ID string `json:"id"`
+				ID      string `json:"id"`
+				Message struct {
+					ID string `json:"id"`
+				} `json:"message"`
 			} `json:"drafts"`
 			NextPageToken string `json:"nextPageToken"`
 		}
 		if err := s.client.get(s.ctx, "/drafts", query, costList, &page); err != nil {
-			return err
+			return nil, err
 		}
-		for _, draft := range page.Drafts {
-			_, err := s.client.http.Do(s.ctx, providerhttp.Request{Method: http.MethodDelete, URL: s.client.base + "/drafts/" + url.PathEscape(draft.ID), Cost: costDraft})
-			if err != nil && !providerhttp.IsStatus(err, http.StatusNotFound) {
-				return mapAccessError(err)
+		for _, d := range page.Drafts {
+			if limit > 0 && len(out) >= limit {
+				return out, nil
 			}
+			out = append(out, draftRef{id: d.ID, messageID: d.Message.ID})
 		}
 		if page.NextPageToken == "" {
-			return nil
+			return out, nil
 		}
 		query.Set("pageToken", page.NextPageToken)
 	}
+}
+
+// messageIDOf returns raw's Message-ID without angle brackets, or "".
+func messageIDOf(raw []byte) string {
+	return strings.Trim(providersend.HeaderValue(raw, "Message-ID"), "<> ")
 }
 
 func (s *DraftsStore) Close() {}

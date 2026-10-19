@@ -8,6 +8,7 @@ import (
 	"tresso/sync/internal/graphsync"
 	"tresso/sync/internal/imapsync"
 	"tresso/sync/internal/providerauth"
+	"tresso/sync/internal/providersend"
 	"tresso/sync/internal/smtpsend"
 )
 
@@ -33,7 +34,8 @@ type imapSender struct {
 	password    string
 }
 
-func (s *imapSender) Send(ctx context.Context, envelope smtpsend.Envelope, raw []byte) error {
+func (s *imapSender) Send(ctx context.Context, message api.OutgoingMessage, raw []byte) error {
+	envelope := smtpsend.Envelope{From: message.EnvelopeFrom, Recipients: message.Recipients}
 	return smtpsend.Send(ctx, s.dialer, s.credentials.Connection.SMTP, s.credentials.Connection.Username, s.password, envelope, raw)
 }
 
@@ -72,8 +74,12 @@ func (t gmailTransport) Open(credentials api.Credentials) (Sender, error) {
 
 type gmailSender struct{ client *gmailsync.Client }
 
-func (s *gmailSender) Send(ctx context.Context, envelope smtpsend.Envelope, raw []byte) error {
-	return gmailsync.Send(ctx, s.client, raw, envelope.Recipients)
+func (s *gmailSender) Send(ctx context.Context, message api.OutgoingMessage, raw []byte) error {
+	marked, err := markOutgoing(message, raw)
+	if err != nil {
+		return err
+	}
+	return gmailsync.Send(ctx, s.client, marked, message.Recipients)
 }
 
 func (s *gmailSender) OpenSent(ctx context.Context) (SentStore, error) {
@@ -111,8 +117,12 @@ func (t graphTransport) Open(credentials api.Credentials) (Sender, error) {
 
 type graphSender struct{ client *graphsync.Client }
 
-func (s *graphSender) Send(ctx context.Context, envelope smtpsend.Envelope, raw []byte) error {
-	return graphsync.Send(ctx, s.client, raw, envelope.Recipients)
+func (s *graphSender) Send(ctx context.Context, message api.OutgoingMessage, raw []byte) error {
+	marked, err := markOutgoing(message, raw)
+	if err != nil {
+		return err
+	}
+	return graphsync.Send(ctx, s.client, marked, message.Recipients)
 }
 
 func (s *graphSender) OpenSent(ctx context.Context) (SentStore, error) {
@@ -125,4 +135,14 @@ func (s *graphSender) OpenDrafts(ctx context.Context) (DraftsStore, error) {
 
 func (s *graphSender) OpenMailbox(ctx context.Context) (MailboxStore, error) {
 	return graphsync.OpenMailbox(ctx, s.client), nil
+}
+
+// markOutgoing marks the message as this outbox message (providersend.OutgoingIDHeader, an opaque hash), so the
+// duplicate check finds the sent copy even when the provider gave it another Message-ID.
+func markOutgoing(message api.OutgoingMessage, raw []byte) ([]byte, error) {
+	marked, err := providersend.SetHeader(raw, providersend.OutgoingIDHeader, providersend.OutgoingMarker(message.ID, message.MessageID))
+	if err != nil {
+		return nil, &providersend.Error{Permanent: true, Message: "The message could not be read.", Err: err}
+	}
+	return marked, nil
 }

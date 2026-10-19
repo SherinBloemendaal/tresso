@@ -25,8 +25,15 @@ var ErrMessageGone = errors.New("the message is no longer in the folder")
 type Mailbox struct {
 	ctx    context.Context
 	client *Client
-	// applied remembers flag changes made in this run: a message in several folders is one Gmail message.
+	// applied remembers the flag changes made for the current change (see StartChange): a message in several of its
+	// folders is one Gmail message, changed once.
 	applied map[string]bool
+}
+
+// StartChange begins the next change: what the one before did is forgotten, so a later change to the same message
+// (unread after read) is always made. It satisfies outbox.ChangeScoped.
+func (m *Mailbox) StartChange() {
+	clear(m.applied)
 }
 
 // OpenMailbox returns the account's mailbox for changes; it opens no connection.
@@ -73,7 +80,9 @@ func (m *Mailbox) SetFlags(location api.MailboxLocation, seen, flagged *bool) er
 // its id in every folder.
 //
 // The target All Mail (tresso:all) means archiving: only the source label goes (Inbox, for the archive button). Trash
-// uses messages.trash; a message leaving Trash is untrashed first. Spam is a label like any other.
+// uses messages.trash and Spam adds the SPAM label; both keep the message's other labels, which Gmail hides while it
+// is there and shows again when it leaves, so restoring it puts it back where it was. A message leaving Trash is
+// untrashed first.
 func (m *Mailbox) Move(source api.MailboxLocation, target, _ string) (string, error) {
 	id := source.RemoteUID
 	msg, err := m.client.getMessage(m.ctx, id, "minimal")
@@ -83,11 +92,11 @@ func (m *Mailbox) Move(source api.MailboxLocation, target, _ string) (string, er
 	if err != nil {
 		return "", err
 	}
-	if !inFolder(msg.LabelIDs, source.Folder) {
-		return "", ErrMessageGone
-	}
 	if target == source.Folder {
 		return id, nil
+	}
+	if !inFolder(msg.LabelIDs, source.Folder) {
+		return m.resume(id, msg.LabelIDs, source.Folder, target)
 	}
 
 	if source.Folder == labelTrash {
@@ -96,17 +105,20 @@ func (m *Mailbox) Move(source api.MailboxLocation, target, _ string) (string, er
 		}
 	}
 	var add, remove []string
-	if source.Folder != allMailFolder && source.Folder != labelTrash {
-		remove = append(remove, source.Folder)
-	}
 	switch target {
 	case labelTrash:
 		if err := m.post(id, "trash"); err != nil {
 			return "", err
 		}
+		return id, nil
 	case allMailFolder:
 	default:
 		add = append(add, target)
+	}
+	// Leaving the source: Trash was left by untrashing, Spam, the Inbox and user labels by losing their label. A move
+	// into Spam keeps the other labels (hidden while it is there).
+	if source.Folder != allMailFolder && source.Folder != labelTrash && target != labelSpam {
+		remove = append(remove, source.Folder)
 	}
 	if len(add)+len(remove) > 0 {
 		if err := m.modify(id, add, remove); err != nil {
@@ -116,12 +128,28 @@ func (m *Mailbox) Move(source api.MailboxLocation, target, _ string) (string, er
 	return id, nil
 }
 
-// inFolder reports whether a message with these labels is in the folder.
-func inFolder(labelIDs []string, folder string) bool {
-	if folder == allMailFolder {
-		return !slices.Contains(labelIDs, labelTrash) && !slices.Contains(labelIDs, labelSpam) && !slices.Contains(labelIDs, labelChat)
+// resume handles a message that is no longer in the move's source folder. A message already where the move takes it
+// counts as moved. A move out of Trash is two requests (untrash, then the target label), and the run may have stopped
+// between them: the retry finds the message out of Trash without the target label and finishes the move. Anything
+// else was moved by someone else, or is gone.
+func (m *Mailbox) resume(id string, labels []string, source, target string) (string, error) {
+	switch {
+	case inFolder(labels, target):
+		return id, nil
+	case source == labelTrash && !slices.Contains(labels, labelSpam) && target != labelTrash:
+		if target != allMailFolder {
+			if err := m.modify(id, []string{target}, nil); err != nil {
+				return "", err
+			}
+		}
+		return id, nil
 	}
-	return slices.Contains(labelIDs, folder)
+	return "", ErrMessageGone
+}
+
+// inFolder reports whether a message with these labels is in the folder, as foldersOf places it.
+func inFolder(labelIDs []string, folder string) bool {
+	return slices.Contains(foldersOf(labelIDs, map[string]bool{folder: true}), folder)
 }
 
 func (m *Mailbox) modify(id string, add, remove []string) error {

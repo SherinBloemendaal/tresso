@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"tresso/sync/internal/providersend"
 )
 
 // fakeGraph is an in-memory Outlook mailbox behind the Graph endpoints the syncer uses: a folder tree, messages with
@@ -48,6 +50,14 @@ type fakeGraph struct {
 	failDelta string
 	// shortPages makes listings return one message per page while more follow, as Graph may.
 	shortPages bool
+	// rewriteIDs gives sent messages and new drafts a Message-ID of the fake's own, as Exchange may.
+	rewriteIDs bool
+	// headersAsProperties returns custom headers only as named extended properties, not as internetMessageHeaders.
+	headersAsProperties bool
+	// refuseRecipientFilter answers a recipient filter with 400, as a Graph that does not support it would.
+	refuseRecipientFilter bool
+	// headerReads counts listed messages whose headers were asked for, to show how much a lookup reads.
+	headerReads int
 }
 
 type fakeFolder struct{ id, name, parent string }
@@ -217,7 +227,7 @@ func (f *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.nextID++
 		id := "draft-" + strconv.Itoa(f.nextID)
-		f.messages[id] = &fakeMessage{id: id, folder: f.wellKnown["drafts"], raw: raw, created: time.Now().UTC(), received: time.Now().UTC()}
+		f.messages[id] = &fakeMessage{id: id, folder: f.wellKnown["drafts"], raw: f.rewrite(raw, id), created: time.Now().UTC(), received: time.Now().UTC()}
 		f.event(f.wellKnown["drafts"], id)
 		f.ops = append(f.ops, "create "+id)
 		w.WriteHeader(http.StatusCreated)
@@ -261,6 +271,13 @@ func (f *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1.0/me/sendMail":
 		body, _ := io.ReadAll(r.Body)
 		f.sent = append(f.sent, sentRequest{contentType: r.Header.Get("Content-Type"), body: body})
+		if folder, ok := f.wellKnown["sentitems"]; ok {
+			raw, _ := base64.StdEncoding.DecodeString(string(body))
+			f.nextID++
+			id := "sent-" + strconv.Itoa(f.nextID)
+			f.messages[id] = &fakeMessage{id: id, folder: folder, raw: f.rewrite(raw, id), created: time.Now().UTC(), received: time.Now().UTC()}
+			f.event(folder, id)
+		}
 		w.WriteHeader(http.StatusAccepted)
 	case len(parts) == 1 && parts[0] == "mailFolders":
 		f.listFolders(w, "", q)
@@ -434,6 +451,41 @@ func (f *fakeGraph) listMessages(w http.ResponseWriter, folder string, q map[str
 	if filter := get("$filter"); strings.HasPrefix(filter, "internetMessageId eq '") {
 		id := strings.TrimSuffix(strings.TrimPrefix(filter, "internetMessageId eq '"), "'")
 		keep = func(m *fakeMessage) bool { return strings.Contains(string(m.raw), "Message-ID: "+id+"\r\n") }
+	} else if after, ok := strings.CutPrefix(filter, "sentDateTime ge "); ok {
+		value, recipients, narrowed := strings.Cut(after, " and (")
+		at, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			f.t.Errorf("unexpected $filter %q", filter)
+		}
+		address := ""
+		if narrowed {
+			if f.refuseRecipientFilter {
+				writeError(w, http.StatusBadRequest, `{"error":{"code":"ErrorInvalidUrlQueryFilter","message":"The query filter contains one or more invalid nodes."}}`)
+				return
+			}
+			start := strings.Index(recipients, "address eq '") + len("address eq '")
+			address = recipients[start : start+strings.IndexByte(recipients[start:], '\'')]
+		}
+		keep = func(m *fakeMessage) bool {
+			if m.received.Before(at) {
+				return false
+			}
+			if address == "" {
+				return true
+			}
+			for _, header := range []string{"To", "Cc", "Bcc"} {
+				if strings.Contains(strings.ToLower(providersend.HeaderValue(m.raw, header)), strings.ToLower(address)) {
+					return true
+				}
+			}
+			return false
+		}
+	} else if after, ok := strings.CutPrefix(filter, "createdDateTime ge "); ok {
+		at, err := time.Parse(time.RFC3339Nano, after)
+		if err != nil {
+			f.t.Errorf("unexpected $filter %q", filter)
+		}
+		keep = func(m *fakeMessage) bool { return !m.created.Before(at) }
 	} else if filter != "" {
 		fields := strings.Fields(filter)
 		if len(fields) != 3 || fields[0] != "receivedDateTime" {
@@ -471,7 +523,7 @@ func (f *fakeGraph) listMessages(w http.ResponseWriter, folder string, q map[str
 	}
 	items := []map[string]any{}
 	for _, m := range all[min(skip, len(all)):end] {
-		items = append(items, f.item(m))
+		items = append(items, f.listItem(m, get("$select"), get("$expand")))
 	}
 	out := map[string]any{"value": items}
 	if end < len(all) {
@@ -501,4 +553,58 @@ func writeError(w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = io.WriteString(w, body)
+}
+
+// rewrite gives raw a Message-ID of the fake's own when rewriteIDs is set.
+func (f *fakeGraph) rewrite(raw []byte, id string) []byte {
+	if !f.rewriteIDs {
+		return raw
+	}
+	replaced, err := providersend.SetHeader(raw, "Message-ID", "<"+id+"@outlook.example>")
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return replaced
+}
+
+// listItem is a listed message with what $select and $expand ask for: the custom X- headers as
+// internetMessageHeaders, or as named extended properties of the internet headers property set.
+func (f *fakeGraph) listItem(m *fakeMessage, sel, expand string) map[string]any {
+	item := f.item(m)
+	if strings.Contains(sel, "internetMessageHeaders") {
+		f.headerReads++
+	}
+	var custom [][2]string
+	for _, line := range strings.Split(string(m.raw[:max(0, strings.Index(string(m.raw), "\r\n\r\n"))]), "\r\n") {
+		if name, value, ok := strings.Cut(line, ":"); ok && strings.HasPrefix(strings.ToLower(name), "x-") {
+			custom = append(custom, [2]string{name, strings.TrimSpace(value)})
+		}
+	}
+	if strings.Contains(sel, "internetMessageHeaders") && !f.headersAsProperties {
+		var headers []map[string]string
+		for _, h := range custom {
+			headers = append(headers, map[string]string{"name": h[0], "value": h[1]})
+		}
+		item["internetMessageHeaders"] = headers
+	}
+	if strings.HasPrefix(expand, "singleValueExtendedProperties") {
+		var props []map[string]string
+		for _, h := range custom {
+			id := "String " + internetHeadersSet + " Name " + h[0]
+			if strings.Contains(expand, "'"+id+"'") {
+				props = append(props, map[string]string{"id": id, "value": h[1]})
+			}
+		}
+		if props != nil {
+			item["singleValueExtendedProperties"] = props
+		}
+	}
+	return item
+}
+
+// addAt puts a message in a folder directly, created (and sent) at t.
+func (f *fakeGraph) addAt(id, folder string, t time.Time, raw []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.messages[id] = &fakeMessage{id: id, folder: folder, raw: raw, received: t.UTC(), created: t.UTC()}
 }

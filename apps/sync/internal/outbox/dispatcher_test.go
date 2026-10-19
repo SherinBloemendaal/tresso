@@ -14,6 +14,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/fakeapi"
 	"tresso/sync/internal/imapsync"
 	"tresso/sync/internal/providersend"
 	"tresso/sync/internal/smtpsend"
@@ -193,6 +194,7 @@ type harness struct {
 	sent    *fakeSent
 	drafts  *fakeDrafts
 	mailbox *fakeMailbox
+	finder  *fakeFinder
 	store   *storage.Memory
 	sends   []smtpsend.Envelope
 	// via lists the transport of every send, and opened the transport of every Sent folder that was opened.
@@ -227,7 +229,8 @@ func (t *fakeTransport) Open(credentials api.Credentials) (Sender, error) {
 	return t, nil
 }
 
-func (t *fakeTransport) Send(_ context.Context, envelope smtpsend.Envelope, _ []byte) error {
+func (t *fakeTransport) Send(_ context.Context, message api.OutgoingMessage, _ []byte) error {
+	envelope := smtpsend.Envelope{From: message.EnvelopeFrom, Recipients: message.Recipients}
 	h := t.h
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -244,7 +247,23 @@ func (t *fakeTransport) OpenSent(context.Context) (SentStore, error) {
 	if h.sent.openErr != nil {
 		return nil, h.sent.openErr
 	}
+	if h.finder != nil && t.name != "imap" {
+		return h.finder, nil
+	}
 	return h.sent, nil
+}
+
+// fakeFinder is a provider's Sent lookup that finds earlier attempts by the outbox id.
+type fakeFinder struct {
+	*fakeSent
+	sentBefore map[string]bool
+	err        error
+	since      time.Time
+}
+
+func (f *fakeFinder) SentBefore(message api.OutgoingMessage, since time.Time) (bool, error) {
+	f.since = since
+	return f.sentBefore[message.ID], f.err
 }
 
 func (t *fakeTransport) OpenDrafts(context.Context) (DraftsStore, error) {
@@ -616,5 +635,49 @@ func TestAFlagChangeIsDoneWhenAnyCopyTookIt(t *testing.T) {
 
 	if want := []mailboxReport{{"c1", api.MailboxDone, "", ""}}; !slices.Equal(h.api.changed, want) {
 		t.Errorf("reports = %+v, want %+v", h.api.changed, want)
+	}
+}
+
+// Fails without the fix: the duplicate check only asked for the Message-ID, which Gmail and Graph may replace, and
+// took a failed check as "not sent", so a retry could send twice.
+func TestProviderRetryFindsAnEarlierSendByItsOutboxID(t *testing.T) {
+	h := newHarness(message("m1", 2))
+	h.api.provider = "gmail"
+	h.finder = &fakeFinder{fakeSent: h.sent, sentBefore: map[string]bool{"m1": true}}
+
+	h.run()
+
+	if len(h.sends) != 0 || !slices.Equal(h.api.reports, []report{{"m1", api.OutcomeSent, "", true}}) {
+		t.Errorf("sends %d, reports %+v", len(h.sends), h.api.reports)
+	}
+	if age := time.Since(h.finder.since); age < retrySpan || age > retrySpan+time.Minute {
+		t.Errorf("looked back %v; an id that is no UUIDv7 says nothing, so the retry span applies", age)
+	}
+}
+
+func TestProviderRetryDoesNotSendWhenTheCheckFails(t *testing.T) {
+	h := newHarness(message("m1", 2))
+	h.api.provider = "microsoft"
+	h.finder = &fakeFinder{fakeSent: h.sent, err: errors.New("too many messages to look through")}
+
+	h.run()
+
+	if len(h.sends) != 0 {
+		t.Fatalf("sent %d times although the check could not decide", len(h.sends))
+	}
+	if len(h.api.reports) != 1 || h.api.reports[0].outcome != api.OutcomeRetry {
+		t.Errorf("reports = %+v", h.api.reports)
+	}
+}
+
+// Fails on the earlier code, which always looked back 48 hours: the window now starts when the message was written.
+func TestEarliestAttemptStartsWhenTheMessageWasWritten(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	written := now.Add(-3 * time.Hour)
+	if got := earliestAttempt(api.OutgoingMessage{ID: fakeapi.UUIDv7(written, 1)}, now); !got.Equal(written.Add(-clockSkew)) {
+		t.Errorf("earliestAttempt = %v, want %v", got, written.Add(-clockSkew))
+	}
+	if got := earliestAttempt(api.OutgoingMessage{ID: "m1"}, now); !got.Equal(now.Add(-retrySpan)) {
+		t.Errorf("earliestAttempt without a UUIDv7 = %v", got)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -351,7 +352,8 @@ func TestFoldersAndFlagsOfLabels(t *testing.T) {
 	}{
 		{[]string{"INBOX", "UNREAD", "CATEGORY_UPDATES"}, []string{"INBOX", allMailFolder}},
 		{nil, []string{allMailFolder}},
-		{[]string{"TRASH", "Label_1"}, []string{"TRASH", "Label_1"}},
+		{[]string{"TRASH", "Label_1", "INBOX"}, []string{"TRASH"}},
+		{[]string{"SPAM", "Label_1"}, nil}, // SPAM is no folder in this map
 		{[]string{"CHAT"}, nil},
 	}
 	for _, c := range cases {
@@ -414,7 +416,7 @@ func TestSendAddsBccForEnvelopeOnlyRecipients(t *testing.T) {
 	}
 }
 
-func TestSendUploadsLargeMessagesAsMedia(t *testing.T) {
+func TestSendUploadsLargeMessagesAsMultipart(t *testing.T) {
 	h := newHarness(t)
 	message := append([]byte("From: kim@example.test\r\nTo: anna@example.test\r\nSubject: Big\r\n\r\n"), make([]byte, uploadThreshold+1)...)
 
@@ -423,8 +425,12 @@ func TestSendUploadsLargeMessagesAsMedia(t *testing.T) {
 	}
 
 	sent := h.gmail.sent
-	if len(sent) != 1 || sent[0].path != "/upload/gmail/v1/users/me/messages/send?uploadType=media" || sent[0].contentType != "message/rfc822" || len(sent[0].raw) != len(message) {
-		t.Fatalf("sent = path %q type %q size %d", sent[0].path, sent[0].contentType, len(sent[0].raw))
+	if len(sent) != 1 || sent[0].path != "/upload/gmail/v1/users/me/messages/send?uploadType=multipart" || !strings.HasPrefix(sent[0].contentType, "multipart/related; boundary=") {
+		t.Fatalf("sent = path %q type %q", sent[0].path, sent[0].contentType)
+	}
+	raw, _ := h.gmail.decodeMessage(sent[0].contentType, sent[0].raw, false)
+	if len(raw) != len(message) {
+		t.Errorf("uploaded %d bytes, want %d", len(raw), len(message))
 	}
 }
 
@@ -513,5 +519,240 @@ func TestMovesMadeByTheMailboxDoNotComeBackThroughHistory(t *testing.T) {
 		if got, _ := h.gmail.gets(id); got != 1 {
 			t.Errorf("%s downloaded %d times; the history round must find it known", id, got)
 		}
+	}
+}
+
+// sentThread returns the thread id the last send or draft request asked for.
+func sentThread(t *testing.T, h *harness, draft bool) string {
+	t.Helper()
+	last := h.gmail.sent[len(h.gmail.sent)-1]
+	_, threadID := h.gmail.decodeMessage(last.contentType, last.raw, draft)
+	return threadID
+}
+
+// Fails without the fix: Send passed no threadId, so Gmail started a new conversation for every reply.
+func TestRepliesGoIntoTheConversationTheyAnswer(t *testing.T) {
+	h := newHarness(t)
+	h.gmail.add("m1", 1000, raw("m1"), "INBOX")
+	h.gmail.messages["m1"].thread = "t-1"
+	client := sendClient(h, h.syncer.opts.Client)
+	reply := func(headers string) []byte {
+		return []byte("From: kim@example.test\r\nTo: sam@example.test\r\nSubject: Re: Message m1\r\n" + headers + "\r\nThanks\r\n")
+	}
+
+	cases := []struct {
+		name, headers, want string
+	}{
+		{"in-reply-to", "In-Reply-To: <m1@example.test>\r\nReferences: <m1@example.test>\r\n", "t-1"},
+		{"references only", "References: <older@example.test> <m1@example.test>\r\n", "t-1"},
+		{"unknown original", "In-Reply-To: <elsewhere@example.test>\r\n", ""},
+		{"no reply", "", ""},
+	}
+	for _, c := range cases {
+		if err := Send(context.Background(), client, reply(c.headers), []string{"sam@example.test"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := sentThread(t, h, false); got != c.want {
+			t.Errorf("%s: threadId %q, want %q", c.name, got, c.want)
+		}
+	}
+
+	// Large replies are uploaded with the thread in the metadata, and draft replies thread as well.
+	big := append(reply("In-Reply-To: <m1@example.test>\r\n"), make([]byte, uploadThreshold)...)
+	if err := Send(context.Background(), client, big, []string{"sam@example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sentThread(t, h, false); got != "t-1" {
+		t.Errorf("large reply: threadId %q", got)
+	}
+	drafts := OpenDrafts(context.Background(), client)
+	if err := drafts.AppendDraft(reply("Message-ID: <d1.1@example.test>\r\nIn-Reply-To: <m1@example.test>\r\n"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := sentThread(t, h, true); got != "t-1" {
+		t.Errorf("draft reply: threadId %q", got)
+	}
+}
+
+// Fails without the fix: the duplicate check only looked for the Message-ID, which Gmail replaced, so a retry after an
+// unreported attempt sent the message again.
+func TestEarlierSendIsFoundWhenGmailReplacedTheMessageID(t *testing.T) {
+	h := newHarness(t)
+	h.gmail.rewriteIDs = true
+	client := sendClient(h, h.syncer.opts.Client)
+	raw := []byte("From: kim@example.test\r\nTo: sam@example.test\r\nSubject: Hi\r\nMessage-ID: <o1@example.test>\r\n\r\nHello\r\n")
+	marked, err := providersend.SetHeader(raw, providersend.OutgoingIDHeader, providersend.OutgoingMarker("outgoing-1", "o1@example.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Send(context.Background(), client, marked, []string{"sam@example.test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := OpenSent(context.Background(), client)
+	if found, _ := store.Contains("o1@example.test"); found {
+		t.Fatal("the fake did not replace the Message-ID")
+	}
+	since := time.Now().Add(-time.Hour)
+	sam := []string{"sam@example.test"}
+	if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: sam}, since); err != nil || !found {
+		t.Errorf("SentBefore = %v, %v; want the earlier send found by its outbox marker", found, err)
+	}
+	if found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: sam}, since); err != nil || found {
+		t.Errorf("SentBefore(other) = %v, %v", found, err)
+	}
+}
+
+// Fails without the fix: removal only matched the Message-ID, which Gmail replaced, so the old copy stayed.
+func TestReplacedDraftCopyIsRemovedWhenGmailReplacedItsMessageID(t *testing.T) {
+	h := newHarness(t)
+	h.gmail.rewriteIDs = true
+	drafts := OpenDrafts(context.Background(), sendClient(h, h.syncer.opts.Client))
+	version := func(n string) []byte {
+		return []byte("From: kim@example.test\r\nTo: sam@example.test\r\nSubject: Draft\r\nMessage-ID: <d1." + n + "@example.test>\r\nX-Tresso-Draft: d1\r\n\r\nNot done\r\n")
+	}
+	if err := drafts.AppendDraft(version("1"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := drafts.AppendDraft(version("2"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := drafts.Remove("d1.1@example.test"); err != nil {
+		t.Fatal(err)
+	}
+
+	var left []string
+	for _, messageID := range h.gmail.drafts {
+		left = append(left, providersend.HeaderValue(h.gmail.messages[messageID].raw, providersend.DraftCopyHeader))
+	}
+	if !slices.Equal(left, []string{providersend.DraftCopyMarker("d1.2@example.test")}) {
+		t.Errorf("drafts left = %v; only the replaced version may go", left)
+	}
+}
+
+// Fails without the fix: foldersOf kept a trashed message in the Inbox, its labels and All Mail.
+func TestTrashedAndSpamMessagesAreOnlyInTrashOrSpam(t *testing.T) {
+	h := newHarness(t)
+	h.gmail.addLabel("Label_1", "Projects")
+	h.gmail.add("t1", 1000, raw("t1"), "INBOX", "Label_1", "TRASH")
+	h.gmail.add("s1", 2000, raw("s1"), "INBOX", "SPAM")
+	h.gmail.add("m1", 3000, raw("m1"), "INBOX", "Label_1")
+	h.start(t)
+
+	expectUIDs(t, h, "INBOX", "m1")
+	expectUIDs(t, h, "Label_1", "m1")
+	expectUIDs(t, h, allMailFolder, "m1")
+	expectUIDs(t, h, "TRASH", "t1")
+	expectUIDs(t, h, "SPAM", "s1")
+}
+
+// Fails without the fix: history only took the message out of the labels it named, so a trashed message stayed in
+// the Inbox and its labels.
+func TestTrashAndRestoreThroughHistory(t *testing.T) {
+	h := backfilled(t)
+
+	h.gmail.addLabels("m4", "TRASH")
+	h.step(t)
+	expectUIDs(t, h, "INBOX", "m1")
+	expectUIDs(t, h, "Label_1")
+	expectUIDs(t, h, allMailFolder, "m1", "m2", "m3")
+	expectUIDs(t, h, "TRASH", "m4", "m5")
+
+	h.gmail.removeLabels("m4", "TRASH")
+	h.step(t)
+	expectUIDs(t, h, "INBOX", "m1", "m4")
+	expectUIDs(t, h, "Label_1", "m4")
+	expectUIDs(t, h, allMailFolder, "m1", "m2", "m3", "m4")
+	expectUIDs(t, h, "TRASH", "m5")
+	if deleted := h.api.DeletedKeys(); len(deleted) != 0 {
+		t.Errorf("deleted = %v", deleted)
+	}
+}
+
+// Fails without the fix: the resync listed label folders with Trash and Spam included, keeping a trashed message in
+// its labels.
+func TestResyncKeepsTrashedMessagesOutOfTheirLabels(t *testing.T) {
+	h := backfilled(t)
+	h.gmail.mu.Lock()
+	h.gmail.messages["m4"].labels = append(h.gmail.messages["m4"].labels, "TRASH") // without history
+	h.gmail.mu.Unlock()
+	h.gmail.add("m9", 9000, raw("m9"), "SENT") // history moves on, then expires
+	h.gmail.expireHistory()
+
+	h.step(t)
+
+	expectUIDs(t, h, "INBOX", "m1")
+	expectUIDs(t, h, "Label_1")
+	expectUIDs(t, h, allMailFolder, "m1", "m2", "m3", "m9")
+	expectUIDs(t, h, "TRASH", "m4", "m5")
+}
+
+func sentTo(to, messageID string) []byte {
+	return []byte("From: kim@example.test\r\nTo: " + to + "\r\nSubject: Hi\r\nMessage-ID: <" + messageID + ">\r\n\r\nHello\r\n")
+}
+
+// Fails on the earlier code: it looked through all mail sent in the last 48 hours and gave up ("undecided") above
+// 2000 messages, so on a busy account a message whose first attempt never went out was never sent, and every check
+// cost a metadata request per sent message.
+func TestDuplicateCheckOnlyReadsMailToTheRecipient(t *testing.T) {
+	h := newHarness(t)
+	h.gmail.rewriteIDs = true
+	now := time.Now()
+	for i := range 2100 {
+		h.gmail.addSent(sentTo("other@example.test", fmt.Sprintf("busy-%d@example.test", i)), now.Add(-time.Minute).UnixMilli())
+	}
+	client := sendClient(h, h.syncer.opts.Client)
+	marked, err := providersend.SetHeader(sentTo("sam@example.test", "o1@example.test"), providersend.OutgoingIDHeader, providersend.OutgoingMarker("outgoing-1", "o1@example.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Send(context.Background(), client, marked, []string{"sam@example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	store := OpenSent(context.Background(), client)
+	since := now.Add(-time.Hour)
+
+	found, err := store.SentBefore(api.OutgoingMessage{ID: "outgoing-1", MessageID: "o1@example.test", Recipients: []string{"sam@example.test"}}, since)
+	if err != nil || !found {
+		t.Errorf("SentBefore = %v, %v", found, err)
+	}
+	// A message whose first attempt failed before sending: decided "not sent", so the retry sends it.
+	found, err = store.SentBefore(api.OutgoingMessage{ID: "outgoing-2", MessageID: "o2@example.test", Recipients: []string{"anna@example.test"}}, since)
+	if err != nil || found {
+		t.Errorf("SentBefore(never sent) = %v, %v", found, err)
+	}
+	if h.gmail.metadataGets > 2 {
+		t.Errorf("%d metadata requests; only mail to the recipient may be read", h.gmail.metadataGets)
+	}
+}
+
+// Fails on the earlier code: when the Message-ID search found nothing it went through every draft and gave up
+// ("undecided") above 2000, so the removal came back every run for ever.
+func TestDraftRemovalOnlyLooksAtDraftsSinceTheDraftStarted(t *testing.T) {
+	h := newHarness(t)
+	h.gmail.rewriteIDs = true
+	now := time.Now()
+	for i := range 2100 {
+		h.gmail.addDraft(sentTo("other@example.test", fmt.Sprintf("old-%d@example.test", i)), now.Add(-48*time.Hour).UnixMilli())
+	}
+	draftID := fakeapi.UUIDv7(now.Add(-time.Hour), 1)
+	filed := draftID + ".1@example.test"
+	drafts := OpenDrafts(context.Background(), sendClient(h, h.syncer.opts.Client))
+	if err := drafts.AppendDraft(sentTo("sam@example.test", filed), now); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := drafts.Remove(draftID + ".9@example.test"); err != nil {
+		t.Errorf("removing a copy that was never filed: %v; it counts as removed", err)
+	}
+	if err := drafts.Remove(filed); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.gmail.drafts) != 2100 {
+		t.Errorf("%d drafts left, want the 2100 old ones", len(h.gmail.drafts))
+	}
+	if h.gmail.metadataGets > 2 {
+		t.Errorf("%d metadata requests; drafts older than the draft may not be read", h.gmail.metadataGets)
 	}
 }

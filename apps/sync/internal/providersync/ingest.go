@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"tresso/sync/internal/api"
 )
@@ -139,7 +140,12 @@ func (in *Ingest) Stored(ctx context.Context, folder string) (map[string]bool, e
 	}
 }
 
-// Missing returns the ids the API has in a folder that are not in present, sorted as the API listed them.
+// pendingPrefix marks a placeholder location the API keeps for a move the worker has not made yet. It is no message
+// at the provider, so it is never missing there.
+const pendingPrefix = "pending:"
+
+// Missing returns the ids the API has in a folder that are not in present, sorted as the API listed them. Placeholders
+// of pending moves are never missing.
 func (in *Ingest) Missing(ctx context.Context, folder string, present map[string]bool) ([]string, error) {
 	var missing []string
 	after := ""
@@ -149,7 +155,7 @@ func (in *Ingest) Missing(ctx context.Context, folder string, present map[string
 			return nil, err
 		}
 		for _, id := range page.RemoteUIDs {
-			if !present[id] {
+			if !present[id] && !strings.HasPrefix(id, pendingPrefix) {
 				missing = append(missing, id)
 			}
 		}

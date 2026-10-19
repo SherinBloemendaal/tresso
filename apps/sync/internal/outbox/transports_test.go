@@ -12,13 +12,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"tresso/sync/internal/api"
 	"tresso/sync/internal/fakeapi"
 	"tresso/sync/internal/gmailsync"
 	"tresso/sync/internal/graphsync"
 	"tresso/sync/internal/providersend"
-	"tresso/sync/internal/smtpsend"
 	"tresso/sync/internal/storage"
 )
 
@@ -72,11 +72,11 @@ func TestGmailTransportRenewsTheTokenAndAddsBcc(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an access token is enough to send: %v", err)
 	}
-	err = sender.Send(context.Background(), smtpsend.Envelope{From: "kim@example.test", Recipients: []string{"anna@example.test", "boss@example.test"}}, []byte(outgoing))
+	err = sender.Send(context.Background(), api.OutgoingMessage{ID: "o1", EnvelopeFrom: "kim@example.test", Recipients: []string{"anna@example.test", "boss@example.test"}}, []byte(outgoing))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.Refreshes != 1 || len(*delivered) != 1 || !strings.HasPrefix((*delivered)[0], "Bcc: <boss@example.test>\r\nFrom:") {
+	if client.Refreshes != 1 || len(*delivered) != 1 || !strings.HasPrefix((*delivered)[0], "Bcc: <boss@example.test>\r\nX-Tresso-Outgoing-Id: "+providersend.OutgoingMarker("o1", "")+"\r\nFrom:") {
 		t.Errorf("refreshes %d, delivered %q", client.Refreshes, *delivered)
 	}
 }
@@ -93,11 +93,11 @@ func TestGraphTransportRenewsTheTokenAndAddsBcc(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = sender.Send(context.Background(), smtpsend.Envelope{Recipients: []string{"anna@example.test", "boss@example.test"}}, []byte(outgoing))
+	err = sender.Send(context.Background(), api.OutgoingMessage{ID: "o1", Recipients: []string{"anna@example.test", "boss@example.test"}}, []byte(outgoing))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.Refreshes != 1 || len(*delivered) != 1 || !strings.HasPrefix((*delivered)[0], "Bcc: <boss@example.test>\r\nFrom:") {
+	if client.Refreshes != 1 || len(*delivered) != 1 || !strings.HasPrefix((*delivered)[0], "Bcc: <boss@example.test>\r\nX-Tresso-Outgoing-Id: "+providersend.OutgoingMarker("o1", "")+"\r\nFrom:") {
 		t.Errorf("refreshes %d, delivered %q", client.Refreshes, *delivered)
 	}
 }
@@ -116,7 +116,7 @@ func TestProviderTransportWithLostAccessIsATemporaryFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = sender.Send(context.Background(), smtpsend.Envelope{Recipients: []string{"anna@example.test"}}, []byte(outgoing))
+	err = sender.Send(context.Background(), api.OutgoingMessage{ID: "o1", Recipients: []string{"anna@example.test"}}, []byte(outgoing))
 
 	outcome, text := outcomeOf(err)
 	var sendErr *providersend.Error
@@ -213,5 +213,32 @@ func TestARunSharesOneProviderClientAcrossMessages(t *testing.T) {
 	}
 	if client.API.Refreshes != 1 {
 		t.Errorf("token renewed %d times for one run; want once", client.API.Refreshes)
+	}
+}
+
+// Fails on the earlier code, which put the raw outbox id (a UUIDv7, so its creation time) in the header recipients see.
+func TestSentMessagesCarryNoOutboxID(t *testing.T) {
+	srv, delivered := providerServer(t, "/gmail/v1/users/me/messages/send", func(body []byte) string {
+		var payload struct{ Raw string }
+		_ = json.Unmarshal(body, &payload)
+		raw, _ := base64.URLEncoding.DecodeString(payload.Raw)
+		return string(raw)
+	})
+	client := fakeapi.New()
+	opts := gmailsync.DefaultClientOptions()
+	opts.BaseURL = srv.URL
+	sender, err := GmailTransport(client, "w1", opts).Open(oauthCredentials(t, client, "gmail"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := fakeapi.UUIDv7(time.Now(), 7)
+	if err := sender.Send(context.Background(), api.OutgoingMessage{ID: id, MessageID: "o1@example.test", Recipients: []string{"anna@example.test"}}, []byte(outgoing)); err != nil {
+		t.Fatal(err)
+	}
+	if len(*delivered) != 1 || strings.Contains((*delivered)[0], id) {
+		t.Fatalf("the outbox id reached the recipient: %q", *delivered)
+	}
+	if got := providersend.HeaderValue([]byte((*delivered)[0]), providersend.OutgoingIDHeader); got != providersend.OutgoingMarker(id, "o1@example.test") {
+		t.Errorf("header = %q", got)
 	}
 }

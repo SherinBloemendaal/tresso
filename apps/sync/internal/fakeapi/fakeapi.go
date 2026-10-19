@@ -323,3 +323,9 @@ func (f *API) MoveLocation(source, target, uid, remoteUID string) {
 	}
 	f.locations[target][remoteUID] = key
 }
+
+// UUIDv7 returns a UUIDv7 made at t, as the API's ids are.
+func UUIDv7(t time.Time, n int) string {
+	hex := fmt.Sprintf("%012x", t.UnixMilli())
+	return fmt.Sprintf("%s-%s-7000-8000-%012x", hex[:8], hex[8:12], n)
+}

@@ -269,10 +269,14 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   with mail to send, so a lost notification only delays sending. The leasing worker claims due messages (5 minute
   claim), sends over SMTP (whole message refused when one recipient is refused), or for Gmail and Microsoft 365
   through their APIs (Gmail `users.messages.send`, Graph `sendMail` with the MIME message, which Graph limits to about
-  3 MB; the envelope-only Bcc recipients are added as a Bcc header, which both providers strip), files a copy in Sent
-  (except at providers that do that themselves, Gmail and Microsoft included) and reports sent, retry (4xx, connection problems, a wrong password: up to 6
+  3 MB; the envelope-only Bcc recipients are added as a Bcc header, which both providers strip; Gmail replies carry
+  the thread id of the message they answer), files a copy in Sent (except at providers that do that themselves, Gmail
+  and Microsoft included) and reports sent, retry (4xx, connection problems, a wrong password: up to 6
   attempts over about 4.5 hours) or failed (5xx). A message claimed again after an unreported attempt is first
-  looked up in Sent by Message-ID, so it is never sent twice. Status reaches clients in the delta as
+  looked up in Sent by Message-ID, so it is never sent twice. Gmail and Microsoft may replace the Message-ID, so
+  their sends also carry `X-Tresso-Outgoing-Id` (a SHA-256 of the outbox id and Message-ID, nothing internal), and the
+  lookup searches mail sent to the first recipient since the outbox entry was written; when it cannot decide, the
+  message waits instead of going out twice. Status reaches clients in the delta as
   `outgoingMessages`.
 - **Drafts:** `/api/v1/drafts` (scopes `mail:read`, `mail:write`) stores the message being written with a `version`
   per save; an update names the version it builds on (`expectedVersion`) and is refused with 409 when another
