@@ -31,7 +31,7 @@ type Account struct {
 type LeaseResponse struct {
 	LeaseSeconds int       `json:"leaseSeconds"`
 	Accounts     []Account `json:"accounts"`
-	// Leased accounts with mail to send now.
+	// Leased accounts with mail to send or calendar changes to write now.
 	Outbox []string `json:"outbox"`
 }
 
@@ -47,6 +47,8 @@ type Connection struct {
 	IMAP     ServerSettings `json:"imap"`
 	SMTP     ServerSettings `json:"smtp"`
 	Username string         `json:"username"`
+	// CalDAV is the address of the account's calendars, set by the user or found earlier; empty to discover it.
+	CalDAV string `json:"caldav"`
 }
 
 // Credentials are the decrypted secrets of one leased account. Keep them in memory only.

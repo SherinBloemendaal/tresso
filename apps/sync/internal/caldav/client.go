@@ -1,0 +1,246 @@
+// Package caldav is a CalDAV client (RFC 4791) with what Tresso needs: discovery (RFC 6764), calendars with their
+// color, privileges, ctag and sync-token, changes by sync-collection (RFC 6578) or etag listing, calendar-multiget, and
+// conditional writes. Objects stay raw iCalendar text both ways, so nothing is lost by re-encoding them; the API
+// parses them. Every connection goes through the guarded dialer.
+package caldav
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"golang.org/x/net/publicsuffix"
+)
+
+// Dialer opens connections; the netguard dialer refuses private addresses.
+type Dialer interface {
+	DialContext(ctx context.Context, address string) (net.Conn, error)
+}
+
+var (
+	// ErrUnauthorized means the server refused the credentials.
+	ErrUnauthorized = errors.New("the calendar server refused the login")
+	// ErrNotCalDAV means the address answers but is no CalDAV server.
+	ErrNotCalDAV = errors.New("no CalDAV server at this address")
+	// ErrInvalidSyncToken means the server no longer knows the sync token; a full listing is needed.
+	ErrInvalidSyncToken = errors.New("the sync token is no longer valid")
+)
+
+const (
+	maxMultistatus = 64 << 20
+	// MaxObject is the largest calendar object Tresso takes; the API refuses larger ones.
+	MaxObject = 1 << 20
+)
+
+// StatusError is an HTTP status the caller decides on (412 conflicts, 403 refusals, 5xx retries).
+type StatusError struct {
+	Method string
+	URL    string
+	Status int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s %s: HTTP %d", e.Method, e.URL, e.Status)
+}
+
+type Client struct {
+	http     *http.Client
+	username string
+	password string
+}
+
+// New returns a client that authenticates with Basic auth over TLS. allowHTTP permits plain HTTP, for local test
+// servers only.
+func New(dialer Dialer, username, password string, allowHTTP bool) *Client {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, address)
+		},
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		MaxIdleConnsPerHost:   2,
+		IdleConnTimeout:       90 * time.Second,
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   2 * time.Minute,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			if req.URL.Scheme != "https" && !allowHTTP {
+				return fmt.Errorf("refusing a redirect to %s", req.URL.Scheme)
+			}
+			// http.Client drops credentials on a redirect to another host. A .well-known address usually redirects to
+			// a CalDAV host of the same provider (example.com to caldav.example.com, caldav.icloud.com to
+			// p42-caldav.icloud.com): only then are they sent again.
+			if sameSite(via[0].URL.Hostname(), req.URL.Hostname()) {
+				req.SetBasicAuth(username, password)
+			}
+			return nil
+		},
+	}
+	return &Client{http: client, username: username, password: password}
+}
+
+func (c *Client) request(ctx context.Context, method, target string, body []byte, header map[string]string) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, reader)
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(c.username, c.password)
+	req.Header.Set("User-Agent", "Tresso")
+	for key, value := range header {
+		req.Header.Set(key, value)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		drain(resp)
+		return nil, ErrUnauthorized
+	}
+	return resp, nil
+}
+
+// multistatusRequest sends PROPFIND or REPORT and parses the 207 answer.
+func (c *Client) multistatusRequest(ctx context.Context, method, target, depth, body string) (*multistatus, *url.URL, error) {
+	resp, err := c.request(ctx, method, target, []byte(xml.Header+body), map[string]string{"Content-Type": "application/xml; charset=utf-8", "Depth": depth})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer drain(resp)
+	if resp.StatusCode != http.StatusMultiStatus {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if bytes.Contains(data, []byte("valid-sync-token")) {
+			return nil, nil, ErrInvalidSyncToken
+		}
+		return nil, nil, &StatusError{Method: method, URL: target, Status: resp.StatusCode}
+	}
+	var ms multistatus
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, maxMultistatus)).Decode(&ms); err != nil {
+		return nil, nil, fmt.Errorf("%s %s: invalid multistatus: %w", method, target, err)
+	}
+	return &ms, resp.Request.URL, nil
+}
+
+// Object is one calendar resource with its iCalendar text.
+type Object struct {
+	Href string
+	ETag string
+	Data string
+}
+
+// Get fetches one resource; a missing resource is a *StatusError with 404.
+func (c *Client) Get(ctx context.Context, href string) (Object, error) {
+	resp, err := c.request(ctx, http.MethodGet, href, nil, map[string]string{"Accept": "text/calendar"})
+	if err != nil {
+		return Object{}, err
+	}
+	defer drain(resp)
+	if resp.StatusCode != http.StatusOK {
+		return Object{}, &StatusError{Method: http.MethodGet, URL: href, Status: resp.StatusCode}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxObject+1))
+	if err != nil {
+		return Object{}, err
+	}
+	if len(data) > MaxObject {
+		return Object{}, fmt.Errorf("%s is larger than %d bytes", href, MaxObject)
+	}
+	return Object{Href: href, ETag: resp.Header.Get("ETag"), Data: string(data)}, nil
+}
+
+// Put writes a resource. With ifMatch the write only happens when the server's version is still that one; without it
+// the resource must not exist yet. Returns the new ETag when the server tells it.
+func (c *Client) Put(ctx context.Context, href, data, ifMatch string) (string, error) {
+	header := map[string]string{"Content-Type": "text/calendar; charset=utf-8"}
+	if ifMatch != "" {
+		header["If-Match"] = ifMatch
+	} else {
+		header["If-None-Match"] = "*"
+	}
+	resp, err := c.request(ctx, http.MethodPut, href, []byte(data), header)
+	if err != nil {
+		return "", err
+	}
+	defer drain(resp)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", &StatusError{Method: http.MethodPut, URL: href, Status: resp.StatusCode}
+	}
+	return resp.Header.Get("ETag"), nil
+}
+
+// Delete removes a resource, only when the server's version is still ifMatch (when given). A resource that is
+// already gone counts as deleted.
+func (c *Client) Delete(ctx context.Context, href, ifMatch string) error {
+	header := map[string]string{}
+	if ifMatch != "" {
+		header["If-Match"] = ifMatch
+	}
+	resp, err := c.request(ctx, http.MethodDelete, href, nil, header)
+	if err != nil {
+		return err
+	}
+	defer drain(resp)
+	if resp.StatusCode == http.StatusNotFound || (resp.StatusCode >= 200 && resp.StatusCode <= 299) {
+		return nil
+	}
+	return &StatusError{Method: http.MethodDelete, URL: href, Status: resp.StatusCode}
+}
+
+// ETag reads the current ETag of a resource, for servers that do not return it on PUT.
+func (c *Client) ETag(ctx context.Context, href string) (string, error) {
+	ms, _, err := c.multistatusRequest(ctx, "PROPFIND", href, "0", `<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:propfind>`)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range ms.Responses {
+		if p, ok := r.okProp(); ok && p.ETag != "" {
+			return p.ETag, nil
+		}
+	}
+	return "", nil
+}
+
+func siteOf(host string) (string, error) {
+	return publicsuffix.EffectiveTLDPlusOne(strings.ToLower(host))
+}
+
+func sameSite(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	siteA, errA := publicsuffix.EffectiveTLDPlusOne(strings.ToLower(a))
+	siteB, errB := publicsuffix.EffectiveTLDPlusOne(strings.ToLower(b))
+	return errA == nil && errB == nil && siteA == siteB
+}
+
+func drain(resp *http.Response) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+}
+
+// resolve turns an href from a multistatus into an absolute URL against the URL it came from.
+func resolve(base *url.URL, href string) string {
+	ref, err := url.Parse(strings.TrimSpace(href))
+	if err != nil {
+		return href
+	}
+	return base.ResolveReference(ref).String()
+}
