@@ -42,6 +42,50 @@ final class VTimezoneBuilderTest extends TestCase
         self::assertCount(1, $calendar->select('VTIMEZONE'));
     }
 
+    public function testTheCurrentRuleCoversEveryLaterYear(): void
+    {
+        $calendar = CalendarDocument::create();
+        VTimezoneBuilder::ensure($calendar, 'Europe/Amsterdam', new \DateTimeImmutable('2026-10-19'));
+        VTimezoneBuilder::ensure($calendar, 'America/New_York', new \DateTimeImmutable('2026-10-19'));
+        $before = $calendar->serialize();
+        VTimezoneBuilder::ensure($calendar, 'Europe/Amsterdam', new \DateTimeImmutable('2061-07-01'));
+
+        self::assertSame($before, $calendar->serialize(), 'A zone with an open rule covers 2061 already.');
+        self::assertStringContainsString("RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\r\n", $before);
+        self::assertStringContainsString("RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\r\n", $before);
+        self::assertStringContainsString("RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU\r\n", $before);
+        self::assertStringContainsString("RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU\r\n", $before);
+    }
+
+    public function testAZoneThatStartsTooLateIsReplacedByOneReachingBack(): void
+    {
+        $calendar = CalendarDocument::create();
+        VTimezoneBuilder::ensure($calendar, 'Europe/Amsterdam', new \DateTimeImmutable('2026-10-19'));
+        VTimezoneBuilder::ensure($calendar, 'Europe/Amsterdam', new \DateTimeImmutable('2015-06-01'));
+
+        self::assertCount(1, $calendar->select('VTIMEZONE'));
+        $serialized = $calendar->serialize();
+        self::assertStringContainsString("DTSTART:20150329T020000\r\n", $serialized);
+        self::assertStringContainsString("DTSTART:20261025T030000\r\n", $serialized);
+        self::assertStringContainsString('RRULE:FREQ=YEARLY', $serialized);
+    }
+
+    public function testAZoneFromElsewhereThatEndsTooSoonIsReplaced(): void
+    {
+        $calendar = CalendarDocument::parse(implode("\r\n", [
+            'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:x',
+            'BEGIN:VTIMEZONE', 'TZID:Europe/Amsterdam',
+            'BEGIN:STANDARD', 'DTSTART:20251026T030000', 'TZOFFSETFROM:+0200', 'TZOFFSETTO:+0100', 'END:STANDARD',
+            'END:VTIMEZONE', 'END:VCALENDAR', '',
+        ]));
+
+        VTimezoneBuilder::ensure($calendar, 'Europe/Amsterdam', new \DateTimeImmutable('2026-10-19'));
+
+        self::assertCount(1, $calendar->select('VTIMEZONE'));
+        self::assertStringContainsString("DTSTART:20251026T030000\r\n", $calendar->serialize(), 'The new zone reaches back as far as the old one.');
+        self::assertStringContainsString('RRULE:FREQ=YEARLY', $calendar->serialize());
+    }
+
     public function testSabreReadsTheZoneBack(): void
     {
         $calendar = CalendarDocument::create();

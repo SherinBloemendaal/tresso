@@ -9,6 +9,7 @@ use App\Calendar\ICalendar\CalendarDocument;
 use App\Calendar\ICalendar\InvalidCalendarData;
 use App\Calendar\ICalendar\Occurrences;
 use App\Calendar\ICalendar\Props;
+use App\Calendar\LocalCalendars;
 use App\Calendar\SelfAddresses;
 use App\Entity\Calendar;
 use App\Entity\CalendarInvitation;
@@ -33,16 +34,25 @@ use Symfony\Component\Uid\Uuid;
  * - CANCEL: the event, or the cancelled occurrences, become cancelled.
  * - REPLY: an attendee's answer to an event the user organizes.
  *
+ * Anyone can send calendar mail, so a message only counts when it comes from the right person: a REQUEST or CANCEL
+ * from the event's organizer (as stored, or as the message says for an event that is new), a REPLY from an attendee
+ * the event already has. A message never changes an event the user organizes, never changes who organizes an event,
+ * and never raises SEQUENCE by more than MAX_SEQUENCE_STEP at once, so a forged high SEQUENCE cannot lock out the
+ * organizer's later updates.
+ *
  * Calendars whose provider schedules by itself (CalDAV auto-schedule, Google, Microsoft) get invitations from the
  * provider; Tresso never writes those events, so the same event is not there twice.
  */
 #[AsMessageHandler]
 final readonly class InvitationApplier
 {
+    public const int MAX_SEQUENCE_STEP = 100;
+
     public function __construct(
         private EntityManagerInterface $entityManager,
         private CalendarObjectRepository $objects,
         private CalendarRepository $calendars,
+        private LocalCalendars $localCalendars,
         private CalendarStore $store,
         private SelfAddresses $selfAddresses,
         private LoggerInterface $logger,
@@ -81,25 +91,56 @@ final readonly class InvitationApplier
             }
         }
         $object = $existing[0] ?? null;
+        $sender = $invitation->getMessage()->getFromAddress();
 
         match ($invitation->getMethod()) {
-            ItipMethod::Request => $this->request($invitation, $itip, $object, $user, $self),
-            ItipMethod::Cancel => $this->cancel($invitation, $itip, $object),
-            ItipMethod::Reply => $this->reply($invitation, $itip, $object, $self),
+            ItipMethod::Request => $this->request($invitation, $itip, $object, $user, $self, $sender),
+            ItipMethod::Cancel => $this->cancel($invitation, $itip, $object, $self, $sender),
+            ItipMethod::Reply => $this->reply($invitation, $itip, $object, $self, $sender),
             default => null,
         };
     }
 
     /**
+     * Whether a REQUEST or CANCEL may change the stored event: it comes from the stored organizer, says the same
+     * organizer, and the event is not the user's own. Logs why not.
+     *
      * @param list<string> $self
      */
-    private function request(CalendarInvitation $invitation, VCalendar $itip, ?CalendarObject $object, User $user, array $self): void
+    private function fromOrganizer(CalendarInvitation $invitation, VCalendar $itip, VCalendar $current, array $self, string $sender): bool
+    {
+        $organizer = self::organizer($current);
+        $reason = match (true) {
+            null === $organizer => 'the stored event has no organizer, so it is the user\'s own',
+            \in_array($organizer, $self, true) => 'the user organizes the stored event',
+            !self::sentBy($itip, $organizer, $sender) => 'the sender is not the stored organizer',
+            $invitation->getSequence() > self::sequence($current, '') + self::MAX_SEQUENCE_STEP => 'SEQUENCE jumps too far',
+            default => null,
+        };
+        if (null === $reason) {
+            return true;
+        }
+        $this->logger->info('Ignoring calendar mail', ['invitation' => $invitation->getId()->toRfc4122(), 'reason' => $reason]);
+
+        return false;
+    }
+
+    /**
+     * @param list<string> $self
+     */
+    private function request(CalendarInvitation $invitation, VCalendar $itip, ?CalendarObject $object, User $user, array $self, string $sender): void
     {
         if (!self::invites($itip, $self)) {
             return;
         }
 
         if (null === $object) {
+            $organizer = self::organizer($itip);
+            if (null === $organizer || !self::sentBy($itip, $organizer, $sender)) {
+                $this->logger->info('Ignoring calendar mail', ['invitation' => $invitation->getId()->toRfc4122(), 'reason' => 'the sender is not the organizer']);
+
+                return;
+            }
             $calendar = $this->targetCalendar($invitation, $user);
             if (null === $calendar) {
                 return;
@@ -114,6 +155,9 @@ final readonly class InvitationApplier
         }
 
         $current = CalendarDocument::parse($object->getIcal());
+        if (!$this->fromOrganizer($invitation, $itip, $current, $self, $sender)) {
+            return;
+        }
         if ($invitation->getSequence() < self::sequence($current, $invitation->getRecurrenceKey())) {
             return;
         }
@@ -141,12 +185,18 @@ final readonly class InvitationApplier
         $this->entityManager->flush();
     }
 
-    private function cancel(CalendarInvitation $invitation, VCalendar $itip, ?CalendarObject $object): void
+    /**
+     * @param list<string> $self
+     */
+    private function cancel(CalendarInvitation $invitation, VCalendar $itip, ?CalendarObject $object, array $self, string $sender): void
     {
         if (null === $object) {
             return;
         }
         $current = CalendarDocument::parse($object->getIcal());
+        if (!$this->fromOrganizer($invitation, $itip, $current, $self, $sender)) {
+            return;
+        }
         if ($invitation->getSequence() < self::sequence($current, '')) {
             return;
         }
@@ -177,7 +227,7 @@ final readonly class InvitationApplier
     /**
      * @param list<string> $self
      */
-    private function reply(CalendarInvitation $invitation, VCalendar $itip, ?CalendarObject $object, array $self): void
+    private function reply(CalendarInvitation $invitation, VCalendar $itip, ?CalendarObject $object, array $self, string $sender): void
     {
         if (null === $object) {
             return;
@@ -188,9 +238,22 @@ final readonly class InvitationApplier
         if (null === $organizer || !\in_array(Props::address(Props::value($organizer)), $self, true)) {
             return;
         }
-        $event = CalendarDocument::events($itip)[0] ?? null;
-        $attendee = null === $event ? null : Props::get($event, 'ATTENDEE');
-        if (null === $attendee) {
+        // The answer counts only from the attendee it is about, and only for someone the event already invites:
+        // otherwise anyone could add themselves and receive every later update.
+        $attendee = null;
+        foreach (CalendarDocument::events($itip) as $event) {
+            foreach (Props::all($event, 'ATTENDEE') as $candidate) {
+                if (Props::address(Props::value($candidate)) !== $sender) {
+                    $this->logger->info('Ignoring calendar mail', ['invitation' => $invitation->getId()->toRfc4122(), 'reason' => 'the reply speaks for someone other than its sender']);
+
+                    return;
+                }
+                $attendee = $candidate;
+            }
+        }
+        if (null === $attendee || !self::attends($current, $sender)) {
+            $this->logger->info('Ignoring calendar mail', ['invitation' => $invitation->getId()->toRfc4122(), 'reason' => 'the sender is not an attendee']);
+
             return;
         }
 
@@ -217,7 +280,59 @@ final readonly class InvitationApplier
             return $default->providerSchedules() || !$default->isWritable() ? null : $default;
         }
 
-        return $this->calendars->findOneBy(['owner' => $user, 'mailAccount' => null, 'isDefault' => true]) ?? $this->calendars->findLocal($user);
+        return $this->localCalendars->ensure($user);
+    }
+
+    /**
+     * The organizer's address, the same on every component, or null when there is none or they differ.
+     */
+    private static function organizer(VCalendar $calendar): ?string
+    {
+        $organizers = [];
+        foreach (CalendarDocument::events($calendar) as $event) {
+            $organizer = Props::get($event, 'ORGANIZER');
+            $organizers[] = null === $organizer ? null : Props::address(Props::value($organizer));
+        }
+        $organizers = array_unique($organizers);
+
+        return 1 === \count($organizers) ? $organizers[0] : null;
+    }
+
+    /**
+     * Whether every component names this organizer, and the mail comes from them or from who they let send for them
+     * (SENT-BY, as Outlook delegates do).
+     */
+    private static function sentBy(VCalendar $itip, string $organizer, string $sender): bool
+    {
+        $events = CalendarDocument::events($itip);
+        if ([] === $events) {
+            return false;
+        }
+        foreach ($events as $event) {
+            $property = Props::get($event, 'ORGANIZER');
+            if (null === $property || Props::address(Props::value($property)) !== $organizer) {
+                return false;
+            }
+            $sentBy = Props::param($property, 'SENT-BY');
+            if ($sender !== $organizer && (null === $sentBy || Props::address($sentBy) !== $sender)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static function attends(VCalendar $calendar, string $address): bool
+    {
+        foreach (CalendarDocument::events($calendar) as $event) {
+            foreach (Props::all($event, 'ATTENDEE') as $attendee) {
+                if (Props::address(Props::value($attendee)) === $address) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

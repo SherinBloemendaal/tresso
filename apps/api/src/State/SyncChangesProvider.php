@@ -7,6 +7,7 @@ namespace App\State;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProviderInterface;
 use App\ApiResource\SyncChanges;
+use App\Calendar\LocalCalendars;
 use App\Classification\BuiltinSmartInboxes;
 use App\Entity\Calendar;
 use App\Security\CurrentUser;
@@ -27,12 +28,15 @@ final readonly class SyncChangesProvider implements ProviderInterface
         private CurrentUser $currentUser,
         private RequestStack $requests,
         private BuiltinSmartInboxes $builtinSmartInboxes,
+        private LocalCalendars $localCalendars,
     ) {
     }
 
     public function provide(Operation $operation, array $uriVariables = [], array $context = []): SyncChanges
     {
         $user = $this->currentUser->get();
+        // A user from before calendars gets the Tresso calendar on the first pull, so every client has one to use.
+        $this->localCalendars->ensure($user);
         $userId = $user->getId()->toRfc4122();
         $query = $this->requests->getCurrentRequest()?->query;
         $since = (int) ($query?->get('since') ?? 0);
@@ -97,14 +101,14 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 SELECT c.change_seq, COUNT(*) FROM calendar c WHERE c.owner_id = :user AND c.change_seq > :since GROUP BY c.change_seq
                 UNION ALL
                 SELECT e.change_seq, COUNT(*) FROM calendar_event e JOIN calendar c ON c.id = e.calendar_id
-                    WHERE c.owner_id = :user AND e.change_seq > :since AND (e.series_ends_at IS NULL OR e.series_ends_at > :window) GROUP BY e.change_seq
+                    WHERE c.owner_id = :user AND e.change_seq > :since GROUP BY e.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
             GROUP BY change_seq
             ORDER BY change_seq
             LIMIT :groups',
-            ['user' => $userId, 'since' => $since, 'groups' => $limit + 1, 'window' => self::eventWindow()],
+            ['user' => $userId, 'since' => $since, 'groups' => $limit + 1],
         );
 
         // Every change number has at least one row, so $limit + 1 groups always reach past a full page.
@@ -465,11 +469,18 @@ final readonly class SyncChangesProvider implements ProviderInterface
      */
     private function deleted(array $range): array
     {
+        // An event changed to end before the window leaves the clients' copies like a deleted one; a copy that
+        // starts from nothing never had it.
         /** @var list<array{entity_type: string, entity_id: string}> $rows */
         $rows = $this->connection->fetchAllAssociative(
-            'SELECT s.entity_type, s.entity_id FROM sync_tombstone s
-             WHERE s.user_id = :user AND s.change_seq > :since AND s.change_seq <= :until ORDER BY s.change_seq',
-            $range,
+            'SELECT entity_type, entity_id FROM (
+                SELECT s.entity_type, s.entity_id, s.change_seq FROM sync_tombstone s
+                 WHERE s.user_id = :user AND s.change_seq > :since AND s.change_seq <= :until
+                UNION ALL
+                SELECT \'calendarEvent\', e.id, e.change_seq FROM calendar_event e JOIN calendar c ON c.id = e.calendar_id
+                 WHERE :since > 0 AND c.owner_id = :user AND e.change_seq > :since AND e.change_seq <= :until AND e.series_ends_at <= :window
+             ) gone ORDER BY change_seq',
+            [...$range, 'window' => self::eventWindow()],
         );
 
         return array_map(static fn (array $r): array => ['type' => $r['entity_type'], 'id' => $r['entity_id']], $rows);

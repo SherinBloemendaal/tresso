@@ -6,6 +6,8 @@ namespace App\Calendar;
 
 use App\ApiResource\CalendarOccurrence;
 use App\Calendar\ICalendar\CalendarDocument;
+use App\Calendar\ICalendar\InvalidCalendarData;
+use App\Calendar\ICalendar\Occurrences;
 use App\Calendar\ICalendar\Props;
 use App\Entity\CalendarEvent;
 use App\Entity\CalendarObject;
@@ -23,6 +25,10 @@ use Sabre\VObject\Settings;
 final readonly class OccurrenceExpander
 {
     public const string MAX_RANGE = 'P400D';
+    /** Occurrences one series contributes to a range; an hourly series fills about 80 days. */
+    public const int MAX_PER_SERIES = 2000;
+    /** Occurrences one request returns; more means the range is too long for what the calendars hold. */
+    public const int MAX_OCCURRENCES = 10000;
     private const int MAX_RECURRENCES = 100000;
 
     public function __construct(
@@ -36,6 +42,8 @@ final readonly class OccurrenceExpander
      * @param list<string> $calendarIds
      *
      * @return list<CalendarOccurrence> ordered by start
+     *
+     * @throws TooManyOccurrences when the range holds more than MAX_OCCURRENCES
      */
     public function expand(User $owner, array $calendarIds, \DateTimeImmutable $from, \DateTimeImmutable $to, \DateTimeZone $zone): array
     {
@@ -52,17 +60,25 @@ final readonly class OccurrenceExpander
         $rowsByObject = $this->events->findForObjects($objects);
         foreach ($objects as $object) {
             $rows = $rowsByObject[$object->getId()->toRfc4122()] ?? [];
+            $count = 0;
             try {
-                $expanded = CalendarDocument::parse($object->getIcal())->expand($from->setTimezone($utc), $to->setTimezone($utc), $zone);
-            } catch (MaxInstancesExceededException|\Sabre\VObject\InvalidDataException $e) {
+                foreach (Occurrences::instances(CalendarDocument::parse($object->getIcal()), $from->setTimezone($utc), $to->setTimezone($utc), $zone, self::MAX_PER_SERIES) as $instance) {
+                    ++$count;
+                    $occurrence = $this->occurrence($object, $rows, $instance, $zone);
+                    if (null === $occurrence) {
+                        continue;
+                    }
+                    $occurrences[] = $occurrence;
+                    if (\count($occurrences) > self::MAX_OCCURRENCES) {
+                        throw new TooManyOccurrences(\sprintf('This range holds more than %d occurrences. Ask for a shorter range.', self::MAX_OCCURRENCES));
+                    }
+                }
+            } catch (MaxInstancesExceededException|\Sabre\VObject\InvalidDataException|InvalidCalendarData $e) {
                 $this->logger->warning('Calendar object could not be expanded', ['object' => $object->getId()->toRfc4122(), 'error' => $e->getMessage()]);
                 continue;
             }
-            foreach (CalendarDocument::events($expanded) as $instance) {
-                $occurrence = $this->occurrence($object, $rows, $instance, $zone);
-                if (null !== $occurrence) {
-                    $occurrences[] = $occurrence;
-                }
+            if ($count >= self::MAX_PER_SERIES) {
+                $this->logger->info('A series was cut off in a range', ['object' => $object->getId()->toRfc4122(), 'limit' => self::MAX_PER_SERIES]);
             }
         }
 

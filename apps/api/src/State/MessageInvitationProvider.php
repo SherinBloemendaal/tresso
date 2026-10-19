@@ -10,6 +10,7 @@ use App\ApiResource\CalendarOccurrence;
 use App\ApiResource\MessageInvitation;
 use App\Calendar\ICalendar\CalendarDocument;
 use App\Calendar\ICalendar\EventReader;
+use App\Calendar\ICalendar\InvalidCalendarData;
 use App\Calendar\OccurrenceExpander;
 use App\Calendar\SelfAddresses;
 use App\Entity\CalendarEvent;
@@ -24,6 +25,7 @@ use App\Repository\CalendarObjectRepository;
 use App\Repository\MessageRepository;
 use App\Security\CurrentUser;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 
 /**
  * @implements ProviderInterface<MessageInvitation>
@@ -52,11 +54,21 @@ final readonly class MessageInvitationProvider implements ProviderInterface
         }
 
         $self = $this->selfAddresses->of($user);
+        $row = $this->storedRow($user, $invitation);
         $itip = CalendarDocument::parse($invitation->getIcal());
         $vevent = CalendarDocument::master($itip) ?? CalendarDocument::events($itip)[0] ?? throw new NotFoundHttpException('This message carries no calendar event.');
-        $data = EventReader::read($vevent, $itip, $self);
+        try {
+            $data = EventReader::read($vevent, $itip, $self);
+        } catch (InvalidCalendarData $e) {
+            // A REPLY or CANCEL may leave out the times (RFC 5546 allows it): show the event as the calendar has it.
+            $stored = null === $row ? null : CalendarDocument::parse($row->getObject()->getIcal());
+            $event = null === $stored ? null : (CalendarDocument::override($stored, $invitation->getRecurrenceKey()) ?? CalendarDocument::master($stored));
+            if (null === $stored || null === $event) {
+                throw new UnprocessableEntityHttpException('The calendar part of this message cannot be read: '.$e->getMessage(), $e);
+            }
+            $data = EventReader::read($event, $stored, $self);
+        }
 
-        $row = $this->storedRow($user, $invitation);
         $stored = null === $row ? null : $row->getSequence();
         $kind = match (true) {
             ItipMethod::Cancel === $invitation->getMethod() => 'cancelled',

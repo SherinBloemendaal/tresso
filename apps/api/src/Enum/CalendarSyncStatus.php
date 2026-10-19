@@ -15,5 +15,7 @@ enum CalendarSyncStatus: string
     /** The server offers no CalDAV (looked for again daily). */
     case Unsupported = 'unsupported';
     case AuthFailed = 'auth_failed';
+    /** A server was found that does not get the password until the user confirms its address. */
+    case Unconfirmed = 'unconfirmed';
     case Error = 'error';
 }

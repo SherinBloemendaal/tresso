@@ -63,11 +63,8 @@ final readonly class EventEditor
         $vcalendar = CalendarDocument::create();
         /** @var VEvent $event */
         $event = $vcalendar->add('VEVENT', ['UID' => $uid, 'DTSTAMP' => $now, 'CREATED' => $now, 'SEQUENCE' => 0]);
-        if ([] !== $changes->attendees) {
-            $organizer ??= $calendar->getMailAccount() ?? throw new EditRejected('Choose the mail account that sends the invitations.');
-            $event->add('ORGANIZER', 'mailto:'.$organizer->getEmailAddress(), ['CN' => $organizer->getDisplayName()]);
-        }
         $this->write($event, $changes, $vcalendar, true, $self);
+        self::withOrganizer($vcalendar, $calendar, $organizer);
         // A new event is its own first version.
         Props::set($event, 'SEQUENCE', 0);
 
@@ -80,7 +77,7 @@ final readonly class EventEditor
     /**
      * @param string|null $recurrenceKey the occurrence the user edited, for recurring events
      */
-    public function update(CalendarEvent $row, EventChanges $changes, EditScope $scope, ?string $recurrenceKey, ?Calendar $moveTo = null, bool $notify = true): CalendarEvent
+    public function update(CalendarEvent $row, EventChanges $changes, EditScope $scope, ?string $recurrenceKey, ?Calendar $moveTo = null, bool $notify = true, ?MailAccount $organizer = null): CalendarEvent
     {
         $calendar = $row->getCalendar();
         self::requireWritable($calendar);
@@ -96,7 +93,7 @@ final readonly class EventEditor
             }
             self::requireWritable($moveTo);
 
-            return $this->move($object, $vcalendar, $old, $master, $changes, $key, $moveTo, $notify, $self);
+            return $this->move($object, $vcalendar, $old, $master, $changes, $key, $moveTo, $notify, $self, $organizer);
         }
 
         $editedKey = '';
@@ -111,13 +108,15 @@ final readonly class EventEditor
         } elseif (EditScope::All === $scope || $this->isFirst($master, $key)) {
             $this->editAll($vcalendar, $master, $changes, $key, $self);
         } else {
-            $newObject = $this->split($object, $vcalendar, $master, $key, $changes, $self, $notify);
+            $newObject = $this->split($object, $vcalendar, $master, $key, $changes, $self, $notify, $organizer);
+            self::withOrganizer($vcalendar, $calendar, $organizer);
             $this->store->save($object, $vcalendar);
             $this->schedule($calendar, $old, $vcalendar, $notify);
 
             return $newObject;
         }
 
+        self::withOrganizer($vcalendar, $calendar, $organizer);
         $rows = $this->store->save($object, $vcalendar);
         $this->schedule($calendar, $old, $vcalendar, $notify);
 
@@ -396,10 +395,10 @@ final readonly class EventEditor
             $master->remove('RDATE');
         } elseif (0 !== $shift || $changes->start->timeZone !== $masterStart->timeZone) {
             foreach ($overrides as $override) {
-                self::shiftProperty(Props::dateTime($override, 'RECURRENCE-ID'), $shift, $changes->start->timeZone, $vcalendar);
+                self::shiftProperty(Props::dateTime($override, 'RECURRENCE-ID'), $shift, $masterStart->timeZone, $changes->start->timeZone, $vcalendar);
             }
             foreach ([...Props::dateTimes($master, 'EXDATE'), ...Props::dateTimes($master, 'RDATE')] as $property) {
-                self::shiftProperty($property, $shift, $changes->start->timeZone, $vcalendar);
+                self::shiftProperty($property, $shift, $masterStart->timeZone, $changes->start->timeZone, $vcalendar);
             }
         }
 
@@ -416,7 +415,7 @@ final readonly class EventEditor
     /**
      * @param list<string> $self
      */
-    private function split(CalendarObject $object, VCalendar $vcalendar, VEvent $master, string $key, EventChanges $changes, array $self, bool $notify): CalendarEvent
+    private function split(CalendarObject $object, VCalendar $vcalendar, VEvent $master, string $key, EventChanges $changes, array $self, bool $notify, ?MailAccount $organizer): CalendarEvent
     {
         $occurrence = $this->occurrenceStart($master, $key, $vcalendar);
         $oldRule = Props::text($master, 'RRULE');
@@ -448,7 +447,7 @@ final readonly class EventEditor
             }
             $moved = clone $override;
             Props::set($moved, 'UID', $uid);
-            self::shiftProperty(Props::dateTime($moved, 'RECURRENCE-ID'), $shift, $changes->start->timeZone, $next);
+            self::shiftProperty(Props::dateTime($moved, 'RECURRENCE-ID'), $shift, $occurrence->timeZone, $changes->start->timeZone, $next);
             $next->add($moved);
         }
         foreach (['EXDATE', 'RDATE'] as $name) {
@@ -457,7 +456,7 @@ final readonly class EventEditor
                 if ([] !== $later && $sameKind) {
                     $copy = $newMaster->add($name, $later, $property->hasTime() ? [] : ['VALUE' => 'DATE']);
                     if ($copy instanceof DateTimeProperty) {
-                        self::shiftProperty($copy, $shift, $changes->start->timeZone, $next);
+                        self::shiftProperty($copy, $shift, $occurrence->timeZone, $changes->start->timeZone, $next);
                     }
                 }
             }
@@ -475,6 +474,7 @@ final readonly class EventEditor
             $changes->summary, $changes->description, $changes->location, $changes->url, $changes->start, $changes->end, $rule,
             $changes->status, $changes->transparency, $changes->visibility, $changes->attendees, $changes->reminders, $changes->conferenceUrl,
         ), $next, true, $self);
+        self::withOrganizer($next, $object->getCalendar(), $organizer);
 
         $rows = $this->store->save(new CalendarObject($object->getCalendar(), $uid, ''), $next);
         $this->schedule($object->getCalendar(), null, $next, $notify);
@@ -485,7 +485,7 @@ final readonly class EventEditor
     /**
      * @param list<string> $self
      */
-    private function move(CalendarObject $object, VCalendar $vcalendar, VCalendar $old, ?VEvent $master, EventChanges $changes, ?string $key, Calendar $target, bool $notify, array $self): CalendarEvent
+    private function move(CalendarObject $object, VCalendar $vcalendar, VCalendar $old, ?VEvent $master, EventChanges $changes, ?string $key, Calendar $target, bool $notify, array $self, ?MailAccount $organizer): CalendarEvent
     {
         if (null !== $master) {
             if (null === $key) {
@@ -497,6 +497,7 @@ final readonly class EventEditor
         if (null !== $this->objects->findOneByUid($target, $object->getUid())) {
             throw new EditRejected('The other calendar already has this event.');
         }
+        self::withOrganizer($vcalendar, $target, $organizer);
         $source = $object->getCalendar();
         $this->store->remove($object);
         $rows = $this->store->save(new CalendarObject($target, $object->getUid(), ''), $vcalendar);
@@ -504,6 +505,30 @@ final readonly class EventEditor
         $this->schedule($target, $source->getMailAccount() === $target->getMailAccount() ? $old : null, $vcalendar, $notify);
 
         return $rows[''];
+    }
+
+    /**
+     * Every component with attendees names an organizer, or no invitation goes out (sabre schedules from it): the
+     * event's own organizer when it has one, else the chosen account, else the calendar's account. An existing
+     * organizer is never replaced.
+     */
+    private static function withOrganizer(VCalendar $vcalendar, Calendar $calendar, ?MailAccount $chosen): void
+    {
+        $existing = null;
+        foreach (CalendarDocument::events($vcalendar) as $event) {
+            $existing ??= Props::get($event, 'ORGANIZER');
+        }
+        foreach (CalendarDocument::events($vcalendar) as $event) {
+            if ([] === Props::all($event, 'ATTENDEE') || null !== Props::get($event, 'ORGANIZER')) {
+                continue;
+            }
+            if (null !== $existing) {
+                $event->add(clone $existing);
+                continue;
+            }
+            $account = $chosen ?? $calendar->getMailAccount() ?? throw new EditRejected('Choose the mail account that sends the invitations.');
+            $existing = $event->add('ORGANIZER', 'mailto:'.$account->getEmailAddress(), ['CN' => $account->getDisplayName()]);
+        }
     }
 
     private function schedule(Calendar $calendar, ?VCalendar $old, ?VCalendar $new, bool $notify): void
@@ -672,18 +697,28 @@ final readonly class EventEditor
         VTimezoneBuilder::ensure($vcalendar, $time->timeZone, $instant);
     }
 
-    /** Moves a date or date-time property by a number of wall-clock seconds, optionally into another zone. */
-    private static function shiftProperty(?DateTimeProperty $property, int $seconds, ?string $zone, VCalendar $vcalendar): void
+    /**
+     * Moves a date or date-time property by a number of wall-clock seconds of the series, from its zone ($from) into
+     * another ($zone). Values given in UTC are read on the series' wall clock first, so they move with the series and
+     * stay in UTC.
+     */
+    private static function shiftProperty(?DateTimeProperty $property, int $seconds, ?string $from, ?string $zone, VCalendar $vcalendar): void
     {
         if (null === $property) {
             return;
         }
+        $zoned = $property->hasTime() && !$property->isFloating();
+        $utc = $zoned && null === Props::param($property, 'TZID');
         $values = [];
         foreach ($property->getDateTimes(new \DateTimeZone('UTC')) as $value) {
+            if ($utc && null !== $from) {
+                $value = \DateTimeImmutable::createFromInterface($value)->setTimezone(new \DateTimeZone($from));
+            }
             $wallClock = new \DateTimeImmutable($value->format('Y-m-d H:i:s'), new \DateTimeZone('UTC'))->modify(\sprintf('%+d seconds', $seconds));
-            $values[] = $property->hasTime() && !$property->isFloating() && null !== $zone
-                ? new \DateTimeImmutable($wallClock->format('Y-m-d H:i:s'), new \DateTimeZone($zone))
+            $shifted = $zoned && null !== ($zone ?? $from)
+                ? new \DateTimeImmutable($wallClock->format('Y-m-d H:i:s'), new \DateTimeZone($zone ?? $from))
                 : $wallClock;
+            $values[] = $utc ? $shifted->setTimezone(new \DateTimeZone('UTC')) : $shifted;
         }
         if (!$property->hasTime()) {
             $property->setDateTimes($values);
@@ -692,7 +727,7 @@ final readonly class EventEditor
             return;
         }
         $property->setDateTimes($values, $property->isFloating());
-        if (null !== $zone && !$property->isFloating() && 'UTC' !== $zone) {
+        if (!$utc && null !== $zone && !$property->isFloating() && 'UTC' !== $zone) {
             VTimezoneBuilder::ensure($vcalendar, $zone, $values[0]);
         }
     }
