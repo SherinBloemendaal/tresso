@@ -3,7 +3,7 @@ import { RealtimeClient } from './realtime'
 import type { RealtimeAccess } from './types'
 
 /** A hub response whose event stream the test writes to. */
-function stream(): { response: Response; send(text: string): void; close(): void } {
+function stream(): { response: Response; send(text: string): void; sendBytes(bytes: Uint8Array): void; close(): void } {
   let controller!: ReadableStreamDefaultController<Uint8Array>
   const body = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) })
   const encoder = new TextEncoder()
@@ -11,6 +11,7 @@ function stream(): { response: Response; send(text: string): void; close(): void
   return {
     response: new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }),
     send: (text) => controller.enqueue(encoder.encode(text)),
+    sendBytes: (bytes) => controller.enqueue(bytes),
     close: () => controller.close(),
   }
 }
@@ -146,5 +147,48 @@ describe('RealtimeClient', () => {
     const outcome = await Promise.race([stopping!.then(() => 'stopped'), new Promise((resolve) => setTimeout(() => resolve('still waiting'), 500))])
 
     expect(outcome).toBe('stopped')
+  })
+
+  it('reads characters split across chunks of the stream', async () => {
+    const hub = stream()
+    const cursors: number[] = []
+    const onConnected = vi.fn()
+    client = new RealtimeClient({ fetchAccess: async () => access('t1'), onCursor: (c) => cursors.push(c), onConnected, fetch: async () => hub.response })
+
+    client.start()
+    await until(() => onConnected.mock.calls.length === 1)
+    // "é" is two bytes in UTF-8; the comment line splits it over two chunks before the event follows.
+    const bytes = new TextEncoder().encode(': caf\u00e9\n\nevent: changes\ndata: {"cursor":3}\n\n')
+    const split = bytes.indexOf(0xc3) + 1
+    hub.sendBytes(bytes.slice(0, split))
+    hub.sendBytes(bytes.slice(split))
+    await until(() => cursors.length === 1)
+
+    expect(cursors).toEqual([3])
+  })
+
+  it('runs one connection when started again right after a stop', async () => {
+    const hubs = [stream(), stream()]
+    let connections = 0
+    const onConnected = vi.fn()
+    client = new RealtimeClient({
+      fetchAccess: async () => access('t1'),
+      onCursor: () => {},
+      onConnected,
+      fetch: async () => hubs[connections++]!.response,
+      retryDelays: [0],
+    })
+
+    client.start()
+    await until(() => onConnected.mock.calls.length === 1)
+    const stopping = client.stop()
+    client.start()
+    await stopping
+    await until(() => onConnected.mock.calls.length === 2)
+    for (let i = 0; i < 20; i++) {
+      await tick()
+    }
+
+    expect(connections).toBe(2)
   })
 })
