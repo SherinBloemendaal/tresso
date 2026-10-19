@@ -85,4 +85,40 @@ describe('ClassificationMenu', () => {
     expect(wrapper.get('[role="alert"]').text()).toBe('Could not move it: This smart inbox does not exist.')
     wrapper.unmount()
   })
+
+  it('says when new mail from the sender will still go to Spam', async () => {
+    classify.mockResolvedValue({
+      threadId: 't1',
+      smartInboxId: 'info',
+      verdict: 'know',
+      reason: 'user',
+      senderRule: { id: 'r1', sender: 'news@bank.example', verdict: null, failsAuthentication: true },
+    })
+    const wrapper = mountMenu('todo', 'do')
+
+    await wrapper.get('button').trigger('click')
+    await wrapper.findAll('[role="menuitemradio"]').find((item) => item.text().startsWith('Informational'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="status"]').text()).toBe('Moved. New mail from news@bank.example still goes to Spam: it fails the checks that prove who sent it.')
+    wrapper.unmount()
+  })
+
+  it('says nothing more for a sender whose mail passes', async () => {
+    classify.mockResolvedValue({
+      threadId: 't1',
+      smartInboxId: 'info',
+      verdict: 'know',
+      reason: 'user',
+      senderRule: { id: 'r1', sender: 'anna@partner.example', verdict: null, failsAuthentication: false },
+    })
+    const wrapper = mountMenu('todo', 'do')
+
+    await wrapper.get('button').trigger('click')
+    await wrapper.findAll('[role="menuitemradio"]').find((item) => item.text().startsWith('Informational'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
 })
