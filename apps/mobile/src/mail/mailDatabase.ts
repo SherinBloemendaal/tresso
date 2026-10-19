@@ -61,6 +61,11 @@ export class MailDatabase implements SyncStore {
   /** Pages being stored, which closing waits for. */
   private readonly writing = new Set<Promise<void>>()
   /**
+   * The last write queued. Writes run one after another: each exclusive transaction opens its own connection with no
+   * busy timeout, so a second write while one is open would fail with "database is locked".
+   */
+  private queue: Promise<void> = Promise.resolve()
+  /**
    * Set while the copy must sync from the start (see resyncFromStart). It is kept in the database too, so it holds
    * after a restart.
    */
@@ -106,9 +111,8 @@ export class MailDatabase implements SyncStore {
    */
   resyncFromStart(): Promise<void> {
     return this.write(async () => {
-      // A pull already under way keeps the cursor it began from: its pages are stored, but it no longer moves the
-      // cursor, so the next pull still begins from the start. Marked before the row is written, so a page stored
-      // meanwhile cannot finish this resync.
+      // A pull already under way keeps the cursor it began from: its later pages are stored, but they no longer move
+      // the cursor, so the next pull still begins from the start.
       this.resyncing = true
       this.resyncsAsked += 1
       await this.sql.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['resync', '1'])
@@ -129,16 +133,17 @@ export class MailDatabase implements SyncStore {
     return this.write(() => this.store(page))
   }
 
-  /** Every write goes through here: refused once the copy is closing, and waited for when it closes. */
+  /** Every write goes through here: one at a time, refused once the copy is closing, and waited for when it closes. */
   private async write<T>(task: () => Promise<T>): Promise<T> {
     if (this.shutting) {
       throw new CopyClosingError()
     }
-    const writing = task()
+    const writing = this.queue.then(task)
     const settled = writing.then(
       () => undefined,
       () => undefined,
     )
+    this.queue = settled
     this.writing.add(settled)
     try {
       return await writing
