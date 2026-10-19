@@ -27,7 +27,9 @@ Delivered in steps, each its own pull request:
 - [x] 1.3b Mercure realtime: issuer-based hub, RFC 9396 subscriber tokens per user, "changes up to N" published
   after commit
 - [x] 1.4a Message content API: sanitized HTML body with remote content blocked by default, signed attachment URLs
-- [ ] 1.4b Web client: sign-in, Unified Inbox, reading pane rendering the body in an isolated frame
+- [x] 1.4b Web client: sign-in, Unified Inbox and per-account inboxes from a local IndexedDB copy kept current by
+  delta sync and realtime, reading pane rendering the body in a sandboxed frame
+- [ ] 1.4c Account management in the web client: add, edit, pause and remove mail accounts
 - [ ] 1.5 Compose, reply and forward, HTML signatures per account, sending through the worker, search
 - [ ] 1.6 Gmail and Microsoft 365: OAuth connection, Gmail API and Microsoft Graph sync
 
