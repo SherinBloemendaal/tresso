@@ -36,7 +36,8 @@ export function undoPlan(applied: AppliedAction, action: 'archive' | 'trash' | '
     if (action === 'archive') {
       const left = original.filter((id) => roles.get(id) === 'inbox')
       from = after.folderIds.find((id) => roles.get(id) === 'archive')
-      to = left.length === 1 ? left[0] : undefined
+      // A copy that was in Archive already would go back to the inbox with the archived one.
+      to = left.length === 1 && (from === undefined || !before.folderIds.includes(from)) ? left[0] : undefined
     } else {
       from = after.folderIds.find((id) => !before.folderIds.includes(id)) ?? after.folderIds[0]
       to = original.length === 1 ? original[0] : undefined

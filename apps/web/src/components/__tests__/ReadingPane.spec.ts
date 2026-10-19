@@ -108,6 +108,12 @@ describe('ReadingPane actions', () => {
     return mount(ReadingPane, { props: { threadId: 't1', backTo: '/' }, global: { plugins: [router] }, attachTo: document.body })
   }
 
+  /** Waits until the pane has read the conversation and its buttons take actions again. */
+  async function opened(wrapper: ReturnType<typeof mountPane>): Promise<void> {
+    await vi.waitFor(() => expect(actions).toHaveLength(1))
+    await vi.waitFor(() => expect(wrapper.get('button[aria-keyshortcuts="E"]').attributes('disabled')).toBeUndefined())
+  }
+
   async function folderIdsOf(id: string): Promise<string[]> {
     const thread = await useMailStore().thread('t1')
     return thread?.messages.find((m) => m.id === id)?.folderIds ?? []
@@ -123,7 +129,7 @@ describe('ReadingPane actions', () => {
 
   it('archives the conversation, goes back to the list and can undo it', async () => {
     const wrapper = mountPane()
-    await vi.waitFor(() => expect(actions).toHaveLength(1))
+    await opened(wrapper)
     actions.length = 0
 
     await wrapper.get('button[aria-keyshortcuts="E"]').trigger('click')
@@ -145,7 +151,7 @@ describe('ReadingPane actions', () => {
 
   it('takes the shortcuts, but not while typing', async () => {
     const wrapper = mountPane()
-    await vi.waitFor(() => expect(actions).toHaveLength(1))
+    await opened(wrapper)
     actions.length = 0
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 's' }))
@@ -168,7 +174,7 @@ describe('ReadingPane actions', () => {
 
   it('moves to a folder of the account from a menu', async () => {
     const wrapper = mountPane()
-    await vi.waitFor(() => expect(actions).toHaveLength(1))
+    await opened(wrapper)
     actions.length = 0
 
     await wrapper.get('button[aria-haspopup="menu"]').trigger('click')
@@ -190,7 +196,7 @@ describe('ReadingPane actions', () => {
     later = page(2, { messages: [message('m2', ['inbox', 'projects'], '2026-10-19T09:00:00Z', false)] })
     await useMailStore().syncNow()
     const wrapper = mountPane()
-    await vi.waitFor(() => expect(actions).toHaveLength(1))
+    await opened(wrapper)
 
     await wrapper.get('button[aria-keyshortcuts="#"]').trigger('click')
     await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/'))
@@ -202,7 +208,7 @@ describe('ReadingPane actions', () => {
 
   it('ignores a held key and shortcuts meant for the compose window', async () => {
     const wrapper = mountPane()
-    await vi.waitFor(() => expect(actions).toHaveLength(1))
+    await opened(wrapper)
     actions.length = 0
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 's', repeat: true }))
@@ -216,7 +222,7 @@ describe('ReadingPane actions', () => {
 
   it('puts things back and says why when the server refuses', async () => {
     const wrapper = mountPane()
-    await vi.waitFor(() => expect(actions).toHaveLength(1))
+    await opened(wrapper)
     refuse = 'archive'
 
     await wrapper.get('button[aria-keyshortcuts="E"]').trigger('click')
