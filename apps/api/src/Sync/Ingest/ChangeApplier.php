@@ -30,16 +30,18 @@ final readonly class ChangeApplier
 
     public function apply(MailAccount $account, ChangeBatchInput $batch): ChangeBatchResult
     {
-        $result = $this->entityManager->wrapInTransaction(function () use ($account, $batch): array {
+        $result = $this->entityManager->wrapInTransaction(function () use ($account, $batch): ChangeBatchResult {
             $folder = $this->folders->get($account, $batch->folder);
-            $updated = $unknown = 0;
+            $updated = 0;
+            /** @var list<string> $unknown */
+            $unknown = [];
             // A flag change from Tresso the server has not confirmed yet keeps \Seen and \Flagged as the user set them.
             $pendingFlags = [] === $batch->flags ? [] : $this->mailboxChanges->messagesWithPendingFlags($account);
 
             foreach ($batch->flags as $change) {
                 $location = $this->entityManager->getRepository(MessageLocation::class)->findOneBy(['folder' => $folder, 'remoteUid' => $change->remoteUid]);
                 if (null === $location) {
-                    ++$unknown;
+                    $unknown[] = $change->remoteUid;
                     continue;
                 }
                 $message = $location->getMessage();
@@ -93,9 +95,11 @@ final readonly class ChangeApplier
             // Messages still in other folders changed their membership.
             $this->sequencer->touchMessages($account->getOwner()->getId(), $affected);
 
-            return [$updated, $removed, $unknown, $deleted];
+            $unknown = array_values(array_unique($unknown));
+
+            return new ChangeBatchResult($updated, $removed, \count($unknown), $deleted, $unknown);
         });
 
-        return new ChangeBatchResult(...$result);
+        return $result;
     }
 }
