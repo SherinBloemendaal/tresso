@@ -25,6 +25,14 @@ function synced(account: MailAccount): SyncedMailAccount {
   return { id, emailAddress, displayName, provider, status, statusDetail, lastSyncedAt }
 }
 
+/** Form validation runs asynchronously; let it and the requests it starts finish. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await flushPromises()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+}
+
 describe('AddAccountView', () => {
   let server: MailAccount
   const requests: { method: string; path: string; body: unknown }[] = []
@@ -94,7 +102,7 @@ describe('AddAccountView', () => {
     await wrapper.get('input[type="email"]').setValue('kim@fastmail.com')
     await wrapper.findAll('input')[1]!.setValue('Kim')
     await wrapper.get('form').trigger('submit')
-    await flushPromises()
+    await settle()
 
     expect(wrapper.text()).toContain('We filled in the settings we found for fastmail.com')
     expect((wrapper.find('input[autocomplete="off"]').element as HTMLInputElement).value).toBe('kim@fastmail.com')
@@ -102,21 +110,21 @@ describe('AddAccountView', () => {
 
     await wrapper.get('input[type="password"]').setValue('wrong-password')
     await wrapper.get('form').trigger('submit')
-    await flushPromises()
+    await settle()
 
     expect(requests.find((r) => r.method === 'POST')?.body).toMatchObject({ emailAddress: 'kim@fastmail.com', displayName: 'Kim', password: 'wrong-password', imap: created.imap })
     expect(wrapper.text()).toContain('Signing in and fetching your folders')
 
     server = { ...server, status: 'auth_failed', statusDetail: 'Invalid credentials' }
     mail.accounts = [synced(server)]
-    await flushPromises()
+    await settle()
     expect(wrapper.text()).toContain('Signing in failed.')
     expect(wrapper.text()).toContain('The server said: Invalid credentials')
 
     await wrapper.get('button.button-primary').trigger('click')
     await wrapper.get('input[type="password"]').setValue('right-password')
     await wrapper.get('form').trigger('submit')
-    await flushPromises()
+    await settle()
 
     expect(requests.filter((r) => r.method === 'POST')).toHaveLength(1)
     expect(requests.find((r) => r.method === 'PATCH')?.body).toMatchObject({ password: 'right-password' })
@@ -124,7 +132,7 @@ describe('AddAccountView', () => {
 
     server = { ...server, lastSyncedAt: '2026-10-19T08:01:00+00:00' }
     mail.accounts = [synced(server)]
-    await flushPromises()
+    await settle()
     expect(wrapper.text()).toContain('Connected. Your mail is arriving')
   })
 })
