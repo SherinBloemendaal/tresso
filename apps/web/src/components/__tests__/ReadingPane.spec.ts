@@ -198,19 +198,22 @@ describe('ReadingPane actions', () => {
     expect(actions).toEqual([{ messageIds: ['m1', 'm2'], action: 'move', folderId: 'projects' }])
   })
 
-  it('offers no undo when a message cannot be put back exactly', async () => {
-    // m2 is in Inbox and in Projects: trash takes both copies, and no move puts both back.
+  it('puts back with undo what it can, and says what it cannot', async () => {
+    // m2 is in Inbox and in Projects: trash takes both copies, and no move puts both back. m1 came from Sent only.
     later = page(2, { messages: [message('m2', ['inbox', 'projects'], '2026-10-19T09:00:00Z', false)] })
     await useMailStore().syncNow()
     const wrapper = mountPane()
     await opened(wrapper)
+    actions.length = 0
 
     await wrapper.get('button[aria-keyshortcuts="#"]').trigger('click')
     await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/'))
 
-    const notice = useComposeStore().notices.find((n) => n.text === 'Moved to Trash.')
-    expect(notice).toBeDefined()
-    expect(notice?.action).toBeUndefined()
+    const notice = useComposeStore().notices.find((n) => n.text.startsWith('Moved to Trash.'))
+    expect(notice?.text).toBe('Moved to Trash. Undo leaves one message that was in several folders.')
+    actions.length = 0
+    notice?.action?.run()
+    await vi.waitFor(() => expect(actions).toEqual([{ messageIds: ['m1'], action: 'move', folderId: 'sent', fromFolderId: 'trash' }]))
   })
 
   it('archives when asked while the conversation is still being read', async () => {

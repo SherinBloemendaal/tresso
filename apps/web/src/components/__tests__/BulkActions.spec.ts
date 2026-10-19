@@ -60,12 +60,14 @@ async function settle(): Promise<void> {
 
 describe('bulk actions', () => {
   const actions: Record<string, unknown>[] = []
+  let later: ChangePage | null
   let router: Router
 
   beforeEach(async () => {
     sessionStorage.setItem('auth.tokens', JSON.stringify({ accessToken: 'token', refreshToken: null, expiresAt: Date.now() + 3_600_000 }))
     setActivePinia(createPinia())
     actions.length = 0
+    later = null
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -84,7 +86,8 @@ describe('bulk actions', () => {
             drafts: [],
             deleted: [],
           }
-          return new Response(JSON.stringify(since === 0 ? first : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [] }))
+          const empty = { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [] }
+          return new Response(JSON.stringify(since === 0 ? first : since === 1 && later !== null ? later : empty))
         }
         if (url.pathname === '/api/v1/message-actions') {
           actions.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
@@ -116,7 +119,7 @@ describe('bulk actions', () => {
   }
 
   function checkbox(wrapper: ReturnType<typeof mountList>, threadId: string) {
-    return wrapper.get(`[aria-label="Select Subject ${threadId}"]`)
+    return wrapper.get(`[aria-label^="Select Subject ${threadId}, from "]`)
   }
 
   it('selects with checkboxes, a shift click selects a range, and the bar counts them', async () => {
@@ -149,8 +152,8 @@ describe('bulk actions', () => {
     const wrapper = mountList()
     await checkbox(wrapper, 't1').trigger('click')
 
-    const button = wrapper.findAll('button').find((b) => b.text() === 'Select all from this sender')
-    await button!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.findAll('button').some((b) => b.text() === 'Select all from this sender')).toBe(true))
+    await wrapper.findAll('button').find((b) => b.text() === 'Select all from this sender')!.trigger('click')
     await vi.waitFor(() => expect([...useSelectionStore().threadIds].sort()).toEqual(['t1', 't2']))
   })
 
@@ -183,11 +186,52 @@ describe('bulk actions', () => {
     await checkbox(wrapper, 't1').trigger('click')
     await checkbox(wrapper, 't4').trigger('click')
 
-    const move = wrapper.get('[aria-label="Bulk actions"] button[aria-haspopup="menu"]')
-    expect(move.attributes('disabled')).toBeDefined()
+    await vi.waitFor(() => expect(wrapper.get('[aria-label="Bulk actions"] button[aria-haspopup="menu"]').attributes('disabled')).toBeDefined())
 
     await checkbox(wrapper, 't4').trigger('click')
+    await vi.waitFor(() => expect(wrapper.get('[aria-label="Bulk actions"] button[aria-haspopup="menu"]').attributes('disabled')).toBeUndefined())
+  })
+
+  it('keeps the selection when Escape closes a menu, and takes no action keys inside a menu', async () => {
+    const wrapper = mountList()
+    await checkbox(wrapper, 't1').trigger('click')
+    await checkbox(wrapper, 't3').trigger('click')
+
+    const select = wrapper.findAll('button[aria-haspopup="menu"]')[0]!
+    await select.trigger('click')
+    const menu = wrapper.get('[role="menu"]')
+    ;(menu.element.querySelector('[role="menuitem"]') as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key: 'e', bubbles: true }))
     await settle()
-    expect(wrapper.get('[aria-label="Bulk actions"] button[aria-haspopup="menu"]').attributes('disabled')).toBeUndefined()
+    expect(actions).toEqual([])
+
+    ;(menu.element.querySelector('[role="menuitem"]') as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await settle()
+    expect(wrapper.find('[role="menu"]').exists()).toBe(false)
+    expect([...useSelectionStore().threadIds].sort()).toEqual(['t1', 't3'])
+  })
+
+  it('selects and unselects only what is shown with the select-all box', async () => {
+    const wrapper = mountList()
+    useSelectionStore().set(['t2'])
+    await settle()
+
+    await wrapper.get('[aria-label="Select all conversations shown"]').trigger('click')
+    expect([...useSelectionStore().threadIds].sort()).toEqual(['t1', 't2', 't3', 't4'])
+    await wrapper.get('[aria-label="Select all conversations shown"]').trigger('click')
+
+    expect([...useSelectionStore().threadIds]).toEqual(['t2'])
+  })
+
+  it('lets go of conversations that left the inbox meanwhile', async () => {
+    const wrapper = mountList()
+    await checkbox(wrapper, 't1').trigger('click')
+    await checkbox(wrapper, 't3').trigger('click')
+
+    // Archived on another device.
+    later = { cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [{ ...messages[2]!, folderIds: ['archive'] }], outgoingMessages: [], signatures: [], drafts: [], deleted: [] }
+    await useMailStore().syncNow()
+
+    await vi.waitFor(() => expect([...useSelectionStore().threadIds]).toEqual(['t1']))
+    expect(wrapper.get('[aria-label="Bulk actions"] [role="status"]').text()).toBe('1 selected')
   })
 })

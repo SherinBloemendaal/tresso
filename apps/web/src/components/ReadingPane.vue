@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import type { MessageAction, SyncedFolder, SyncedMessage, SyncedThread } from '@tresso/core'
+import type { MessageAction, SyncedMessage, SyncedThread } from '@tresso/core'
 import type { AppliedAction } from '@/mail/db'
 import { shortcutAllowed, useMessageActions } from '@/mail/useMessageActions'
 import { useComposeStore } from '@/stores/compose'
@@ -18,7 +18,7 @@ const compose = useComposeStore()
 const router = useRouter()
 const thread = ref<SyncedThread | null>(null)
 const messages = ref<SyncedMessage[]>([])
-const folders = ref<SyncedFolder[]>([])
+const folders = computed(() => mail.allFolders)
 const expanded = ref(new Set<string>())
 const missing = ref(false)
 const actions = useMessageActions()
@@ -62,7 +62,6 @@ watch(
       open.add(newest.id)
     }
     expanded.value = open
-    folders.value = await mail.folders()
   },
   { immediate: true },
 )

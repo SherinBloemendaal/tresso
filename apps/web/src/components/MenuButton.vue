@@ -28,6 +28,14 @@ function close(): void {
   button.value?.focus()
 }
 
+// Escape closes the menu, and goes no further (the list would otherwise let go of a selection too).
+function escape(event: KeyboardEvent): void {
+  if (open.value) {
+    event.preventDefault()
+    close()
+  }
+}
+
 function choose(id: string): void {
   open.value = false
   emit('choose', id)
@@ -74,7 +82,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', outside))
 </script>
 
 <template>
-  <div class="move" @keydown.esc="open && close()">
+  <div class="move" @keydown.esc="escape">
     <button ref="button" type="button" class="tool" :disabled="props.disabled || items.length === 0" aria-haspopup="menu" :aria-expanded="open" @click="open ? close() : show()">
       <AppIcon v-if="icon" :name="icon" /> {{ label }}
     </button>

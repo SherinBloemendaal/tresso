@@ -490,6 +490,30 @@ export class MailDatabase implements SyncStore {
     return ids
   }
 
+  /**
+   * What a selection of threads holds now: the ones still in the inbox on screen (of one account, or of all), and
+   * their accounts and senders (lower-case addresses).
+   */
+  async describeThreads(mailAccountId: string | null, threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }> {
+    const tx = this.db.transaction('conversations')
+    const present: string[] = []
+    const accounts = new Set<string>()
+    const senders = new Set<string>()
+    for (const threadId of threadIds) {
+      const conversation = await tx.store.get(threadId)
+      if (conversation === undefined || conversation.inbox !== 1 || (mailAccountId !== null && conversation.mailAccountId !== mailAccountId)) {
+        continue
+      }
+      present.push(threadId)
+      accounts.add(conversation.mailAccountId)
+      for (const sender of conversation.senders) {
+        senders.add(sender.address.toLowerCase())
+      }
+    }
+
+    return { present, accounts: [...accounts], senders: [...senders] }
+  }
+
   /** The messages of these threads, for acting on whole conversations. */
   async messageIdsOfThreads(threadIds: string[]): Promise<string[]> {
     const tx = this.db.transaction('messages')

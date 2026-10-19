@@ -1,20 +1,20 @@
-import { ref } from 'vue'
+import { ref, type Ref } from 'vue'
 import type { MessageAction, SyncedFolder } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
 import type { AppliedAction } from '@/mail/db'
 import { undoPlan, type UndoMove } from '@/mail/undo'
 import { useComposeStore } from '@/stores/compose'
-import { useMailStore } from '@/stores/mail'
+import { PartialActionError, useMailStore } from '@/stores/mail'
 
 /**
  * Message actions as screens use them: errors become notices, one action runs at a time, and archiving, trashing or
- * moving offers an undo that puts back exactly what moved (none when that is not possible).
+ * moving offers an undo that puts back exactly what moved.
+ *
+ * @param busy the guard to use; pass one that outlives the component when it can be unmounted mid-action
  */
-export function useMessageActions() {
+export function useMessageActions(busy: Ref<boolean> = ref(false)) {
   const mail = useMailStore()
   const compose = useComposeStore()
-  /** An action is on its way; buttons and shortcuts wait for it. */
-  const busy = ref(false)
   let before: Promise<void> = Promise.resolve()
 
   /** Lets actions taken from now on wait for this first (e.g. reading a conversation on open). */
@@ -25,10 +25,19 @@ export function useMessageActions() {
     )
   }
 
+  /**
+   * Returns what changed: everything, the part the server took when a large selection went partly through (the rest
+   * is reported), or null when nothing did.
+   */
   async function run(messageIds: string[], action: MessageAction, folderId?: string): Promise<AppliedAction | null> {
     try {
       return await mail.act(messageIds, action, { folderId })
     } catch (error) {
+      if (error instanceof PartialActionError) {
+        const rest = messageIds.length - error.accepted.before.length
+        compose.notify({ text: `${rest === 1 ? 'One message was' : `${rest} messages were`} not changed: ${errorMessage(error.reason)}`, tone: 'error' })
+        return error.accepted
+      }
       compose.notify({ text: errorMessage(error), tone: 'error' })
       return null
     }
@@ -51,7 +60,10 @@ export function useMessageActions() {
     }
   }
 
-  /** Archives, trashes or moves the messages and says so, with an undo when one puts them back exactly. */
+  /**
+   * Archives, trashes or moves the messages and says so, with an undo that puts back exactly what can be: messages
+   * that were in several folders cannot (a move takes every copy), and the notice says so.
+   */
   async function relocate(messageIds: string[], action: 'archive' | 'trash' | 'move', folders: SyncedFolder[], folderId?: string): Promise<boolean> {
     const applied = await run(messageIds, action, folderId)
     if (applied === null) {
@@ -59,10 +71,12 @@ export function useMessageActions() {
     }
     const label = action === 'archive' ? 'Archived' : action === 'trash' ? 'Moved to Trash' : `Moved to ${folders.find((folder) => folder.id === folderId)?.displayName ?? 'the folder'}`
     const plan = undoPlan(applied, action, folders)
+    const left = plan.unrestorable
+    const caveat = left === 0 || plan.moves.length === 0 ? '' : ` Undo leaves ${left === 1 ? 'one message' : `${left} messages`} that ${left === 1 ? 'was' : 'were'} in several folders.`
     compose.notify({
-      text: `${label}.`,
+      text: `${label}.${caveat}`,
       tone: 'info',
-      action: plan.exact && plan.moves.length > 0 ? { label: 'Undo', run: () => void undo(plan.moves) } : undefined,
+      action: plan.moves.length > 0 ? { label: 'Undo', run: () => void undo(plan.moves) } : undefined,
     })
     return true
   }
@@ -86,10 +100,11 @@ export function useMessageActions() {
   return { busy, after, run, exclusive, relocate }
 }
 
-/** Whether a key press is meant for shortcuts: not typing, not writing, not held, no modifiers. */
+/** Whether a key press is meant for shortcuts: not typing, not writing, not in a menu, not held, no modifiers. */
 export function shortcutAllowed(event: KeyboardEvent, composing: boolean): boolean {
   const target = event.target instanceof HTMLElement ? event.target : null
   const typing = target !== null && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
   const inDialog = target?.closest('[role="dialog"]') != null
-  return !(typing || composing || inDialog || event.repeat || event.isComposing || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey)
+  const inMenu = target?.closest('[role="menu"]') != null
+  return !(typing || composing || inDialog || inMenu || event.repeat || event.isComposing || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey)
 }
