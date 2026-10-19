@@ -493,6 +493,18 @@ flags it, with the same exact undo as the web client: the way an action changes 
 undo it (`undoPlan`) live in `packages/core`, and `MailSession.act` applies it to the copy first and puts back what
 the server did not take.
 
+Writing mail on the phone works as on the web, through the same code in `packages/core`: `Composer` (autosave and
+upload, sending after a few seconds so "Undo" can stop it or at a chosen time, conflicts with another device, and what
+became of a sent message, announced once), `DraftSync` (one upload per draft at a time; another device's newer version
+is never overwritten) and the helpers for replies, forwards, send-later times and the send request. The web client's
+Pinia store and the phone's `ComposerProvider` only wrap it. The compose screen (`apps/mobile/src/app/compose.tsx`)
+has the sending account, recipients as chips with suggestions from the people in synced mail, Cc and Bcc, the subject,
+the signature (changeable, following the account) and the quoted original kept apart from the text. The text is
+written in tiptap, as on the web, running in a web view: `apps/mobile/editor/editor.ts` is bundled by
+`npm run build:editor` into a generated module (CI checks it is current) and talks to the screen through JSON messages
+(`editorProtocol.ts`); its page has a Content-Security-Policy that allows no connection, and links may only be web
+and mail addresses. Leaving the screen keeps the draft; Cancel asks whether to keep or delete one with content.
+
 Shared TypeScript lives in `packages/core` (MIT): domain types, the OAuth flow, and the client side of the sync
 protocol, so every client syncs the same way:
 
