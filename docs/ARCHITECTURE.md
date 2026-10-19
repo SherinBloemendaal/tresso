@@ -188,7 +188,8 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   realtime notification and heartbeat hint, the same claim and report cycle.
 - **Message actions:** `POST /api/v1/message-actions` (scope `mail:write`) marks up to 500 messages read or unread,
   flags or unflags them, archives them (out of the inbox into Archive, or All Mail where there is no Archive folder,
-  as on Gmail), trashes them or moves them to a folder of their account. The change shows in Tresso at once and is
+  as on Gmail), trashes them or moves them to a folder of their account (every copy, or with `fromFolderId` only the
+  copies in that folder). The change shows in Tresso at once and is
   queued per account as a `mailbox_change`; the outbox run claims an account's changes in the order they were made
   (`/internal/sync/accounts/{id}/mailbox-changes/claim`) and reports each (`.../{change}/report`: done, retry,
   failed, or gone for a move whose copy is no longer in its folder). A flag change goes on every copy of the message;
@@ -336,11 +337,13 @@ draft). Edits made here are never overwritten by the delta: when another device 
 window asks whether to keep this version or take the other one. Drafts written before they were synced are
 uploaded after the update.
 
-Message actions in the web client: opening a conversation reads it; the conversation's toolbar archives, trashes,
-marks unread, flags and moves it (shortcuts E, #, U and S), and archiving, trashing or moving goes back to the list
-with an undo that puts every message back in the folder it came from. Each action changes the local copy first
-(`MailDatabase.applyAction`), so lists update at once, and is put back when the server refuses it, except on
-messages the delta updated since.
+Message actions in the web client: opening a conversation reads it; the conversation's buttons archive, trash, mark
+unread, flag and move it (shortcuts E, #, U and S, not while typing or writing), and archiving, trashing or moving
+goes back to the list with an undo. The undo moves back only what the action moved, each message from where it went
+into the one folder it came from (`fromFolderId` on the move); for a message that was in several folders (Gmail's
+All Mail aside) no exact undo exists, so none is offered. Each action changes the local copy first
+(`MailDatabase.applyAction`), so lists update at once; when the server does not take it (for a large selection, the
+batches it did not take), it is put back, except on messages the delta updated since.
 
 Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
 addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is
