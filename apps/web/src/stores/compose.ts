@@ -72,22 +72,24 @@ export const useComposeStore = defineStore('compose', () => {
 
   /** Opens one of the draft's files in a new tab, through a fresh link. */
   async function openAttachment(attachmentId: string): Promise<void> {
-    // Opened at once, in the click, so the browser does not block it; the link follows.
-    const opened = window.open('about:blank', '_blank', 'noopener,noreferrer')
+    // Opened at once, in the click, so the browser does not block it; the link follows. Not with noopener, which
+    // gives no handle to the tab; the tab loses its way back to this page by hand instead.
+    const opened = window.open('about:blank', '_blank')
+    if (opened === null) {
+      notify({ text: 'The file could not be opened: the browser blocked the new tab.', tone: 'error' })
+      return
+    }
+    opened.opener = null
     try {
       const url = await composer.attachmentLink(attachmentId)
       if (url === null) {
-        opened?.close()
+        opened.close()
         notify({ text: 'This file is blocked: it contains malware.', tone: 'error' })
         return
       }
-      if (opened === null) {
-        window.location.assign(url)
-      } else {
-        opened.location.href = url
-      }
+      opened.location.href = url
     } catch (error) {
-      opened?.close()
+      opened.close()
       notify({ text: `The file could not be opened: ${errorMessage(error)}`, tone: 'error' })
     }
   }
@@ -138,6 +140,7 @@ export const useComposeStore = defineStore('compose', () => {
     attach,
     removeAttachment: (attachmentId: string) => composer.removeAttachment(attachmentId),
     openAttachment,
+    shownQuote: () => composer.shownQuote(),
     openNew,
     openReply,
     defaultSignature: (mailAccountId: string | null) => composer.defaultSignature(mailAccountId),

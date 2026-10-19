@@ -174,3 +174,34 @@ export function sendLaterOptions(now: Date = new Date()): { key: SendLaterKey; a
   }
   return options
 }
+
+function escapeAttribute(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+}
+
+/**
+ * The quote with one inline image referred to by its content id instead of the signed link the body was shown with:
+ * links expire within the hour, while the image goes along with the message.
+ */
+export function quoteWithContentId(quoteHtml: string, url: string, contentId: string): string {
+  return quoteHtml.split(escapeAttribute(url)).join(`cid:${contentId}`).split(url).join(`cid:${contentId}`)
+}
+
+/** The inline images of a body that a quote shows, by their signed link. */
+export function quotedInlineImages<T extends { inline: boolean; contentId: string | null; url: string | null }>(quoteHtml: string, attachments: T[]): (T & { contentId: string; url: string })[] {
+  return attachments.filter(
+    (attachment): attachment is T & { contentId: string; url: string } =>
+      attachment.inline && attachment.contentId !== null && attachment.url !== null && (quoteHtml.includes(attachment.url) || quoteHtml.includes(escapeAttribute(attachment.url))),
+  )
+}
+
+/** For showing a draft on screen: its cid: images through the given links (fresh ones, from the draft's endpoint). */
+export function withInlineLinks(html: string, links: { contentId?: string | null; url: string | null }[]): string {
+  let shown = html
+  for (const link of links) {
+    if (link.contentId && link.url) {
+      shown = shown.split(`cid:${link.contentId}`).join(escapeAttribute(link.url))
+    }
+  }
+  return shown
+}

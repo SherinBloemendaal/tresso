@@ -1,5 +1,5 @@
-import { isPlausibleAddress, type SendMessageRequest } from './compose'
-import { AttachmentsNeedTheServer, defaultSignatureOf, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome, type AttachmentFile, type DraftSync } from './drafts'
+import { isPlausibleAddress, quotedInlineImages, quoteWithContentId, withInlineLinks, type SendMessageRequest } from './compose'
+import { AttachmentsNeedTheServer, defaultSignatureOf, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome, withoutLink, type AttachmentFile, type DraftSync } from './drafts'
 import { CopyClosingError, type Draft, type MailStore } from './store/mailStore'
 import type { Address, DraftAttachment, MessageAttachment, MessageBody, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature } from './sync/types'
 
@@ -73,6 +73,9 @@ export class Composer {
    * sign-in the composer does not touch the new copy (see reset).
    */
   private openedIn: MailStore | null = null
+  /** Files on their way to a draft, by a number of their own, so switching drafts never loses or mixes them up. */
+  private readonly onTheirWay = new Map<number, { draftId: string; name: string }>()
+  private nextFile = 0
 
   constructor(private readonly deps: ComposerDeps) {}
 
@@ -112,7 +115,7 @@ export class Composer {
       void this.save(this.current.draft)
     }
     this.openedIn = store
-    this.set({ draft: plain(draft), revision: this.current.revision + 1, error: null, violations: {}, savedAt: null, conflict: draft.remoteVersion !== null, attaching: [] })
+    this.set({ draft: plain(draft), revision: this.current.revision + 1, error: null, violations: {}, savedAt: null, conflict: draft.remoteVersion !== null, attaching: this.attachingTo(draft.id) })
   }
 
   /** The copy to write the open draft into, or null when it is no longer the one open (a sign-out, another user). */
@@ -132,6 +135,7 @@ export class Composer {
       this.undoTimer = null
     }
     this.openedIn = null
+    this.onTheirWay.clear()
     this.set({ draft: null, savedAt: null, sending: false, error: null, violations: {}, conflict: false, undoable: null, attaching: [] })
   }
 
@@ -144,19 +148,28 @@ export class Composer {
     const body = await this.deps.body(message.id).catch(() => ({ html: null, text: message.snippet, attachments: [] as MessageAttachment[] }))
     const draft = replyDraft(message, body, kind, this.deps.accounts(), this.deps.signatures())
     this.open(draft)
-    if (kind === 'forward') {
-      // A forward takes the original's files along, as other mail apps do; inline images are part of its text.
-      const files = body.attachments.filter((attachment) => !attachment.inline && attachment.scanStatus !== 'infected')
-      if (files.length > 0) {
-        // The files are kept with the server's copy of the draft, so the draft goes up first.
-        await this.save(this.current.draft)
-        await this.withFiles(
-          draft.id,
-          files.map((file) => file.filename),
-          files.map((file) => () => this.deps.drafts.forward(draft.id, file.id)),
-        )
-      }
+    const usable = body.attachments.filter((attachment) => attachment.scanStatus !== 'infected')
+    // The quote's images go along with the message: their links expire within the hour.
+    const images = quotedInlineImages(draft.quoteHtml, usable)
+    // A forward takes the original's files along too, as other mail apps do.
+    const files = kind === 'forward' ? usable.filter((attachment) => !attachment.inline) : []
+    if (images.length + files.length === 0) {
+      return
     }
+    // Shown as on their way from the start, so the message is not sent without them.
+    const tokens = this.beginFiles(draft.id, [...images, ...files].map((file) => file.filename))
+    // The files are kept with the server's copy of the draft, so the draft goes up first.
+    await this.save(this.current.draft)
+    await this.withFiles(draft.id, [
+      ...images.map((image, index) => ({
+        token: tokens[index]!,
+        name: image.filename,
+        request: () => this.deps.drafts.forward(draft.id, image.id),
+        // From now on the quote refers to the copy that goes along.
+        done: () => this.changeQuote(draft.id, (quote) => quoteWithContentId(quote, image.url, image.contentId)),
+      })),
+      ...files.map((file, index) => ({ token: tokens[images.length + index]!, name: file.filename, request: () => this.deps.drafts.forward(draft.id, file.id) })),
+    ])
   }
 
   /** Attaches files to the open draft, which goes to the server first if it is not there yet. */
@@ -166,12 +179,15 @@ export class Composer {
       return
     }
     // Typed text goes up with the draft, so it is not lost if the files take long.
+    const tokens = this.beginFiles(
+      draft.id,
+      files.map((file) => file.name),
+    )
     this.clearSaveTimer()
     await this.save(draft)
     await this.withFiles(
       draft.id,
-      files.map((file) => file.name),
-      files.map((file) => () => this.deps.drafts.attach(draft.id, file)),
+      files.map((file, index) => ({ token: tokens[index]!, name: file.name, request: () => this.deps.drafts.attach(draft.id, file) })),
     )
   }
 
@@ -200,21 +216,60 @@ export class Composer {
     return (await this.deps.drafts.links(draft.id)).find((link) => link.id === attachmentId)?.url ?? null
   }
 
+  /**
+   * The open draft's quote as it can be shown: images that go along with the draft are referred to by content id,
+   * which a screen cannot load, so they are shown through fresh links (the quote unchanged when those cannot be had).
+   */
+  async shownQuote(): Promise<string> {
+    const draft = this.current.draft
+    if (draft === null) {
+      return ''
+    }
+    if (!draft.quoteHtml.includes('cid:')) {
+      return draft.quoteHtml
+    }
+    const links = await this.deps.drafts.links(draft.id).catch(() => [])
+    return withInlineLinks(draft.quoteHtml, links)
+  }
+
+  /** Notes files as on their way to a draft; returns their numbers, to say when each arrived. */
+  private beginFiles(draftId: string, names: string[]): number[] {
+    const tokens = names.map((name) => {
+      const token = ++this.nextFile
+      this.onTheirWay.set(token, { draftId, name })
+      return token
+    })
+    this.showAttaching()
+    return tokens
+  }
+
+  private endFile(token: number): void {
+    this.onTheirWay.delete(token)
+    this.showAttaching()
+  }
+
+  private attachingTo(draftId: string): string[] {
+    return [...this.onTheirWay.values()].filter((file) => file.draftId === draftId).map((file) => file.name)
+  }
+
+  private showAttaching(): void {
+    const draft = this.current.draft
+    this.set({ attaching: draft === null ? [] : this.attachingTo(draft.id) })
+  }
+
   /** Runs the attach requests one after another, showing which files are on their way and why one failed. */
-  private async withFiles(draftId: string, names: string[], requests: (() => Promise<DraftAttachment>)[]): Promise<void> {
-    this.set({ attaching: [...this.current.attaching, ...names] })
+  private async withFiles(draftId: string, files: { token: number; name: string; request: () => Promise<DraftAttachment>; done?: () => void }[]): Promise<void> {
     const failures: string[] = []
-    for (const [index, request] of requests.entries()) {
+    for (const file of files) {
       try {
-        const attachment = await request()
-        this.noteAttachments(draftId, (attachments) => [...attachments.filter((other) => other.id !== attachment.id), plainAttachment(attachment)])
+        const attachment = await file.request()
+        this.noteAttachments(draftId, (attachments) => [...attachments.filter((other) => other.id !== attachment.id), withoutLink(attachment)])
+        file.done?.()
       } catch (error) {
         const reason = error instanceof AttachmentsNeedTheServer ? error.message : this.deps.explain(error).message
-        failures.push(`${names[index]}: ${reason}`)
+        failures.push(`${file.name}: ${reason}`)
       } finally {
-        const still = [...this.current.attaching]
-        still.splice(still.indexOf(names[index]!), 1)
-        this.set({ attaching: still })
+        this.endFile(file.token)
       }
     }
     if (failures.length > 0) {
@@ -225,6 +280,21 @@ export class Composer {
         this.deps.notify({ text, tone: 'error' }, 8000)
       }
     }
+  }
+
+  /** Changes the quote of a draft (the one open, or one saved), as an edit that is saved and uploaded. */
+  private changeQuote(draftId: string, change: (quoteHtml: string) => string): void {
+    if (this.current.draft?.id === draftId) {
+      this.update({ quoteHtml: change(this.current.draft.quoteHtml) })
+      return
+    }
+    const store = this.storeOfDraft()
+    void store?.draft(draftId).then(async (stored) => {
+      if (stored) {
+        await store.saveDraft({ ...stored, quoteHtml: change(stored.quoteHtml), pendingSave: true, updatedAt: Date.now() })
+        await this.deps.drafts.upload(draftId).catch(() => undefined)
+      }
+    })
   }
 
   /** The open draft's files as the server has them now (they are not edits: nothing is saved for them). */
@@ -270,8 +340,9 @@ export class Composer {
     try {
       const stored = await store.draft(draft.id)
       isNew = stored === null
-      // Keep what the upload learned (server version, a conflict) and lay the edits on top.
-      await store.saveDraft({ ...draft, version: stored?.version ?? draft.version, remoteVersion: stored?.remoteVersion ?? null })
+      // Keep what the upload learned (server version, a conflict) and lay the edits on top. The files are no edit:
+      // the copy here has them as the server last said, which may be newer than what this screen holds.
+      await store.saveDraft({ ...draft, version: stored?.version ?? draft.version, remoteVersion: stored?.remoteVersion ?? null, attachments: stored?.attachments ?? draft.attachments })
     } catch (error) {
       if (error instanceof CopyClosingError) {
         // Signed out meanwhile: the copy is going, and the draft with it.
@@ -301,8 +372,13 @@ export class Composer {
     if (this.current.draft?.id !== id) {
       return
     }
-    const remote = (await this.deps.store()?.draft(id))?.remoteVersion ?? null
-    this.set({ conflict: remote !== null })
+    const stored = await this.deps.store()?.draft(id)
+    const open = this.current.draft
+    if (open?.id !== id) {
+      return
+    }
+    this.set({ conflict: (stored?.remoteVersion ?? null) !== null })
+    await this.showStoredFiles()
   }
 
   async resolveConflict(keep: 'mine' | 'theirs'): Promise<void> {
@@ -496,6 +572,13 @@ export class Composer {
     }
     for (const stored of await store.drafts()) {
       const outgoing = stored.outgoingId === null ? null : await store.outgoing(stored.outgoingId)
+      if (stored.outgoingId !== null && outgoing === null && stored.mailAccountId === null) {
+        // Its account was removed while it was on its way: the message went with it, unsent, and the draft is back.
+        await store.saveDraft({ ...reopenedDraft(stored), pendingSave: false })
+        this.deps.changed?.()
+        this.deps.notify({ text: `"${stored.subject || '(no subject)'}" was not sent: its account was removed. It is in Drafts.`, tone: 'error' }, 30000)
+        continue
+      }
       const outcome = sentOutcome(stored, outgoing)
       if (outcome === null || outgoing === null) {
         continue
@@ -520,6 +603,20 @@ export class Composer {
       }
       await store.saveDraft({ ...stored, noticedStatus: outgoing.status })
     }
+    await this.showStoredFiles()
+  }
+
+  /** The open draft's files as the copy here has them now: attached or removed on another device meanwhile. */
+  private async showStoredFiles(): Promise<void> {
+    const open = this.current.draft
+    if (open === null) {
+      return
+    }
+    const stored = await this.storeOfDraft()?.draft(open.id)
+    const now = this.current.draft
+    if (stored && now?.id === open.id && !sameFiles(now.attachments, stored.attachments)) {
+      this.set({ draft: { ...now, attachments: stored.attachments } })
+    }
   }
 
   /** The local draft behind an outgoing message, if it was written on this device. */
@@ -539,6 +636,6 @@ function plain<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
 
-function plainAttachment(attachment: DraftAttachment): DraftAttachment {
-  return { id: attachment.id, filename: attachment.filename, contentType: attachment.contentType, size: attachment.size, scanStatus: attachment.scanStatus }
+function sameFiles(one: DraftAttachment[], other: DraftAttachment[]): boolean {
+  return one.length === other.length && one.every((attachment, index) => JSON.stringify(attachment) === JSON.stringify(other[index]))
 }

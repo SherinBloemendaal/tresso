@@ -54,6 +54,8 @@ export default function ComposeScreen() {
   const [linking, setLinking] = useState(false)
   const [format, setFormat] = useState<EditorState>(NO_FORMAT)
   const [showQuote, setShowQuote] = useState(false)
+  // The quote with the images that go along through fresh links, for the quote it was made from.
+  const [shownQuote, setShownQuote] = useState<{ quote: string; shown: string } | null>(null)
   const [laterError, setLaterError] = useState<string | null>(null)
   // Worked out when the row opens, not on every render: the times move with the clock.
   const [options, setOptions] = useState(() => sendLaterOptions())
@@ -91,11 +93,29 @@ export default function ComposeScreen() {
 
   const update = useCallback((changes: Partial<Draft>) => composer.update(changes), [composer])
 
+  const quote = draft?.quoteHtml ?? ''
+  useEffect(() => {
+    if (!showQuote || quote === '') {
+      return
+    }
+    let current = true
+    void composer.shownQuote().then((shown) => {
+      if (current) {
+        setShownQuote({ quote, shown })
+      }
+    })
+    return () => {
+      current = false
+    }
+  }, [composer, showQuote, quote])
+
   if (draft === null) {
     return null
   }
 
   const account = accounts.find((candidate) => candidate.id === draft.mailAccountId) ?? null
+  // Images of the quote are shown in it, not as files.
+  const files = draft.attachments.filter((attachment) => !attachment.inline)
   const signature = signatures.find((candidate) => candidate.id === draft.signatureId) ?? null
 
   function changeAccount(id: string): void {
@@ -299,7 +319,7 @@ export default function ComposeScreen() {
               <Pressable style={styles.quoteToggle} onPress={() => setShowQuote((open) => !open)} accessibilityRole="button" accessibilityState={{ expanded: showQuote }}>
                 <Text style={styles.quoteToggleLabel}>{showQuote ? 'Hide the original message' : draft.kind === 'forward' ? 'Forwarded message included' : 'Original message included'}</Text>
               </Pressable>
-              {showQuote && <HtmlFrame html={draft.quoteHtml} allowRemoteContent={false} accessibilityLabel="Original message" />}
+              {showQuote && <HtmlFrame html={shownQuote?.quote === draft.quoteHtml ? shownQuote.shown : draft.quoteHtml} allowRemoteContent={false} accessibilityLabel="Original message" />}
             </View>
           )}
 
@@ -316,9 +336,9 @@ export default function ComposeScreen() {
             </Pressable>
           </View>
 
-          {(draft.attachments.length > 0 || state.attaching.length > 0) && (
+          {(files.length > 0 || state.attaching.length > 0) && (
             <View style={styles.files} accessibilityLabel="Attachments">
-              {draft.attachments.map((attachment) => (
+              {files.map((attachment) => (
                 <AttachmentRow
                   key={attachment.id}
                   filename={attachment.filename}

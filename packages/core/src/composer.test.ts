@@ -21,6 +21,7 @@ describe('Composer', () => {
   let notices: ComposerNotice[]
   let api: FakeDraftApi
   let originalFiles: MessageAttachment[]
+  let originalHtml: string
   let sendFails: unknown
   let currentStore: SqliteMailStore | null
   let changes: number
@@ -38,13 +39,14 @@ describe('Composer', () => {
     changes = 0
     api = new FakeDraftApi()
     originalFiles = []
+    originalHtml = '<p>Numbers?</p>'
     composer = new Composer({
       store: () => currentStore,
       drafts: new DraftSync(() => currentStore, api),
       accounts: () => accounts,
       signatures: () => [signature('sig-work', 'Work')],
       defaultAccount: () => 'work',
-      body: async () => ({ html: '<p>Numbers?</p>', text: null, attachments: originalFiles }),
+      body: async () => ({ html: originalHtml, text: null, attachments: originalFiles }),
       send: async (request) => {
         if (sendFails !== null) throw sendFails
         sent.push(request)
@@ -417,20 +419,95 @@ describe('Composer', () => {
 
   it('does not send while files are on their way, nor without the draft that has them', async () => {
     composer.openNew([{ address: 'anna@example.test', name: null }])
-    let release!: () => void
+    let release: (() => void) | null = null
     api.duringFile = () => new Promise<void>((resolve) => (release = resolve))
     const attaching = composer.attach([{ name: 'slow.bin', type: 'application/octet-stream', size: 10, body: 'blob' }])
-    await vi.waitFor(() => expect(composer.state.attaching).toEqual(['slow.bin']))
+    // On its way from the click, before the draft has even gone up.
+    expect(composer.state.attaching).toEqual(['slow.bin'])
+    await vi.waitFor(() => expect(release).not.toBeNull())
 
     await composer.send()
     expect(composer.state.error).toBe('Wait until the files are attached.')
     api.duringFile = null
-    release()
+    release!()
     await attaching
 
     api.offline = true
     await composer.send()
     expect(composer.state.error).toBe('Attaching files needs a connection. Try again when you are online.')
     expect(sent).toEqual([])
+  })
+
+  it("sends a reply's quoted images along, referred to by content id, and shows them through fresh links", async () => {
+    const signed = 'https://api.example.test/content/attachments/logo?expires=1&signature=a'
+    originalHtml = `<p>Numbers?</p><img src="${signed.replace('&', '&amp;')}" alt="Logo">`
+    originalFiles = [{ id: 'logo', filename: 'logo.png', contentType: 'image/png', size: 100, inline: true, contentId: 'logo@example.test', scanStatus: 'clean', url: signed }]
+    api.received.set('logo', { filename: 'logo.png', contentType: 'image/png', inline: true, contentId: 'logo@example.test' })
+
+    await composer.openReply(original, 'reply')
+    await vi.advanceTimersByTimeAsync(5000)
+
+    const draft = composer.state.draft!
+    expect(api.calls).toContain(`forward ${draft.id} logo`)
+    expect(draft.attachments).toMatchObject([{ id: 'forwarded-logo', inline: true, contentId: 'logo@example.test' }])
+    expect(draft.quoteHtml).toContain('src="cid:logo@example.test"')
+    expect(draft.quoteHtml).not.toContain('signature=a')
+    expect(api.drafts.get(draft.id)!.quoteHtml).toContain('cid:logo@example.test')
+    expect(composer.state.conflict).toBe(false)
+    expect(await composer.shownQuote()).toContain('src="https://api.example.test/content/draft-attachments/forwarded-logo?signed"')
+  })
+
+  it('takes the version a file gave the draft, so the next edit is no conflict', async () => {
+    composer.openNew([{ address: 'anna@example.test', name: null }])
+    await composer.attach([{ name: 'plan.pdf', type: 'application/pdf', size: 10, body: 'blob' }])
+    const id = composer.state.draft!.id
+
+    composer.update({ subject: 'With the plan' })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(composer.state.conflict).toBe(false)
+    expect(api.drafts.get(id)!.subject).toBe('With the plan')
+
+    await composer.removeAttachment(composer.state.draft!.attachments[0]!.id)
+    composer.update({ subject: 'Without it' })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(composer.state.conflict).toBe(false)
+    expect(api.drafts.get(id)).toMatchObject({ subject: 'Without it', attachments: [] })
+  })
+
+  it('keeps files on their way with their own draft when another one is opened', async () => {
+    composer.openNew([{ address: 'anna@example.test', name: null }])
+    const first = composer.state.draft!.id
+    let release: (() => void) | null = null
+    api.duringFile = () => new Promise<void>((resolve) => (release = resolve))
+    const attaching = composer.attach([{ name: 'slow.bin', type: 'application/octet-stream', size: 10, body: 'blob' }])
+    await vi.waitFor(() => expect(release).not.toBeNull())
+
+    composer.openNew()
+    expect(composer.state.attaching).toEqual([])
+    await composer.openDraft(first)
+    expect(composer.state.attaching).toEqual(['slow.bin'])
+
+    api.duringFile = null
+    release!()
+    await attaching
+    expect(composer.state.attaching).toEqual([])
+    expect(composer.state.draft!.attachments.map((attachment) => attachment.filename)).toEqual(['slow.bin'])
+  })
+
+  it('shows files attached to the open draft on another device, and does not save over them', async () => {
+    composer.openNew([{ address: 'anna@example.test', name: null }])
+    await composer.save()
+    const id = composer.state.draft!.id
+    const stored = (await store.draft(id))!
+    const other = { id: 'other-file', filename: 'other.pdf', contentType: 'application/pdf', size: 5, scanStatus: 'clean' as const, inline: false, contentId: null }
+    await store.saveDraft({ ...stored, attachments: [other] })
+
+    await composer.followUp()
+    expect(composer.state.draft!.attachments).toEqual([other])
+
+    await store.saveDraft({ ...stored, attachments: [other, { ...other, id: 'second' }] })
+    composer.update({ subject: 'Typed meanwhile' })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect((await store.draft(id))!.attachments.map((attachment) => attachment.id)).toEqual(['other-file', 'second'])
   })
 })

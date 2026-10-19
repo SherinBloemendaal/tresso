@@ -26,8 +26,8 @@ const showCopies = ref(props.draft.cc.length > 0 || props.draft.bcc.length > 0)
 const laterOpen = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const dropping = ref(false)
-/** The files of the draft as the server has them; they are not form fields. */
-const attachments = computed(() => compose.draft?.attachments ?? props.draft.attachments)
+/** The files of the draft as the server has them; they are not form fields. Images of the quote are shown in it. */
+const attachments = computed(() => (compose.draft?.attachments ?? props.draft.attachments).filter((attachment) => !attachment.inline))
 
 function pickFiles(event: Event): void {
   const input = event.target as HTMLInputElement
@@ -66,6 +66,22 @@ const [subject] = defineField('subject')
 const [html] = defineField('html')
 const [signatureId] = defineField('signatureId')
 const showQuote = ref(false)
+/** The quote with the images that go along through fresh links; null until those are loaded. */
+const shownQuote = ref<string | null>(null)
+watch(
+  [showQuote, () => compose.draft?.quoteHtml],
+  async ([open]) => {
+    if (!open) {
+      return
+    }
+    const asked = compose.draft?.quoteHtml
+    const shown = await compose.shownQuote()
+    if (asked === compose.draft?.quoteHtml) {
+      shownQuote.value = shown
+    }
+  },
+  { immediate: true },
+)
 const signature = computed(() => mail.signatures.find((s) => s.id === signatureId.value) ?? null)
 
 // Switching the account swaps the signature, unless the user picked one by hand.
@@ -189,7 +205,7 @@ function keydown(event: KeyboardEvent): void {
       <button type="button" class="toggle" :aria-expanded="showQuote" @click="showQuote = !showQuote">
         {{ showQuote ? 'Hide' : 'Show' }} {{ draft.kind === 'forward' ? 'forwarded message' : 'quoted text' }}
       </button>
-      <MessageFrame v-if="showQuote" :html="draft.quoteHtml" :allow-remote-content="false" />
+      <MessageFrame v-if="showQuote" :html="shownQuote ?? draft.quoteHtml" :allow-remote-content="false" />
     </div>
 
     <p v-if="compose.error" class="form-error" role="alert">{{ compose.error }}</p>

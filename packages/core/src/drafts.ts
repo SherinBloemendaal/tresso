@@ -156,6 +156,8 @@ function requestOf(draft: Draft): DraftRequest {
  */
 export class DraftSync {
   private readonly uploads = new Map<string, Promise<void>>()
+  /** Requests that change a draft on the server, one at a time per draft: each one's version is the next one's base. */
+  private readonly lanes = new Map<string, Promise<unknown>>()
   private readonly again = new Set<string>()
 
   constructor(
@@ -188,7 +190,25 @@ export class DraftSync {
     return run
   }
 
-  private async uploadOnce(id: string): Promise<void> {
+  private uploadOnce(id: string): Promise<void> {
+    return this.inLane(id, () => this.uploadNow(id))
+  }
+
+  /** Runs a request that changes the draft on the server after the ones before it. */
+  private inLane<T>(id: string, request: () => Promise<T>): Promise<T> {
+    const before = this.lanes.get(id) ?? Promise.resolve()
+    const run = before.then(request, request)
+    const settled = run.catch(() => undefined)
+    this.lanes.set(id, settled)
+    void settled.then(() => {
+      if (this.lanes.get(id) === settled) {
+        this.lanes.delete(id)
+      }
+    })
+    return run
+  }
+
+  private async uploadNow(id: string): Promise<void> {
     const store = this.store()
     const local = await store?.draft(id)
     if (!store || !local || !local.pendingSave || local.remoteVersion !== null || local.outgoingId !== null) {
@@ -292,29 +312,42 @@ export class DraftSync {
    */
   async attach(id: string, file: AttachmentFile): Promise<DraftAttachmentLink> {
     await this.ensureOnServer(id)
-    const attachment = await this.api.attach(id, file)
-    await this.note(id, (attachments) => [...attachments.filter((other) => other.id !== attachment.id), withoutLink(attachment)])
-    return attachment
+    return this.inLane(id, async () => {
+      const before = await this.versionHere(id)
+      const attachment = await this.api.attach(id, file)
+      await this.note(id, (attachments) => [...attachments.filter((other) => other.id !== attachment.id), withoutLink(attachment)], before, attachment.draftVersion ?? null)
+      return attachment
+    })
   }
 
   /** Attaches a file of a received message, for a forward; the same file twice is attached once. */
   async forward(id: string, attachmentId: string): Promise<DraftAttachmentLink> {
     await this.ensureOnServer(id)
-    const attachment = await this.api.forward(id, attachmentId)
-    await this.note(id, (attachments) => [...attachments.filter((other) => other.id !== attachment.id), withoutLink(attachment)])
-    return attachment
+    return this.inLane(id, async () => {
+      const before = await this.versionHere(id)
+      const attachment = await this.api.forward(id, attachmentId)
+      await this.note(id, (attachments) => [...attachments.filter((other) => other.id !== attachment.id), withoutLink(attachment)], before, attachment.draftVersion ?? null)
+      return attachment
+    })
   }
 
   /** Removes a file from the draft; one that is gone already is fine. */
   async detach(id: string, attachmentId: string): Promise<void> {
-    try {
-      await this.api.detach(id, attachmentId)
-    } catch (error) {
-      if (statusOf(error) !== 404) {
-        throw error
+    await this.inLane(id, async () => {
+      const before = await this.versionHere(id)
+      let removed = true
+      try {
+        await this.api.detach(id, attachmentId)
+      } catch (error) {
+        if (statusOf(error) !== 404) {
+          throw error
+        }
+        removed = false
       }
-    }
-    await this.note(id, (attachments) => attachments.filter((attachment) => attachment.id !== attachmentId))
+      // The answer has no body: the version the removal gave the draft is asked for (none when that fails: offline).
+      const after = removed && before > 0 ? await this.api.get(id).then((remote) => remote.version, () => null) : null
+      await this.note(id, (attachments) => attachments.filter((attachment) => attachment.id !== attachmentId), before, after)
+    })
   }
 
   /** Fresh download links for the draft's files (the copy here keeps none: they expire). */
@@ -330,11 +363,21 @@ export class DraftSync {
     }
   }
 
-  private async note(id: string, change: (attachments: DraftAttachment[]) => DraftAttachment[]): Promise<void> {
+  private async versionHere(id: string): Promise<number> {
+    return (await this.store()?.draft(id))?.version ?? 0
+  }
+
+  /**
+   * Notes a change to the draft's files on the copy here. A change to the files raises the draft's version on the
+   * server; when the server's version is the one right after the copy's (nothing else changed it meanwhile), the copy
+   * takes it, so the next edit is not taken for a conflict. Any other version is left for the next upload to find.
+   */
+  private async note(id: string, change: (attachments: DraftAttachment[]) => DraftAttachment[], before: number, after: number | null): Promise<void> {
     const store = this.store()
     const stored = await store?.draft(id)
     if (store && stored) {
-      await store.saveDraft({ ...stored, attachments: change(stored.attachments) })
+      const version = after !== null && stored.version === before && after === before + 1 ? after : stored.version
+      await store.saveDraft({ ...stored, attachments: change(stored.attachments), version })
     }
   }
 
@@ -346,13 +389,22 @@ export class DraftSync {
     }
     // What the uploads learned (the server version, a conflict) stays: the draft on screen does not know it.
     const stored = await store.draft(draft.id)
-    await store.saveDraft({ ...draft, version: stored?.version ?? draft.version, remoteVersion: stored?.remoteVersion ?? null })
+    await store.saveDraft({ ...draft, version: stored?.version ?? draft.version, remoteVersion: stored?.remoteVersion ?? null, attachments: stored?.attachments ?? draft.attachments })
     return this.upload(draft.id)
       .then(async () => ((await store.draft(draft.id))?.version ?? 0) > 0)
       .catch(() => false)
   }
 }
 
-function withoutLink(attachment: DraftAttachmentLink | DraftAttachment): DraftAttachment {
-  return { id: attachment.id, filename: attachment.filename, contentType: attachment.contentType, size: attachment.size, scanStatus: attachment.scanStatus }
+/** A draft attachment as the copy on a device keeps it: without its link, which expires. */
+export function withoutLink(attachment: DraftAttachmentLink | DraftAttachment): DraftAttachment {
+  return {
+    id: attachment.id,
+    filename: attachment.filename,
+    contentType: attachment.contentType,
+    size: attachment.size,
+    scanStatus: attachment.scanStatus,
+    inline: attachment.inline ?? false,
+    contentId: attachment.contentId ?? null,
+  }
 }
