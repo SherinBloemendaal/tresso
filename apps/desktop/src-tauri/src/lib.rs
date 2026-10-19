@@ -1,3 +1,4 @@
+mod sql;
 mod tokens;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -6,7 +7,18 @@ pub fn run() {
     .plugin(tauri_plugin_deep_link::init())
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_notification::init())
-    .invoke_handler(tauri::generate_handler![tokens::load_tokens, tokens::save_tokens, tokens::clear_tokens])
+    .manage(sql::Databases::default())
+    .invoke_handler(tauri::generate_handler![
+      tokens::load_tokens,
+      tokens::save_tokens,
+      tokens::clear_tokens,
+      sql::sql_open,
+      sql::sql_exec,
+      sql::sql_run,
+      sql::sql_select,
+      sql::sql_close,
+      sql::sql_delete,
+    ])
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(
