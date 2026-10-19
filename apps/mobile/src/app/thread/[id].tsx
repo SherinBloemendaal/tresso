@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
-import { Stack, useLocalSearchParams } from 'expo-router'
-import type { SyncedMessage, SyncedThread } from '@tresso/core'
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import type { SyncedFolder, SyncedMessage, SyncedThread } from '@tresso/core'
 import { MessageBodyView } from '@/components/MessageBodyView'
 import { useMail } from '@/mail/MailProvider'
+import { useMessageActions } from '@/mail/useMessageActions'
 import { initials, senderName, shortTime } from '@/mail/format'
 import { useTheme, type Theme } from '@/theme'
 
@@ -17,7 +19,17 @@ export default function ThreadScreen() {
   const [messages, setMessages] = useState<SyncedMessage[]>([])
   const [missing, setMissing] = useState(false)
   const [expanded, setExpanded] = useState<Set<string> | null>(null)
-  const { thread: load, version } = mail
+  const [folders, setFolders] = useState<SyncedFolder[]>([])
+  const { thread: load, folders: loadFolders, version } = mail
+  const router = useRouter()
+  const insets = useSafeAreaInsets()
+  const actions = useMessageActions()
+  const { after, run, exclusive, relocate, busy } = actions
+  const read = useRef(false)
+
+  useEffect(() => {
+    void loadFolders().then(setFolders)
+  }, [loadFolders, version])
 
   useEffect(() => {
     let current = true
@@ -28,6 +40,14 @@ export default function ThreadScreen() {
       setMissing(result === null)
       setThread(result?.thread ?? null)
       setMessages(result?.messages ?? [])
+      // Opening a conversation reads it, once; actions taken meanwhile wait for that.
+      if (result !== null && !read.current) {
+        read.current = true
+        const unread = result.messages.filter((m) => !m.flags.seen).map((m) => m.id)
+        if (unread.length > 0) {
+          after(run(unread, 'markRead'))
+        }
+      }
       setExpanded((open) => {
         if (open !== null || result === null) {
           return open
@@ -43,7 +63,39 @@ export default function ThreadScreen() {
     return () => {
       current = false
     }
-  }, [load, id, version])
+  }, [load, id, version, after, run])
+
+  const flagged = messages.some((message) => message.flags.flagged)
+
+  function relocateAll(action: 'archive' | 'trash') {
+    void exclusive(async () => {
+      if ((await relocate(messages.map((m) => m.id), action, folders)) !== null) {
+        router.back()
+      }
+    })
+  }
+
+  function markUnread() {
+    void exclusive(async () => {
+      const newest = messages[messages.length - 1]
+      if (newest && (await run([newest.id], 'markUnread')) !== null) {
+        router.back()
+      }
+    })
+  }
+
+  function toggleFlag() {
+    void exclusive(async () => {
+      if (flagged) {
+        await run(messages.filter((m) => m.flags.flagged).map((m) => m.id), 'unflag')
+        return
+      }
+      const newest = messages[messages.length - 1]
+      if (newest) {
+        await run([newest.id], 'flag')
+      }
+    })
+  }
 
   function toggle(messageId: string) {
     setExpanded((open) => {
@@ -91,6 +143,27 @@ export default function ThreadScreen() {
           </>
         )}
       </ScrollView>
+      {thread !== null && (
+        <View style={[styles.bar, { paddingBottom: insets.bottom + 8 }]} accessibilityRole="toolbar">
+          {[
+            { label: 'Archive', onPress: () => relocateAll('archive') },
+            { label: 'Trash', onPress: () => relocateAll('trash') },
+            { label: 'Unread', onPress: markUnread },
+            { label: flagged ? 'Unflag' : 'Flag', onPress: toggleFlag, selected: flagged },
+          ].map((button) => (
+            <Pressable
+              key={button.label}
+              style={({ pressed }) => [styles.action, (pressed || busy) && styles.pressed]}
+              onPress={button.onPress}
+              disabled={busy}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: busy, selected: button.selected }}
+            >
+              <Text style={styles.actionLabel}>{button.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
     </>
   )
 }
@@ -108,5 +181,9 @@ function makeStyles(theme: Theme) {
     from: { color: theme.ink, fontSize: 16 },
     bold: { fontWeight: '600' },
     muted: { color: theme.ink2, fontSize: 13 },
+    bar: { flexDirection: 'row', justifyContent: 'space-around', paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.line, backgroundColor: theme.surface },
+    action: { minWidth: 64, minHeight: 44, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center', borderRadius: 6 },
+    actionLabel: { color: theme.accent, fontSize: 15, fontWeight: '600' },
+    pressed: { opacity: 0.5 },
   })
 }

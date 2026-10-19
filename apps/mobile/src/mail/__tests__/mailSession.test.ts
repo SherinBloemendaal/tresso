@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ChangePage } from '@tresso/core'
+import { MAX_MESSAGES_PER_ACTION, PartialActionError, type ChangePage, type MessageActionRequest, type SyncedMessage } from '@tresso/core'
 import { databaseName, MailSession, type MailState } from '../mailSession'
 import type { Sql } from '../sql'
 import { memorySql } from './sqljs'
@@ -46,13 +46,18 @@ function device() {
   }
 }
 
-function session(disk: ReturnType<typeof device>, fetchPage = async (since: number) => page(since === 0 ? 1 : since, since === 0 ? { mailAccounts: [account] } : {})) {
+function session(
+  disk: ReturnType<typeof device>,
+  fetchPage = async (since: number) => page(since === 0 ? 1 : since, since === 0 ? { mailAccounts: [account] } : {}),
+  postAction: (request: MessageActionRequest) => Promise<void> = async () => {},
+) {
   const states: MailState[] = []
   const mail = new MailSession({
     openSql: (name) => disk.openSql(name),
     deleteSql: (name) => disk.deleteSql(name),
     fetchPage,
     fetchAccess: () => Promise.reject(new Error('no realtime in this test')),
+    postAction,
     onState: (state) => states.push(state),
   })
   return { mail, states, last: () => states[states.length - 1]! }
@@ -129,6 +134,59 @@ describe('MailSession', () => {
     expect(last().live).toBe(false)
     mail.setForeground(true)
     await vi.waitFor(() => expect(fetchPage.mock.calls.length).toBeGreaterThan(pulls))
+    await mail.switchTo(null)
+  })
+
+  it('shows an action at once, sends it in batches, and puts back only what the server did not take', async () => {
+    const disk = device()
+    const ids = Array.from({ length: MAX_MESSAGES_PER_ACTION + 2 }, (_, i) => `m${i}`)
+    const message = (id: string): SyncedMessage => ({
+      id,
+      mailAccountId: 'work',
+      threadId: `t-${id}`,
+      folderIds: ['inbox'],
+      subject: '',
+      from: { address: 'a@example.test', name: null },
+      recipients: { to: [], cc: [], bcc: [], replyTo: [] },
+      snippet: '',
+      sentAt: null,
+      receivedAt: '2026-10-19T08:00:00Z',
+      flags: { seen: false, flagged: false, answered: false, draft: false },
+      hasAttachments: false,
+      categoryId: null,
+      verdict: null,
+      summary: null,
+    })
+    const requests: MessageActionRequest[] = []
+    const { mail } = session(
+      disk,
+      async (since) =>
+        since === 0
+          ? page(1, {
+              mailAccounts: [account],
+              folders: [{ id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' }],
+              threads: ids.map((id) => ({ id: `t-${id}`, mailAccountId: 'work', subject: '', messageCount: 1, lastMessageAt: '2026-10-19T08:00:00Z' })),
+              messages: ids.map(message),
+            })
+          : page(since),
+      async (request) => {
+        requests.push(request)
+        if (requests.length === 2) {
+          throw new Error('Try again later.')
+        }
+      },
+    )
+    await mail.switchTo('kim')
+    await vi.waitFor(async () => expect((await mail.database?.inbox(null, 1000))?.length).toBe(ids.length))
+
+    const failure = await mail.act(ids, 'markRead').catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(PartialActionError)
+    expect((failure as PartialActionError).rejected).toBe(2)
+    expect(requests.map((r) => r.messageIds.length)).toEqual([MAX_MESSAGES_PER_ACTION, 2])
+    const seen = async (id: string) => (await mail.database?.thread(`t-${id}`))?.messages[0]?.flags.seen
+    expect(await seen('m0')).toBe(true)
+    expect(await seen(`m${MAX_MESSAGES_PER_ACTION}`)).toBe(false)
     await mail.switchTo(null)
   })
 })

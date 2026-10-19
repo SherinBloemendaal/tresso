@@ -1,5 +1,8 @@
 import {
+  actionResult,
   summarizeConversation,
+  type AppliedAction,
+  type MessageAction,
   type ChangePage,
   type ConversationSummary,
   type SyncedFolder,
@@ -79,16 +82,25 @@ export class MailDatabase implements SyncStore {
     return row === null ? 0 : Number(row.value)
   }
 
-  async apply(page: ChangePage): Promise<void> {
+  apply(page: ChangePage): Promise<void> {
+    return this.write(() => this.store(page))
+  }
+
+  /** Every write goes through here: refused once the copy is closing, and waited for when it closes. */
+  private async write<T>(task: () => Promise<T>): Promise<T> {
     if (this.shutting) {
       throw new Error('The mail copy is closing.')
     }
-    const writing = this.store(page)
-    this.writing.add(writing)
+    const writing = task()
+    const settled = writing.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.writing.add(settled)
     try {
-      await writing
+      return await writing
     } finally {
-      this.writing.delete(writing)
+      this.writing.delete(settled)
     }
   }
 
@@ -151,20 +163,77 @@ export class MailDatabase implements SyncStore {
         if (previous !== null && previous.thread_id !== message.threadId) {
           affected.add(previous.thread_id)
         }
-        await tx.run('INSERT OR REPLACE INTO messages (id, thread_id, mail_account_id, json) VALUES (?, ?, ?, ?)', [message.id, message.threadId, message.mailAccountId, JSON.stringify(message)])
-        await tx.run('DELETE FROM message_folders WHERE message_id = ?', [message.id])
-        for (const folderId of new Set(message.folderIds)) {
-          await tx.run('INSERT INTO message_folders (message_id, folder_id) VALUES (?, ?)', [message.id, folderId])
-        }
+        await writeMessage(tx, message)
         affected.add(message.threadId)
       }
 
-      const inboxFolders = new Set((await tx.all<{ id: string }>("SELECT id FROM folders WHERE role = 'inbox'")).map((row) => row.id))
+      const inboxFolders = await inboxFolderIds(tx)
       for (const threadId of affected) {
         await refreshConversation(tx, threadId, inboxFolders)
       }
       await tx.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['cursor', String(page.cursor)])
     })
+  }
+
+  /**
+   * Makes an action show at once, before the server confirms it, the way the server will make it (see actionResult).
+   *
+   * @throws MissingFolderError when an account has nothing to archive or trash into; nothing changes then
+   */
+  applyAction(messageIds: string[], action: MessageAction, folderId?: string, fromFolderId?: string): Promise<AppliedAction> {
+    return this.write(() => this.storeAction(messageIds, action, folderId, fromFolderId))
+  }
+
+  private async storeAction(messageIds: string[], action: MessageAction, folderId?: string, fromFolderId?: string): Promise<AppliedAction> {
+    let applied: AppliedAction = { before: [], after: [] }
+    await this.sql.transaction(async (tx) => {
+      const folders = (await tx.all<{ json: string }>('SELECT json FROM folders')).map((row) => JSON.parse(row.json) as SyncedFolder)
+      const accounts = (await tx.all<{ json: string }>('SELECT json FROM mail_accounts')).map((row) => JSON.parse(row.json) as SyncedMailAccount)
+      const before: SyncedMessage[] = []
+      for (const id of messageIds) {
+        const row = await tx.first<{ json: string }>('SELECT json FROM messages WHERE id = ?', [id])
+        if (row !== null) {
+          before.push(JSON.parse(row.json) as SyncedMessage)
+        }
+      }
+      const after = actionResult(before, action, { folders, accounts, folderId, fromFolderId })
+      await this.rewrite(tx, after)
+      applied = { before, after }
+    })
+    return applied
+  }
+
+  /**
+   * Puts back what {@link applyAction} changed, on the messages the delta has not updated since. It is only given
+   * messages whose request the server did not take, so a delta can only have brought them someone else's change.
+   */
+  revertAction(applied: AppliedAction): Promise<void> {
+    return this.write(() => this.storeRevert(applied))
+  }
+
+  private async storeRevert(applied: AppliedAction): Promise<void> {
+    await this.sql.transaction(async (tx) => {
+      const restore: SyncedMessage[] = []
+      for (const [index, previous] of applied.before.entries()) {
+        const row = await tx.first<{ json: string }>('SELECT json FROM messages WHERE id = ?', [previous.id])
+        if (row !== null && row.json === JSON.stringify(applied.after[index])) {
+          restore.push(previous)
+        }
+      }
+      await this.rewrite(tx, restore)
+    })
+  }
+
+  private async rewrite(tx: Sql, messages: SyncedMessage[]): Promise<void> {
+    const affected = new Set<string>()
+    for (const message of messages) {
+      await writeMessage(tx, message)
+      affected.add(message.threadId)
+    }
+    const inboxFolders = await inboxFolderIds(tx)
+    for (const threadId of affected) {
+      await refreshConversation(tx, threadId, inboxFolders)
+    }
   }
 
   async mailAccounts(): Promise<SyncedMailAccount[]> {
@@ -203,6 +272,18 @@ export class MailDatabase implements SyncStore {
     messages.sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt))
     return { thread: JSON.parse(row.json) as SyncedThread, messages }
   }
+}
+
+async function writeMessage(tx: Sql, message: SyncedMessage): Promise<void> {
+  await tx.run('INSERT OR REPLACE INTO messages (id, thread_id, mail_account_id, json) VALUES (?, ?, ?, ?)', [message.id, message.threadId, message.mailAccountId, JSON.stringify(message)])
+  await tx.run('DELETE FROM message_folders WHERE message_id = ?', [message.id])
+  for (const folderId of new Set(message.folderIds)) {
+    await tx.run('INSERT INTO message_folders (message_id, folder_id) VALUES (?, ?)', [message.id, folderId])
+  }
+}
+
+async function inboxFolderIds(tx: Sql): Promise<Set<string>> {
+  return new Set((await tx.all<{ id: string }>("SELECT id FROM folders WHERE role = 'inbox'")).map((row) => row.id))
 }
 
 async function deleteAccount(tx: Sql, accountId: string): Promise<void> {
