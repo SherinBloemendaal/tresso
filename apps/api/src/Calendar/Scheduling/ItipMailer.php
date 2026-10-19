@@ -47,7 +47,9 @@ final readonly class ItipMailer
             if ('REQUEST' === $message->method && !$message->significantChange) {
                 continue;
             }
-            $account = $this->account($user, Props::address($message->sender));
+            // A reply goes from the account the invitation came to when no account sends as the invited address
+            // (an alias, or the sign-in address).
+            $account = $this->account($user, Props::address($message->sender), 'REPLY' === $message->method ? $inReplyTo?->getMailAccount() : null);
             $method = ItipMethod::tryFrom($message->method);
             if (null === $method) {
                 continue;
@@ -75,12 +77,15 @@ final readonly class ItipMailer
         return $sent;
     }
 
-    private function account(User $user, string $address): MailAccount
+    private function account(User $user, string $address, ?MailAccount $fallback): MailAccount
     {
         foreach ($this->accounts->findOwnedBy($user) as $account) {
-            if ($account->getEmailAddress() === $address) {
+            if (mb_strtolower($account->getEmailAddress()) === $address) {
                 return $account;
             }
+        }
+        if (null !== $fallback) {
+            return $fallback;
         }
 
         throw new SchedulingFailed(\sprintf('None of your mail accounts sends as %s, so the calendar message cannot be sent.', $address));

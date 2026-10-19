@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace App\Sync\Ingest;
 
 use App\ApiResource\Input\Sync\AddressInput;
-use App\Classification\ClassificationScheduler;
 use App\ApiResource\Input\Sync\MessageBatchInput;
 use App\ApiResource\Input\Sync\MessageInput;
 use App\Calendar\Invitation\InvitationRecorder;
+use App\Classification\ClassificationScheduler;
 use App\Entity\Attachment;
 use App\Entity\Folder;
 use App\Entity\MailAccount;
@@ -17,7 +17,6 @@ use App\Entity\MessageLocation;
 use App\Entity\MessageReference;
 use App\Entity\MessageSignals;
 use App\Entity\MessageText;
-use App\Enum\FolderRole;
 use App\Mailbox\MailboxChanges;
 use App\Repository\MailboxChangeRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -62,6 +61,8 @@ final readonly class MessageIngestor
                     if (!$this->changes->arrived($existing, $folder, $input->remoteUid, $input->modSeq)) {
                         $this->addLocation($existing, $folder, $input);
                     }
+                    // Moved into the inbox, or out of Spam: its calendar mail counts now.
+                    $this->invitations->arrived($existing, $folder->getRole(), $input->calendarParts);
                     $this->applyFlags($existing, $input, $pendingFlags);
                     ++$linked;
                     continue;
@@ -132,15 +133,7 @@ final readonly class MessageIngestor
         }
         $message->setHasAttachments($hasAttachments);
 
-        // Calendar mail in Spam or Trash is not looked at. It changes the calendar only from the inbox and only when it
-        // arrived after the account was connected: the first sync of years of mail must not replay old invitations
-        // and cancellations. The rest is kept, so the message still shows what it carries.
-        if (!\in_array($folder->getRole(), [FolderRole::Spam, FolderRole::Trash], true)) {
-            $apply = FolderRole::Inbox === $folder->getRole() && $receivedAt >= $account->getCreatedAt();
-            foreach ($input->calendarParts as $part) {
-                $this->invitations->record($message, $part->method, $part->ical, $apply);
-            }
-        }
+        $this->invitations->arrived($message, $folder->getRole(), $input->calendarParts);
 
         $this->addLocation($message, $folder, $input);
 

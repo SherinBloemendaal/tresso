@@ -4,13 +4,16 @@ declare(strict_types=1);
 
 namespace App\Calendar\Invitation;
 
+use App\ApiResource\Input\Sync\CalendarPartInput;
 use App\Calendar\ICalendar\CalendarDocument;
 use App\Calendar\ICalendar\InvalidCalendarData;
 use App\Calendar\ICalendar\Props;
 use App\Entity\CalendarInvitation;
 use App\Entity\Message;
+use App\Enum\FolderRole;
 use App\Enum\ItipMethod;
 use App\Realtime\AfterCommitDispatcher;
+use App\Repository\CalendarInvitationRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
 
@@ -24,8 +27,39 @@ final readonly class InvitationRecorder
     public function __construct(
         private EntityManagerInterface $entityManager,
         private AfterCommitDispatcher $afterCommit,
+        private CalendarInvitationRepository $invitations,
         private LoggerInterface $logger,
     ) {
+    }
+
+    /**
+     * The message arrived in a folder (new, or a copy moved there). Calendar mail in Spam or Trash is not looked at.
+     * It changes the calendar only from the inbox and only when it arrived after the account was connected: the
+     * first sync of years of mail must not replay old invitations and cancellations. The rest is kept, so the message
+     * still shows what it carries and the user can apply it. Mail recorded before and moved into the inbox later (or
+     * rescued from Spam) is applied then.
+     *
+     * @param list<CalendarPartInput> $parts
+     */
+    public function arrived(Message $message, FolderRole $role, array $parts): void
+    {
+        if (\in_array($role, [FolderRole::Spam, FolderRole::Trash], true)) {
+            return;
+        }
+        $apply = FolderRole::Inbox === $role && $message->getReceivedAt() >= $message->getMailAccount()->getCreatedAt();
+        $recorded = $this->invitations->findForMessage($message);
+        if ([] === $recorded) {
+            foreach ($parts as $part) {
+                $this->record($message, $part->method, $part->ical, $apply);
+            }
+
+            return;
+        }
+        foreach ($recorded as $invitation) {
+            if ($apply && null === $invitation->getAppliedAt()) {
+                $this->afterCommit->dispatch(new ApplyCalendarInvitation($invitation->getId()->toRfc4122()));
+            }
+        }
     }
 
     public function record(Message $message, ?string $partMethod, string $ical, bool $apply): ?CalendarInvitation
