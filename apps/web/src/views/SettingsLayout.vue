@@ -8,6 +8,7 @@ import { RouterLink, RouterView } from 'vue-router'
       <RouterLink :to="{ name: 'unified' }" class="back">← Back to mail</RouterLink>
       <h1>Settings</h1>
       <RouterLink :to="{ name: 'settings-accounts' }" class="item">Accounts</RouterLink>
+      <RouterLink :to="{ name: 'settings-signatures' }" class="item">Signatures</RouterLink>
     </nav>
     <main class="content">
       <RouterView />

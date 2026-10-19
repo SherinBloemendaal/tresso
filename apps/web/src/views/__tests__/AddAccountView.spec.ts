@@ -18,11 +18,12 @@ const created: MailAccount = {
   smtp: { host: 'smtp.fastmail.com', port: 465, security: 'tls' },
   lastSyncedAt: null,
   createdAt: '2026-10-19T08:00:00+00:00',
+  defaultSignatureId: null,
 }
 
 function synced(account: MailAccount): SyncedMailAccount {
-  const { id, emailAddress, displayName, provider, status, statusDetail, lastSyncedAt } = account
-  return { id, emailAddress, displayName, provider, status, statusDetail, lastSyncedAt }
+  const { id, emailAddress, displayName, provider, status, statusDetail, lastSyncedAt, defaultSignatureId } = account
+  return { id, emailAddress, displayName, provider, status, statusDetail, lastSyncedAt, defaultSignatureId }
 }
 
 /** Form validation runs asynchronously; let it and the requests it starts finish. */

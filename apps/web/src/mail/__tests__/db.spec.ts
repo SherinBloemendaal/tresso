@@ -1,23 +1,28 @@
 import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ChangePage, SyncedMessage } from '@tresso/core'
-import { deleteMailDatabase, MailDatabase } from '../db'
+import { openDB } from 'idb'
+import { databaseName, deleteMailDatabase, MailDatabase } from '../db'
 
 const USER = 'user-1'
 
 function page(changes: Partial<ChangePage> & { cursor: number }): ChangePage {
-  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], deleted: [], ...changes }
+  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], deleted: [], ...changes }
 }
 
 const accounts = [
-  { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null },
-  { id: 'home', emailAddress: 'kim@mail.example', displayName: 'Personal', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null },
+  { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: 'sig-work' },
+  { id: 'home', emailAddress: 'kim@mail.example', displayName: 'Personal', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null },
 ]
 const folders = [
   { id: 'work-inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' as const },
   { id: 'work-archive', mailAccountId: 'work', name: 'Archive', displayName: 'Archive', role: 'archive' as const },
   { id: 'home-inbox', mailAccountId: 'home', name: 'INBOX', displayName: 'Inbox', role: 'inbox' as const },
 ]
+
+function signature(id: string, name: string) {
+  return { id, name, html: `<p>${name}</p>`, updatedAt: '2026-10-19T08:00:00+00:00' }
+}
 
 function thread(id: string, mailAccountId: string) {
   return { id, mailAccountId, subject: `Subject ${id}`, messageCount: 1, lastMessageAt: '2026-10-19T08:00:00+00:00' }
@@ -53,6 +58,7 @@ describe('MailDatabase', () => {
       page({
         cursor: 10,
         mailAccounts: accounts,
+        signatures: [signature('sig-work', 'Work'), signature('sig-short', 'Short reply')],
         folders,
         threads: [thread('t1', 'work'), thread('t2', 'work'), thread('t3', 'home')],
         messages: [
@@ -192,5 +198,58 @@ describe('MailDatabase', () => {
 
     expect(await db.cursor()).toBe(0)
     expect(await db.mailAccounts()).toEqual([])
+  })
+
+  it('lists signatures by name and keeps them current', async () => {
+    expect((await db.signatures()).map((s) => s.name)).toEqual(['Short reply', 'Work'])
+
+    await db.apply(page({ cursor: 11, signatures: [{ ...signature('sig-work', 'Work'), html: '<p>Kim Visser</p>' }] }))
+    expect((await db.signatures()).find((s) => s.id === 'sig-work')?.html).toBe('<p>Kim Visser</p>')
+
+    await db.apply(
+      page({ cursor: 12, deleted: [{ type: 'signature', id: 'sig-work' }], mailAccounts: [{ ...accounts[0]!, defaultSignatureId: null }] }),
+    )
+    expect((await db.signatures()).map((s) => s.id)).toEqual(['sig-short'])
+    expect((await db.mailAccounts()).find((a) => a.id === 'work')?.defaultSignatureId).toBeNull()
+    expect(await db.cursor()).toBe(12)
+  })
+})
+
+describe('MailDatabase upgrade', () => {
+  afterEach(async () => {
+    await deleteMailDatabase(USER)
+  })
+
+  it('adds signatures to a copy stored before they existed', async () => {
+    const old = await openDB(databaseName(USER), 1, {
+      upgrade(database) {
+        database.createObjectStore('meta')
+        database.createObjectStore('mailAccounts', { keyPath: 'id' })
+        database.createObjectStore('folders', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+        database.createObjectStore('threads', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+        const messages = database.createObjectStore('messages', { keyPath: 'id' })
+        messages.createIndex('byThread', 'threadId')
+        messages.createIndex('byAccount', 'mailAccountId')
+        messages.createIndex('byFolder', 'folderIds', { multiEntry: true })
+        const conversations = database.createObjectStore('conversations', { keyPath: 'threadId' })
+        conversations.createIndex('byAccount', 'mailAccountId')
+        conversations.createIndex('byInboxDate', ['inbox', 'lastMessageAt'])
+        conversations.createIndex('byAccountInboxDate', ['mailAccountId', 'inbox', 'lastMessageAt'])
+        conversations.createIndex('byAccountUnreadInbox', ['mailAccountId', 'unreadInbox'])
+      },
+    })
+    const { defaultSignatureId: _, ...withoutDefault } = accounts[0]!
+    await old.put('mailAccounts', withoutDefault)
+    await old.put('meta', 7, 'cursor')
+    old.close()
+
+    const db = await MailDatabase.open(USER)
+
+    expect(await db.cursor()).toBe(7)
+    expect(await db.signatures()).toEqual([])
+    expect(await db.mailAccounts()).toEqual([{ ...withoutDefault, defaultSignatureId: null }])
+    await db.apply(page({ cursor: 8, signatures: [signature('sig-work', 'Work')] }))
+    expect((await db.signatures()).map((s) => s.id)).toEqual(['sig-work'])
+    db.close()
   })
 })
