@@ -8,7 +8,10 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "app.tresso.mobile"
+      "bundleIdentifier": "app.tresso.mobile",
+      "config": {
+        "usesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -23,6 +26,14 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "scheme": "tresso"
+    "scheme": "tresso",
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-web-browser"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
   }
 }
