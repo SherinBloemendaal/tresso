@@ -1,5 +1,6 @@
-// Package mimeparse turns a raw RFC 5322 message into the metadata Tresso stores: headers, a text snippet and the
-// attachments. It is lenient: real-world mail breaks every rule, and a message must never be lost because of that.
+// Package mimeparse turns a raw RFC 5322 message into the metadata Tresso stores: headers, a text snippet, the body
+// text for search and the attachments. It is lenient: real-world mail breaks every rule, and a message must never be
+// lost because of that.
 package mimeparse
 
 import (
@@ -24,7 +25,9 @@ import (
 
 const (
 	snippetLength = 300
-	// Text parts are read up to this size for the snippet; the rest is never needed for metadata.
+	// The body text for search is cut to this many characters; the API refuses longer text.
+	bodyTextLength = 32768
+	// Text parts are read up to this size for the snippet and the search text; the rest is never needed.
 	maxTextRead = 256 << 10
 	// UnknownSender is used when a message has no usable From, Sender or Return-Path.
 	UnknownSender = "unknown@unknown.invalid"
@@ -57,6 +60,7 @@ type Message struct {
 	ReplyTo     []Address
 	Date        *time.Time
 	Snippet     string
+	BodyText    string
 	Attachments []Attachment
 }
 
@@ -118,12 +122,12 @@ func Parse(raw []byte) (*Message, error) {
 
 	markReferencedInline(msg.Attachments, html)
 
-	switch {
-	case strings.TrimSpace(plain) != "":
-		msg.Snippet = Snippet(plain)
-	case html != "":
-		msg.Snippet = Snippet(HTMLToText(html))
+	text := plain
+	if strings.TrimSpace(plain) == "" && html != "" {
+		text = HTMLToText(html)
 	}
+	msg.Snippet = Snippet(text)
+	msg.BodyText = BodyText(text)
 
 	return msg, nil
 }

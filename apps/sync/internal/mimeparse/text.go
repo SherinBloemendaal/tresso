@@ -9,15 +9,7 @@ import (
 
 // Snippet collapses whitespace, drops quoted reply lines and cuts at a word boundary.
 func Snippet(text string) string {
-	var kept []string
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, ">") {
-			continue
-		}
-		kept = append(kept, trimmed)
-	}
-	collapsed := strings.Join(strings.FieldsFunc(strings.Join(kept, " "), unicode.IsSpace), " ")
+	collapsed := readable(text)
 
 	runes := []rune(collapsed)
 	if len(runes) <= snippetLength {
@@ -28,6 +20,35 @@ func Snippet(text string) string {
 		cut = cut[:i]
 	}
 	return strings.TrimRight(cut, " ,.;:") + "…"
+}
+
+// BodyText is the text the search index gets: like the snippet without quoted reply lines (the quoted message is
+// indexed on its own) and with whitespace collapsed, but up to bodyTextLength characters, cut at a word boundary.
+func BodyText(text string) string {
+	collapsed := readable(text)
+
+	runes := []rune(collapsed)
+	if len(runes) <= bodyTextLength {
+		return collapsed
+	}
+	cut := string(runes[:bodyTextLength])
+	if i := strings.LastIndexByte(cut, ' '); i > len(cut)/2 {
+		cut = cut[:i]
+	}
+	return cut
+}
+
+// readable drops quoted reply lines and collapses all whitespace to single spaces.
+func readable(text string) string {
+	var kept []string
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, ">") {
+			continue
+		}
+		kept = append(kept, trimmed)
+	}
+	return strings.Join(strings.FieldsFunc(strings.Join(kept, " "), unicode.IsSpace), " ")
 }
 
 // HTMLToText extracts visible text from an HTML body, skipping scripts, styles and head content.

@@ -61,6 +61,7 @@ type Message struct {
 	Bcc          []Address    `json:"bcc"`
 	ReplyTo      []Address    `json:"replyTo"`
 	Snippet      string       `json:"snippet"`
+	BodyText     string       `json:"bodyText"` // plain text for search, at most 32768 characters
 	Attachments  []Attachment `json:"attachments"`
 }
 
