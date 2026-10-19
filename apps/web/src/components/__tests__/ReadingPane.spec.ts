@@ -53,6 +53,8 @@ describe('ReadingPane actions', () => {
   const actions: Record<string, unknown>[] = []
   let refuse: string | null
   let later: ChangePage | null
+  /** While set, marking read waits for it before the server answers. */
+  let holdMarkRead: Promise<void> | null
   let router: Router
 
   beforeEach(async () => {
@@ -61,6 +63,7 @@ describe('ReadingPane actions', () => {
     actions.length = 0
     refuse = null
     later = null
+    holdMarkRead = null
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -78,6 +81,9 @@ describe('ReadingPane actions', () => {
         if (url.pathname === '/api/v1/message-actions') {
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>
           actions.push(body)
+          if (body.action === 'markRead' && holdMarkRead !== null) {
+            await holdMarkRead
+          }
           if (refuse !== null && body.action === refuse) {
             return new Response(JSON.stringify({ detail: 'action: kim@company.example has no Archive folder.' }), { status: 422 })
           }
@@ -204,6 +210,22 @@ describe('ReadingPane actions', () => {
     const notice = useComposeStore().notices.find((n) => n.text === 'Moved to Trash.')
     expect(notice).toBeDefined()
     expect(notice?.action).toBeUndefined()
+  })
+
+  it('archives when asked while the conversation is still being read', async () => {
+    let release = () => {}
+    holdMarkRead = new Promise((resolve) => (release = resolve))
+    const wrapper = mountPane()
+    await vi.waitFor(() => expect(wrapper.find('.subject').exists()).toBe(true))
+    await vi.waitFor(() => expect(actions).toHaveLength(1))
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'e' }))
+    await settle()
+    expect(actions.map((a) => a.action), 'the archive waits for the read').toEqual(['markRead'])
+    release()
+
+    await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/'))
+    expect(actions.map((a) => a.action)).toEqual(['markRead', 'archive'])
   })
 
   it('ignores a held key and shortcuts meant for the compose window', async () => {
