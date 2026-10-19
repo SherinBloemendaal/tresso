@@ -44,6 +44,7 @@ export const useComposeStore = defineStore('compose', () => {
     cancel: (outgoingId) => mail.cancelOutgoing(outgoingId),
     notify,
     explain: (error) => ({ message: errorMessage(error), violations: error instanceof ApiError ? error.violations : {} }),
+    changed: () => void mail.refresh(),
   })
 
   // The composer's state, for templates; replaced whole on every change, so a shallow ref is enough.
@@ -61,9 +62,13 @@ export const useComposeStore = defineStore('compose', () => {
   const conflict = computed(() => state.value.conflict)
   const undoable = computed(() => state.value.undoable)
 
-  function open(run: () => void | Promise<void>): Promise<void> {
-    minimized.value = false
-    return Promise.resolve(run())
+  /** Opening a draft brings the compose window up again; asking for one that is gone leaves it as it is. */
+  async function open(run: () => void | Promise<void>): Promise<void> {
+    const before = composer.state.revision
+    await run()
+    if (composer.state.revision !== before && composer.state.draft !== null) {
+      minimized.value = false
+    }
   }
 
   function openNew(to: Address[] = []): void {
@@ -79,8 +84,7 @@ export const useComposeStore = defineStore('compose', () => {
   }
 
   function update(changes: Partial<Draft>): void {
-    // Changes come from reactive form state; the copy stores only plain data.
-    composer.update(JSON.parse(JSON.stringify(changes)) as Partial<Draft>)
+    composer.update(changes)
   }
 
   watch(

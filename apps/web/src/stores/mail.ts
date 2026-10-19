@@ -400,11 +400,6 @@ export const useMailStore = defineStore('mail', () => {
     return draftSync.deleteEverywhere(id)
   }
 
-  /** Saves and uploads the draft before sending; true when the server has it. */
-  function uploadDraftForSending(draft: Draft): Promise<boolean> {
-    return draftSync.uploadForSending(JSON.parse(JSON.stringify(draft)) as Draft)
-  }
-
   async function drafts(): Promise<Draft[]> {
     return (await db.value?.drafts()) ?? []
   }
@@ -464,7 +459,6 @@ export const useMailStore = defineStore('mail', () => {
     draft,
     deleteDraft,
     uploadDraft,
-    uploadDraftForSending,
     draftSync,
     currentStore,
     uploadPendingDrafts,
