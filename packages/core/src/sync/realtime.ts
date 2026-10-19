@@ -26,12 +26,13 @@ const DEFAULT_RENEW_BEFORE = 60_000
  * stream is read through fetch(). Reconnects with backoff after failures and renews the token before it expires.
  */
 export class RealtimeClient {
-  private controller: AbortController | null = null
   private stopped = true
-  private loop: Promise<void> | null = null
+  private loops = new Set<Promise<void>>()
   private failures = 0
   /** Which run is current: a start right after a stop must not leave the old run going next to the new one. */
   private generation = 0
+  /** Every wait and request of every run, so a stop ends all of them, also of a run that was replaced. */
+  private readonly controllers = new Set<AbortController>()
 
   constructor(private readonly options: RealtimeOptions) {}
 
@@ -40,18 +41,18 @@ export class RealtimeClient {
       return
     }
     this.stopped = false
-    this.loop = this.run(++this.generation)
+    const loop = this.run(++this.generation).finally(() => this.loops.delete(loop))
+    this.loops.add(loop)
   }
 
+  /** Ends every run, including one a quick start replaced, and resolves once all of them are over. */
   async stop(): Promise<void> {
     this.stopped = true
     this.generation++
-    this.controller?.abort()
-    const loop = this.loop
-    await loop
-    if (this.loop === loop) {
-      this.loop = null
+    for (const controller of this.controllers) {
+      controller.abort()
     }
+    await Promise.all([...this.loops])
   }
 
   private current(generation: number): boolean {
@@ -63,7 +64,7 @@ export class RealtimeClient {
     this.failures = 0
     while (this.current(generation)) {
       try {
-        await this.listen()
+        await this.listen(generation)
       } catch (error) {
         if (!this.current(generation)) {
           return
@@ -71,16 +72,18 @@ export class RealtimeClient {
         this.options.onError?.(error)
         const delay = delays[Math.min(this.failures, delays.length - 1)] ?? DEFAULT_RETRY_DELAYS[DEFAULT_RETRY_DELAYS.length - 1]
         this.failures++
-        await this.sleep(delay ?? 30_000)
+        await this.sleep(delay ?? 30_000, generation)
       }
     }
   }
 
-  /** Resolves when the token is due for renewal; rejects when the connection fails. */
-  private async listen(): Promise<void> {
+  /** Resolves when the token is due for renewal or the run is no longer current; rejects when the connection fails. */
+  private async listen(generation: number): Promise<void> {
     const access = await this.options.fetchAccess()
-    const controller = new AbortController()
-    this.controller = controller
+    if (!this.current(generation)) {
+      return
+    }
+    const controller = this.track(new AbortController())
     let renewing = false
     const renewIn = Date.parse(access.expiresAt) - Date.now() - (this.options.renewBefore ?? DEFAULT_RENEW_BEFORE)
     const renewal = setTimeout(() => {
@@ -103,7 +106,7 @@ export class RealtimeClient {
       this.options.onConnected?.()
 
       const parser = new SseParser()
-      // TextDecoder in streaming mode rather than TextDecoderStream, which React Native does not have.
+      // TextDecoder in streaming mode rather than TextDecoderStream, which not every runtime has.
       const decoder = new TextDecoder()
       const reader = response.body.getReader()
       // Ends a pending read on stop or renewal even where aborting the request does not end the body stream.
@@ -122,15 +125,13 @@ export class RealtimeClient {
         }
       }
     } catch (error) {
-      if (renewing || this.stopped) {
+      if (renewing || !this.current(generation)) {
         return
       }
       throw error
     } finally {
       clearTimeout(renewal)
-      if (this.controller === controller) {
-        this.controller = null
-      }
+      this.controllers.delete(controller)
     }
   }
 
@@ -149,20 +150,26 @@ export class RealtimeClient {
     }
   }
 
-  /** Waits before the next attempt; stop() ends the wait, also when it came just before the wait began. */
-  private sleep(ms: number): Promise<void> {
+  /** Waits before the next attempt; a stop ends the wait, also one that came just before the wait began. */
+  private sleep(ms: number, generation: number): Promise<void> {
     return new Promise((resolve) => {
-      if (this.stopped) {
+      if (!this.current(generation)) {
         resolve()
         return
       }
-      const controller = new AbortController()
-      this.controller = controller
-      const timer = setTimeout(resolve, ms)
-      controller.signal.addEventListener('abort', () => {
+      const controller = this.track(new AbortController())
+      const done = () => {
         clearTimeout(timer)
+        this.controllers.delete(controller)
         resolve()
-      })
+      }
+      const timer = setTimeout(done, ms)
+      controller.signal.addEventListener('abort', done, { once: true })
     })
+  }
+
+  private track(controller: AbortController): AbortController {
+    this.controllers.add(controller)
+    return controller
   }
 }
