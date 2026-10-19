@@ -9,12 +9,14 @@ use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\Patch;
 use App\ApiResource\Input\Notification\UpdateNotificationSettings;
 use App\Entity\NotificationPreferences;
+use App\Enum\SnoozeChoice;
 use App\Security\Scope;
 use App\State\NotificationSettingsProcessor;
 use App\State\NotificationSettingsProvider;
 
 /**
- * Quiet hours, focus, the channels per kind of notification and where email notifications go.
+ * Quiet hours, working hours, focus, travel, snooze choices, the channels per kind of notification and where email
+ * notifications go.
  */
 #[ApiResource(
     shortName: 'NotificationSettings',
@@ -28,9 +30,11 @@ use App\State\NotificationSettingsProvider;
 final readonly class NotificationSettingsResource
 {
     /**
-     * @param list<int> $quietDays
-     * @param object    $channelsByKind the user's choices, kind to list of channels; kinds missing here use their
-     *                                  default (an object, so an empty one is {} in JSON)
+     * @param list<int>    $quietDays
+     * @param object       $channelsByKind the user's choices, kind to list of channels; kinds missing here use their
+     *                                     default (an object, so an empty one is {} in JSON)
+     * @param list<int>    $workDays
+     * @param list<string> $snoozeChoices
      */
     public function __construct(
         public string $timeZone,
@@ -42,6 +46,17 @@ final readonly class NotificationSettingsResource
         public ?string $emailAddress,
         public string $effectiveEmailAddress,
         public object $channelsByKind,
+        public array $workDays,
+        public string $workStart,
+        public string $workEnd,
+        public bool $shiftEarlyReminders,
+        public bool $workCalendarsQuiet,
+        public bool $holdDuringFocus,
+        public bool $holdMailInMeetings,
+        public bool $leaveNow,
+        public string $travelMode,
+        public int $extraTravelMinutes,
+        public array $snoozeChoices,
     ) {
     }
 
@@ -57,6 +72,17 @@ final readonly class NotificationSettingsResource
             $preferences->getEmailAddress(),
             $preferences->getEmailAddress() ?? $preferences->getUser()->getEmail(),
             (object) $preferences->getChannelsByKind(),
+            $preferences->getWorkDays(),
+            $preferences->getWorkStart(),
+            $preferences->getWorkEnd(),
+            $preferences->isShiftEarlyReminders(),
+            $preferences->isWorkCalendarsQuiet(),
+            $preferences->isHoldDuringFocus(),
+            $preferences->isHoldMailInMeetings(),
+            $preferences->isLeaveNow(),
+            $preferences->getTravelMode()->value,
+            $preferences->getExtraTravelMinutes(),
+            array_map(static fn (SnoozeChoice $choice): string => $choice->value, $preferences->getSnoozeChoices()),
         );
     }
 }

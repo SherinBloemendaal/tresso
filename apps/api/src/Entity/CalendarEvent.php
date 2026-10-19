@@ -144,6 +144,10 @@ class CalendarEvent implements TracksChanges
     #[ORM\Column(options: ['default' => true])]
     private bool $defaultReminders = true;
 
+    /** A high priority: reminders reach the user also in quiet and outside working hours. */
+    #[ORM\Column(options: ['default' => false])]
+    private bool $important = false;
+
     /** The invitation this event came from. */
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(onDelete: 'SET NULL')]
@@ -214,6 +218,7 @@ class CalendarEvent implements TracksChanges
         $this->conference = $data->conference;
         $this->travelMinutes = $data->travelMinutes;
         $this->defaultReminders = $data->defaultReminders;
+        $this->important = $data->important;
         $this->updatedAt = new \DateTimeImmutable();
     }
 
@@ -368,6 +373,11 @@ class CalendarEvent implements TracksChanges
         return $this->conference;
     }
 
+    public function isImportant(): bool
+    {
+        return $this->important;
+    }
+
     public function getTravelMinutes(): ?int
     {
         return $this->travelMinutes;
@@ -418,7 +428,7 @@ class CalendarEvent implements TracksChanges
         return [
             'sequence', 'status', 'summary', 'description', 'location', 'url', 'transparency', 'visibility', 'allDay',
             'startValue', 'startTimeZone', 'endValue', 'endTimeZone', 'rrule', 'rdates', 'exdates', 'organizer',
-            'attendees', 'selfPartstat', 'reminders', 'conference', 'message', 'syncError', 'travelMinutes', 'defaultReminders',
+            'attendees', 'selfPartstat', 'reminders', 'conference', 'message', 'syncError', 'travelMinutes', 'defaultReminders', 'important',
         ];
     }
 

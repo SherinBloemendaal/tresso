@@ -74,6 +74,7 @@ final readonly class CalendarResource
         public bool $writable,
         public bool $isDefault,
         public bool $visible,
+        public bool $work,
         public bool $providerSchedules,
         public int $position,
     ) {
@@ -91,6 +92,7 @@ final readonly class CalendarResource
             $calendar->isWritable(),
             $calendar->isDefault(),
             $calendar->isVisible(),
+            $calendar->isWork(),
             $calendar->providerSchedules(),
             $calendar->getPosition(),
         );

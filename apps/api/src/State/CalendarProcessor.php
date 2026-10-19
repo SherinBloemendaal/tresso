@@ -11,6 +11,8 @@ use App\ApiResource\CalendarResource;
 use App\ApiResource\Input\Calendar\CreateCalendar;
 use App\ApiResource\Input\Calendar\UpdateCalendar;
 use App\Entity\Calendar;
+use App\Notification\PlanUserNotifications;
+use App\Realtime\AfterCommitDispatcher;
 use App\Repository\CalendarRepository;
 use App\Security\CurrentUser;
 use Doctrine\ORM\EntityManagerInterface;
@@ -26,6 +28,7 @@ final readonly class CalendarProcessor implements ProcessorInterface
         private EntityManagerInterface $entityManager,
         private CalendarRepository $calendars,
         private CurrentUser $currentUser,
+        private AfterCommitDispatcher $afterCommit,
     ) {
     }
 
@@ -84,8 +87,19 @@ final readonly class CalendarProcessor implements ProcessorInterface
             if (null !== $data->color) {
                 $calendar->isLocal() ? $calendar->setColor($data->color) : $calendar->setUserColor($data->color);
             }
-            if (null !== $data->visible) {
+            $replan = false;
+            if (null !== $data->visible && $data->visible !== $calendar->isVisible()) {
+                // Hidden calendars do not notify.
                 $calendar->setVisible($data->visible);
+                $replan = true;
+            }
+            if (null !== $data->work && $data->work !== $calendar->isWork()) {
+                // Its notifications now keep to the working hours, or no longer do.
+                $calendar->setWork($data->work);
+                $replan = true;
+            }
+            if ($replan) {
+                $this->afterCommit->dispatch(new PlanUserNotifications($owner->getId()->toRfc4122()));
             }
             if (true === $data->isDefault) {
                 if (!$calendar->isWritable()) {

@@ -71,6 +71,10 @@ class Calendar implements TracksChanges
     #[ORM\Column]
     private bool $visible = true;
 
+    /** A work calendar: its notifications keep to the user's working hours. */
+    #[ORM\Column(options: ['default' => false])]
+    private bool $work = false;
+
     /** The provider sends invitations and replies itself (RFC 6638 auto-schedule, Google, Microsoft). */
     #[ORM\Column]
     private bool $providerSchedules = false;
@@ -211,6 +215,16 @@ class Calendar implements TracksChanges
         $this->visible = $visible;
     }
 
+    public function isWork(): bool
+    {
+        return $this->work;
+    }
+
+    public function setWork(bool $work): void
+    {
+        $this->work = $work;
+    }
+
     public function providerSchedules(): bool
     {
         return $this->providerSchedules;
@@ -253,7 +267,7 @@ class Calendar implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        return ['name', 'color', 'userColor', 'timeZone', 'writable', 'isDefault', 'visible', 'providerSchedules', 'position'];
+        return ['name', 'color', 'userColor', 'timeZone', 'writable', 'isDefault', 'visible', 'work', 'providerSchedules', 'position'];
     }
 
     public static function changeType(): string

@@ -9,6 +9,8 @@ use ApiPlatform\State\ProcessorInterface;
 use App\ApiResource\Input\Notification\UpdateNotificationSettings;
 use App\ApiResource\NotificationSettingsResource;
 use App\Entity\NotificationPreferences;
+use App\Enum\SnoozeChoice;
+use App\Enum\TravelMode;
 use App\Notification\NotificationChannelChoice;
 use App\Notification\PlanUserNotifications;
 use App\Realtime\AfterCommitDispatcher;
@@ -51,17 +53,59 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
             if (null !== $data->emailAddress) {
                 $preferences->setEmailAddress('' === trim($data->emailAddress) ? null : trim($data->emailAddress));
             }
-            $channelsBefore = $preferences->getChannelsByKind();
+            $planningBefore = self::planning($preferences);
+            if (null !== $data->workDays || null !== $data->workStart || null !== $data->workEnd) {
+                $preferences->setWorkingHours(
+                    null === $data->workDays ? $preferences->getWorkDays() : array_map(intval(...), $data->workDays),
+                    $data->workStart ?? $preferences->getWorkStart(),
+                    $data->workEnd ?? $preferences->getWorkEnd(),
+                );
+            }
+            if (null !== $data->shiftEarlyReminders) {
+                $preferences->setShiftEarlyReminders($data->shiftEarlyReminders);
+            }
+            if (null !== $data->workCalendarsQuiet) {
+                $preferences->setWorkCalendarsQuiet($data->workCalendarsQuiet);
+            }
+            if (null !== $data->holdDuringFocus) {
+                $preferences->setHoldDuringFocus($data->holdDuringFocus);
+            }
+            if (null !== $data->holdMailInMeetings) {
+                $preferences->setHoldMailInMeetings($data->holdMailInMeetings);
+            }
+            if (null !== $data->leaveNow) {
+                $preferences->setLeaveNow($data->leaveNow);
+            }
+            if (null !== $data->travelMode || null !== $data->extraTravelMinutes) {
+                $preferences->setTravel(
+                    null === $data->travelMode ? $preferences->getTravelMode() : TravelMode::from($data->travelMode),
+                    $data->extraTravelMinutes ?? $preferences->getExtraTravelMinutes(),
+                );
+            }
+            if (null !== $data->snoozeChoices) {
+                $preferences->setSnoozeChoices(array_map(static fn (mixed $choice): SnoozeChoice => SnoozeChoice::from((string) $choice), $data->snoozeChoices));
+            }
             foreach ($data->channelsByKind ?? [] as $kind => $channels) {
                 $preferences->setChannelsFor((string) $kind, \is_array($channels) ? NotificationChannelChoice::fromValues(array_values($channels)) : null);
             }
             $this->entityManager->flush();
-            if ($zoneChanged || $channelsBefore !== $preferences->getChannelsByKind()) {
-                // All-day reminders fire at a time of day in the user's zone; planned notifications carry channels.
+            if ($zoneChanged || $planningBefore !== self::planning($preferences)) {
+                // All-day reminders fire at a time of day in the user's zone; planned notifications carry their
+                // channels, early reminders move with the working hours, leave-now with the travel settings.
                 $this->afterCommit->dispatch(new PlanUserNotifications($user->getId()->toRfc4122()));
             }
 
             return $preferences;
         }));
+    }
+
+    /**
+     * What planned notifications depend on, to see whether a change needs a replan.
+     *
+     * @return list<mixed>
+     */
+    private static function planning(NotificationPreferences $preferences): array
+    {
+        return [$preferences->getChannelsByKind(), $preferences->getWorkDays(), $preferences->getWorkStart(), $preferences->getWorkEnd(), $preferences->isShiftEarlyReminders(), $preferences->isLeaveNow(), $preferences->getTravelMode(), $preferences->getExtraTravelMinutes()];
     }
 }

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Entity;
 
+use App\Enum\SnoozeChoice;
+use App\Enum\TravelMode;
 use App\Notification\NotificationChannelChoice;
 use App\Repository\NotificationPreferencesRepository;
 use Doctrine\DBAL\Types\Types;
@@ -43,6 +45,48 @@ class NotificationPreferences
     /** While a busy event runs, only the user's own meetings and leave-now alerts break through. */
     #[ORM\Column]
     private bool $focusDuringBusy = true;
+
+    /** @var list<int> ISO days (1 = Monday) with working hours */
+    #[ORM\Column(type: Types::JSON)]
+    private array $workDays = [1, 2, 3, 4, 5];
+
+    /** HH:MM, in the user's zone. */
+    #[ORM\Column(length: 5)]
+    private string $workStart = '09:00';
+
+    #[ORM\Column(length: 5)]
+    private string $workEnd = '17:30';
+
+    /** A reminder that would come before the working day, for an event before it starts, comes at the end of the working day before. */
+    #[ORM\Column]
+    private bool $shiftEarlyReminders = true;
+
+    /** Notifications of work calendars wait for working hours, except leave-now and important events. */
+    #[ORM\Column]
+    private bool $workCalendarsQuiet = true;
+
+    /** During a focus block, notifications wait until it ends; meetings with others and leave-now come through. */
+    #[ORM\Column]
+    private bool $holdDuringFocus = true;
+
+    /** Mail notifications wait while the user is in a meeting (read by the mail notifications). */
+    #[ORM\Column]
+    private bool $holdMailInMeetings = true;
+
+    /** Leave-now reminders for events with a place. */
+    #[ORM\Column]
+    private bool $leaveNow = true;
+
+    #[ORM\Column(length: 16, enumType: TravelMode::class)]
+    private TravelMode $travelMode = TravelMode::Car;
+
+    /** Minutes added to the travel time. */
+    #[ORM\Column]
+    private int $extraTravelMinutes = 5;
+
+    /** @var list<string> the snooze choices a reminder offers, in order (SnoozeChoice values) */
+    #[ORM\Column(type: Types::JSON)]
+    private array $snoozeChoices = ['minutes_5', 'before_start', 'start', 'meeting_end'];
 
     /**
      * The user's channels per kind of notification ("leave_now", "brief", or a kind of another feature), as channel
@@ -148,6 +192,118 @@ class NotificationPreferences
             return;
         }
         $this->channelsByKind[$kind] = $choice->values();
+    }
+
+    /**
+     * @return list<int>
+     */
+    public function getWorkDays(): array
+    {
+        return $this->workDays;
+    }
+
+    public function getWorkStart(): string
+    {
+        return $this->workStart;
+    }
+
+    public function getWorkEnd(): string
+    {
+        return $this->workEnd;
+    }
+
+    /**
+     * @param list<int> $days
+     */
+    public function setWorkingHours(array $days, string $start, string $end): void
+    {
+        $days = array_values(array_unique($days));
+        sort($days);
+        $this->workDays = $days;
+        $this->workStart = $start;
+        $this->workEnd = $end;
+    }
+
+    public function isShiftEarlyReminders(): bool
+    {
+        return $this->shiftEarlyReminders;
+    }
+
+    public function setShiftEarlyReminders(bool $shift): void
+    {
+        $this->shiftEarlyReminders = $shift;
+    }
+
+    public function isWorkCalendarsQuiet(): bool
+    {
+        return $this->workCalendarsQuiet;
+    }
+
+    public function setWorkCalendarsQuiet(bool $quiet): void
+    {
+        $this->workCalendarsQuiet = $quiet;
+    }
+
+    public function isHoldDuringFocus(): bool
+    {
+        return $this->holdDuringFocus;
+    }
+
+    public function setHoldDuringFocus(bool $hold): void
+    {
+        $this->holdDuringFocus = $hold;
+    }
+
+    public function isHoldMailInMeetings(): bool
+    {
+        return $this->holdMailInMeetings;
+    }
+
+    public function setHoldMailInMeetings(bool $hold): void
+    {
+        $this->holdMailInMeetings = $hold;
+    }
+
+    public function isLeaveNow(): bool
+    {
+        return $this->leaveNow;
+    }
+
+    public function setLeaveNow(bool $leaveNow): void
+    {
+        $this->leaveNow = $leaveNow;
+    }
+
+    public function getTravelMode(): TravelMode
+    {
+        return $this->travelMode;
+    }
+
+    public function setTravel(TravelMode $mode, int $extraMinutes): void
+    {
+        $this->travelMode = $mode;
+        $this->extraTravelMinutes = $extraMinutes;
+    }
+
+    public function getExtraTravelMinutes(): int
+    {
+        return $this->extraTravelMinutes;
+    }
+
+    /**
+     * @return list<SnoozeChoice>
+     */
+    public function getSnoozeChoices(): array
+    {
+        return array_values(array_filter(array_map(SnoozeChoice::tryFrom(...), $this->snoozeChoices)));
+    }
+
+    /**
+     * @param list<SnoozeChoice> $choices
+     */
+    public function setSnoozeChoices(array $choices): void
+    {
+        $this->snoozeChoices = array_values(array_unique(array_map(static fn (SnoozeChoice $choice): string => $choice->value, $choices)));
     }
 
     public function getEmailAddress(): ?string

@@ -399,6 +399,24 @@ final class CalendarEventApiTest extends DatabaseTestCase
         self::assertSame([], $this->getJson('/api/v1/sync/changes?since=0', $this->kim)['calendarEvents'], 'A new copy never gets it.');
     }
 
+    public function testImportantEventsAndWorkCalendarsReachTheClients(): void
+    {
+        $event = $this->create(['important' => true]);
+        self::assertTrue($event['important'] ?? null);
+
+        $this->client->request('PATCH', '/api/v1/calendars/'.$this->calendarId, server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['work' => true], \JSON_THROW_ON_ERROR));
+        self::assertResponseIsSuccessful();
+
+        $delta = $this->getJson('/api/v1/sync/changes?since=0', $this->kim);
+        self::assertIsArray($delta['calendarEvents']);
+        self::assertSame([true], array_column($delta['calendarEvents'], 'important'));
+        self::assertIsArray($delta['calendars']);
+        self::assertSame([true], array_column($delta['calendars'], 'work'));
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$event['id'], self::event($this->calendarId), $this->kim);
+        self::assertFalse($this->decodedResponse()['important']);
+    }
+
     public function testTheDeltaCarriesCalendarsAndEvents(): void
     {
         $series = $this->create(['recurrence' => 'FREQ=DAILY;COUNT=5']);

@@ -57,6 +57,8 @@ final readonly class EventData
         public ?int $travelMinutes = null,
         /** The event has no reminders of its own, so the user's default rules apply. */
         public bool $defaultReminders = true,
+        /** A high priority: reminders reach the user also in quiet and outside working hours. */
+        public bool $important = false,
     ) {
     }
 

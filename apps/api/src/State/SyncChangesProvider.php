@@ -386,7 +386,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     {
         $rows = $this->connection->fetchAllAssociative(
             'SELECT c.id, c.mail_account_id, c.source, c.name, c.color, c.user_color, c.time_zone, c.writable, c.is_default,
-                    c.visible, c.provider_schedules, c.position
+                    c.visible, c.work, c.provider_schedules, c.position
              FROM calendar c WHERE c.owner_id = :user AND c.change_seq > :since AND c.change_seq <= :until ORDER BY c.change_seq',
             $range,
         );
@@ -401,6 +401,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'writable' => (bool) $r['writable'],
             'isDefault' => (bool) $r['is_default'],
             'visible' => (bool) $r['visible'],
+            'work' => (bool) $r['work'],
             'providerSchedules' => (bool) $r['provider_schedules'],
             'position' => self::int($r['position']),
         ], $rows);
@@ -420,7 +421,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'SELECT e.id, e.calendar_id, e.uid, e.recurrence_key, e.sequence, e.status, e.summary, e.description, e.location, e.url,
                     e.transparency, e.visibility, e.all_day, e.start_value, e.start_time_zone, e.end_value, e.end_time_zone,
                     e.rrule, e.rdates, e.exdates, e.organizer, e.attendees, e.self_partstat, e.reminders, e.conference,
-                    e.message_id, e.sync_error, e.travel_minutes, e.default_reminders
+                    e.message_id, e.sync_error, e.travel_minutes, e.default_reminders, e.important
              FROM calendar_event e JOIN calendar c ON c.id = e.calendar_id
              WHERE c.owner_id = :user AND e.change_seq > :since AND e.change_seq <= :until
                AND (e.series_ends_at IS NULL OR e.series_ends_at > :window)
@@ -455,6 +456,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'messageId' => $r['message_id'],
             'syncError' => $r['sync_error'],
             'travelMinutes' => null === $r['travel_minutes'] ? null : self::int($r['travel_minutes']),
+            'important' => (bool) $r['important'],
             'defaultReminders' => (bool) $r['default_reminders'],
         ], $rows);
     }

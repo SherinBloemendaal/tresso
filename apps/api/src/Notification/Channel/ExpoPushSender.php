@@ -38,16 +38,7 @@ final readonly class ExpoPushSender
         try {
             $response = $this->http->request('POST', self::SEND_URL, [
                 'headers' => $headers,
-                'body' => json_encode([
-                    'to' => $token,
-                    'title' => $message->title,
-                    'body' => $message->body,
-                    'data' => $message->payload(),
-                    'sound' => $message->silent ? null : 'default',
-                    'priority' => $message->silent ? 'normal' : 'high',
-                    'expiration' => $message->expiresAt->getTimestamp(),
-                    'channelId' => 'reminders',
-                ], \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_UNICODE),
+                'body' => json_encode(self::body($token, $message), \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_UNICODE),
                 'timeout' => 10,
             ]);
             $status = $response->getStatusCode();
@@ -74,5 +65,29 @@ final readonly class ExpoPushSender
         $text = $ticket['message'] ?? 'Expo refused the message.';
 
         return PushResult::failed(\is_string($text) ? $text : 'Expo refused the message.');
+    }
+
+    /**
+     * A message without a title is data only: the app handles it in the background and shows nothing (iOS
+     * content-available, Android high priority so it is delivered while the phone sleeps).
+     *
+     * @return array<string, mixed>
+     */
+    private static function body(string $token, PushMessage $message): array
+    {
+        if ('' === $message->title) {
+            return ['to' => $token, 'data' => $message->payload(), '_contentAvailable' => true, 'priority' => 'high', 'expiration' => $message->expiresAt->getTimestamp()];
+        }
+
+        return [
+            'to' => $token,
+            'title' => $message->title,
+            'body' => $message->body,
+            'data' => $message->payload(),
+            'sound' => $message->silent ? null : 'default',
+            'priority' => $message->silent ? 'normal' : 'high',
+            'expiration' => $message->expiresAt->getTimestamp(),
+            'channelId' => 'reminders',
+        ];
     }
 }
