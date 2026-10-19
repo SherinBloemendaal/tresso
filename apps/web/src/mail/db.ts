@@ -125,6 +125,8 @@ export function deleteMailDatabase(userId: string): Promise<void> {
 export class IndexedDbMailStore implements MailStore {
   /** Collected by {@link apply}, handed out by {@link takeArrivals}. */
   private arrivals: Arrival[] = []
+  /** Threads classified on this device whose server version has not arrived yet; see {@link restoreThread}. */
+  private readonly unconfirmed = new Set<string>()
 
   private constructor(private readonly db: IDBPDatabase<MailSchema>) {}
 
@@ -268,6 +270,7 @@ export class IndexedDbMailStore implements MailStore {
     for (const thread of page.threads) {
       await tx.objectStore('threads').put(thread)
       affected.add(thread.id)
+      this.unconfirmed.delete(thread.id)
     }
     const inboxFolders = new Set(
       (await tx.objectStore('folders').getAll()).filter((folder) => folder.role === 'inbox').map((folder) => folder.id),
@@ -493,6 +496,7 @@ export class IndexedDbMailStore implements MailStore {
     const previous = await tx.objectStore('threads').get(threadId)
     if (previous !== undefined) {
       await tx.objectStore('threads').put(classifiedByUser(previous, smartInboxId, verdict))
+      this.unconfirmed.add(threadId)
       await refreshConversation(tx, threadId, await listFoldersOf(tx))
     }
     await tx.done
@@ -503,7 +507,8 @@ export class IndexedDbMailStore implements MailStore {
   /** Puts a thread back as it was, unless the delta changed it since. */
   async restoreThread(previous: SyncedThread, optimistic: { smartInboxId: string; verdict: Verdict }): Promise<void> {
     const tx = this.db.transaction(ALL_STORES, 'readwrite')
-    if (stillAsClassified(await tx.objectStore('threads').get(previous.id), optimistic)) {
+    // Once the server's version arrived it stays, also when it is the same placement: the request went through.
+    if (this.unconfirmed.delete(previous.id) && stillAsClassified(await tx.objectStore('threads').get(previous.id), optimistic)) {
       await tx.objectStore('threads').put(previous)
       await refreshConversation(tx, previous.id, await listFoldersOf(tx))
     }

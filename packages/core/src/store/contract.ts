@@ -509,6 +509,15 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
         expect((await db.thread('t2'))?.thread).toMatchObject({ smartInboxId: 'news', classificationReason: 'sender_rule' })
       })
 
+      it('keeps a placement the server confirmed, also when the answer to the request was lost', async () => {
+        const previous = await db.classifyThread('t2', 'todo', 'do')
+        await db.apply(page({ cursor: 21, threads: [thread('t2', 'work', { smartInboxId: 'todo', verdict: 'do', classificationReason: 'user' })] }))
+
+        await db.restoreThread(previous!, { smartInboxId: 'todo', verdict: 'do' })
+
+        expect((await db.thread('t2'))?.thread).toMatchObject({ smartInboxId: 'todo', verdict: 'do', classificationReason: 'user' })
+      })
+
       it('says when the conversation to classify is gone', async () => {
         expect(await db.classifyThread('gone', 'todo', 'do')).toBeNull()
       })
