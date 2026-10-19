@@ -6,6 +6,10 @@ import type { Address, MessageBody, SyncedMailAccount, SyncedMessage, SyncedOutg
 /** Seconds a sent message waits before it goes out, so "Undo" can still stop it. */
 export const UNDO_SECONDS = 5
 const AUTOSAVE_MS = 800
+/** What the API accepts; the web form's schema (apps/web/src/forms/compose.ts) checks the same. */
+export const MAX_RECIPIENTS = 100
+export const MAX_SUBJECT = 998
+export const MAX_HTML = 2_000_000
 
 export interface ComposerNotice {
   text: string
@@ -196,8 +200,17 @@ export class Composer {
     if (recipients.length === 0) {
       return 'Add at least one recipient.'
     }
+    if (recipients.length > MAX_RECIPIENTS) {
+      return `A message can have at most ${MAX_RECIPIENTS} recipients.`
+    }
     const wrong = recipients.find((recipient) => !isPlausibleAddress(recipient.address))
-    return wrong ? `${wrong.address} is not a valid address.` : null
+    if (wrong) {
+      return `${wrong.address} is not a valid address.`
+    }
+    if (draft.subject.length > MAX_SUBJECT || /[\r\n]/.test(draft.subject)) {
+      return draft.subject.length > MAX_SUBJECT ? 'The subject is too long.' : 'The subject cannot contain line breaks.'
+    }
+    return draft.html.length > MAX_HTML ? 'The message is too long.' : null
   }
 
   /** Sends now (after the undo window) or at a chosen time. */

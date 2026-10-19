@@ -144,3 +144,29 @@ export function composeBody(html: string, signatureHtml: string | null, quoteHtm
   }
   return parts.join('')
 }
+
+export type SendLaterKey = 'thisEvening' | 'tomorrowMorning' | 'tomorrowAfternoon' | 'mondayMorning'
+
+function onDay(now: Date, days: number, hour: number): Date {
+  const date = new Date(now)
+  date.setDate(date.getDate() + days)
+  date.setHours(hour, 0, 0, 0)
+  return date
+}
+
+/**
+ * The times "Send later" offers, in the device's time zone: this evening (until 17:00), tomorrow morning and
+ * afternoon, and next Monday morning (a week ahead on a Monday). Each client words them itself.
+ */
+export function sendLaterOptions(now: Date = new Date()): { key: SendLaterKey; at: Date }[] {
+  const nextMonday = (8 - now.getDay()) % 7 || 7
+  const options: { key: SendLaterKey; at: Date }[] = [
+    { key: 'tomorrowMorning', at: onDay(now, 1, 8) },
+    { key: 'tomorrowAfternoon', at: onDay(now, 1, 13) },
+    { key: 'mondayMorning', at: onDay(now, nextMonday, 8) },
+  ]
+  if (now.getHours() < 17) {
+    options.unshift({ key: 'thisEvening', at: onDay(now, 0, 18) })
+  }
+  return options
+}

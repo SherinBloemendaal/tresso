@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SyncedMessage } from './sync/types'
-import { composeBody, forwardSubject, parseAddresses, quotedOriginal, replyRecipients, replySubject } from './compose'
+import { composeBody, forwardSubject, parseAddresses, quotedOriginal, replyRecipients, replySubject, sendLaterOptions } from './compose'
 
 function message(overrides: Partial<SyncedMessage> = {}): SyncedMessage {
   return {
@@ -98,5 +98,24 @@ describe('composeBody', () => {
   it('leaves out what is empty', () => {
     expect(composeBody('<p>Hi</p>', null, '')).toBe('<p>Hi</p>')
     expect(composeBody('<p>Hi</p>', '  ', '')).toBe('<p>Hi</p>')
+  })
+})
+
+describe('sendLaterOptions', () => {
+  it('offers this evening only before five, then tomorrow and next Monday, in local time', () => {
+    // A Wednesday afternoon.
+    const options = sendLaterOptions(new Date(2026, 9, 21, 14, 30))
+    expect(options.map((option) => [option.key, option.at.getDate(), option.at.getHours()])).toEqual([
+      ['thisEvening', 21, 18],
+      ['tomorrowMorning', 22, 8],
+      ['tomorrowAfternoon', 22, 13],
+      ['mondayMorning', 26, 8],
+    ])
+    expect(sendLaterOptions(new Date(2026, 9, 21, 17, 0)).map((option) => option.key)).not.toContain('thisEvening')
+  })
+
+  it('takes Monday a week ahead when it is Monday already', () => {
+    const monday = sendLaterOptions(new Date(2026, 9, 19, 9, 0)).find((option) => option.key === 'mondayMorning')
+    expect(monday?.at.getDate()).toBe(26)
   })
 })

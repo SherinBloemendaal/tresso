@@ -116,6 +116,18 @@ describe('Composer', () => {
     composer.update({ to: [{ address: 'anna@example.test', name: null }], mailAccountId: null })
     await composer.send()
     expect(composer.state.error).toBe('Choose the account to send from.')
+
+    composer.update({ mailAccountId: 'work', subject: 'Two\nlines' })
+    await composer.send()
+    expect(composer.state.error).toBe('The subject cannot contain line breaks.')
+
+    composer.update({ subject: 'x'.repeat(999) })
+    await composer.send()
+    expect(composer.state.error).toBe('The subject is too long.')
+
+    composer.update({ subject: 'Fine', to: Array.from({ length: 101 }, (_, index) => ({ address: `p${index}@example.test`, name: null })) })
+    await composer.send()
+    expect(composer.state.error).toBe('A message can have at most 100 recipients.')
     expect(sent).toEqual([])
   })
 
