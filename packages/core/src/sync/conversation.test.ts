@@ -38,6 +38,7 @@ function message(id: string, from: string, receivedAt: string, extra: Partial<Sy
     smartInboxId: null,
     verdict: null,
     summary: null,
+    calendarMethod: null,
     ...extra,
   }
 }

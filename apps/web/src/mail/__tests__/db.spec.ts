@@ -71,7 +71,7 @@ describe('IndexedDbMailStore upgrade from before signatures', () => {
       // Outgoing mail, contacts and signatures only arrive through the delta, so the copy starts over.
       expect(await db.cursor()).toBe(0)
       expect(await db.signatures()).toEqual([])
-      expect(await db.mailAccounts()).toEqual([{ ...withoutDefault, defaultSignatureId: null }])
+      expect(await db.mailAccounts()).toEqual([{ ...withoutDefault, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }])
       await db.apply(page({ cursor: 8, signatures: [signature('sig-work', 'Work')] }))
       expect((await db.signatures()).map((s) => s.id)).toEqual(['sig-work'])
     } finally {

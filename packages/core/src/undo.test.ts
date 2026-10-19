@@ -28,6 +28,7 @@ function message(id: string, folderIds: string[]): SyncedMessage {
     smartInboxId: null,
     verdict: null,
     summary: null,
+    calendarMethod: null,
   }
 }
 

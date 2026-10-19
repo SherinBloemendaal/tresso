@@ -41,7 +41,7 @@ describe('DraftSync', () => {
       await store.saveDraft({ ...(await store.draft('d1'))!, subject: 'Typed', pendingSave: true, updatedAt: 2 })
       const answer = await realAttach(id, file)
       // The realtime sync brings the draft as the file leaves it, before the answer to adding it.
-      await store.apply({ cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [{ ...api.drafts.get('d1')! }], smartInboxes: [], deleted: [] })
+      await store.apply({ cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [{ ...api.drafts.get('d1')! }], smartInboxes: [], calendars: [], calendarEvents: [], deleted: [] })
       return answer
     }
 
@@ -96,7 +96,7 @@ describe('DraftSync', () => {
     api.create = async (id, request) => {
       const saved = await realCreate(id, request)
       // The echo of the upload arrives first; the edit typed meanwhile is still pending.
-      await store.apply({ cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [saved], smartInboxes: [], deleted: [] })
+      await store.apply({ cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [saved], smartInboxes: [], calendars: [], calendarEvents: [], deleted: [] })
       return saved
     }
 

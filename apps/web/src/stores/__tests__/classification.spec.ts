@@ -14,7 +14,7 @@ function smartInbox(id: string, verdict: SyncedSmartInbox['verdict'], position: 
 const first: ChangePage = {
   cursor: 1,
   hasMore: false,
-  mailAccounts: [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }],
+  mailAccounts: [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }],
   folders: [{ id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' }],
   threads: [{ id: 't1', mailAccountId: 'work', subject: 'Budget', messageCount: 1, lastMessageAt: '2026-10-19T08:00:00Z', smartInboxId: 'info', verdict: 'know', classificationReason: 'copied' }],
   messages: [
@@ -34,12 +34,15 @@ const first: ChangePage = {
       smartInboxId: 'info',
       verdict: 'know',
       summary: null,
+      calendarMethod: null,
     },
   ],
   outgoingMessages: [],
   signatures: [],
   drafts: [],
   smartInboxes: [smartInbox('todo', 'do', 0), smartInbox('info', 'know', 1)],
+  calendars: [],
+  calendarEvents: [],
   deleted: [],
 }
 

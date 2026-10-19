@@ -4,10 +4,10 @@ import { databaseName, MailSession, type MailState } from '../mailSession'
 import type { Sql } from '../sql'
 import { memorySql } from '@tresso/core/testing/sql'
 
-const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }
+const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], deleted: [], ...extra }
 }
 
 /** Databases by name, as on a device: deleting one that is open fails, as expo-sqlite does. */

@@ -12,8 +12,8 @@ import ConversationList from '../ConversationList.vue'
 
 const DAY = 86_400_000
 const accounts = [
-  { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null },
-  { id: 'home', emailAddress: 'kim@mail.example', displayName: 'Home', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null },
+  { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null },
+  { id: 'home', emailAddress: 'kim@mail.example', displayName: 'Home', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null },
 ]
 const folders = [
   { id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' as const },
@@ -40,6 +40,7 @@ function message(id: string, threadId: string, account: string, from: string, ag
     smartInboxId: null,
     verdict: null,
     summary: null,
+    calendarMethod: null,
   }
 }
 
@@ -87,6 +88,8 @@ describe('bulk actions', () => {
             signatures: [],
             drafts: [],
             smartInboxes: [],
+            calendars: [],
+            calendarEvents: [],
             deleted: [],
           }
           const empty = { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [] }
@@ -234,7 +237,7 @@ describe('bulk actions', () => {
     await checkbox(wrapper, 't3').trigger('click')
 
     // Archived on another device.
-    later = { cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [{ ...messages[2]!, folderIds: ['archive'] }], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], deleted: [] }
+    later = { cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [{ ...messages[2]!, folderIds: ['archive'] }], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], deleted: [] }
     await useMailStore().syncNow()
 
     await vi.waitFor(() => expect([...useSelectionStore().threadIds]).toEqual(['t1']))
