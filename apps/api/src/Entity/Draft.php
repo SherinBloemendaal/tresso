@@ -206,6 +206,13 @@ class Draft implements TracksChanges
         $this->signature = null;
     }
 
+    /** Its account was removed, and with it the Drafts folder copy. The text stays; sending needs another account. */
+    public function detachFromAccount(): void
+    {
+        $this->mailAccount = null;
+        $this->forgetFiledCopy();
+    }
+
     /** The account changed: the copy filed in the old account's Drafts folder is someone else's job now. */
     public function forgetFiledCopy(): void
     {

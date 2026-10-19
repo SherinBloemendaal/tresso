@@ -11,6 +11,7 @@ use ApiPlatform\Validator\Exception\ValidationException;
 use App\ApiResource\Input\CreateMailAccount;
 use App\ApiResource\Input\UpdateMailAccount;
 use App\ApiResource\MailAccountResource;
+use App\Entity\Draft;
 use App\Entity\MailAccount;
 use App\Entity\User;
 use App\Enum\MailAccountStatus;
@@ -58,6 +59,10 @@ final readonly class MailAccountProcessor implements ProcessorInterface
         $account = $this->ownedAccount($owner, $uriVariables);
 
         if ($operation instanceof DeleteOperationInterface) {
+            // Drafts outlive the account; detached here rather than by the foreign key, so every device hears of it.
+            foreach ($this->entityManager->getRepository(Draft::class)->findBy(['mailAccount' => $account]) as $draft) {
+                $draft->detachFromAccount();
+            }
             $this->entityManager->remove($account);
             $this->entityManager->flush();
 
