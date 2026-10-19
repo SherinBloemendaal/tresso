@@ -25,9 +25,10 @@ use Sabre\VObject\Settings;
 final readonly class OccurrenceExpander
 {
     public const string MAX_RANGE = 'P400D';
-    /** Occurrences one series contributes to a range; an hourly series fills about 80 days. */
-    public const int MAX_PER_SERIES = 2000;
-    /** Occurrences one request returns; more means the range is too long for what the calendars hold. */
+    /**
+     * Occurrences one request returns; more means the range is too long for what the calendars hold. An hourly series
+     * fits in the longest range, so no series is ever cut short without the caller being told.
+     */
     public const int MAX_OCCURRENCES = 10000;
     private const int MAX_RECURRENCES = 100000;
 
@@ -61,11 +62,11 @@ final readonly class OccurrenceExpander
         $rowsByObject = $this->events->findForObjects($objects);
         foreach ($objects as $object) {
             $rows = $rowsByObject[$object->getId()->toRfc4122()] ?? [];
-            $count = 0;
             try {
-                foreach (Occurrences::instances(CalendarDocument::parse($object->getIcal()), $from->setTimezone($utc), $to->setTimezone($utc), $zone, self::MAX_PER_SERIES) as $instance) {
-                    ++$count;
-                    $occurrence = $this->occurrence($object, $rows, $instance, $zone);
+                // One more than fits, so a range that holds too many is refused rather than cut short.
+                $limit = self::MAX_OCCURRENCES - \count($occurrences) + 1;
+                foreach (Occurrences::instances(CalendarDocument::parse($object->getIcal()), $from->setTimezone($utc), $to->setTimezone($utc), $zone, $limit) as $source => $instance) {
+                    $occurrence = $this->occurrence($object, $rows, $source, $instance, $zone);
                     if (null === $occurrence) {
                         continue;
                     }
@@ -78,9 +79,6 @@ final readonly class OccurrenceExpander
                 $this->logger->warning('Calendar object could not be expanded', ['object' => $object->getId()->toRfc4122(), 'error' => $e->getMessage()]);
                 continue;
             }
-            if ($count >= self::MAX_PER_SERIES) {
-                $this->logger->info('A series was cut off in a range', ['object' => $object->getId()->toRfc4122(), 'limit' => self::MAX_PER_SERIES]);
-            }
         }
 
         usort($occurrences, static fn (CalendarOccurrence $a, CalendarOccurrence $b): int => [self::sortKey($a->start, $zone), $a->id] <=> [self::sortKey($b->start, $zone), $b->id]);
@@ -90,15 +88,16 @@ final readonly class OccurrenceExpander
 
     /**
      * @param array<string, CalendarEvent> $rows
+     * @param string                         $source the recurrence key of the component the instance comes from
      */
-    private function occurrence(CalendarObject $object, array $rows, VEvent $instance, \DateTimeZone $zone): ?CalendarOccurrence
+    private function occurrence(CalendarObject $object, array $rows, string $source, VEvent $instance, \DateTimeZone $zone): ?CalendarOccurrence
     {
         $start = Props::dateTime($instance, 'DTSTART');
         if (null === $start) {
             return null;
         }
         $key = CalendarDocument::recurrenceKey($instance);
-        $row = $rows[$key] ?? $rows[''] ?? null;
+        $row = $rows[$source] ?? $rows[''] ?? null;
         if (null === $row) {
             return null;
         }

@@ -13,7 +13,6 @@ use Sabre\VObject\Component\VEvent;
 use Sabre\VObject\Property;
 use Sabre\VObject\Property\ICalendar\DateTime as DateTimeProperty;
 use Sabre\VObject\Property\ICalendar\Duration as DurationProperty;
-use Sabre\VObject\Recur\EventIterator;
 use Sabre\VObject\Recur\MaxInstancesExceededException;
 use Sabre\VObject\TimeZoneUtil;
 
@@ -153,31 +152,29 @@ final class EventReader
      */
     private static function seriesEnd(VEvent $master, int $lengthSeconds): ?\DateTimeImmutable
     {
-        try {
-            $iterator = new EventIterator([$master], null, new \DateTimeZone('UTC'));
-        } catch (\Throwable) {
-            return null;
-        }
-        if ($iterator->isInfinite()) {
+        // An RRULE without COUNT or UNTIL never ends, whatever RDATEs come with it.
+        $rule = Props::text($master, 'RRULE');
+        if (null !== $rule && 1 !== preg_match('/(^|;)(COUNT|UNTIL)=/i', $rule)) {
             return null;
         }
 
         $last = null;
         $count = 0;
         try {
-            while ($iterator->valid()) {
-                $last = $iterator->getDtStart();
+            // In order, RRULE and RDATE together (Occurrences::starts), so the last start is the series' end.
+            foreach (Occurrences::starts($master, new \DateTimeZone('UTC')) as $start) {
+                $last = $start;
                 if (++$count > self::MAX_COUNTED_OCCURRENCES) {
                     return null;
                 }
-                $iterator->next();
             }
-        } catch (MaxInstancesExceededException) {
+        } catch (MaxInstancesExceededException|InvalidCalendarData) {
             return null;
         }
 
-        return null === $last ? null : \DateTimeImmutable::createFromInterface($last)->setTimezone(new \DateTimeZone('UTC'))->modify(\sprintf('+%d seconds', $lengthSeconds));
+        return null === $last ? null : $last->setTimezone(new \DateTimeZone('UTC'))->modify(\sprintf('+%d seconds', $lengthSeconds));
     }
+
 
     /**
      * @return list<string>

@@ -24,11 +24,10 @@ use Sabre\VObject\Component\VCalendar;
 use Sabre\VObject\Component\VEvent;
 use Sabre\VObject\ITip\Broker;
 use Sabre\VObject\ITip\Message as ItipMessage;
-use Sabre\VObject\Property\ICalendar\Recur;
 use Sabre\VObject\Parameter;
 use Sabre\VObject\Property;
+use Sabre\VObject\Property\ICalendar\Recur;
 use Sabre\VObject\Property\ICalendar\DateTime as DateTimeProperty;
-use Sabre\VObject\Recur\EventIterator;
 use Sabre\VObject\Settings;
 use Symfony\Component\Uid\Uuid;
 
@@ -197,7 +196,8 @@ final readonly class EventEditor
                     $answered = true;
                 }
             }
-            self::touch($component, false);
+            // Only LAST-MODIFIED: DTSTAMP stays the organizer's, which their next update is compared with (RFC 5546).
+            Props::set($component, 'LAST-MODIFIED', new \DateTimeImmutable('now', new \DateTimeZone('UTC')));
         }
         if (!$answered) {
             throw new EditRejected('You are not among the attendees of this event.');
@@ -562,8 +562,16 @@ final readonly class EventEditor
         }
     }
 
+    /**
+     * Where the occurrence is: an override's own start when it was moved (the time the user sees and edits from),
+     * else the series' time at its recurrence id.
+     */
     private function occurrenceStart(VEvent $master, string $key, VCalendar $vcalendar): EventTime
     {
+        $override = CalendarDocument::override($vcalendar, $key);
+        if (null !== $override) {
+            return EventReader::time(self::dtStart($override), $vcalendar);
+        }
         $masterStart = EventReader::time(self::dtStart($master), $vcalendar);
         $instant = RecurrenceKey::require($key);
         if ($masterStart->isDate) {
@@ -586,7 +594,12 @@ final readonly class EventEditor
     {
         $start = self::dtStart($master);
         $instant = RecurrenceKey::require($key);
-        $until = $start->hasTime() ? $instant->modify('-1 second')->format('Ymd\THis\Z') : $instant->modify('-1 day')->format('Ymd');
+        // UNTIL takes the form of DTSTART (RFC 5545 3.3.10): a date, a floating time (the key is its wall clock), or UTC.
+        $until = match (true) {
+            !$start->hasTime() => $instant->modify('-1 day')->format('Ymd'),
+            $start->isFloating() => $instant->modify('-1 second')->format('Ymd\THis'),
+            default => $instant->modify('-1 second')->format('Ymd\THis\Z'),
+        };
 
         $rule = Props::get($master, 'RRULE');
         if ($rule instanceof Recur) {
@@ -621,20 +634,10 @@ final readonly class EventEditor
         if (!is_numeric($count)) {
             return null;
         }
-        $count = (int) $count;
-        $before = 0;
-        $iterator = new EventIterator([$master], null, new \DateTimeZone('UTC'));
-        $isDate = !self::dtStart($master)->hasTime();
-        while ($iterator->valid()) {
-            $start = $iterator->getDtStart();
-            if (($isDate ? RecurrenceKey::fromDate($start) : RecurrenceKey::fromInstant($start)) >= $key) {
-                break;
-            }
-            ++$before;
-            $iterator->next();
-        }
+        // COUNT counts the rule's occurrences before EXDATE takes any away, and not the RDATEs (RFC 5545 3.3.10).
+        $before = Occurrences::ruleOccurrencesBefore($master, $key, new \DateTimeZone('UTC')) ?? 0;
 
-        return max(1, $count - $before);
+        return max(1, (int) $count - $before);
     }
 
     private static function withCount(string $rule, int $count): string

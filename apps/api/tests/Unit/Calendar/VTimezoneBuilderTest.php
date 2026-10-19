@@ -176,6 +176,22 @@ final class VTimezoneBuilderTest extends TestCase
         return $sign * ((int) substr($offset, 1, 2) * 3600 + (int) substr($offset, 3, 2) * 60);
     }
 
+    public function testARuleMustCoverTheLastYearToo(): void
+    {
+        $changes = [];
+        foreach (range(2027, 2057) as $year) {
+            $changes[] = self::change($year, 10, true);
+            if ($year < 2057) {
+                $changes[] = self::change($year, 3, false);
+            }
+        }
+        usort($changes, static fn (array $a, array $b): int => $a['ts'] <=> $b['ts']);
+
+        $rules = new \ReflectionMethod(VTimezoneBuilder::class, 'rules')->invoke(null, $changes, 2057);
+
+        self::assertNull($rules, 'Summer time missing in the last year means the rule does not hold.');
+    }
+
     public function testSabreReadsTheZoneBack(): void
     {
         $calendar = CalendarDocument::create();
@@ -184,5 +200,17 @@ final class VTimezoneBuilderTest extends TestCase
         self::assertInstanceOf(\Sabre\VObject\Component\VCalendar::class, $parsed);
 
         self::assertSame('America/New_York', TimeZoneUtil::getTimeZone('America/New_York', $parsed)->getName());
+    }
+
+    /**
+     * A change at 02:00 UTC on the last Sunday of the month: into summer time ($daylight) or back.
+     *
+     * @return array{ts: int, from: int, to: int, isdst: bool, abbr: string}
+     */
+    private static function change(int $year, int $month, bool $daylight): array
+    {
+        $day = new \DateTimeImmutable(\sprintf('last sunday of %d-%02d 02:00:00', $year, $month), new \DateTimeZone('UTC'));
+
+        return ['ts' => $day->getTimestamp(), 'from' => $daylight ? 3600 : 7200, 'to' => $daylight ? 7200 : 3600, 'isdst' => $daylight, 'abbr' => $daylight ? 'CEST' : 'CET'];
     }
 }

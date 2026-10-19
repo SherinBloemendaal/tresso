@@ -264,13 +264,40 @@ final class CalendarEventApiTest extends DatabaseTestCase
         self::assertResponseStatusCodeSame(400);
     }
 
-    public function testLongRangesStayBounded(): void
+    public function testAnHourlySeriesFillsTheLongestRange(): void
     {
         $this->create(['recurrence' => 'FREQ=HOURLY']);
 
         $occurrences = $this->occurrences($this->kim, '2026-10-19T00:00:00+00:00', '2027-11-01T00:00:00+00:00');
 
-        self::assertCount(OccurrenceExpander::MAX_PER_SERIES, $occurrences, 'One dense series fills a range only up to its share.');
+        // Every hour until the end of the range: no series is cut short without a word.
+        self::assertGreaterThan(9000, \count($occurrences));
+        self::assertSame(['dateTime' => '2027-10-31T23:00:00+00:00'], $occurrences[\count($occurrences) - 1]['start']);
+    }
+
+    public function testARangeHoldingTooManyOccurrencesIsRefused(): void
+    {
+        $this->create(['recurrence' => 'FREQ=HOURLY']);
+        $this->create(['recurrence' => 'FREQ=HOURLY', 'summary' => 'Another']);
+
+        $this->client->request('GET', '/api/v1/calendar-occurrences?'.http_build_query(['from' => '2026-10-19T00:00:00+00:00', 'to' => '2027-11-01T00:00:00+00:00']), server: $this->kim);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertStringContainsString((string) OccurrenceExpander::MAX_OCCURRENCES, self::string($this->decodedResponse()['detail'] ?? null));
+    }
+
+    public function testARangeInAnotherOffsetFindsFloatingEvents(): void
+    {
+        $this->create([
+            'start' => ['dateTime' => '2026-10-19T09:00:00', 'timeZone' => null],
+            'end' => ['dateTime' => '2026-10-19T10:00:00', 'timeZone' => null],
+        ]);
+
+        // The whole of 19 October in Honolulu, written in +14:00.
+        $occurrences = $this->occurrences($this->kim, '2026-10-20T00:00:00+14:00', '2026-10-21T00:00:00+14:00', 'Pacific/Honolulu');
+
+        self::assertCount(1, $occurrences);
+        self::assertSame(['dateTime' => '2026-10-19T19:00:00+00:00'], $occurrences[0]['start']);
     }
 
     public function testAnUnknownTimeZoneIsRefused(): void
@@ -281,16 +308,75 @@ final class CalendarEventApiTest extends DatabaseTestCase
         self::assertSame('timeZone', $this->violationPath());
     }
 
-    public function testAnOccurrenceTooFarIntoADenseSeriesIsRefused(): void
+    public function testAnOccurrenceFarIntoADenseSeriesCanBeChanged(): void
     {
         $series = $this->create(['recurrence' => 'FREQ=HOURLY']);
 
         $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?'.http_build_query(['scope' => 'this', 'recurrenceId' => '20400101T000000Z']), self::event($this->calendarId, [
-            'start' => ['dateTime' => '2040-01-01T02:00:00', 'timeZone' => 'Europe/Amsterdam'],
-            'end' => ['dateTime' => '2040-01-01T03:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'summary' => 'New year',
+            'start' => ['dateTime' => '2040-01-01T01:30:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2040-01-01T02:00:00', 'timeZone' => 'Europe/Amsterdam'],
         ]), $this->kim);
+        self::assertResponseIsSuccessful();
 
-        self::assertResponseStatusCodeSame(422);
+        $occurrences = $this->occurrences($this->kim, '2039-12-31T23:00:00+00:00', '2040-01-01T02:00:00+00:00');
+        self::assertSame(['Weekly sync', 'New year', 'Weekly sync'], array_column($occurrences, 'summary'));
+        self::assertSame(['dateTime' => '2040-01-01T00:30:00+00:00'], $occurrences[1]['start']);
+    }
+
+    public function testASplitCountsTheOccurrencesAnExceptionRemoved(): void
+    {
+        $series = $this->create(['recurrence' => 'FREQ=WEEKLY;COUNT=4']);
+        $this->client->request('DELETE', '/api/v1/calendar-events/'.$series['id'].'?scope=this&recurrenceId=20261026T080000Z', server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=following&recurrenceId=20261102T080000Z', self::event($this->calendarId, [
+            'summary' => 'Weekly sync, later',
+            'recurrence' => 'FREQ=WEEKLY;COUNT=4',
+            'start' => ['dateTime' => '2026-11-02T10:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-11-02T10:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        // COUNT includes the removed occurrence (RFC 5545 3.3.10), so two of the four are left for the new series.
+        self::assertSame('FREQ=WEEKLY;COUNT=2', $this->decodedResponse()['recurrence']);
+        self::assertCount(3, $this->occurrences($this->kim, '2026-10-01T00:00:00+00:00', '2027-01-01T00:00:00+00:00'));
+    }
+
+    public function testEndingAFloatingSeriesKeepsItsEndFloating(): void
+    {
+        $series = $this->create([
+            'recurrence' => 'FREQ=WEEKLY',
+            'start' => ['dateTime' => '2026-10-19T09:00:00', 'timeZone' => null],
+            'end' => ['dateTime' => '2026-10-19T09:30:00', 'timeZone' => null],
+        ]);
+
+        $this->client->request('DELETE', '/api/v1/calendar-events/'.$series['id'].'?scope=following&recurrenceId=20261102T090000Z', server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+
+        self::assertSame('FREQ=WEEKLY;UNTIL=20261102T085959', $this->getJson('/api/v1/calendar-events/'.$series['id'], $this->kim)['recurrence']);
+        self::assertCount(2, $this->occurrences($this->kim, '2026-10-01T00:00:00+00:00', '2027-01-01T00:00:00+00:00', 'Pacific/Auckland'));
+    }
+
+    public function testEditingAllFromAMovedOccurrenceShiftsByWhatTheUserChanged(): void
+    {
+        $series = $this->create(['recurrence' => 'FREQ=WEEKLY;COUNT=3']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=this&recurrenceId=20261026T080000Z', self::event($this->calendarId, [
+            'start' => ['dateTime' => '2026-10-26T11:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-26T11:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        // The moved occurrence, shown at 11:00, is dragged half an hour later and applied to all.
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=all&recurrenceId=20261026T080000Z', self::event($this->calendarId, [
+            'recurrence' => 'FREQ=WEEKLY;COUNT=3',
+            'start' => ['dateTime' => '2026-10-26T11:30:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-26T12:00:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        $occurrences = $this->occurrences($this->kim, '2026-10-01T00:00:00+00:00', '2026-12-01T00:00:00+00:00');
+        self::assertSame(['dateTime' => '2026-10-19T07:30:00+00:00'], $occurrences[0]['start']);
     }
 
     public function testAnEventMovedBeforeTheDeltaWindowLeavesTheCopies(): void
