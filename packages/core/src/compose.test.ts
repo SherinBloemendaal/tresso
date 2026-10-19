@@ -143,6 +143,12 @@ describe('inline images in a quote', () => {
     expect(withInlineLinks(sent, [{ contentId: 'logo@example.test', url: null }])).toBe(sent)
   })
 
+  it('also finds an image used as a background', () => {
+    const table = `<table background="${url.replace('&', '&amp;')}"><tr><td><img alt="x" src='${url}'></td></tr></table><script src="${url}"></script>`
+    expect(quotedInlineImages(table, [image])).toEqual([image])
+    expect(quoteWithContentId(table, url, 'logo@example.test')).toBe(`<table background="cid:logo@example.test"><tr><td><img alt="x" src="cid:logo@example.test"></td></tr></table><script src="${url}"></script>`)
+  })
+
   it('does not take one content id for another that starts with it', () => {
     const html = '<img src="cid:a@b"><img src="cid:a@bc">'
     expect(withInlineLinks(html, [{ contentId: 'a@b', url: 'https://fresh.test/1' }])).toBe('<img src="https://fresh.test/1"><img src="cid:a@bc">')

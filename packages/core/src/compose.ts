@@ -192,14 +192,23 @@ function decodeAttribute(value: string): string {
   })
 }
 
-const IMAGE_SOURCE = /(<img\b[^>]*?\ssrc\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi
+const TAG = /<([a-z][a-z0-9-]*)\b[^>]*>/gi
+const IMAGE_ATTRIBUTE = /(\s(src|background)\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi
 
-/** Every image source in the HTML, read as a browser reads it, with a way to give it another one. */
+/**
+ * Every image source in the HTML (an image's src, any element's background, as the body sanitizer leaves both),
+ * read as a browser reads it, with a way to give it another one.
+ */
 function mapImageSources(html: string, change: (source: string) => string | null): string {
-  return html.replace(IMAGE_SOURCE, (whole: string, before: string, double?: string, single?: string, bare?: string) => {
-    const next = change(decodeAttribute(double ?? single ?? bare ?? ''))
-    return next === null ? whole : `${before}"${escapeAttribute(next)}"`
-  })
+  return html.replace(TAG, (tag: string, name: string) =>
+    tag.replace(IMAGE_ATTRIBUTE, (whole: string, before: string, attribute: string, double?: string, single?: string, bare?: string) => {
+      if (attribute.toLowerCase() === 'src' && name.toLowerCase() !== 'img') {
+        return whole
+      }
+      const next = change(decodeAttribute(double ?? single ?? bare ?? ''))
+      return next === null ? whole : `${before}"${escapeAttribute(next)}"`
+    }),
+  )
 }
 
 function imageSources(html: string): Set<string> {

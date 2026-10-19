@@ -53,6 +53,24 @@ describe('DraftSync', () => {
     expect(api.drafts.get('d1')).toMatchObject({ subject: 'Typed', version: 3, attachments: [{ filename: 'plan.pdf' }] })
   })
 
+  it('uploads again on the version the copy moved on to while the refused upload was under way', async () => {
+    await store.saveDraft(draft('d1', { pendingSave: true, updatedAt: 1 }))
+    await sync.upload('d1')
+    api.drafts.set('d1', { ...api.drafts.get('d1')!, version: 2 })
+    await store.saveDraft({ ...(await store.draft('d1'))!, subject: 'Typed', pendingSave: true, updatedAt: 2 })
+    api.during = async () => {
+      api.during = null
+      // Meanwhile the copy took version 2 (as after a file change of its own).
+      await store.changeDraft('d1', (stored) => stored && { ...stored, version: 2 })
+    }
+
+    await sync.upload('d1')
+
+    expect(conflicts).toBe(0)
+    expect(api.calls.slice(-2)).toEqual(['update d1 @1', 'update d1 @2'])
+    expect(api.drafts.get('d1')).toMatchObject({ subject: 'Typed', version: 3 })
+  })
+
   it("takes no upload of its own for another device's either", async () => {
     await store.saveDraft(draft('d1', { pendingSave: true, updatedAt: 1 }))
     api.during = async () => {

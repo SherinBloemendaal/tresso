@@ -223,8 +223,17 @@ export class DraftSync {
       const now = await store.draft(id)
       if (status === 409 && local.version > 0 && now !== null) {
         const remote = await this.api.get(id)
-        await store.changeDraft(id, (stored) => stored && { ...stored, remoteVersion: remote.version > stored.version ? remote.version : null })
-        this.onConflict()
+        let behind = false
+        await store.changeDraft(id, (stored) => {
+          behind = stored !== null && remote.version > stored.version
+          return stored && { ...stored, remoteVersion: behind ? remote.version : stored.remoteVersion }
+        })
+        if (behind) {
+          this.onConflict()
+        } else {
+          // The copy here moved on meanwhile (a file change it took the version of): the edits go up on that one.
+          this.again.add(id)
+        }
         return
       }
       if (status === 404 && local.version > 0 && now !== null) {
