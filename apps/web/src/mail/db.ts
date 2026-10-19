@@ -6,6 +6,7 @@ import type {
   SyncedMailAccount,
   SyncedMessage,
   SyncedOutgoingMessage,
+  SyncedSignature,
   SyncedThread,
   SyncStore,
 } from '@tresso/core'
@@ -85,13 +86,14 @@ interface MailSchema extends DBSchema {
       byAccountUnreadInbox: [string, number]
     }
   }
+  signatures: { key: string; value: SyncedSignature }
 }
 
 type Stores = StoreNames<MailSchema>[]
 type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
-const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts']
-const VERSION = 2
+const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures']
+const VERSION = 3
 const SENDERS_PER_CONVERSATION = 3
 
 export function databaseName(userId: string): string {
@@ -108,21 +110,9 @@ export class MailDatabase implements SyncStore {
 
   static async open(userId: string): Promise<MailDatabase> {
     const db = await openDB<MailSchema>(databaseName(userId), VERSION, {
-      upgrade(database, oldVersion, _newVersion, transaction) {
+      async upgrade(database, oldVersion, _newVersion, transaction) {
         if (oldVersion < 1) {
-          database.createObjectStore('meta')
-          database.createObjectStore('mailAccounts', { keyPath: 'id' })
-          database.createObjectStore('folders', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
-          database.createObjectStore('threads', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
-          const messages = database.createObjectStore('messages', { keyPath: 'id' })
-          messages.createIndex('byThread', 'threadId')
-          messages.createIndex('byAccount', 'mailAccountId')
-          messages.createIndex('byFolder', 'folderIds', { multiEntry: true })
-          const conversations = database.createObjectStore('conversations', { keyPath: 'threadId' })
-          conversations.createIndex('byAccount', 'mailAccountId')
-          conversations.createIndex('byInboxDate', ['inbox', 'lastMessageAt'])
-          conversations.createIndex('byAccountInboxDate', ['mailAccountId', 'inbox', 'lastMessageAt'])
-          conversations.createIndex('byAccountUnreadInbox', ['mailAccountId', 'unreadInbox'])
+          createVersion1(database)
         }
         if (oldVersion < 2) {
           const outgoing = database.createObjectStore('outgoing', { keyPath: 'id' })
@@ -130,10 +120,18 @@ export class MailDatabase implements SyncStore {
           outgoing.createIndex('bySendAt', 'sendAt')
           database.createObjectStore('contacts', { keyPath: 'key' }).createIndex('byLastSeen', 'lastSeen')
           database.createObjectStore('drafts', { keyPath: 'id' }).createIndex('byUpdatedAt', 'updatedAt')
-          // Outgoing mail and contacts come from the delta: an existing copy syncs again from the start to fill them.
-          if (oldVersion >= 1) {
-            void transaction.objectStore('meta').delete('cursor')
+        }
+        if (oldVersion < 3) {
+          database.createObjectStore('signatures', { keyPath: 'id' })
+          // Accounts stored before signatures existed have no default; the server gave every account null.
+          const accounts = transaction.objectStore('mailAccounts')
+          for (let cursor = await accounts.openCursor(); cursor !== null; cursor = await cursor.continue()) {
+            await cursor.update({ ...cursor.value, defaultSignatureId: cursor.value.defaultSignatureId ?? null })
           }
+        }
+        // Outgoing mail, contacts and signatures come from the delta: an existing copy syncs again from the start.
+        if (oldVersion >= 1) {
+          await transaction.objectStore('meta').delete('cursor')
         }
       },
     })
@@ -179,6 +177,9 @@ export class MailDatabase implements SyncStore {
         case 'outgoingMessage':
           await tx.objectStore('outgoing').delete(deleted.id)
           break
+        case 'signature':
+          await tx.objectStore('signatures').delete(deleted.id)
+          break
       }
     }
 
@@ -193,6 +194,9 @@ export class MailDatabase implements SyncStore {
           affected.add(message.threadId)
         }
       }
+    }
+    for (const signature of page.signatures) {
+      await tx.objectStore('signatures').put(signature)
     }
     for (const thread of page.threads) {
       await tx.objectStore('threads').put(thread)
@@ -228,6 +232,12 @@ export class MailDatabase implements SyncStore {
     const accounts = await this.db.getAll('mailAccounts')
 
     return accounts.sort((a, b) => a.displayName.localeCompare(b.displayName) || a.emailAddress.localeCompare(b.emailAddress))
+  }
+
+  async signatures(): Promise<SyncedSignature[]> {
+    const signatures = await this.db.getAll('signatures')
+
+    return signatures.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
   }
 
   /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
@@ -312,6 +322,22 @@ export class MailDatabase implements SyncStore {
 
     return { thread, messages }
   }
+}
+
+function createVersion1(database: IDBPDatabase<MailSchema>): void {
+  database.createObjectStore('meta')
+  database.createObjectStore('mailAccounts', { keyPath: 'id' })
+  database.createObjectStore('folders', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+  database.createObjectStore('threads', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+  const messages = database.createObjectStore('messages', { keyPath: 'id' })
+  messages.createIndex('byThread', 'threadId')
+  messages.createIndex('byAccount', 'mailAccountId')
+  messages.createIndex('byFolder', 'folderIds', { multiEntry: true })
+  const conversations = database.createObjectStore('conversations', { keyPath: 'threadId' })
+  conversations.createIndex('byAccount', 'mailAccountId')
+  conversations.createIndex('byInboxDate', ['inbox', 'lastMessageAt'])
+  conversations.createIndex('byAccountInboxDate', ['mailAccountId', 'inbox', 'lastMessageAt'])
+  conversations.createIndex('byAccountUnreadInbox', ['mailAccountId', 'unreadInbox'])
 }
 
 async function deleteAccount(tx: WriteTx, accountId: string): Promise<void> {

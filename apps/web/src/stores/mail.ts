@@ -10,6 +10,7 @@ import {
   type SyncedMailAccount,
   type SyncedMessage,
   type SyncedOutgoingMessage,
+  type SyncedSignature,
   type SyncedThread,
 } from '@tresso/core'
 import { deleteMailDatabase, MailDatabase, type Contact, type Conversation, type Draft } from '@/mail/db'
@@ -28,6 +29,7 @@ export const useMailStore = defineStore('mail', () => {
   const auth = useAuthStore()
 
   const accounts = ref<SyncedMailAccount[]>([])
+  const signatures = ref<SyncedSignature[]>([])
   const conversations = ref<Conversation[]>([])
   const unreadCounts = ref<Map<string, number>>(new Map())
   /** Outgoing mail that is scheduled, on its way or failed. */
@@ -91,9 +93,10 @@ export const useMailStore = defineStore('mail', () => {
     }
   }
 
-  /** Pulls the delta now (on top of realtime), e.g. when the user asks to refresh. */
-  function syncNow(): Promise<void> {
-    return pull(() => engine?.sync())
+  /** Pulls changes now, e.g. right after a write or when the user asks, instead of waiting for realtime. */
+  async function syncNow(): Promise<void> {
+    await pull(() => engine?.sync())
+    await refresh()
   }
 
   async function stop(): Promise<void> {
@@ -106,6 +109,7 @@ export const useMailStore = defineStore('mail', () => {
     live.value = false
     ready.value = false
     accounts.value = []
+    signatures.value = []
     conversations.value = []
     unreadCounts.value = new Map()
     outbox.value = []
@@ -125,14 +129,16 @@ export const useMailStore = defineStore('mail', () => {
     if (database === null) {
       return
     }
-    const [nextAccounts, nextConversations, nextCounts, nextOutbox] = await Promise.all([
+    const [nextAccounts, nextSignatures, nextConversations, nextCounts, nextOutbox] = await Promise.all([
       database.mailAccounts(),
+      database.signatures(),
       database.inbox(mailbox.value, listLimit.value + 1),
       database.unreadInboxCounts(),
       database.outbox(),
     ])
     outbox.value = nextOutbox
     accounts.value = nextAccounts
+    signatures.value = nextSignatures
     hasMore.value = nextConversations.length > listLimit.value
     conversations.value = nextConversations.slice(0, listLimit.value)
     unreadCounts.value = nextCounts
@@ -206,6 +212,7 @@ export const useMailStore = defineStore('mail', () => {
 
   return {
     accounts,
+    signatures,
     conversations,
     unreadCounts,
     outbox,
@@ -220,6 +227,7 @@ export const useMailStore = defineStore('mail', () => {
     syncNow,
     forget,
     refresh,
+    syncNow,
     showMailbox,
     showMore,
     thread,
