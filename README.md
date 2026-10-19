@@ -117,6 +117,11 @@ npm run dev:mobile
 | Meilisearch | http://localhost:7700 |
 | Postgres | `localhost:54320` (user, password and database: `app`) |
 | Redis | `localhost:63790` |
+| GreenMail (test mail server) | IMAP `localhost:3143`, IMAPS 3993, SMTP 3025, SMTPS 3465 |
+
+GreenMail has two mailboxes for development, `kim@tresso.test` (password `dev-password-kim`) and `lisa@tresso.test`
+(`dev-password-lisa`). Connect them in the app with host `greenmail`, IMAP port 3143 and SMTP port 3025, security
+`none`.
 
 ClamAV needs about 1.5 GB of memory, so it only starts when asked:
 
@@ -155,7 +160,9 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/) with
 - FrankenPHP keeps the app in memory. After clearing the cache inside the container, restart it with
   `docker compose restart api`.
 - Secrets in `compose.yaml` and the committed `.env` files are development values only. Real secrets go in
-  `.env.local` files or the deployment environment.
+  `.env.local` files or the deployment environment. In production set at least `APP_SECRET`, `OAUTH_PASSPHRASE`,
+  `OAUTH_ENCRYPTION_KEY`, `SYNC_WORKER_CLIENT_SECRET`, `DATA_KEYS` and `DATA_KEY_CURRENT`, and keep
+  `MAIL_ALLOW_UNSAFE_SERVERS=0`.
 - Desktop and mobile sign in through the `tresso://auth/callback` scheme. Until the native apps phase, the desktop
   shell signs in through the web dev server.
 

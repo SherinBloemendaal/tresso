@@ -104,11 +104,21 @@ Users log in with email + password (Argon2id) and, later, Google / Microsoft sig
 ### 3.3 Mail account credentials
 
 - OAuth (Gmail, Microsoft 365) wherever possible; IMAP/SMTP passwords as fallback.
-- Envelope encryption: each user has a data encryption key (DEK). The DEK is encrypted with a master key (KEK)
-  held outside the database (env/KMS). Credentials are encrypted with the DEK using libsodium
-  (XChaCha20-Poly1305). Rotating the KEK only re-encrypts DEKs.
-- Sync workers fetch decrypted credentials over TLS through a dedicated endpoint, scope `sync:credentials`, only
-  for accounts they currently lease. Credentials are held in memory only.
+- Envelope encryption with XChaCha20-Poly1305 (libsodium):
+  - Each user has a random data key (DEK), stored on the user wrapped by a master key (KEK):
+    `v1.<key id>.<base64(nonce + ciphertext)>`, with the user id as additional data.
+  - Credentials are sealed with the owner's DEK as `v1.<base64(nonce + ciphertext)>`, with the account id as
+    additional data, so a ciphertext copied to another user or account does not decrypt.
+  - Master keys come from the environment: `DATA_KEYS` (`id:base64`, comma separated) and `DATA_KEY_CURRENT`.
+    Rotation: add a key, make it current, run `bin/console app:crypto:rotate-data-keys`, remove the old key. Only the
+    DEKs are re-wrapped; credentials stay as they are.
+- The API never returns credentials. Sync workers fetch them over TLS from
+  `GET /internal/sync/accounts/{id}/credentials?workerId=...` (scope `sync:credentials`), only for accounts they hold
+  an unexpired lease on (anything else is a 404), with `Cache-Control: no-store`. Workers keep them in memory only.
+- Mail servers are user input, so they are checked against server-side request forgery: the host must resolve only
+  to public addresses (no private, loopback, link-local, carrier-grade NAT or IPv4-mapped ranges) and the connection
+  must use TLS or STARTTLS. `MAIL_ALLOW_UNSAFE_SERVERS=1` lifts this for local test servers only. The sync workers
+  repeat the address check when they connect, which also covers DNS changes after validation.
 
 ### 3.4 Sync workers (`apps/sync`)
 
