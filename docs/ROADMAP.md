@@ -96,7 +96,9 @@ Tresso Cloud: teams, shared inboxes, assignments, internal comments, delegation 
 
 ## Phase 4: Safety and housekeeping
 
-- ClamAV attachment scanning and quarantine
-- Bulk management (by sender, smart inbox, age), cleanup suggestions
+- [ ] 4.1 ClamAV attachment scanning and quarantine
+- [x] 4.2 Bulk actions in the web client: select conversations (checkboxes, shift for a range), act on all of them,
+  select everything from their senders or older than an age
+- [ ] 4.3 Bulk management by smart inbox, cleanup suggestions (after 2.1)
 
 Tresso Cloud: API keys and third-party apps, webhooks, MCP endpoint, developer tools, statistics, Year in mail.
