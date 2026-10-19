@@ -65,6 +65,8 @@ describe('undoPlan', () => {
   it('is not exact for mail that was in several folders, or archived into All Mail', () => {
     expect(undoPlan({ before: [message('m1', ['inbox', 'projects'])], after: [message('m1', ['trash'])] }, 'trash', folders).exact).toBe(false)
     expect(undoPlan({ before: [message('m1', ['inbox', 'all'])], after: [message('m1', ['all'])] }, 'archive', folders).exact).toBe(false)
+    // A copy already in Archive would go back to the inbox along with the archived one.
+    expect(undoPlan({ before: [message('m1', ['inbox', 'archive'])], after: [message('m1', ['archive'])] }, 'archive', folders).exact).toBe(false)
   })
 
   it('has nothing to undo when nothing moved', () => {

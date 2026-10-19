@@ -58,9 +58,11 @@ watch(
       open.add(newest.id)
     }
     expanded.value = open
-    // Opening a conversation reads it.
+    // Opening a conversation reads it, as one of the conversation's actions, so a quick "unread" goes after it.
     if (unread.length > 0) {
-      void run(unread, 'markRead')
+      void exclusive(async () => {
+        await run(unread, 'markRead')
+      })
     }
   },
   { immediate: true },
@@ -258,8 +260,8 @@ onBeforeUnmount(() => {
         <button type="button" class="tool" :class="{ on: flagged }" :disabled="busy" :aria-pressed="flagged" aria-keyshortcuts="S" :title="flagged ? 'Remove flag (S)' : 'Flag (S)'" @click="toggleFlag">
           <AppIcon name="flag" label="Flag" />
         </button>
-        <div class="move">
-          <button ref="menuButton" type="button" class="tool wide" :disabled="busy" aria-haspopup="menu" :aria-expanded="menuOpen" @click="menuOpen ? closeMenu() : openMenu()">
+        <div class="move" @keydown.esc="menuOpen && closeMenu()">
+          <button ref="menuButton" type="button" class="tool wide" :disabled="busy || moveTargets.length === 0" aria-haspopup="menu" :aria-expanded="menuOpen" @click="menuOpen ? closeMenu() : openMenu()">
             <AppIcon name="folder" /> Move to
           </button>
           <div v-if="menuOpen" ref="menu" class="menu" role="menu" aria-label="Move to folder" @keydown="menuKeydown">
