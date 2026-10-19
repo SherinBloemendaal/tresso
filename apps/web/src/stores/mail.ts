@@ -28,11 +28,15 @@ import { useAuthStore } from '@/stores/auth'
 
 const PAGE_SIZE = 500
 
-/** A large selection went partly through: `accepted` is what the server took; `reason` is why the rest did not. */
+/**
+ * A large selection went partly through: `accepted` is what the server took, `rejected` how many of the requested
+ * messages it did not, and `reason` why.
+ */
 export class PartialActionError extends Error {
   constructor(
     readonly reason: unknown,
     readonly accepted: AppliedAction,
+    readonly rejected: number,
   ) {
     super(reason instanceof Error ? reason.message : String(reason))
     this.name = 'PartialActionError'
@@ -238,6 +242,15 @@ export const useMailStore = defineStore('mail', () => {
     return (await db.value?.messageIdsOfThreads(threadIds)) ?? []
   }
 
+  /** The messages of each thread, to tell which threads an action took completely. */
+  async function messagesByThread(threadIds: string[]): Promise<Map<string, string[]>> {
+    const byThread = new Map<string, string[]>()
+    for (const threadId of threadIds) {
+      byThread.set(threadId, await messageIdsOf([threadId]))
+    }
+    return byThread
+  }
+
   async function folders(): Promise<SyncedFolder[]> {
     return (await db.value?.folders()) ?? []
   }
@@ -279,7 +292,7 @@ export const useMailStore = defineStore('mail', () => {
       await refresh()
       void syncNow()
       if (accepted > 0) {
-        throw new PartialActionError(error, appliedFor(applied, new Set(messageIds.slice(0, accepted))))
+        throw new PartialActionError(error, appliedFor(applied, new Set(messageIds.slice(0, accepted))), messageIds.length - accepted)
       }
       throw error
     }
@@ -463,6 +476,7 @@ export const useMailStore = defineStore('mail', () => {
     threadsBefore,
     describeThreads,
     messageIdsOf,
+    messagesByThread,
     folders,
     body,
     send,

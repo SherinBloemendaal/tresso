@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import type { MessageAction } from '@tresso/core'
-import type { Conversation } from '@/mail/db'
+import type { AppliedAction, Conversation } from '@/mail/db'
 import { shortcutAllowed, useMessageActions } from '@/mail/useMessageActions'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
@@ -27,8 +27,13 @@ const accounts = ref<string[]>([])
 const senders = ref(new Set<string>())
 let described = 0
 watch(
-  [() => selection.threadIds, () => mail.conversations],
+  [() => selection.threadIds, () => mail.conversations, () => selection.busy],
   async () => {
+    // Not while an action is on its way: it shows its change before the server confirms it, and puts it back when
+    // refused, so what looks gone then may come back. Once it is done, this runs again.
+    if (selection.busy) {
+      return
+    }
     // Only the newest answer counts, and it only removes what it found gone among the threads it was asked about:
     // an older, slower answer must not undo a selection the user just made.
     const request = ++described
@@ -73,23 +78,28 @@ function selectSenders(): Promise<void> {
   })
 }
 
-// The threads an action takes leave the selection when it is done; ones the user added meanwhile stay.
-function act(action: Extract<MessageAction, 'markRead' | 'markUnread'>): Promise<void> {
+/**
+ * Runs an action on every message of the selected threads. The threads it took completely leave the selection when
+ * it is done; ones the server did not (wholly) take, and ones the user added meanwhile, stay.
+ */
+function onSelection(perform: (messageIds: string[]) => Promise<AppliedAction | null>): Promise<void> {
   return exclusive(async () => {
-    const threadIds = [...selection.threadIds]
-    if ((await actions.run(await mail.messageIdsOf(threadIds), action)) !== null) {
-      selection.remove(threadIds)
+    const byThread = await mail.messagesByThread([...selection.threadIds])
+    const applied = await perform([...byThread.values()].flat())
+    if (applied === null) {
+      return
     }
+    const taken = new Set(applied.before.map((message) => message.id))
+    selection.remove([...byThread].filter(([, ids]) => ids.every((id) => taken.has(id))).map(([threadId]) => threadId))
   })
 }
 
+function act(action: Extract<MessageAction, 'markRead' | 'markUnread'>): Promise<void> {
+  return onSelection((messageIds) => actions.run(messageIds, action))
+}
+
 function relocate(action: 'archive' | 'trash' | 'move', folderId?: string): Promise<void> {
-  return exclusive(async () => {
-    const threadIds = [...selection.threadIds]
-    if (await actions.relocate(await mail.messageIdsOf(threadIds), action, mail.allFolders, folderId)) {
-      selection.remove(threadIds)
-    }
-  })
+  return onSelection((messageIds) => actions.relocate(messageIds, action, mail.allFolders, folderId))
 }
 
 // K marks read, E archives, # trashes, Esc lets go of the selection; not while typing, writing or in a menu (an
@@ -128,7 +138,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', shortcut))
       icon="folder"
       :items="moveTargets"
       :disabled="busy"
-      :title="account === null ? 'Conversations of several accounts are selected; folders belong to one account' : undefined"
+      :title="accounts.length > 1 ? 'Conversations of several accounts are selected; folders belong to one account' : undefined"
       @choose="(folderId) => relocate('move', folderId)"
     />
     <button type="button" class="tool" :disabled="busy" aria-keyshortcuts="#" title="Move to Trash (#)" @click="relocate('trash')"><AppIcon name="trash" /> Trash</button>

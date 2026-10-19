@@ -210,7 +210,7 @@ describe('ReadingPane actions', () => {
     await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/'))
 
     const notice = useComposeStore().notices.find((n) => n.text.startsWith('Moved to Trash.'))
-    expect(notice?.text).toBe('Moved to Trash. Undo leaves one message that was in several folders.')
+    expect(notice?.text).toBe('Moved to Trash. Undo cannot put one message back.')
     actions.length = 0
     notice?.action?.run()
     await vi.waitFor(() => expect(actions).toEqual([{ messageIds: ['m1'], action: 'move', folderId: 'sent', fromFolderId: 'trash' }]))

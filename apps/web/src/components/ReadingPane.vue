@@ -80,7 +80,7 @@ function toggle(messageId: string): void {
 /** Archives, trashes or moves the whole conversation and goes back to the list. */
 function relocate(action: 'archive' | 'trash' | 'move', folderId?: string): Promise<void> {
   return exclusive(async () => {
-    if (await actions.relocate(messages.value.map((message) => message.id), action, folders.value, folderId)) {
+    if ((await actions.relocate(messages.value.map((message) => message.id), action, folders.value, folderId)) !== null) {
       await router.push(props.backTo)
     }
   })
