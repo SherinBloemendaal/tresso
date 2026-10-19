@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { AppState } from 'react-native'
 import { fetch as streamingFetch } from 'expo/fetch'
+import * as SecureStore from 'expo-secure-store'
 import type { ChangePage, ConversationSummary, MessageBody, RealtimeAccess, SyncedMailAccount, SyncedMessage, SyncedThread } from '@tresso/core'
 import { useAuth } from '@/auth/AuthProvider'
 import { MailSession, type MailState } from '@/mail/mailSession'
@@ -9,6 +10,8 @@ import { deleteSql, openSql } from '@/mail/sql'
 const LIST_LIMIT = 200
 /** Wait before asking again who is signed in, after that failed (offline at start, server down). */
 const ME_RETRY_MS = 10_000
+/** Who was signed in last, so their copy opens before the server answers (or when it cannot: offline). */
+const LAST_USER = 'mail.lastUserId'
 
 interface Mail extends Omit<MailState, 'userId'> {
   mailAccounts(): Promise<SyncedMailAccount[]>
@@ -38,21 +41,32 @@ export function MailProvider({ children }: { children: ReactNode }) {
         // expo/fetch streams response bodies, which the realtime connection reads.
         fetch: streamingFetch as unknown as typeof fetch,
         onState: setState,
+        foreground: AppState.currentState === 'active',
       }),
     [auth.session],
   )
 
-  // Who is signed in decides whose copy is open; asked again until it is known.
+  // Who is signed in decides whose copy is open. The last known user's copy opens at once, so mail on the device
+  // shows offline too; the server then confirms who it is (asked again until it answers), and a different answer
+  // switches to that user's copy, which removes the other.
   useEffect(() => {
     if (auth.restoring) {
       return
     }
     if (!auth.isAuthenticated) {
       void session.switchTo(null)
+      void SecureStore.deleteItemAsync(LAST_USER).catch(() => {})
       return
     }
     let current = true
     let retry: ReturnType<typeof setTimeout> | undefined
+    void SecureStore.getItemAsync(LAST_USER)
+      .then((last) => {
+        if (current && last !== null) {
+          void session.switchTo(last)
+        }
+      })
+      .catch(() => {})
     const lookUp = () => {
       auth.session
         .me()
@@ -60,6 +74,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
           if (current) {
             setLookupError(null)
             void session.switchTo(me.id)
+            void SecureStore.setItemAsync(LAST_USER, me.id).catch(() => {})
           }
         })
         .catch((error: unknown) => {

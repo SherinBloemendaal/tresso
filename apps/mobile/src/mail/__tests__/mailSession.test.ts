@@ -64,8 +64,9 @@ describe('MailSession', () => {
     const { mail, last } = session(disk)
 
     await mail.switchTo('kim')
-    expect(last()).toMatchObject({ userId: 'kim', ready: true, syncState: 'idle' })
-    expect((await mail.database?.mailAccounts())?.map((a) => a.id)).toEqual(['work'])
+    expect(last()).toMatchObject({ userId: 'kim', ready: true })
+    await vi.waitFor(async () => expect((await mail.database?.mailAccounts())?.map((a) => a.id)).toEqual(['work']))
+    await vi.waitFor(() => expect(last().syncState).toBe('idle'))
 
     await mail.switchTo(null)
     expect(last()).toMatchObject({ userId: null, ready: false })
@@ -91,10 +92,10 @@ describe('MailSession', () => {
 
     const opening = slow.mail.switchTo('kim')
     await vi.waitFor(() => expect(disk.files.has(databaseName('kim'))).toBe(true))
-    const leaving = slow.mail.switchTo(null)
-    release()
+    // The first pull is still on its way: signing out does not wait for it.
     await opening
-    await leaving
+    await slow.mail.switchTo(null)
+    release()
 
     expect(disk.files.has(databaseName('kim'))).toBe(false)
     expect(slow.last()).toMatchObject({ userId: null, ready: false })
@@ -121,6 +122,7 @@ describe('MailSession', () => {
     const fetchPage = vi.fn(async (since: number) => page(since === 0 ? 1 : since, since === 0 ? { mailAccounts: [account] } : {}))
     const { mail, last } = session(disk, fetchPage)
     await mail.switchTo('kim')
+    await vi.waitFor(() => expect(last().syncState).toBe('idle'))
     const pulls = fetchPage.mock.calls.length
 
     mail.setForeground(false)

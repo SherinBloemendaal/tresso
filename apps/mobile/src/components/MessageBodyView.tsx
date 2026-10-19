@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, View } from 'react-native'
 import { WebView, type WebViewMessageEvent } from 'react-native-webview'
 import { mailFrameDocument, type MessageBody } from '@tresso/core'
 import { config } from '@/config'
+import { MAX_BODY_HEIGHT, nextBodyHeight } from '@/mail/bodyHeight'
 import { useMail } from '@/mail/MailProvider'
 import { useTheme, type Theme } from '@/theme'
 
@@ -23,9 +24,6 @@ const MEASURE = `
   })();
   true;
 `
-/** No message is taller than this on screen; past it, the view scrolls inside. */
-const MAX_HEIGHT = 20_000
-
 /** One message's body: sanitized HTML in a locked-down web view, or its plain text. */
 export function MessageBodyView({ messageId }: { messageId: string }) {
   const mail = useMail()
@@ -35,6 +33,9 @@ export function MessageBodyView({ messageId }: { messageId: string }) {
   const [error, setError] = useState<string | null>(null)
   const [remote, setRemote] = useState(false)
   const [height, setHeight] = useState(80)
+  /** The last growths, to tell content that grows with the view (sized in vh) from content that is just long. */
+  const growths = useRef<number[]>([])
+  const shown = useRef(80)
   const { body: load } = mail
 
   useEffect(() => {
@@ -75,16 +76,20 @@ export function MessageBodyView({ messageId }: { messageId: string }) {
           style={[styles.web, { height }]}
           originWhitelist={['about:*']}
           source={{ html: mailFrameDocument(body.html, { apiOrigin: API_ORIGIN, allowRemoteContent: body.remoteContentLoaded }), baseUrl: '' }}
-          scrollEnabled={height >= MAX_HEIGHT}
+          scrollEnabled={height >= MAX_BODY_HEIGHT}
+          nestedScrollEnabled
           javaScriptEnabled
           allowFileAccess={false}
           mixedContentMode="never"
           injectedJavaScript={MEASURE}
           onMessage={(event: WebViewMessageEvent): void => {
             const measured = Number(event.nativeEvent.data)
-            if (Number.isFinite(measured) && measured > 0) {
-              setHeight((previous) => (Math.abs(measured - previous) <= 1 ? previous : Math.min(measured, MAX_HEIGHT)))
+            if (!Number.isFinite(measured) || measured <= 0) {
+              return
             }
+            // Worked out here rather than in a state updater, which React may run twice.
+            shown.current = nextBodyHeight(shown.current, measured, growths.current)
+            setHeight(shown.current)
           }}
           // A link the reader taps opens in the browser (or the mail app), never inside the message view; nothing
           // else leaves the page (a redirect, a frame).
