@@ -119,6 +119,12 @@ Users log in with email + password (Argon2id) and, later, Google / Microsoft sig
   to public addresses (no private, loopback, link-local, carrier-grade NAT or IPv4-mapped ranges) and the connection
   must use TLS or STARTTLS. `MAIL_ALLOW_UNSAFE_SERVERS=1` lifts this for local test servers only. The sync workers
   repeat the address check when they connect, which also covers DNS changes after validation.
+- `GET /api/v1/mail-server-settings?emailAddress=` suggests IMAP and SMTP settings the way Thunderbird finds them:
+  the provider's own autoconfig (`autoconfig.<domain>`, then `<domain>/.well-known/autoconfig`), Mozilla's ISPDB
+  by domain, then ISPDB by the parent domains of the preferred mail exchanger (which finds company domains hosted
+  by a large provider). The first three are requested together. These requests go to domains users type in, so
+  they run through a client that refuses private networks, with short timeouts and a 64 KB limit. Only encrypted
+  servers are suggested. Answers are cached per domain in Redis: a day when found, an hour when not.
 
 ### 3.4 Sync workers (`apps/sync`)
 

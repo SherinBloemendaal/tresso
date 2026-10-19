@@ -8,8 +8,8 @@ use Symfony\Component\HttpClient\Response\MockResponse;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
 /**
- * Stands in for every outgoing HTTP request in the test environment (framework.http_client.mock_response_factory)
- * and records what the API published to the Mercure hub.
+ * Stands in for the Mercure hub in tests (requests reach it through the {@see MockHttpRouter}) and records what the
+ * API published.
  */
 final class RecordingMercureHub
 {
