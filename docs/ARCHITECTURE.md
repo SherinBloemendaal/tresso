@@ -554,9 +554,22 @@ saying how many messages that were in several folders it leaves.
 Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
 addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is
 sent with a `sendAt` a few seconds ahead, so "Undo" can cancel it; "Send later" picks a time. The draft is saved in
-local copy while typing and kept until the message is confirmed sent, so a failed message can be edited and sent
+the local copy while typing and kept until the message is confirmed sent, so a failed message can be edited and sent
 again; the outcome of each sent message is announced once. Recipient suggestions come from the people in synced
 mail, stored locally per user.
+
+Attachments: files are attached to the server's copy of a draft (`POST /api/v1/drafts/{id}/attachments`, multipart,
+field `file`), so the draft goes up first; a forward takes the original's files along
+(`/forwarded-attachments`, without storing them again; inline images stay part of the text, malware is refused).
+Files live in object storage under their SHA-256 (uploads under `uploads/`), so the same file is stored once; they go
+out with the message and into the Drafts folder copy, within `MAIL_MAX_ATTACHMENT_BYTES` together (18 MB by default,
+about 25 MB once encoded). A file with malware is not sent. Drafts in the delta carry their files without links,
+which expire; `GET /api/v1/drafts/{id}` has fresh signed ones, and the content is served like a received
+attachment's. An upload no draft refers to any more is removed ten minutes later, under a lock on its key that
+uploading takes too. Sending keeps the draft on the server, out of the clients' sight, until its message went out:
+an undo or a failure brings it back as it was, version and files included, so the device can go on writing it; once
+the message is sent the draft goes. The web client attaches by button or by dropping files on the form; the phone
+picks files (device or cloud drive) and photos (HEIC as JPEG), and shows the files of received messages.
 
 ### 3.11 Signatures
 
