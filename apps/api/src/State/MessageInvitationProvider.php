@@ -11,6 +11,7 @@ use App\ApiResource\MessageInvitation;
 use App\Calendar\ICalendar\CalendarDocument;
 use App\Calendar\ICalendar\EventReader;
 use App\Calendar\ICalendar\InvalidCalendarData;
+use App\Calendar\Invitation\InvitationApplier;
 use App\Calendar\OccurrenceExpander;
 use App\Calendar\SelfAddresses;
 use App\Calendar\TooManyOccurrences;
@@ -112,18 +113,19 @@ final readonly class MessageInvitationProvider implements ProviderInterface
             ($row?->getSelfPartstat() ?? $data->selfPartstat)?->value,
             ItipMethod::Request === $invitation->getMethod() && null !== $row && null !== $row->getSelfPartstat() && 'outdated' !== $kind,
             $conflicts,
-            ItipMethod::Request === $invitation->getMethod() && null === $row && null === $invitation->getAppliedAt(),
+            null === $invitation->getAppliedAt() && \in_array($invitation->getMethod(), [ItipMethod::Request, ItipMethod::Cancel, ItipMethod::Reply], true),
         );
     }
 
     private function storedRow(User $user, CalendarInvitation $invitation): ?CalendarEvent
     {
-        foreach ($this->objects->findForOwnerByUid($user, $invitation->getUid()) as $object) {
-            $rows = $this->events->findForObject($object);
-
-            return $rows[$invitation->getRecurrenceKey()] ?? $rows[''] ?? null;
+        // The same object the applier would change.
+        $object = InvitationApplier::pick($this->objects->findForOwnerByUid($user, $invitation->getUid()), $invitation->getMessage()->getMailAccount());
+        if (null === $object) {
+            return null;
         }
+        $rows = $this->events->findForObject($object);
 
-        return null;
+        return $rows[$invitation->getRecurrenceKey()] ?? $rows[''] ?? null;
     }
 }

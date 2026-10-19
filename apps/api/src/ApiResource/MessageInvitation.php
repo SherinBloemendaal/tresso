@@ -32,10 +32,11 @@ use App\State\MessageInvitationProvider;
             security: "is_granted('".Scope::ROLE_MAIL_READ."') and is_granted('".Scope::ROLE_CALENDAR_READ."')",
             provider: MessageInvitationProvider::class,
         ),
-        // Adds an invitation the calendar did not take by itself (it arrived outside the inbox, or before the
-        // account was connected), with the same checks as calendar mail that arrives in the inbox.
+        // Applies calendar mail the calendar did not take by itself (an invitation, update, cancellation or reply that
+        // arrived outside the inbox or before the account was connected), with the same checks as calendar mail that
+        // arrives in the inbox.
         new Post(
-            uriTemplate: '/messages/{id}/invitation/add',
+            uriTemplate: '/messages/{id}/invitation/apply',
             status: 200,
             security: "is_granted('".Scope::ROLE_MAIL_READ."') and is_granted('".Scope::ROLE_CALENDAR_WRITE."')",
             input: false,
@@ -77,8 +78,11 @@ final readonly class MessageInvitation
         public ?string $selfResponse,
         public bool $canRespond,
         public array $conflicts,
-        /** An invitation the calendar did not take by itself; POST .../invitation/add adds it. */
-        public bool $canAdd,
+        /**
+         * Calendar mail the calendar did not take by itself (it arrived outside the inbox or before the account was
+         * connected, or there was no calendar to write to): POST .../invitation/apply applies it.
+         */
+        public bool $canApply,
     ) {
     }
 }

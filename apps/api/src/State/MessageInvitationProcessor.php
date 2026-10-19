@@ -8,6 +8,7 @@ use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProcessorInterface;
 use App\ApiResource\MessageInvitation;
 use App\Calendar\Invitation\InvitationApplier;
+use App\Calendar\Invitation\InvitationOutcome;
 use App\Entity\CalendarInvitation;
 use App\Entity\Message;
 use App\Enum\ItipMethod;
@@ -20,8 +21,8 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 
 /**
- * Adds an invitation the calendar did not take by itself, on the user's word, with the checks that calendar mail
- * in the inbox gets: it must come from the organizer and invite the user.
+ * Applies calendar mail the calendar did not take by itself, on the user's word, with the checks that calendar mail
+ * in the inbox gets.
  *
  * @implements ProcessorInterface<null, MessageInvitation>
  */
@@ -45,22 +46,22 @@ final readonly class MessageInvitationProcessor implements ProcessorInterface
         if (!$invitation instanceof CalendarInvitation) {
             throw new NotFoundHttpException('This message carries no calendar event.');
         }
-        if (ItipMethod::Request !== $invitation->getMethod()) {
-            throw new UnprocessableEntityHttpException('Only an invitation can be added to the calendar.');
+        if (!\in_array($invitation->getMethod(), [ItipMethod::Request, ItipMethod::Cancel, ItipMethod::Reply], true)) {
+            throw new UnprocessableEntityHttpException('Only invitations, updates, cancellations and replies change the calendar.');
         }
 
-        $this->entityManager->wrapInTransaction(function () use ($invitation): void {
+        $outcome = $this->entityManager->wrapInTransaction(function () use ($invitation): ?InvitationOutcome {
             $locked = $this->entityManager->find(CalendarInvitation::class, $invitation->getId(), LockMode::PESSIMISTIC_WRITE);
-            if (null !== $locked && null === $locked->getAppliedAt()) {
-                $this->applier->applyNow($locked);
-            }
-        });
 
-        $result = $this->provider->provide($operation, $uriVariables, $context);
-        if (null === $result->eventId) {
-            throw new UnprocessableEntityHttpException('This invitation cannot be added: it does not come from its organizer, or it is not for you.');
+            // Applied before (by the worker, or an earlier click): nothing more to do.
+            return null !== $locked && null === $locked->getAppliedAt() ? $this->applier->applyNow($locked) : null;
+        });
+        if (null !== $outcome && InvitationOutcome::APPLIED !== $outcome->status) {
+            // Ignored mail is used up (applying it again cannot change the answer); mail without a calendar to go
+            // to stays, for once there is one.
+            throw new UnprocessableEntityHttpException($outcome->reason ?? 'This calendar mail cannot be applied.');
         }
 
-        return $result;
+        return $this->provider->provide($operation, $uriVariables, $context);
     }
 }
