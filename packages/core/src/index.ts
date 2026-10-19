@@ -1,4 +1,5 @@
 export * from './accounts'
+export * from './actions'
 export * from './compose'
 export * from './domain'
 export * from './oauth'
