@@ -23,8 +23,9 @@ Delivered in steps, each its own pull request:
 - [x] 1.2a Ingest protocol and threading: folders, message batches, changes, account status, thread merging
 - [x] 1.2b Go IMAP sync: folder discovery, newest-first backfill, raw MIME and attachments to S3, MIME parsing,
   IDLE, CONDSTORE deltas, presence-based deletions, SSRF-guarded connections
-- [ ] 1.3 Client delta sync, Mercure realtime (issuer-based JWT config of current Mercure
-  releases)
+- [x] 1.3a Client delta sync: per-user change numbers committed in order, tombstones, paged delta endpoint
+- [ ] 1.3b Mercure realtime (issuer-based configuration and RFC 9396 tokens of
+  current Mercure releases)
 - [ ] 1.4 Web client: sign-in, Unified Inbox, reading pane with sanitized HTML in an isolated frame, remote content
   blocked by default
 - [ ] 1.5 Compose, reply and forward, HTML signatures per account, sending through the worker, search
