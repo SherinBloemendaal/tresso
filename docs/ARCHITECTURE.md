@@ -912,7 +912,7 @@ after. Everything lives in `apps/api/src/Notification`.
 - **What can remind:**
   - Event reminders: any number per event (up to 10 from the editor), each with an offset and its own channels.
     Stored as `VALARM`s in the event's iCalendar, so other clients see them too; the channels ride along as
-    `X-TRESSO-CHANNELS` (an alarm without it means push, `ACTION:EMAIL` means email). Alarms other clients set
+    `X-TRESSO-CHANNELS` (an alarm without it means phone and desktop, `ACTION:EMAIL` means email). Alarms other clients set
     relative to the end or at a fixed time are kept and fire as well. An event without alarms uses the user's
     **default rules** (`defaultReminders`); `X-TRESSO-DEFAULT-REMINDERS:FALSE` means "no reminders at all".
   - Default rules (`reminder_rule`, `/api/v1/reminder-rules`): by calendar, timed or all-day, the user's role
@@ -920,7 +920,7 @@ after. Everything lives in `apps/api/src/Notification`.
     the most conditions wins, ties by position. A rule gives reminders in minutes before the start, or for all-day
     events a time on the day before, and switches leave-now, the brief (minutes before) and the follow-up for the
     events it matches. New users start with 10 minutes before timed events and 09:00 the day before all-day events,
-    both by push.
+    both on the phone and the desktop.
   - **Leave now:** for timed events with a place. With a travel time set on the event (`travelMinutes`, stored as
     `X-TRESSO-TRAVEL-MINUTES`; Apple Calendar's `X-APPLE-TRAVEL-DURATION` is read too) it fires at start minus travel
     minus 5 minutes. When the matching rule asks for leave-now and the user shared a position (`PUT
@@ -934,8 +934,11 @@ after. Everything lives in `apps/api/src/Notification`.
   - **Follow-up nudge:** at the end of a meeting with other people, to write notes: private notes on an event or an
     occurrence (`PUT /api/v1/calendar-events/{id}/note`, in the delta as `eventNotes`, never sent to a provider) and,
     once todos exist (phase 2), todos.
-- **Channels:** `push` reaches every enabled device of the user, `email` the address in the settings (or the sign-in
-  address) from the system sender `NOTIFICATIONS_FROM`. Devices register with `POST /api/v1/notification-devices`:
+- **Channels:** `phone` reaches the user's Expo devices, `desktop` the desktop app and browsers with web push, `email`
+  the address in the settings (or the sign-in address) from the system sender `NOTIFICATIONS_FROM`. Reminders carry
+  their own channels; other kinds use the user's choice per kind (`channelsByKind` in the notification settings,
+  keyed by kind name so other features add their own), else the kind's default: leave-now on the phone, briefs and
+  follow-ups on the desktop. Devices register with `POST /api/v1/notification-devices`:
   - Web push (`web_push`): the browser's subscription. Messages are encrypted per RFC 8291 (aes128gcm) and signed
     with VAPID (RFC 8292, ES256) on ext-openssl, checked against the RFC's own example. Endpoints come from clients,
     so they must be https and requests refuse private networks. Keys come from `WEB_PUSH_PUBLIC_KEY` and
@@ -957,9 +960,14 @@ after. Everything lives in `apps/api/src/Notification`.
   `FireNotification` for its fire time. A Symfony Scheduler task (`scheduler_notifications`) sweeps every minute:
   it delivers due notifications whose message got lost (up to two hours late) and extends the plan for users whose
   plan ends within a week. A delivered notification is never planned again.
-- **Idempotent delivery:** delivery takes a lock on the notification, checks it is still current, and records one
-  `notification_delivery` per target and round (unique) before anything is sent, so a retried message or a sweep
-  never notifies a device twice. Sends happen after that commit; their outcome is recorded afterwards.
+- **Idempotent delivery:** delivery takes a lock on the notification, checks it is still current and marks it
+  delivered. Then the `NotificationDispatcher` sends it: given a user, a `PushMessage` (id, kind, title, body, a
+  path in the app or none, silent, and a data map), a delivery key and the channels, it claims one
+  `notification_delivery` per key and target (unique, `INSERT ... ON CONFLICT DO NOTHING`) before anything is sent,
+  so a retried message or a sweep never notifies a device twice. Sends happen after that commit, their outcome is
+  recorded afterwards, and devices the push service no longer knows are removed. Calendar notifications use the key
+  `calendar:{notification}:{round}`; any other feature (mail, phase 3.7) sends through the same dispatcher with keys
+  of its own.
 - **In the apps:** `GET /api/v1/notifications` lists the last week and the coming days; `POST .../dismiss` clears a
   notification on every device (the delta carries `dismissedAt`), `POST .../snooze` delivers it again later (a new
   round).
