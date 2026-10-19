@@ -19,8 +19,11 @@ final class Props
             return null;
         }
 
+        // In UTC: date-time columns keep the wall clock only, so an instant in another zone would be stored wrong.
+        $utc = new \DateTimeZone('UTC');
+
         return $property->hasTime()
-            ? $property->getDateTime(new \DateTimeZone('UTC'))
-            : new \DateTimeImmutable($property->getDateTime($zone)->format('Y-m-d'), $zone);
+            ? $property->getDateTime($utc)->setTimezone($utc)
+            : new \DateTimeImmutable($property->getDateTime($zone)->format('Y-m-d'), $zone)->setTimezone($utc);
     }
 }
