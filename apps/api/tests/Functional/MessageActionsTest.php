@@ -431,6 +431,42 @@ final class MessageActionsTest extends DatabaseTestCase
         self::assertSame([$this->folderId('INBOX')], $this->message()['folderIds'], 'a refused selection changes nothing');
     }
 
+    public function testArchivingOnTheGmailApiLeavesTheCopyAlreadyInAllMail(): void
+    {
+        // The Gmail API syncer files every message in the virtual All Mail folder too, under the same message id.
+        $this->accountId = $this->createAccount('kim@gmail.example', $this->kim);
+        $this->connection()->executeStatement("UPDATE mail_account SET provider = 'gmail', connection = '{}' WHERE id = :id", ['id' => $this->accountId]);
+        $this->lease();
+        $this->folders($this->accountId, [
+            ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => null],
+            ['remoteName' => 'tresso:all', 'displayName' => 'All Mail', 'role' => 'all', 'uidValidity' => null],
+        ]);
+        $this->ingest($this->accountId, 'INBOX', '18f2a', '<gmail@finance.example>');
+        $this->ingest($this->accountId, 'tresso:all', '18f2a', '<gmail@finance.example>');
+        $this->messageId = $this->message('<gmail@finance.example>')['id'];
+
+        $this->act('archive');
+        $changes = $this->claim();
+        self::assertSame(['folder' => 'INBOX', 'uidValidity' => null, 'remoteUid' => '18f2a'], $changes[0]['source'] ?? null);
+        self::assertSame(['folder' => 'tresso:all'], $changes[0]['target'] ?? null);
+
+        $this->report($changes[0]['id'], 'done', '18f2a');
+
+        self::assertSame(['tresso:all' => '18f2a'], $this->locations(), 'one copy, the one All Mail already had');
+        self::assertSame([$this->folderId('tresso:all')], $this->message('<gmail@finance.example>')['folderIds']);
+    }
+
+    public function testAMoveOnAnImapAccountReportsANumericUid(): void
+    {
+        $this->act('archive');
+        $change = $this->claim()[0];
+
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/mailbox-changes/'.$change['id'].'/report', ['workerId' => 'w1', 'outcome' => 'done', 'remoteUid' => '18f2a'], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame('An IMAP uid is a number.', $this->decodedResponse()['detail'] ?? null);
+    }
+
     public function testAMoveCanTakeOnlyTheCopiesInOneFolder(): void
     {
         $this->ingest($this->accountId, 'Projects', '3', '<plan@finance.example>');

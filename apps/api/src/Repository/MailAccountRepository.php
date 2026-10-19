@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Repository;
 
 use App\Entity\MailAccount;
+use App\Entity\ProviderGrant;
 use App\Entity\User;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
@@ -47,5 +48,17 @@ class MailAccountRepository extends ServiceEntityRepository
     public function existsForOwner(User $owner, string $emailAddress): bool
     {
         return null !== $this->findOneBy(['owner' => $owner, 'emailAddress' => mb_strtolower($emailAddress)]);
+    }
+
+    public function findOneByOwnerAndAddress(User $owner, string $emailAddress): ?MailAccount
+    {
+        return $this->findOneBy(['owner' => $owner, 'emailAddress' => mb_strtolower($emailAddress)]);
+    }
+
+    /** @return list<MailAccount> */
+    public function findByProviderGrant(ProviderGrant $grant): array
+    {
+        /** @var list<MailAccount> */
+        return $this->findBy(['providerGrant' => $grant]);
     }
 }

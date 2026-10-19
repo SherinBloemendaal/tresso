@@ -6,6 +6,7 @@ namespace App\Entity;
 
 use App\Enum\MailAccountStatus;
 use App\Enum\MailProvider;
+use App\Enum\OAuthProvider;
 use App\Mail\ServerSettings;
 use App\Repository\MailAccountRepository;
 use Doctrine\DBAL\Types\Types;
@@ -49,10 +50,16 @@ class MailAccount implements TracksChanges
     private array $connection = [];
 
     /**
-     * Credentials (password or OAuth tokens), encrypted with the owner's data key.
+     * The password of an IMAP account, encrypted with the owner's data key. Accounts connected through OAuth have none:
+     * their tokens live on the provider grant.
      */
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     private ?string $encryptedCredentials = null;
+
+    /** The provider sign-in a Gmail or Microsoft 365 account syncs with; null for IMAP accounts. */
+    #[ORM\ManyToOne]
+    #[ORM\JoinColumn(nullable: true)]
+    private ?ProviderGrant $providerGrant = null;
 
     #[ORM\Column(length: 16, enumType: MailAccountStatus::class)]
     private MailAccountStatus $status = MailAccountStatus::Active;
@@ -123,39 +130,54 @@ class MailAccount implements TracksChanges
         $this->connection = ['imap' => $imap->toArray(), 'smtp' => $smtp->toArray(), 'username' => $username];
     }
 
-    public function getImap(): ServerSettings
+    /** IMAP and SMTP settings exist only for IMAP accounts; Gmail and Microsoft 365 sync through their APIs. */
+    public function usesServers(): bool
     {
-        return ServerSettings::fromArray($this->connectionPart('imap'));
+        return MailProvider::Imap === $this->provider;
     }
 
-    public function getSmtp(): ServerSettings
+    public function getImap(): ?ServerSettings
     {
-        return ServerSettings::fromArray($this->connectionPart('smtp'));
+        $value = $this->connection['imap'] ?? null;
+
+        return \is_array($value) ? ServerSettings::fromArray($value) : null;
     }
 
-    public function getUsername(): string
+    public function getSmtp(): ?ServerSettings
+    {
+        $value = $this->connection['smtp'] ?? null;
+
+        return \is_array($value) ? ServerSettings::fromArray($value) : null;
+    }
+
+    public function getUsername(): ?string
     {
         $username = $this->connection['username'] ?? null;
 
-        return \is_string($username) ? $username : throw new \UnexpectedValueException('The mail account has no username.');
+        return \is_string($username) ? $username : null;
     }
 
     /**
-     * Connection settings as the sync workers receive them.
+     * Connection settings as the sync workers receive them; null when the account has no servers.
      *
-     * @return array<string, mixed>
+     * @return array<string, mixed>|null
      */
-    public function getConnection(): array
+    public function getConnection(): ?array
     {
-        return $this->connection;
+        return [] === $this->connection ? null : $this->connection;
     }
 
-    /** @return array<mixed> */
-    private function connectionPart(string $part): array
+    public function getProviderGrant(): ?ProviderGrant
     {
-        $value = $this->connection[$part] ?? null;
+        return $this->providerGrant;
+    }
 
-        return \is_array($value) ? $value : throw new \UnexpectedValueException(\sprintf('The mail account has no %s settings.', $part));
+    public function linkProviderGrant(ProviderGrant $grant): void
+    {
+        if (OAuthProvider::forMailProvider($this->provider) !== $grant->getProvider() || $grant->getOwner() !== $this->owner) {
+            throw new \LogicException('A mail account can only use a grant of its own owner and provider.');
+        }
+        $this->providerGrant = $grant;
     }
 
     public function getEncryptedCredentials(): ?string

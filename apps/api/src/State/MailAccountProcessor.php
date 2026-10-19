@@ -16,6 +16,9 @@ use App\Entity\MailAccount;
 use App\Entity\User;
 use App\Enum\MailAccountStatus;
 use App\Enum\MailProvider;
+use App\Enum\OAuthProvider;
+use App\ProviderAuth\ProviderAccessTokens;
+use App\ProviderAuth\ProviderClient;
 use App\Repository\MailAccountRepository;
 use App\Security\CurrentUser;
 use App\Security\Crypto\CredentialVault;
@@ -26,6 +29,8 @@ use Symfony\Component\Validator\ConstraintViolationList;
 
 /**
  * Creates, updates and deletes the signed-in user's mail accounts. Passwords go straight into the credential vault.
+ * Gmail and Microsoft 365 accounts are created through {@see \App\ProviderAuth\ProviderConnector}; here they can be
+ * renamed, paused and removed, and removing the last account of a provider grant also ends the grant.
  *
  * @implements ProcessorInterface<CreateMailAccount|UpdateMailAccount|MailAccountResource, MailAccountResource|null>
  */
@@ -36,19 +41,41 @@ final readonly class MailAccountProcessor implements ProcessorInterface
         private CurrentUser $currentUser,
         private CredentialVault $vault,
         private EntityManagerInterface $entityManager,
+        private ProviderAccessTokens $providerTokens,
+        private ProviderClient $providerClient,
     ) {
     }
 
     public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): ?MailAccountResource
     {
+        // Checked before the transaction: an exception inside it would close the entity manager.
+        if ($data instanceof UpdateMailAccount) {
+            $account = $this->ownedAccount($this->currentUser->get(), $uriVariables);
+            if (!$account->usesServers()) {
+                $this->assertNoServerChanges($account, $data);
+            }
+        }
+
+        /** @var list<array{OAuthProvider, string}> $endedGrants provider and refresh token of grants deleted with their last account */
+        $endedGrants = [];
         // One transaction per write, so change numbers for client sync commit in order.
-        return $this->entityManager->wrapInTransaction(fn (): ?MailAccountResource => $this->write($data, $operation, $uriVariables));
+        $result = $this->entityManager->wrapInTransaction(function () use ($data, $operation, $uriVariables, &$endedGrants): ?MailAccountResource {
+            return $this->write($data, $operation, $uriVariables, $endedGrants);
+        });
+
+        // Only once the deletion is committed: the provider call cannot be rolled back.
+        foreach ($endedGrants as [$provider, $refreshToken]) {
+            $this->providerClient->revoke($provider, $refreshToken);
+        }
+
+        return $result;
     }
 
     /**
      * @param array<string, mixed> $uriVariables
+     * @param list<array{OAuthProvider, string}> $endedGrants
      */
-    private function write(mixed $data, Operation $operation, array $uriVariables): ?MailAccountResource
+    private function write(mixed $data, Operation $operation, array $uriVariables, array &$endedGrants): ?MailAccountResource
     {
         $owner = $this->currentUser->get();
 
@@ -59,12 +86,22 @@ final readonly class MailAccountProcessor implements ProcessorInterface
         $account = $this->ownedAccount($owner, $uriVariables);
 
         if ($operation instanceof DeleteOperationInterface) {
+            $grant = $account->getProviderGrant();
             // Drafts outlive the account; detached here rather than by the foreign key, so every device hears of it.
             foreach ($this->entityManager->getRepository(Draft::class)->findBy(['mailAccount' => $account]) as $draft) {
                 $draft->detachFromAccount();
             }
             $this->entityManager->remove($account);
             $this->entityManager->flush();
+
+            if (null !== $grant && [] === $this->accounts->findByProviderGrant($grant)) {
+                $refreshToken = $this->providerTokens->refreshToken($grant);
+                $this->entityManager->remove($grant);
+                $this->entityManager->flush();
+                if (null !== $refreshToken) {
+                    $endedGrants[] = [$grant->getProvider(), $refreshToken];
+                }
+            }
 
             return null;
         }
@@ -105,9 +142,9 @@ final readonly class MailAccountProcessor implements ProcessorInterface
 
         if (null !== $input->imap || null !== $input->smtp || null !== $input->username) {
             $account->configureServers(
-                $input->imap ?? $account->getImap(),
-                $input->smtp ?? $account->getSmtp(),
-                $input->username ?? $account->getUsername(),
+                $input->imap ?? $account->getImap() ?? throw new \LogicException('IMAP accounts have IMAP settings.'),
+                $input->smtp ?? $account->getSmtp() ?? throw new \LogicException('IMAP accounts have SMTP settings.'),
+                $input->username ?? $account->getUsername() ?? throw new \LogicException('IMAP accounts have a username.'),
             );
         }
 
@@ -125,6 +162,29 @@ final readonly class MailAccountProcessor implements ProcessorInterface
         $this->entityManager->flush();
 
         return MailAccountResource::fromEntity($account);
+    }
+
+    /**
+     * Accounts that sign in through a provider have no password or servers to change; signing in again fixes them.
+     */
+    private function assertNoServerChanges(MailAccount $account, UpdateMailAccount $input): void
+    {
+        $violations = new ConstraintViolationList();
+        foreach (['username' => $input->username, 'password' => $input->password, 'imap' => $input->imap, 'smtp' => $input->smtp] as $field => $value) {
+            if (null !== $value) {
+                $violations->add(new ConstraintViolation(
+                    \sprintf('This account signs in with %s; it has no %s to change.', OAuthProvider::forMailProvider($account->getProvider())?->label() ?? 'its provider', 'password' === $field ? 'password' : 'server settings'),
+                    null,
+                    [],
+                    $input,
+                    $field,
+                    null,
+                ));
+            }
+        }
+        if (\count($violations) > 0) {
+            throw new ValidationException($violations);
+        }
     }
 
     /**

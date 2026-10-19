@@ -55,6 +55,9 @@ final readonly class SyncMailboxProcessor implements ProcessorInterface
             if (MailboxReportInput::GONE === $data->outcome && MailboxChangeKind::Move !== $change->getKind()) {
                 throw new UnprocessableEntityHttpException('Only a move can find its copy gone.');
             }
+            if (null !== $data->remoteUid && $account->usesServers() && 1 !== preg_match('/^[0-9]{1,18}$/', $data->remoteUid)) {
+                throw new UnprocessableEntityHttpException('An IMAP uid is a number.');
+            }
             match ($data->outcome) {
                 MailboxReportInput::DONE => $this->changes->done($change, $data->remoteUid),
                 MailboxReportInput::GONE => $this->changes->gone($change),

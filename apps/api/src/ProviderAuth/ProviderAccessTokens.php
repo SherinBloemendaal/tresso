@@ -1,0 +1,147 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\ProviderAuth;
+
+use App\Entity\ProviderGrant;
+use App\Enum\MailAccountStatus;
+use App\Enum\ProviderFeature;
+use App\Repository\MailAccountRepository;
+use App\Security\Crypto\CredentialVault;
+use Doctrine\DBAL\LockMode;
+use Doctrine\ORM\EntityManagerInterface;
+
+/**
+ * Keeps a grant's tokens: stores what a sign-in returned and hands out access tokens, refreshing them at the provider
+ * when they are about to expire. The refresh token never leaves this class.
+ *
+ * Refreshing locks the grant row, so two callers (a sync worker and, later, the calendar) never refresh at the same
+ * time: Microsoft replaces the refresh token on every refresh, and a lost replacement would end the grant.
+ */
+final readonly class ProviderAccessTokens
+{
+    /** Access tokens closer than this to expiry are refreshed before they are handed out. */
+    private const int REFRESH_MARGIN_SECONDS = 300;
+
+    /** A token reported as rejected is replaced, unless it was issued this recently (then the report is stale). */
+    private const int REJECTION_GRACE_SECONDS = 60;
+
+    public function __construct(
+        private EntityManagerInterface $entityManager,
+        private CredentialVault $vault,
+        private ProviderClient $client,
+        private MailAccountRepository $mailAccounts,
+    ) {
+    }
+
+    /**
+     * Stores the tokens of a sign-in. Providers may omit the refresh token on a repeated consent; the previous one
+     * then stays valid and is kept.
+     */
+    public function store(ProviderGrant $grant, TokenSet $tokens): void
+    {
+        $refreshToken = $tokens->refreshToken ?? $this->refreshToken($grant)
+            ?? throw new \LogicException('Callers check that the tokens or the grant hold a refresh token.');
+
+        $this->vault->sealGrant($grant, [
+            'refreshToken' => $refreshToken,
+            'accessToken' => $tokens->accessToken,
+            'accessTokenExpiresAt' => $tokens->expiresAt->getTimestamp(),
+            'accessTokenIssuedAt' => time(),
+        ]);
+    }
+
+    /**
+     * An access token for the feature, valid for at least a few more minutes.
+     *
+     * @param bool $rejected the caller's last token was refused by the provider, so a cached one is not good enough
+     *
+     * @throws ReauthorizationRequired
+     * @throws ProviderUnavailable
+     */
+    public function accessToken(ProviderGrant $grant, ProviderFeature $feature, bool $rejected = false): AccessToken
+    {
+        // Nothing is thrown inside the transaction: an exception there closes the entity manager.
+        $token = $this->entityManager->wrapInTransaction(function () use ($grant, $feature, $rejected): AccessToken|ProviderUnavailable|null {
+            $this->entityManager->refresh($grant, LockMode::PESSIMISTIC_WRITE);
+            $provider = $grant->getProvider();
+
+            if ($grant->isRevoked()) {
+                return null;
+            }
+            if (!$grant->hasScopes(ProviderScopes::required($provider, $feature))) {
+                $this->requireSignIn($grant, \sprintf('Tresso is not allowed to use the %s of this account. Sign in with %s again and allow it.', $feature->value, $provider->label()));
+
+                return null;
+            }
+
+            $tokens = $this->vault->openGrant($grant);
+            $accessToken = \is_string($tokens['accessToken'] ?? null) ? $tokens['accessToken'] : null;
+            $expiresAt = \is_int($tokens['accessTokenExpiresAt'] ?? null) ? $tokens['accessTokenExpiresAt'] : 0;
+            $issuedAt = \is_int($tokens['accessTokenIssuedAt'] ?? null) ? $tokens['accessTokenIssuedAt'] : 0;
+            $now = time();
+            if (null !== $accessToken && $expiresAt - self::REFRESH_MARGIN_SECONDS > $now && (!$rejected || $issuedAt > $now - self::REJECTION_GRACE_SECONDS)) {
+                return new AccessToken($accessToken, new \DateTimeImmutable('@'.$expiresAt));
+            }
+
+            $refreshToken = \is_string($tokens['refreshToken'] ?? null) ? $tokens['refreshToken'] : throw new \UnexpectedValueException('The grant has no refresh token.');
+            try {
+                $refreshed = $this->client->refresh($provider, $refreshToken, ProviderScopes::request($provider, ProviderScopes::coveredFeatures($provider, $grant->getScopes())));
+            } catch (GrantRejected) {
+                $grant->revoke();
+                $this->requireSignIn($grant, \sprintf('%s no longer lets Tresso use this account. Sign in with %s again.', $provider->label(), $provider->label()));
+
+                return null;
+            } catch (ProviderUnavailable $e) {
+                return $e;
+            }
+
+            if (null !== $refreshed->scopes) {
+                $grant->updateScopes($refreshed->scopes);
+            }
+            $this->store($grant, $refreshed);
+            $this->entityManager->flush();
+
+            if (!$grant->hasScopes(ProviderScopes::required($provider, $feature))) {
+                $this->requireSignIn($grant, \sprintf('Tresso is not allowed to use the %s of this account. Sign in with %s again and allow it.', $feature->value, $provider->label()));
+
+                return null;
+            }
+
+            return new AccessToken($refreshed->accessToken, $refreshed->expiresAt);
+        });
+
+        if ($token instanceof ProviderUnavailable) {
+            throw $token;
+        }
+
+        return $token ?? throw new ReauthorizationRequired(\sprintf('Sign in with %s again to keep using this account.', $grant->getProvider()->label()));
+    }
+
+    /**
+     * The refresh token the grant holds, if any.
+     */
+    public function refreshToken(ProviderGrant $grant): ?string
+    {
+        if ('' === $grant->getEncryptedTokens()) {
+            return null;
+        }
+        $refreshToken = $this->vault->openGrant($grant)['refreshToken'] ?? null;
+
+        return \is_string($refreshToken) ? $refreshToken : null;
+    }
+
+    /**
+     * Stops the grant's mail accounts with a message the user can act on. Paused accounts stay paused.
+     */
+    private function requireSignIn(ProviderGrant $grant, string $detail): void
+    {
+        foreach ($this->mailAccounts->findByProviderGrant($grant) as $account) {
+            if (MailAccountStatus::Paused !== $account->getStatus()) {
+                $account->setStatus(MailAccountStatus::AuthFailed, $detail);
+            }
+        }
+        $this->entityManager->flush();
+    }
+}

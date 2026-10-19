@@ -42,7 +42,7 @@ class Folder implements TracksChanges
     private ?int $uidValidity = null;
 
     /** Provider sync cursor: IMAP HIGHESTMODSEQ, Gmail historyId or Graph delta token. */
-    #[ORM\Column(length: 2048, nullable: true)]
+    #[ORM\Column(type: Types::TEXT, nullable: true)]
     private ?string $syncCursor = null;
 
     public function __construct(MailAccount $mailAccount, string $remoteName, string $displayName, FolderRole $role)

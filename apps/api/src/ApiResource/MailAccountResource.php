@@ -23,6 +23,9 @@ use App\State\MailAccountProvider;
 
 /**
  * A mail account of the signed-in user. Credentials can be written but are never returned.
+ *
+ * Gmail and Microsoft 365 accounts (provider "gmail", "microsoft") are created by signing in with the provider
+ * (see {@see ProviderAuthorization}) and have no username or server settings: those fields are null.
  */
 #[ApiResource(
     shortName: 'MailAccount',
@@ -73,9 +76,9 @@ final class MailAccountResource
         public MailProvider $provider,
         public MailAccountStatus $status,
         public ?string $statusDetail,
-        public string $username,
-        public ServerSettings $imap,
-        public ServerSettings $smtp,
+        public ?string $username,
+        public ?ServerSettings $imap,
+        public ?ServerSettings $smtp,
         public ?\DateTimeImmutable $lastSyncedAt,
         public \DateTimeImmutable $createdAt,
         /** Set through the signature's "defaultFor" (/api/v1/signatures). */

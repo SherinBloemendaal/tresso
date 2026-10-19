@@ -15,7 +15,7 @@ final class ChangeBatchInput extends WorkerRequest
     #[Assert\Length(max: 512)]
     public string $folder = '';
 
-    #[Assert\Length(max: 2048)]
+    #[Assert\Length(max: 8192)]
     public ?string $cursor = null;
 
     /** @var list<FlagChangeInput> */
