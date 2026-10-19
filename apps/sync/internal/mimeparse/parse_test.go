@@ -297,3 +297,43 @@ cGhvdG8=
 		t.Errorf("unreferenced image = %+v, want a regular attachment that keeps its Content-ID", photo)
 	}
 }
+
+func TestKeepsTheSignalHeaders(t *testing.T) {
+	raw := crlf(`Authentication-Results: mx.example; dmarc=fail (p=REJECT)
+	header.from=bank.example
+Authentication-Results: relay.example; dmarc=pass
+From: Shop <deals@news.shop.example>
+List-Unsubscribe: <https://shop.example/u>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+Precedence: bulk
+X-Mailer: Something
+Subject: Deals
+
+body
+`)
+	msg, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"authentication-results": "mx.example; dmarc=fail (p=REJECT) header.from=bank.example",
+		"list-unsubscribe":       "<https://shop.example/u>",
+		"list-unsubscribe-post":  "List-Unsubscribe=One-Click",
+		"precedence":             "bulk",
+	}
+	if len(msg.Signals) != len(want) {
+		t.Fatalf("signals = %v", msg.Signals)
+	}
+	for name, value := range want {
+		if msg.Signals[name] != value {
+			t.Errorf("%s = %q, want %q", name, msg.Signals[name], value)
+		}
+	}
+}
+
+func TestMessageWithoutSignalsHasNone(t *testing.T) {
+	msg, _ := Parse(crlf("From: anna@example.test\nSubject: Hi\n\nbody\n"))
+	if msg.Signals != nil {
+		t.Errorf("signals = %v", msg.Signals)
+	}
+}

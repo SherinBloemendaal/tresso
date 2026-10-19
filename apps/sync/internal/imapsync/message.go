@@ -25,6 +25,7 @@ func buildMessage(ctx context.Context, store storage.Store, buf *imapclient.Fetc
 	if err != nil {
 		return api.Message{}, err
 	}
+	msg.Junk = isJunk(buf.Flags)
 	if condStore && buf.ModSeq > 0 {
 		modSeq := buf.ModSeq
 		msg.ModSeq = &modSeq
@@ -47,4 +48,19 @@ func flagsOf(flags []imap.Flag) api.Flags {
 		}
 	}
 	return f
+}
+
+// isJunk reads the junk keywords of RFC 5788 (and their older names without the dollar sign). An explicit "not junk"
+// wins: the user or a filter took the message out of junk.
+func isJunk(flags []imap.Flag) bool {
+	junk := false
+	for _, flag := range flags {
+		switch strings.ToLower(string(flag)) {
+		case "$junk", "junk":
+			junk = true
+		case "$notjunk", "notjunk", "nonjunk":
+			return false
+		}
+	}
+	return junk
 }

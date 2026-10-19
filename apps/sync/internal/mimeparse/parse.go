@@ -31,7 +31,15 @@ const (
 	maxTextRead = 256 << 10
 	// UnknownSender is used when a message has no usable From, Sender or Return-Path.
 	UnknownSender = "unknown@unknown.invalid"
+	// The API takes signal header values up to this many characters.
+	signalLength = 1000
 )
+
+// signalHeaders tell automated, bulk and junk mail apart; the API classifies mail with them.
+var signalHeaders = []string{
+	"List-Unsubscribe", "List-Unsubscribe-Post", "List-Id", "Precedence", "Auto-Submitted", "Feedback-Id",
+	"X-Spam-Flag", "X-Spam-Status", "Authentication-Results",
+}
 
 type Address struct {
 	Address string
@@ -62,6 +70,9 @@ type Message struct {
 	Snippet     string
 	BodyText    string
 	Attachments []Attachment
+	// Signals holds the signal headers the message has, by lower-cased name. For a header that occurs more than
+	// once it is the first (topmost) one: for Authentication-Results that is the one the receiving server added.
+	Signals map[string]string
 }
 
 // Parse never fails on malformed input: headers it cannot read stay empty. It only returns an error when the input
@@ -150,8 +161,24 @@ func headersFrom(h gomail.Header) *Message {
 	msg.Bcc = addressList(h, "Bcc")
 	msg.ReplyTo = addressList(h, "Reply-To")
 	msg.From = firstAddress(h, "From", "Sender", "Return-Path")
+	msg.Signals = signals(h.Get)
 
 	return msg
+}
+
+func signals(get func(string) string) map[string]string {
+	var out map[string]string
+	for _, name := range signalHeaders {
+		value := strings.Join(strings.Fields(get(name)), " ")
+		if value == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[strings.ToLower(name)] = truncate(value, signalLength)
+	}
+	return out
 }
 
 func addressList(h gomail.Header, key string) []Address {
@@ -197,6 +224,7 @@ func parseHeadersOnly(raw []byte) (*Message, error) {
 		MessageID: strings.Trim(parsed.Header.Get("Message-Id"), "<> "),
 		InReplyTo: strings.Trim(parsed.Header.Get("In-Reply-To"), "<> "),
 		From:      Address{Address: UnknownSender},
+		Signals:   signals(parsed.Header.Get),
 	}
 	for _, field := range strings.Fields(parsed.Header.Get("References")) {
 		msg.References = append(msg.References, strings.Trim(field, "<> "))

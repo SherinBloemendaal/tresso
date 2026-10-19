@@ -34,3 +34,15 @@ func TestBuildStoresRawAndDescribesTheMessage(t *testing.T) {
 		t.Errorf("fallback receivedAt = %v", msg.ReceivedAt)
 	}
 }
+
+func TestBuildSendsTheSignalHeaders(t *testing.T) {
+	raw := []byte("From: news@shop.example\r\nPrecedence: bulk\r\nList-Unsubscribe: <https://shop.example/u>\r\nSubject: Deals\r\n\r\nBody\r\n")
+
+	msg, err := Build(context.Background(), storage.NewMemory(), raw, "x", time.Time{}, api.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Headers["precedence"] != "bulk" || msg.Headers["list-unsubscribe"] != "<https://shop.example/u>" || len(msg.Headers) != 2 {
+		t.Errorf("headers = %v", msg.Headers)
+	}
+}

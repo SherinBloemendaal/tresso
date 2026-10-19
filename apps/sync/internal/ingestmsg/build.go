@@ -64,6 +64,7 @@ func Build(ctx context.Context, store storage.Store, raw []byte, remoteUID strin
 		Snippet:      parsed.Snippet,
 		BodyText:     parsed.BodyText,
 		Attachments:  attachments,
+		Headers:      parsed.Signals,
 	}
 	if parsed.MessageID != "" {
 		id := truncate(parsed.MessageID, 998)
