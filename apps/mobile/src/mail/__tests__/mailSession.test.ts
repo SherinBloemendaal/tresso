@@ -63,6 +63,9 @@ function session(
       update: () => Promise.reject(new Error('no drafts in this test')),
       get: () => Promise.reject(new Error('no drafts in this test')),
       remove: () => Promise.reject(new Error('no drafts in this test')),
+      attach: () => Promise.reject(new Error('no drafts in this test')),
+      forward: () => Promise.reject(new Error('no drafts in this test')),
+      detach: () => Promise.reject(new Error('no drafts in this test')),
     },
     onState: (state) => states.push(state),
   })
