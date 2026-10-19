@@ -4,13 +4,14 @@ declare(strict_types=1);
 
 namespace App\Entity;
 
+use App\Notification\NotificationChannelChoice;
 use App\Repository\NotificationPreferencesRepository;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 
 /**
- * When and how the user wants to be disturbed: quiet hours, focus during busy events, and where email notifications
- * go. Also how far ahead their notifications are planned.
+ * When and how the user wants to be disturbed: quiet hours, focus during busy events, the channels per kind of
+ * notification, and where email notifications go. Also how far ahead their notifications are planned.
  */
 #[ORM\Entity(repositoryClass: NotificationPreferencesRepository::class)]
 #[ORM\Index(columns: ['planned_until'])]
@@ -42,6 +43,15 @@ class NotificationPreferences
     /** While a busy event runs, only the user's own meetings and leave-now alerts break through. */
     #[ORM\Column]
     private bool $focusDuringBusy = true;
+
+    /**
+     * The user's channels per kind of notification ("leave_now", "brief", or a kind of another feature), as channel
+     * names; a kind missing here uses the default its feature gives.
+     *
+     * @var array<string, list<string>>
+     */
+    #[ORM\Column(type: Types::JSON)]
+    private array $channelsByKind = [];
 
     /** Where email notifications go; the sign-in address when null. */
     #[ORM\Column(length: 320, nullable: true)]
@@ -112,6 +122,32 @@ class NotificationPreferences
     public function setFocusDuringBusy(bool $focusDuringBusy): void
     {
         $this->focusDuringBusy = $focusDuringBusy;
+    }
+
+    public function channelsFor(string $kind, NotificationChannelChoice $default): NotificationChannelChoice
+    {
+        return \array_key_exists($kind, $this->channelsByKind) ? NotificationChannelChoice::fromValues($this->channelsByKind[$kind]) : $default;
+    }
+
+    /**
+     * @return array<string, list<string>>
+     */
+    public function getChannelsByKind(): array
+    {
+        return $this->channelsByKind;
+    }
+
+    /**
+     * Sets the channels of one kind; null goes back to the feature's default.
+     */
+    public function setChannelsFor(string $kind, ?NotificationChannelChoice $choice): void
+    {
+        if (null === $choice) {
+            unset($this->channelsByKind[$kind]);
+
+            return;
+        }
+        $this->channelsByKind[$kind] = $choice->values();
     }
 
     public function getEmailAddress(): ?string

@@ -118,7 +118,7 @@ final class EventReaderTest extends TestCase
         self::assertSame(EventStatus::Cancelled, $data->status);
         self::assertSame(Transparency::Free, $data->transparency);
         self::assertSame([
-            ['action' => 'display', 'trigger' => '-PT5M', 'relatedTo' => 'end', 'at' => null, 'channels' => ['push']],
+            ['action' => 'display', 'trigger' => '-PT5M', 'relatedTo' => 'end', 'at' => null, 'channels' => ['phone', 'desktop']],
             ['action' => 'email', 'trigger' => null, 'relatedTo' => 'start', 'at' => '20261018T120000Z', 'channels' => ['email']],
         ], $data->reminders);
     }
@@ -149,8 +149,8 @@ final class EventReaderTest extends TestCase
 
     public function testReadsTressoChannelsTravelTimeAndTheDefaults(): void
     {
-        $own = self::read(['DTSTART:20261019T090000Z', 'X-TRESSO-TRAVEL-MINUTES:25', 'BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT30M', 'X-TRESSO-CHANNELS:push,email', 'END:VALARM']);
-        self::assertSame(['push', 'email'], $own->reminders[0]['channels']);
+        $own = self::read(['DTSTART:20261019T090000Z', 'X-TRESSO-TRAVEL-MINUTES:25', 'BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT30M', 'X-TRESSO-CHANNELS:phone,email,pager', 'END:VALARM']);
+        self::assertSame(['phone', 'email'], $own->reminders[0]['channels'], 'Unknown channels are left out.');
         self::assertSame(25, $own->travelMinutes);
         self::assertFalse($own->defaultReminders);
 

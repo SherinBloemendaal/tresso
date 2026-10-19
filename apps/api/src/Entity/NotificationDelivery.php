@@ -9,13 +9,15 @@ use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * One delivery of a notification to one target (a device, or email) in one round. The unique key is what makes
- * delivery idempotent: a retried message or a sweep never notifies a device twice.
+ * One delivery of one notification to one target (a device, or email). The unique delivery key and target are what
+ * make delivery idempotent: a retried message or a sweep never notifies a device twice. The key is chosen by the
+ * feature that sends, e.g. "calendar:{notification}:{round}".
  */
 #[ORM\Entity]
-#[ORM\UniqueConstraint(columns: ['notification_id', 'target', 'round'])]
+#[ORM\UniqueConstraint(columns: ['delivery_key', 'target'])]
 class NotificationDelivery
 {
+    public const string SENDING = 'sending';
     public const string SENT = 'sent';
     public const string FAILED = 'failed';
     public const string GONE = 'gone';
@@ -26,32 +28,31 @@ class NotificationDelivery
 
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(nullable: false, onDelete: 'CASCADE')]
-    private ScheduledNotification $notification;
+    private User $user;
+
+    #[ORM\Column(length: 190)]
+    private string $deliveryKey;
 
     /** A device id, or "email". */
     #[ORM\Column(length: 64)]
     private string $target;
 
-    #[ORM\Column]
-    private int $round;
-
     #[ORM\Column(length: 16)]
     private string $status;
 
     #[ORM\Column(length: 500, nullable: true)]
-    private ?string $error;
+    private ?string $error = null;
 
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
-    public function __construct(ScheduledNotification $notification, string $target, string $status, ?string $error = null)
+    public function __construct(User $user, string $deliveryKey, string $target)
     {
         $this->id = Uuid::v7();
-        $this->notification = $notification;
+        $this->user = $user;
+        $this->deliveryKey = $deliveryKey;
         $this->target = $target;
-        $this->round = $notification->getRound();
-        $this->status = $status;
-        $this->error = null === $error ? null : mb_substr($error, 0, 500);
+        $this->status = self::SENDING;
         $this->createdAt = new \DateTimeImmutable();
     }
 
@@ -60,19 +61,19 @@ class NotificationDelivery
         return $this->id;
     }
 
-    public function getNotification(): ScheduledNotification
+    public function getUser(): User
     {
-        return $this->notification;
+        return $this->user;
+    }
+
+    public function getDeliveryKey(): string
+    {
+        return $this->deliveryKey;
     }
 
     public function getTarget(): string
     {
         return $this->target;
-    }
-
-    public function getRound(): int
-    {
-        return $this->round;
     }
 
     public function getStatus(): string

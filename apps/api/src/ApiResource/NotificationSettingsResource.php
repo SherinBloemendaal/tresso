@@ -14,7 +14,7 @@ use App\State\NotificationSettingsProcessor;
 use App\State\NotificationSettingsProvider;
 
 /**
- * Quiet hours, focus and where email notifications go.
+ * Quiet hours, focus, the channels per kind of notification and where email notifications go.
  */
 #[ApiResource(
     shortName: 'NotificationSettings',
@@ -29,6 +29,8 @@ final readonly class NotificationSettingsResource
 {
     /**
      * @param list<int> $quietDays
+     * @param object    $channelsByKind the user's choices, kind to list of channels; kinds missing here use their
+     *                                  default (an object, so an empty one is {} in JSON)
      */
     public function __construct(
         public string $timeZone,
@@ -39,6 +41,7 @@ final readonly class NotificationSettingsResource
         public bool $focusDuringBusy,
         public ?string $emailAddress,
         public string $effectiveEmailAddress,
+        public object $channelsByKind,
     ) {
     }
 
@@ -53,6 +56,7 @@ final readonly class NotificationSettingsResource
             $preferences->isFocusDuringBusy(),
             $preferences->getEmailAddress(),
             $preferences->getEmailAddress() ?? $preferences->getUser()->getEmail(),
+            (object) $preferences->getChannelsByKind(),
         );
     }
 }

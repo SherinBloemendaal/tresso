@@ -13,9 +13,9 @@ final class ReminderInput
     public int $minutesBefore = 10;
 
     /** @var list<string> */
-    #[Assert\Count(min: 1, max: 2)]
-    #[Assert\All([new Assert\Choice(choices: ['push', 'email'])])]
-    public array $channels = ['push'];
+    #[Assert\Count(min: 1, max: 3)]
+    #[Assert\All([new Assert\Choice(choices: ['phone', 'desktop', 'email'])])]
+    public array $channels = ['phone', 'desktop'];
 
     /**
      * @return array{minutesBefore: int, channels: list<string>}

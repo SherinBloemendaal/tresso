@@ -4,6 +4,12 @@ declare(strict_types=1);
 
 namespace App\Enum;
 
+use App\Notification\NotificationChannelChoice;
+
+/**
+ * The kinds of calendar notification. Other features name their own kinds; the dispatcher and the per-kind channel
+ * preferences take any kind name.
+ */
 enum NotificationKind: string
 {
     /** A reminder before (or at) an event. */
@@ -14,4 +20,14 @@ enum NotificationKind: string
     case Brief = 'brief';
     /** After a meeting: notes and follow-up. */
     case FollowUp = 'follow_up';
+
+    /** Where this kind goes unless the user chose otherwise. Reminders carry their own channels. */
+    public function defaultChannels(): NotificationChannelChoice
+    {
+        return match ($this) {
+            self::Reminder => new NotificationChannelChoice(NotificationChannel::Phone, NotificationChannel::Desktop),
+            self::LeaveNow => new NotificationChannelChoice(NotificationChannel::Phone),
+            self::Brief, self::FollowUp => new NotificationChannelChoice(NotificationChannel::Desktop),
+        };
+    }
 }

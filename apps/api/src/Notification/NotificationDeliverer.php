@@ -6,30 +6,20 @@ namespace App\Notification;
 
 use App\Calendar\Assistant\MeetingBriefWriter;
 use App\Calendar\OccurrenceExpander;
-use App\Entity\NotificationDelivery;
-use App\Entity\NotificationDevice;
 use App\Entity\ScheduledNotification;
 use App\Entity\UserLocation;
-use App\Enum\DeviceKind;
 use App\Enum\NotificationKind;
-use App\Notification\Channel\EmailNotifier;
-use App\Notification\Channel\ExpoPushSender;
 use App\Notification\Channel\PushMessage;
-use App\Notification\Channel\PushResult;
-use App\Notification\Channel\WebPushSender;
 use App\Notification\Travel\TravelTimeEstimator;
-use App\Repository\NotificationDeviceRepository;
 use App\Repository\NotificationPreferencesRepository;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
-use Psr\Log\LoggerInterface;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * Delivers a notification when its time has come. First, under a lock on the notification: still current, not quiet
- * (or moved to the end of the quiet hours), not drowned out by focus, leave-now re-estimated, and one delivery record
- * per target and round, so nothing is ever sent twice. Then the sends, outside the transaction. The desktop app gets
- * delivered notifications through the delta, so its record is complete at once.
+ * Delivers a calendar notification when its time has come. First, under a lock on the notification: still current,
+ * not quiet (or moved to the end of the quiet hours), not drowned out by focus, leave-now re-estimated, and marked
+ * delivered. Then the NotificationDispatcher sends it, once per target and round.
  */
 final readonly class NotificationDeliverer
 {
@@ -41,15 +31,11 @@ final readonly class NotificationDeliverer
     public function __construct(
         private EntityManagerInterface $entityManager,
         private NotificationPreferencesRepository $preferences,
-        private NotificationDeviceRepository $devices,
         private NotificationPlanner $planner,
         private OccurrenceExpander $occurrences,
         private TravelTimeEstimator $travel,
         private MeetingBriefWriter $briefs,
-        private WebPushSender $webPush,
-        private ExpoPushSender $expo,
-        private EmailNotifier $email,
-        private LoggerInterface $logger,
+        private NotificationDispatcher $dispatcher,
     ) {
     }
 
@@ -58,46 +44,43 @@ final readonly class NotificationDeliverer
         if (!Uuid::isValid($notificationId)) {
             return;
         }
-        /** @var list<array{NotificationDelivery, ?NotificationDevice, ?string}> $sends */
-        $sends = $this->entityManager->wrapInTransaction(fn (): array => $this->prepare(Uuid::fromString($notificationId), $now));
-        if ([] === $sends) {
-            $this->entityManager->clear();
-
-            return;
-        }
-
-        $message = $this->message($sends[0][0]->getNotification(), $now);
-        foreach ($sends as [$delivery, $device, $address]) {
-            $result = match (true) {
-                null !== $address => $this->email->send($address, $message),
-                DeviceKind::WebPush === $device?->getKind() => $this->webPush->send($device, $message, $now),
-                DeviceKind::Expo === $device?->getKind() => $this->expo->send($device, $message, $now),
-                default => PushResult::sent(),
-            };
-            $this->record($delivery, $device, $result);
+        $notification = $this->entityManager->wrapInTransaction(fn (): ?ScheduledNotification => $this->prepare(Uuid::fromString($notificationId), $now));
+        if (null !== $notification) {
+            $this->dispatcher->send(
+                $notification->getUser(),
+                $this->message($notification, $now),
+                self::deliveryKey($notification),
+                NotificationChannelChoice::fromValues($notification->getChannels()),
+                $now,
+            );
         }
         $this->entityManager->clear();
     }
 
+    /** One delivery per notification and round: a snooze starts a new round, so the devices show it again. */
+    public static function deliveryKey(ScheduledNotification $notification): string
+    {
+        return \sprintf('calendar:%s:%d', $notification->getId()->toRfc4122(), $notification->getRound());
+    }
+
     /**
-     * @return list<array{NotificationDelivery, ?NotificationDevice, ?string}> what to send, with the device or email
-     *                                                                           address
+     * The notification to send now, marked delivered; null when there is nothing to send (yet).
      */
-    private function prepare(Uuid $id, \DateTimeImmutable $now): array
+    private function prepare(Uuid $id, \DateTimeImmutable $now): ?ScheduledNotification
     {
         $notification = $this->entityManager->find(ScheduledNotification::class, $id, LockMode::PESSIMISTIC_WRITE);
         if (null === $notification || $notification->isDelivered() || null !== $notification->getDismissedAt()) {
-            return [];
+            return null;
         }
         $event = $notification->getEvent();
         if (null === $event) {
             $this->entityManager->remove($notification);
             $this->entityManager->flush();
 
-            return [];
+            return null;
         }
         if ($notification->getFireAt()->getTimestamp() > $now->getTimestamp() + self::EARLY_SECONDS) {
-            return [];
+            return null;
         }
 
         $user = $notification->getUser();
@@ -110,14 +93,14 @@ final readonly class NotificationDeliverer
                 $notification->dismiss($now);
                 $this->entityManager->flush();
 
-                return [];
+                return null;
             }
             if ($leaveAt->getTimestamp() > $now->getTimestamp() + 60) {
                 $notification->postpone(min($leaveAt, $now->modify('+15 minutes')));
                 $this->entityManager->flush();
                 $this->planner->announce($notification);
 
-                return [];
+                return null;
             }
         }
         if (NotificationKind::Brief === $notification->getKind()) {
@@ -132,7 +115,7 @@ final readonly class NotificationDeliverer
                 $this->entityManager->flush();
                 $this->planner->announce($notification);
 
-                return [];
+                return null;
             }
             $silent = true;
         }
@@ -141,29 +124,9 @@ final readonly class NotificationDeliverer
         }
 
         $notification->markDelivered($now, $silent);
-
-        $targets = [];
-        if (\in_array('push', $notification->getChannels(), true)) {
-            foreach ($this->devices->findEnabled($user) as $device) {
-                $targets[] = [$device->getId()->toRfc4122(), $device, null];
-            }
-        }
-        if (\in_array('email', $notification->getChannels(), true)) {
-            $targets[] = ['email', null, $preferences->getEmailAddress() ?? $user->getEmail()];
-        }
-
-        $sends = [];
-        foreach ($targets as [$target, $device, $address]) {
-            if (null !== $this->entityManager->getRepository(NotificationDelivery::class)->findOneBy(['notification' => $notification, 'target' => $target, 'round' => $notification->getRound()])) {
-                continue;
-            }
-            $delivery = new NotificationDelivery($notification, $target, 'sending');
-            $this->entityManager->persist($delivery);
-            $sends[] = [$delivery, $device, $address];
-        }
         $this->entityManager->flush();
 
-        return $sends;
+        return $notification;
     }
 
     private function leaveAt(ScheduledNotification $notification): ?\DateTimeImmutable
@@ -214,20 +177,5 @@ final readonly class NotificationDeliverer
             $notification->isSilent(),
             $now->modify(self::EXPIRES),
         );
-    }
-
-    private function record(NotificationDelivery $delivery, ?NotificationDevice $device, PushResult $result): void
-    {
-        $this->entityManager->wrapInTransaction(function () use ($delivery, $device, $result): void {
-            $connection = $this->entityManager->getConnection();
-            $connection->update('notification_delivery', ['status' => $result->status, 'error' => null === $result->error ? null : mb_substr($result->error, 0, 500)], ['id' => $delivery->getId()->toRfc4122()]);
-            if ('gone' === $result->status && null !== $device) {
-                // The push service forgot the subscription; so do we.
-                $connection->delete('notification_device', ['id' => $device->getId()->toRfc4122()]);
-            }
-        });
-        if ('failed' === $result->status) {
-            $this->logger->warning('A notification could not be delivered', ['delivery' => $delivery->getId()->toRfc4122(), 'error' => $result->error]);
-        }
     }
 }

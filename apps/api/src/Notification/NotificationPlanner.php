@@ -98,6 +98,16 @@ final readonly class NotificationPlanner
         $this->afterCommit->dispatch(new FireNotification($notification->getId()->toRfc4122()), [DelayStamp::delayUntil($notification->getFireAt())]);
     }
 
+    /**
+     * The user's channels for a kind, else its default: leave now on the phone, briefs and follow-ups on the desktop.
+     *
+     * @return list<string>
+     */
+    private static function channels(PlanContext $context, NotificationKind $kind): array
+    {
+        return $context->preferences->channelsFor($kind->value, $kind->defaultChannels())->values();
+    }
+
     private function context(User $user, NotificationPreferences $preferences): PlanContext
     {
         return new PlanContext(
@@ -106,6 +116,7 @@ final readonly class NotificationPlanner
             $this->rules->of($user),
             $this->selfAddresses->of($user),
             $this->entityManager->find(UserLocation::class, $user),
+            $preferences,
         );
     }
 
@@ -184,17 +195,17 @@ final readonly class NotificationPlanner
         if (!$row->isAllDay() && '' !== $location && (null !== $row->getTravelMinutes() || true === $rule?->isLeaveNow())) {
             $travel = $row->getTravelMinutes();
             if (null !== $travel) {
-                $plans[] = new Plan($key, NotificationKind::LeaveNow, 'leave', $start->modify(\sprintf('-%d minutes', $travel + self::LEAVE_MARGIN_MINUTES)), $start, $title, self::leaveBody($travel, $location), ['push']);
+                $plans[] = new Plan($key, NotificationKind::LeaveNow, 'leave', $start->modify(\sprintf('-%d minutes', $travel + self::LEAVE_MARGIN_MINUTES)), $start, $title, self::leaveBody($travel, $location), self::channels($context, NotificationKind::LeaveNow));
             } elseif (null !== $context->location) {
                 // Estimated when it fires, and moved to the right moment then.
-                $plans[] = new Plan($key, NotificationKind::LeaveNow, 'leave:estimated', $start->modify(\sprintf('-%d minutes', self::LEAVE_CHECK_MINUTES)), $start, $title, self::leaveBody(null, $location), ['push']);
+                $plans[] = new Plan($key, NotificationKind::LeaveNow, 'leave:estimated', $start->modify(\sprintf('-%d minutes', self::LEAVE_CHECK_MINUTES)), $start, $title, self::leaveBody(null, $location), self::channels($context, NotificationKind::LeaveNow));
             }
         }
         if ($others && null !== $rule?->getBriefMinutes()) {
-            $plans[] = new Plan($key, NotificationKind::Brief, 'brief', $start->modify(\sprintf('-%d minutes', $rule->getBriefMinutes())), $start, 'Brief: '.$title, 'Who is coming and what you discussed.', ['push']);
+            $plans[] = new Plan($key, NotificationKind::Brief, 'brief', $start->modify(\sprintf('-%d minutes', $rule->getBriefMinutes())), $start, 'Brief: '.$title, 'Who is coming and what you discussed.', self::channels($context, NotificationKind::Brief));
         }
         if ($others && !$row->isAllDay() && true === $rule?->isFollowUp() && $end > $now->modify('-1 hour')) {
-            $plans[] = new Plan($key, NotificationKind::FollowUp, 'follow', $end, $start, 'After: '.$title, 'How did it go? Add notes or follow-ups while it is fresh.', ['push']);
+            $plans[] = new Plan($key, NotificationKind::FollowUp, 'follow', $end, $start, 'After: '.$title, 'How did it go? Add notes or follow-ups while it is fresh.', self::channels($context, NotificationKind::FollowUp));
         }
 
         return $plans;

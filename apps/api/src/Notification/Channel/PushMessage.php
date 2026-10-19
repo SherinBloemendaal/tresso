@@ -5,20 +5,26 @@ declare(strict_types=1);
 namespace App\Notification\Channel;
 
 /**
- * What every push channel shows: a title and body, where a tap leads, and whether it may make a sound.
+ * What every channel shows: a title and body, where a tap leads, and whether it may make a sound. Any feature can
+ * send one; the id is what clients dismiss it by.
  */
 final readonly class PushMessage
 {
+    /**
+     * @param string|null           $path a path in the app (/calendar/events/{id}?occurrence=..., /thread/{id}), or
+     *                                    null to open the app as it is
+     * @param array<string, string> $data more for the client to read, next to the fixed keys
+     */
     public function __construct(
-        public string $notificationId,
+        public string $id,
         public string $kind,
         public string $title,
         public string $body,
-        /** A path in the app, e.g. /calendar/events/{id}?occurrence=... */
-        public string $path,
+        public ?string $path,
         public bool $silent,
         /** Push services drop it when it could not be delivered by then. */
         public \DateTimeImmutable $expiresAt,
+        public array $data = [],
     ) {
     }
 
@@ -27,6 +33,6 @@ final readonly class PushMessage
      */
     public function payload(): array
     {
-        return ['id' => $this->notificationId, 'kind' => $this->kind, 'title' => $this->title, 'body' => $this->body, 'path' => $this->path, 'silent' => $this->silent];
+        return [...$this->data, 'id' => $this->id, 'kind' => $this->kind, 'title' => $this->title, 'body' => $this->body, 'path' => $this->path, 'silent' => $this->silent];
     }
 }

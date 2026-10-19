@@ -23,18 +23,18 @@ final readonly class ReminderRules
     }
 
     /**
-     * New users: 10 minutes before timed events and 09:00 the day before all-day events, by push.
+     * New users: 10 minutes before timed events and 09:00 the day before all-day events, on the phone and desktop.
      */
     public function createDefaults(User $user): void
     {
         $timed = new ReminderRule($user, 'Timed events');
         $timed->match(null, false, RuleRole::Any, null, null, null);
-        $timed->setReminders([['minutesBefore' => 10, 'dayBeforeAt' => null, 'channels' => ['push']]]);
+        $timed->setReminders([['minutesBefore' => 10, 'dayBeforeAt' => null, 'channels' => ['phone', 'desktop']]]);
         $this->entityManager->persist($timed);
 
         $allDay = new ReminderRule($user, 'All-day events');
         $allDay->match(null, true, RuleRole::Any, null, null, null);
-        $allDay->setReminders([['minutesBefore' => null, 'dayBeforeAt' => '09:00', 'channels' => ['push']]]);
+        $allDay->setReminders([['minutesBefore' => null, 'dayBeforeAt' => '09:00', 'channels' => ['phone', 'desktop']]]);
         $allDay->setPosition(1);
         $this->entityManager->persist($allDay);
     }

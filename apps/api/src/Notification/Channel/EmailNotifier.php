@@ -27,7 +27,7 @@ final readonly class EmailNotifier
     public function send(string $to, PushMessage $message): PushResult
     {
         $from = null !== $this->from && '' !== $this->from ? $this->from : 'Tresso <notifications@localhost>';
-        $link = rtrim($this->webAppUrl, '/').$message->path;
+        $link = rtrim($this->webAppUrl, '/').($message->path ?? '/');
         $email = new Email()
             ->from(Address::create($from))
             ->to($to)
