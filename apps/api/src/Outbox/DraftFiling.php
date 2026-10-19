@@ -28,6 +28,8 @@ final readonly class DraftFiling
     public const string REST = 'PT20S';
     public const string CLAIM_TTL = 'PT5M';
     public const int CLAIM_BATCH = 20;
+    /** How long a draft that cannot be built (a file gone from storage) waits before it is tried again. */
+    public const string UNFILEABLE_RETRY = 'P1D';
 
     public function __construct(
         private EntityManagerInterface $entityManager,
@@ -52,9 +54,10 @@ final readonly class DraftFiling
             try {
                 $composed = $this->composer->composeDraft($this->composition($draft, $account, $now), $draft->getId(), $draft->getVersion());
             } catch (MissingAttachment $exception) {
-                // One draft whose file is gone must not hold up the others; it is filed once the user fixed it.
+                // One draft whose file is gone must not hold up the others. It is tried again a day later, or as soon
+                // as the user changes it (a new version files right away after resting).
                 $this->logger->warning('A draft could not be filed: {reason}', ['reason' => $exception->getMessage(), 'draft' => $draft->getId()->toRfc4122()]);
-                $draft->claimFiling($workerId, $until);
+                $draft->claimFiling(Draft::UNFILEABLE, $now->add(new \DateInterval(self::UNFILEABLE_RETRY)));
                 continue;
             }
             $sha = hash('sha256', $composed->raw);

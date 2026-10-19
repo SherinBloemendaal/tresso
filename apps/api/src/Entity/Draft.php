@@ -28,6 +28,9 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Index(columns: ['mail_account_id', 'filed_version'])]
 class Draft implements TracksChanges, HidesFromClients
 {
+    /** Holds the filing claim of a draft that could not be built, until it changes or a day passed (see DraftFiling). */
+    public const string UNFILEABLE = 'unfileable';
+
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
     private Uuid $id;
@@ -215,6 +218,7 @@ class Draft implements TracksChanges, HidesFromClients
         $this->inReplyTo = $inReplyTo;
         ++$this->version;
         $this->updatedAt = $now;
+        $this->releaseUnfileable();
     }
 
     /** Its signature was deleted. A change clients see, but not a new version of what the user wrote. */
@@ -230,7 +234,6 @@ class Draft implements TracksChanges, HidesFromClients
         $this->forgetFiledCopy();
     }
 
-    /** The account changed: the copy filed in the old account's Drafts folder is someone else's job now. */
     /** @return list<DraftAttachment> */
     public function getAttachments(): array
     {
@@ -289,11 +292,32 @@ class Draft implements TracksChanges, HidesFromClients
         $this->forgetFiledCopy();
     }
 
+    /**
+     * Its files changed (one added or removed): that is a new version, so the copy in the Drafts folder is filed
+     * again and other devices take the change.
+     */
+    public function filesChanged(\DateTimeImmutable $now): void
+    {
+        ++$this->version;
+        $this->updatedAt = $now;
+        $this->releaseUnfileable();
+    }
+
+    /** A change may have put right what kept the draft from being filed: it is tried again. */
+    private function releaseUnfileable(): void
+    {
+        if (self::UNFILEABLE === $this->filingClaimedBy) {
+            $this->filingClaimedBy = null;
+            $this->filingClaimedUntil = null;
+        }
+    }
+
     public function isHiddenFromClients(): bool
     {
         return $this->isSending();
     }
 
+    /** The account changed: the copy filed in the old account's Drafts folder is someone else's job now. */
     public function forgetFiledCopy(): void
     {
         $this->filedVersion = 0;

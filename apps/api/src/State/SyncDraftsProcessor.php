@@ -68,8 +68,9 @@ final readonly class SyncDraftsProcessor implements ProcessorInterface
             }
 
             $draft = $this->find(Draft::class, $uriVariables['draftId'] ?? null);
-            if (!$draft instanceof Draft) {
-                // Sent or deleted while it was being filed: the copy that just landed has to go again.
+            if (!$draft instanceof Draft || $draft->isSending()) {
+                // Sent or deleted while it was being filed: the copy that just landed has to go again. A draft that is
+                // being sent comes back, if at all, filed anew.
                 $this->entityManager->persist(new DraftCopyRemoval($account, $data->messageId));
                 $this->entityManager->flush();
 

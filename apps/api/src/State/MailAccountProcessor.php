@@ -92,6 +92,10 @@ final readonly class MailAccountProcessor implements ProcessorInterface
             // Drafts outlive the account; detached here rather than by the foreign key, so every device hears of it.
             foreach ($this->entityManager->getRepository(Draft::class)->findBy(['mailAccount' => $account]) as $draft) {
                 $draft->detachFromAccount();
+                // Its message goes with the account, unsent: the draft comes back to be sent from another one.
+                if ($draft->isSending()) {
+                    $draft->restoreFromSending();
+                }
             }
             $this->entityManager->remove($account);
             $this->entityManager->flush();
