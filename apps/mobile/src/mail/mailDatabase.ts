@@ -65,8 +65,10 @@ export class MailDatabase implements SyncStore {
    * after a restart.
    */
   private resyncing: boolean
-  /** Whether the pull under way began from the start since the resync was asked for, so its pages may move the cursor. */
-  private pullFromStart = false
+  /** Counts the resyncs asked for, so one asked for while a pull from the start is finishing is not lost. */
+  private resyncsAsked = 0
+  /** Which resync the pull under way began from the start for, if it did; only then may its pages move the cursor. */
+  private pullFromStartFor: number | null = null
 
   private constructor(
     private readonly sql: Sql,
@@ -104,18 +106,19 @@ export class MailDatabase implements SyncStore {
    */
   resyncFromStart(): Promise<void> {
     return this.write(async () => {
-      await this.sql.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['resync', '1'])
       // A pull already under way keeps the cursor it began from: its pages are stored, but it no longer moves the
-      // cursor, so the next pull still begins from the start.
+      // cursor, so the next pull still begins from the start. Marked before the row is written, so a page stored
+      // meanwhile cannot finish this resync.
       this.resyncing = true
-      this.pullFromStart = false
+      this.resyncsAsked += 1
+      await this.sql.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['resync', '1'])
     })
   }
 
   /** Where the next pull begins. The sync engine reads it once per pull, which is how a resync knows its pull began. */
   async cursor(): Promise<number> {
     if (this.resyncing) {
-      this.pullFromStart = true
+      this.pullFromStartFor = this.resyncsAsked
       return 0
     }
     const row = await this.sql.first<{ value: string }>('SELECT value FROM meta WHERE key = ?', ['cursor'])
@@ -145,6 +148,7 @@ export class MailDatabase implements SyncStore {
   }
 
   private async store(page: ChangePage): Promise<void> {
+    let finished: number | null = null
     await this.sql.transaction(async (tx) => {
       const affected = new Set<string>()
 
@@ -213,14 +217,16 @@ export class MailDatabase implements SyncStore {
       }
       if (!this.resyncing) {
         await tx.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['cursor', String(page.cursor)])
-      } else if (this.pullFromStart) {
+      } else if (this.pullFromStartFor === this.resyncsAsked) {
         await tx.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', ['cursor', String(page.cursor)])
         await tx.run('DELETE FROM meta WHERE key = ?', ['resync'])
+        finished = this.resyncsAsked
       }
     })
-    if (this.resyncing && this.pullFromStart) {
+    // A resync asked for while this page was being stored still stands: the next pull begins from the start again.
+    if (finished !== null && finished === this.resyncsAsked) {
       this.resyncing = false
-      this.pullFromStart = false
+      this.pullFromStartFor = null
     }
   }
 

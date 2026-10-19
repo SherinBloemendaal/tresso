@@ -184,6 +184,16 @@ describe('MailDatabase on the device', () => {
     expect(await (await MailDatabase.open(sql)).cursor()).toBe(11)
   })
 
+  it('keeps a resync asked for while a pull from the start stores its first page', async () => {
+    await db.resyncFromStart()
+    expect(await db.cursor()).toBe(0)
+
+    await Promise.all([db.apply(page({ cursor: 11 })), db.resyncFromStart()])
+
+    expect(await db.cursor()).toBe(0)
+    expect(await (await MailDatabase.open(sql)).cursor()).toBe(0)
+  })
+
   it('rebuilds a copy made by another version, so it syncs again from the start and has the current shape', async () => {
     await sql.run("UPDATE meta SET value = '0' WHERE key = 'schema'")
     // An older shape of a table.
