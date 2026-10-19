@@ -15,6 +15,14 @@ function signature(id: string, name: string, html: string): SyncedSignature {
   return { id, name, html, updatedAt: UPDATED_AT }
 }
 
+/** Form validation runs asynchronously; let it and the requests it starts finish. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await flushPromises()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+}
+
 describe('SettingsSignaturesView', () => {
   const requests: { method: string; path: string; body: unknown }[] = []
   let mail: ReturnType<typeof useMailStore>
@@ -41,8 +49,8 @@ describe('SettingsSignaturesView', () => {
         if (method === 'DELETE') {
           return new Response(null, { status: 204 })
         }
-        if (method === 'POST' && body?.name === '') {
-          return new Response(JSON.stringify({ detail: 'name: This value should not be blank.', violations: [{ propertyPath: 'name', message: 'This value should not be blank.' }] }), { status: 422 })
+        if (method === 'POST' && body?.name === 'Rejected') {
+          return new Response(JSON.stringify({ detail: 'name: This name is not allowed.', violations: [{ propertyPath: 'name', message: 'This name is not allowed.' }] }), { status: 422 })
         }
         const saved: Signature = { id: method === 'POST' ? 'sig-new' : url.pathname.split('/').pop()!, name: '', html: '', defaultFor: [], updatedAt: UPDATED_AT, ...body }
         return new Response(JSON.stringify(saved), { status: method === 'POST' ? 201 : 200 })
@@ -93,7 +101,7 @@ describe('SettingsSignaturesView', () => {
       mail.signatures = [mail.signatures[0]!, signature('sig-work', 'Work', '<p>Kim Visser</p>')]
     }
     await wrapper.get('form').trigger('submit')
-    await flushPromises()
+    await settle()
 
     expect(requests).toEqual([{ method: 'PATCH', path: '/api/v1/signatures/sig-work', body: { html: '<p onclick="x()">Kim Visser</p>' } }])
     expect(textarea(wrapper).value).toBe('<p>Kim Visser</p>')
@@ -113,7 +121,7 @@ describe('SettingsSignaturesView', () => {
     expect(wrapper.findAll('.check')[0]!.text()).toBe('Work(now no signature)')
 
     await wrapper.get('form').trigger('keydown', { key: 's', ctrlKey: true })
-    await flushPromises()
+    await settle()
 
     expect(requests).toEqual([{ method: 'PATCH', path: '/api/v1/signatures/sig-work', body: { defaultFor: ['support'] } }])
   })
@@ -131,24 +139,37 @@ describe('SettingsSignaturesView', () => {
       mail.accounts = mail.accounts.map((a) => (a.id === 'home' ? { ...a, defaultSignatureId: 'sig-new' } : a))
     }
     await wrapper.get('form').trigger('submit')
-    await flushPromises()
+    await settle()
 
     expect(requests).toEqual([{ method: 'POST', path: '/api/v1/signatures', body: { name: 'Short reply', html: '<p>K.</p>', defaultFor: ['home'] } }])
     const selected = wrapper.get('[role="option"][aria-selected="true"]')
     expect(selected.text()).toBe('Short replyDefault for 1 account')
   })
 
-  it('shows what the API rejected', async () => {
+  it('asks for a name before saving', async () => {
     const wrapper = mountView()
     await wrapper.get('button.new').trigger('click')
 
     await wrapper.get('form').trigger('submit')
-    await flushPromises()
+    await settle()
 
-    expect(wrapper.get('[role="alert"]').text()).toBe('name: This value should not be blank.')
-    expect(wrapper.find('.field .error').text()).toBe('This value should not be blank.')
+    expect(wrapper.find('.field .error').text()).toBe('Give the signature a name.')
+    expect(requests.filter((r) => r.method !== 'GET')).toEqual([])
+  })
+
+  it('shows what the API rejected', async () => {
+    const wrapper = mountView()
+    await wrapper.get('button.new').trigger('click')
+    await wrapper.get('.field input').setValue('Rejected')
+
+    await wrapper.get('form').trigger('submit')
+    await settle()
+
+    expect(wrapper.get('[role="alert"]').text()).toBe('name: This name is not allowed.')
+    expect(wrapper.find('.field .error').text()).toBe('This name is not allowed.')
     expect(mail.syncNow).not.toHaveBeenCalled()
   })
+
 
   it('deletes after confirmation and opens the next signature', async () => {
     const wrapper = mountView()
@@ -160,7 +181,7 @@ describe('SettingsSignaturesView', () => {
       mail.accounts = mail.accounts.map((a) => (a.defaultSignatureId === 'sig-support' ? { ...a, defaultSignatureId: null } : a))
     }
     await wrapper.get('[role="alertdialog"] button.button-danger').trigger('click')
-    await flushPromises()
+    await settle()
 
     expect(requests).toEqual([{ method: 'DELETE', path: '/api/v1/signatures/sig-support', body: undefined }])
     expect(wrapper.findAll('[role="option"]').map((o) => o.text())).toEqual(['WorkDefault for 1 account'])
