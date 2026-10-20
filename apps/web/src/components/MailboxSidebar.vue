@@ -5,6 +5,8 @@ import { handOverStatus, type SyncedMailAccount, type SyncedSmartInbox } from '@
 import AppIcon from '@/components/AppIcon.vue'
 import SenderAvatar from '@/components/SenderAvatar.vue'
 import SmartInboxMark from '@/components/SmartInboxMark.vue'
+import { briefProgress } from '@tresso/core'
+import { useBriefStore } from '@/stores/brief'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import { useTodosStore } from '@/stores/todos'
@@ -25,7 +27,7 @@ const props = defineProps<{
   nextBatch: string | null
   live: boolean
   /** A page of its own on screen instead of a list of mail. */
-  page?: 'waiting'
+  page?: 'waiting' | 'brief'
 }>()
 const emit = defineEmits<{ signOut: [] }>()
 
@@ -37,6 +39,17 @@ const failedCount = computed(() => mail.outbox.filter((message) => message.statu
 const waitingCount = computed(() => mail.handOvers.filter((handOver) => handOver.state === 'open').length)
 const overdueCount = computed(() => mail.handOvers.filter((handOver) => handOverStatus(handOver) === 'overdue').length)
 const inList = computed(() => props.page === undefined)
+
+const brief = useBriefStore()
+const briefLeft = computed(() => {
+  const latest = mail.latestBrief
+  if (latest === null) {
+    return 0
+  }
+  const { noted, total } = briefProgress(latest.entries)
+  return total - noted
+})
+const briefIsNew = computed(() => mail.latestBrief !== null && briefLeft.value > 0 && mail.latestBrief.brief.id !== brief.seenBriefId)
 
 const totalUnread = computed(() => [...props.unreadCounts.values()].reduce((sum, count) => sum + count, 0))
 
@@ -66,6 +79,12 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         <AppIcon name="inbox" />
         <span class="label">Unified Inbox</span>
         <span v-if="totalUnread > 0" class="count">{{ totalUnread }}<span class="visually-hidden"> unread</span></span>
+      </RouterLink>
+      <RouterLink :to="{ name: 'brief' }" class="item" :aria-current="page === 'brief' ? 'page' : undefined">
+        <AppIcon name="know" />
+        <span class="label">Daily brief</span>
+        <span v-if="briefIsNew" class="new">New</span>
+        <span v-if="briefLeft > 0" class="count">{{ briefLeft }}<span class="visually-hidden"> to note</span></span>
       </RouterLink>
       <RouterLink :to="{ name: 'todos' }" class="item">
         <AppIcon name="todo" />
@@ -189,6 +208,14 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
   padding: 2px 6px;
   border-radius: 4px;
   background: color-mix(in srgb, var(--surface) 25%, transparent);
+}
+.new {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--know-soft);
+  color: var(--know);
+  font-size: 11px;
+  font-weight: 700;
 }
 .count.failed {
   color: var(--danger);

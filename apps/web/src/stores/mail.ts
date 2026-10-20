@@ -5,12 +5,14 @@ import {
   SyncEngine,
   MAX_MESSAGES_PER_ACTION,
   appliedFor,
+  briefView,
   CopyClosingError,
   deliveredNotices,
   noticeKey,
   DraftSync,
   PartialActionError,
   type AppliedAction,
+  type BriefView,
   type ChangePage,
   type MessageAction,
   type MessageActionRequest,
@@ -19,6 +21,7 @@ import {
   type RealtimeAccess,
   type MailStore,
   type SendMessageRequest,
+  type SyncedDailyBrief,
   type SyncedDraft,
   type DraftAttachmentLink,
   type SyncedFolder,
@@ -80,6 +83,9 @@ export const useMailStore = defineStore('mail', () => {
   const handOvers = ref<SyncedHandOver[]>([])
   /** Overdue notices the server delivered, not yet taken by the screens (see takeOverdue). */
   const overdue = ref<SyncedHandOver[]>([])
+  /** The daily briefs, newest first, and the newest one with its conversations as they are now. */
+  const dailyBriefs = ref<SyncedDailyBrief[]>([])
+  const latestBrief = ref<BriefView | null>(null)
   /** The user's unsubscribe requests, of every account. */
   const unsubscriptions = ref<SyncedUnsubscription[]>([])
   const scope = computed<ListScope>(() => {
@@ -315,6 +321,8 @@ export const useMailStore = defineStore('mail', () => {
     unsubscriptions.value = []
     handOvers.value = []
     overdue.value = []
+    dailyBriefs.value = []
+    latestBrief.value = null
     outbox.value = []
     await stopping?.stop()
     await database?.close()
@@ -336,7 +344,7 @@ export const useMailStore = defineStore('mail', () => {
     if (database === null) {
       return
     }
-    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts, nextTodos, nextUnsubscriptions, nextHandOvers] = await Promise.all([
+    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts, nextTodos, nextUnsubscriptions, nextHandOvers, nextBriefs] = await Promise.all([
       database.mailAccounts(),
       database.folders(),
       database.signatures(),
@@ -348,9 +356,13 @@ export const useMailStore = defineStore('mail', () => {
       database.todos(),
       database.unsubscriptions(),
       database.handOvers(),
+      database.dailyBriefs(),
     ])
     todos.value = nextTodos
     handOvers.value = nextHandOvers
+    const newest = nextBriefs[0]
+    latestBrief.value = newest === undefined ? null : briefView(newest, await database.conversations(newest.threadIds))
+    dailyBriefs.value = nextBriefs
     smartInboxes.value = nextSmartInboxes
     smartInboxCounts.value = nextSmartCounts
     outbox.value = nextOutbox
@@ -428,6 +440,16 @@ export const useMailStore = defineStore('mail', () => {
   async function showMore(): Promise<void> {
     listLimit.value += LIST_STEP
     await refresh()
+  }
+
+  /** A brief with its conversations as they are now; null when it is gone. */
+  async function dailyBrief(briefId: string): Promise<BriefView | null> {
+    const database = db.value
+    const brief = dailyBriefs.value.find((candidate) => candidate.id === briefId)
+    if (database === null || brief === undefined) {
+      return null
+    }
+    return briefView(brief, await database.conversations(brief.threadIds))
   }
 
   async function thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null> {
@@ -647,6 +669,8 @@ export const useMailStore = defineStore('mail', () => {
     handOvers,
     overdue,
     takeOverdue,
+    dailyBriefs,
+    latestBrief,
     hasMore,
     syncState,
     pulls,
@@ -669,6 +693,7 @@ export const useMailStore = defineStore('mail', () => {
     messages,
     threadMessages,
     unsubscribe,
+    dailyBrief,
     threadsFrom,
     threadsBefore,
     describeThreads,
