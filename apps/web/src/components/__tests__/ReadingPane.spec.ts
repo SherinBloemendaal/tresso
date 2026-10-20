@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import type { ChangePage, SyncedMessage, SyncedUnsubscription, SyncedHandOver } from '@tresso/core'
@@ -142,9 +142,6 @@ describe('ReadingPane actions', () => {
     vi.unstubAllGlobals()
     sessionStorage.clear()
   })
-
-  // Registered after the teardown above, so it runs first: a pane left mounted would take the next test's shortcuts.
-  enableAutoUnmount(afterEach)
 
   function mountPane() {
     return mount(ReadingPane, { props: { threadId: 't1', backTo: '/' }, global: { plugins: [router] }, attachTo: document.body })
