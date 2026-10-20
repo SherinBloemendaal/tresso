@@ -210,14 +210,20 @@ function session(threadIds: string[], options: { handOver?: () => Promise<Triage
 
 const current = (triage: TriageSession) => (triage.state === null ? null : currentTriage(triage.state))
 
+/** Decides once the email the round is at shows, as a person does. */
+async function decideOnScreen(triage: TriageSession, decision: 'do' | 'delegate' | 'know'): Promise<void> {
+  await vi.waitFor(() => expect(triage.conversation?.thread.id).toBe(current(triage)))
+  triage.decide(decision)
+}
+
 describe('TriageSession', () => {
   it('runs D, K and Z pressed in quick succession in order, dropping none', async () => {
     const { triage, calls, hold } = session(['a', 'b', 'c'])
     await triage.begin()
     const open = hold()
 
-    triage.decide('do')
-    triage.decide('know')
+    await decideOnScreen(triage, 'do')
+    await decideOnScreen(triage, 'know')
     triage.undo()
     expect(current(triage)).toBe('c')
     open()
@@ -228,13 +234,70 @@ describe('TriageSession', () => {
     expect(triageProgress(triage.state!).counts).toEqual({ do: 1, delegate: 0, know: 0 })
   })
 
+  it('ignores a decision while the next email still loads', async () => {
+    const { triage, calls } = session(['a', 'b'])
+    await triage.begin()
+
+    triage.decide('know')
+    triage.decide('know')
+    await triage.idle()
+
+    expect(calls).toEqual(['archive m-a', 'markRead m-a'])
+    expect(current(triage)).toBe('b')
+  })
+
+  it('archives and reads only the messages shown when the user decided, not a reply that came in since', async () => {
+    const { triage, fake, calls, hold } = session(['a', 'b'])
+    await triage.begin()
+    const open = hold()
+    await decideOnScreen(triage, 'do')
+    await decideOnScreen(triage, 'know')
+    // A reply in b arrives while do on a is still on its way.
+    fake.mail.get('b')!.messages.push(message('m-b2', 'b', 2_000_000))
+    open()
+    await triage.idle()
+
+    expect(calls.filter((call) => call.includes('m-b'))).toEqual(['archive m-b', 'markRead m-b'])
+    expect(fake.mail.get('b')!.messages.find((m) => m.id === 'm-b2')).toMatchObject({ folderIds: ['inbox'], flags: { seen: false } })
+  })
+
+  it("keeps the decision when what its hook did cannot be taken back, and the mail read as it was", async () => {
+    let fail = true
+    const { triage, calls, notices } = session(['a', 'b'], {
+      afterDo: async () => ({
+        undo: async () => {
+          if (fail) {
+            throw new Error('The todo could not be removed.')
+          }
+          calls.push('remove todo')
+        },
+      }),
+    })
+    await triage.begin()
+    await decideOnScreen(triage, 'do')
+    await triage.idle()
+
+    triage.undo()
+    await triage.idle()
+
+    expect(calls).toEqual(['place a do', 'markRead m-a', 'markUnread m-a', 'markRead m-a'])
+    expect(notices.at(-1)?.text).toBe('This could not be undone: The todo could not be removed.')
+    expect(current(triage)).toBe('b')
+
+    fail = false
+    triage.undo()
+    await triage.idle()
+    expect(calls.slice(4)).toEqual(['markUnread m-a', 'remove todo', 'release a'])
+    expect(current(triage)).toBe('a')
+  })
+
   it('goes on after a decision that failed, and shows that conversation again', async () => {
     const { triage, calls, notices, failPlace } = session(['a', 'b', 'c'])
     await triage.begin()
     failPlace.next = true
 
-    triage.decide('do')
-    triage.decide('know')
+    await decideOnScreen(triage, 'do')
+    await decideOnScreen(triage, 'know')
     await triage.idle()
 
     expect(notices.map((n) => n.text)).toEqual(['Try again later.', 'Noted and archived.'])
@@ -245,12 +308,12 @@ describe('TriageSession', () => {
   it("undoes by decision: an old notice's undo leaves a later decision on the same conversation alone", async () => {
     const { triage, calls, notices } = session(['a', 'b'])
     await triage.begin()
-    triage.decide('do')
+    await decideOnScreen(triage, 'do')
     await triage.idle()
     const first = notices[0]!.action!
     first.run()
     await triage.idle()
-    triage.decide('know')
+    await decideOnScreen(triage, 'know')
     await triage.idle()
     calls.length = 0
 
@@ -271,8 +334,8 @@ describe('TriageSession', () => {
     })
     await triage.begin()
 
-    triage.decide('delegate')
-    triage.decide('know')
+    await decideOnScreen(triage, 'delegate')
+    await decideOnScreen(triage, 'know')
     await vi.waitFor(() => expect(calls).toEqual(['archive m-b', 'markRead m-b']))
 
     const withdraw = vi.fn(async () => {})
@@ -291,7 +354,7 @@ describe('TriageSession', () => {
     const { triage, calls } = session(['a', 'b'], { handOver: async () => null })
     await triage.begin()
 
-    triage.decide('delegate')
+    await decideOnScreen(triage, 'delegate')
     await triage.idle()
 
     expect(calls).toEqual([])
@@ -307,9 +370,9 @@ describe('TriageSession', () => {
     })
     await triage.begin()
 
-    triage.decide('delegate')
+    await decideOnScreen(triage, 'delegate')
     await triage.idle()
-    triage.decide('know')
+    await decideOnScreen(triage, 'know')
     await triage.idle()
 
     expect(notices[0]?.text).toBe('The forward could not be opened.')
@@ -325,7 +388,7 @@ describe('TriageSession', () => {
       }),
     })
     await triage.begin()
-    triage.decide('do')
+    await decideOnScreen(triage, 'do')
     await triage.idle()
 
     triage.undo()
@@ -338,7 +401,7 @@ describe('TriageSession', () => {
     const removeTodo = vi.fn(async () => {})
     const { triage, calls, notices, failRelease } = session(['a'], { afterDo: async () => ({ undo: removeTodo }) })
     await triage.begin()
-    triage.decide('do')
+    await decideOnScreen(triage, 'do')
     await triage.idle()
     failRelease.next = true
 
@@ -357,8 +420,8 @@ describe('TriageSession', () => {
   it('keeps a choice made again elsewhere, and the next undo goes for the decision before', async () => {
     const { triage, fake, calls, notices } = session(['a', 'b', 'c'])
     await triage.begin()
-    triage.decide('know')
-    triage.decide('do')
+    await decideOnScreen(triage, 'know')
+    await decideOnScreen(triage, 'do')
     await triage.idle()
     fake.mail.get('b')!.placementId = 'from another device'
 
@@ -375,7 +438,7 @@ describe('TriageSession', () => {
   it('takes mail arriving during the round in at its end, reading only the round and the newest mail', async () => {
     const { triage, fake, waiting } = session(['a'])
     await triage.begin()
-    triage.decide('know')
+    await decideOnScreen(triage, 'know')
     await triage.idle()
     expect(current(triage)).toBeNull()
 
@@ -391,7 +454,7 @@ describe('TriageSession', () => {
     await triage.begin()
     fake.mail.get('b')!.thread.classificationReason = 'user'
 
-    triage.decide('do')
+    await decideOnScreen(triage, 'do')
     await triage.idle()
     await triage.follow()
 
@@ -402,7 +465,7 @@ describe('TriageSession', () => {
   it('brings an undone conversation back at the end once the copy has synced the undo', async () => {
     const { triage, fake, notices, lag } = session(['a', 'b'])
     await triage.begin()
-    triage.decide('do')
+    await decideOnScreen(triage, 'do')
     await triage.idle()
     lag.release = true
 
@@ -414,7 +477,7 @@ describe('TriageSession', () => {
     // The copy syncs.
     const synced = fake.mail.get('a')!
     synced.thread = { ...synced.thread, classificationReason: 'direct' }
-    triage.decide('know')
+    await decideOnScreen(triage, 'know')
     await triage.idle()
     await triage.follow()
     expect(current(triage)).toBe('a')

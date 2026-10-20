@@ -201,17 +201,22 @@ export class TriageSession {
     return this.following
   }
 
-  /** Decides the conversation on screen; the screen moves on at once. */
+  /**
+   * Decides the conversation on screen, as it is on screen: only the messages shown are archived and read, so a reply
+   * that arrives meanwhile waits for the next round. Ignored while the next email still loads. The screen moves on at
+   * once.
+   */
   decide(decision: TriageDecision): void {
     const threadId = this.state === null ? null : currentTriage(this.state)
-    if (this.state === null || threadId === null) {
+    const shown = this.conversation
+    if (this.state === null || threadId === null || shown === null || shown.thread.id !== threadId) {
       return
     }
     const id = ++this.seq
     this.state = decideTriage(this.state, decision, id)
     this.deps.changed()
     void this.show()
-    const done = decision === 'delegate' ? this.handOver(id, threadId) : this.enqueue(() => this.perform(id, threadId, decision, null))
+    const done = decision === 'delegate' ? this.handOver(id, shown) : this.enqueue(() => this.perform(id, shown, decision, null))
     this.settled.set(id, done)
   }
 
@@ -323,12 +328,7 @@ export class TriageSession {
   }
 
   /** Hand over: the hook first, outside the order of decisions; placed only once it says it was handed over. */
-  private async handOver(id: number, threadId: string): Promise<void> {
-    const shown = await this.deps.thread(threadId)
-    if (shown === null) {
-      this.revert(id)
-      return
-    }
+  private async handOver(id: number, shown: TriageConversation): Promise<void> {
     let handle: TriageUndo | null
     try {
       handle = await this.deps.hooks.handOver(shown)
@@ -341,18 +341,23 @@ export class TriageSession {
       this.revert(id)
       return
     }
-    await this.enqueue(() => this.perform(id, threadId, 'delegate', handle))
+    await this.enqueue(() => this.perform(id, shown, 'delegate', handle))
   }
 
   /** Runs a decision and records how to take it back; reverts it when it did not happen (the user is told why). */
-  private async perform(id: number, threadId: string, decision: TriageDecision, handOver: TriageUndo | null): Promise<void> {
-    const shown = await this.deps.thread(threadId)
-    if (shown === null) {
+  private async perform(id: number, decided: TriageConversation, decision: TriageDecision, handOver: TriageUndo | null): Promise<void> {
+    const threadId = decided.thread.id
+    // The messages shown when the user decided, as far as they are still there now.
+    const now = await this.deps.thread(threadId)
+    const still = new Map((now?.messages ?? []).map((message) => [message.id, message]))
+    const messages = decided.messages.filter((message) => still.has(message.id)).map((message) => still.get(message.id)!)
+    if (now === null || messages.length === 0) {
       await this.withdraw(handOver)
       this.revert(id)
       return
     }
-    const unread = shown.messages.filter((message) => !message.flags.seen).map((message) => message.id)
+    const shown: TriageConversation = { thread: now.thread, messages }
+    const unread = messages.filter((message) => !message.flags.seen).map((message) => message.id)
     let moves: UndoMove[] = []
     let unrestorable = 0
     let placementId: string | null = null
@@ -420,11 +425,21 @@ export class TriageSession {
       if (placementId !== null) {
         // What the decision did besides placing goes first, so the server's rules see the mail as it was before it:
         // unread, without the todo do made (classification gives new mail its automatic todo only then).
-        if (taken.read.length > 0 && (await this.deps.act(taken.read, 'markUnread')) !== null) {
+        const read = taken.read
+        if (read.length > 0 && (await this.deps.act(read, 'markUnread')) !== null) {
           this.taken.set(entry.id, (taken = { ...taken, read: [] }))
         }
         if (taken.hook !== null) {
-          await this.withdraw(taken.hook)
+          try {
+            await taken.hook.undo()
+          } catch (error) {
+            // The todo or the hand-over still stands: so does the decision, read as it was, to try again.
+            if (taken.read.length === 0 && read.length > 0 && (await this.deps.act(read, 'markRead')) !== null) {
+              this.taken.set(entry.id, (taken = { ...taken, read }))
+            }
+            this.deps.notify({ text: `This could not be undone: ${this.deps.explain(error)}`, tone: 'error' })
+            return
+          }
           this.taken.set(entry.id, (taken = { ...taken, hook: null }))
         }
         let outcome: 'released' | 'moved'
