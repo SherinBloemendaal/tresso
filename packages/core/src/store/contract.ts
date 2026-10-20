@@ -380,43 +380,6 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
       expect((await db.drafts())[0]?.attachments).toEqual([])
     })
 
-    it('hands out new unread inbox mail judged do or delegate, once', async () => {
-      db.takeArrivals()
-      await db.apply(
-        page({
-          cursor: 11,
-          threads: [thread('t4', 'work')],
-          messages: [
-            message('m5', 't4', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00', { verdict: 'do' }),
-            message('m6', 't4', 'work', ['work-inbox'], '2026-10-19T11:01:00+00:00', { verdict: 'delegate' }),
-            message('m7', 't4', 'work', ['work-inbox'], '2026-10-19T11:02:00+00:00', { verdict: 'know' }),
-            message('m8', 't4', 'work', ['work-inbox'], '2026-10-19T11:03:00+00:00', { verdict: null }),
-            message('m9', 't4', 'work', ['work-archive'], '2026-10-19T11:04:00+00:00', { verdict: 'do' }),
-            message('m10', 't4', 'work', ['work-inbox'], '2026-10-19T11:05:00+00:00', { verdict: 'do', flags: { seen: true, flagged: false, answered: false, draft: false } }),
-          ],
-        }),
-      )
-
-      expect(db.takeArrivals()).toEqual([
-        { messageId: 'm5', threadId: 't4', mailAccountId: 'work', from: { address: 'm5@sender.example', name: 'Sender m5' }, subject: 'Subject t4', snippet: 'Snippet m5', receivedAt: '2026-10-19T11:00:00+00:00', verdict: 'do' },
-        { messageId: 'm6', threadId: 't4', mailAccountId: 'work', from: { address: 'm6@sender.example', name: 'Sender m6' }, subject: 'Subject t4', snippet: 'Snippet m6', receivedAt: '2026-10-19T11:01:00+00:00', verdict: 'delegate' },
-      ])
-      expect(db.takeArrivals()).toEqual([])
-
-      // Classified later: the unjudged message counts once it is judged; flag changes on judged ones do not repeat it.
-      await db.apply(
-        page({
-          cursor: 12,
-          messages: [
-            message('m8', 't4', 'work', ['work-inbox'], '2026-10-19T11:03:00+00:00', { verdict: 'do' }),
-            message('m5', 't4', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00', { verdict: 'do', flags: { seen: false, flagged: true, answered: false, draft: false } }),
-            message('m6', 't4', 'work', ['work-inbox'], '2026-10-19T11:01:00+00:00', { verdict: 'do' }),
-          ],
-        }),
-      )
-      expect(db.takeArrivals().map((arrival) => arrival.messageId)).toEqual(['m8'])
-    })
-
     it('shows actions at once and takes archived mail out of the inbox list', async () => {
       const applied = await db.applyAction(['m1', 'm2'], 'archive')
 

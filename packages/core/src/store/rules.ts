@@ -1,35 +1,6 @@
 import type { Verdict } from '../domain'
 import type { SyncedDraft, SyncedMessage, SyncedThread } from '../sync/types'
-import type { Arrival, Contact, Draft } from './mailStore'
-
-function needsTheUser(message: SyncedMessage | null | undefined): boolean {
-  return message?.verdict === 'do' || message?.verdict === 'delegate'
-}
-
-/**
- * The arrival a stored message makes, if it is one: unread, in an inbox, and judged `do` or `delegate` for the first
- * time (when it arrived, or when it was classified later). Flag changes on a message judged before do not repeat it.
- */
-export function arrivalOf(previous: SyncedMessage | null | undefined, message: SyncedMessage, inboxFolders: Set<string>): Arrival | null {
-  if (
-    (message.verdict !== 'do' && message.verdict !== 'delegate') ||
-    needsTheUser(previous) ||
-    message.flags.seen ||
-    !message.folderIds.some((id) => inboxFolders.has(id))
-  ) {
-    return null
-  }
-  return {
-    messageId: message.id,
-    threadId: message.threadId,
-    mailAccountId: message.mailAccountId,
-    from: message.from,
-    subject: message.subject,
-    snippet: message.snippet,
-    receivedAt: message.receivedAt,
-    verdict: message.verdict,
-  }
-}
+import type { Contact, Draft } from './mailStore'
 
 /** Everyone on a new message is a suggestion, under a lower-cased address; addresses without an @ are left out. */
 export function peopleOn(message: SyncedMessage): { key: string; person: SyncedMessage['from'] }[] {
