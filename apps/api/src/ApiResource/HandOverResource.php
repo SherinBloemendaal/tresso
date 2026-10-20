@@ -78,6 +78,7 @@ final readonly class HandOverResource
 {
     /**
      * @param array{address: string, name: ?string} $delegate
+     * @param list<string>                          $notifiedChannels
      */
     public function __construct(
         #[ApiProperty(identifier: true)]
@@ -95,6 +96,10 @@ final readonly class HandOverResource
         /** The outgoing message that forwarded it. */
         public ?string $forwardId,
         public ?\DateTimeImmutable $overdueAt,
+        /** When the overdue notice was delivered, on these channels (none: the user chose none for hand-overs). */
+        public ?\DateTimeImmutable $notifiedAt,
+        public array $notifiedChannels,
+        public bool $notifiedSilently,
         public ?\DateTimeImmutable $nudgedAt,
         /** The latest nudge, an outgoing message; cancel it to undo the nudge. */
         public ?string $lastNudgeId,
@@ -120,6 +125,9 @@ final readonly class HandOverResource
             $handOver->getState(),
             $handOver->getForward()?->getId()->toRfc4122(),
             $handOver->getOverdueAt(),
+            $handOver->getNotifiedAt(),
+            $handOver->getNotifiedChannels(),
+            $handOver->isNotifiedSilently(),
             $handOver->getNudgedAt(),
             $handOver->getLastNudge()?->getId()->toRfc4122(),
             $handOver->getReply()?->getId()->toRfc4122(),
