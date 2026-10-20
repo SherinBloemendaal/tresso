@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\ProviderAuth;
 
 use App\Entity\ProviderGrant;
+use App\Enum\CalendarSyncStatus;
 use App\Enum\MailAccountStatus;
+use App\Enum\OAuthProvider;
 use App\Enum\ProviderFeature;
 use App\Repository\MailAccountRepository;
 use App\Security\Crypto\CredentialVault;
@@ -88,13 +90,17 @@ final readonly class ProviderAccessTokens
             }
 
             $refreshToken = \is_string($tokens['refreshToken'] ?? null) ? $tokens['refreshToken'] : throw new \UnexpectedValueException('The grant has no refresh token.');
+            $covered = ProviderScopes::coveredFeatures($provider, $grant->getScopes());
             try {
-                $refreshed = $this->client->refresh($provider, $refreshToken, ProviderScopes::request($provider, ProviderScopes::coveredFeatures($provider, $grant->getScopes())));
+                $refreshed = $this->client->refresh($provider, $refreshToken, ProviderScopes::request($provider, $covered));
             } catch (GrantRejected) {
-                $grant->revoke();
-                $this->requireSignIn($grant, \sprintf('%s no longer lets Tresso use this account. Sign in with %s again.', $provider->label(), $provider->label()));
+                $refreshed = $this->refreshForMail($grant, $refreshToken, $covered);
+                if (null === $refreshed) {
+                    $grant->revoke();
+                    $this->requireSignIn($grant, \sprintf('%s no longer lets Tresso use this account. Sign in with %s again.', $provider->label(), $provider->label()));
 
-                return null;
+                    return null;
+                }
             } catch (ProviderUnavailable $e) {
                 return $e;
             }
@@ -117,6 +123,32 @@ final readonly class ProviderAccessTokens
         }
 
         return $token ?? throw new ReauthorizationRequired(\sprintf('Sign in with %s again to keep using this account.', $grant->getProvider()->label()));
+    }
+
+    /**
+     * Microsoft refreshes for the scopes asked for: a user (or admin) who withdrew the calendar consent makes a refresh
+     * for mail and calendars fail, while mail alone still works. The grant then keeps mail, loses the calendars, and
+     * its accounts say calendars are not allowed. Null when mail alone is refused too, or there is nothing else to try.
+     *
+     * @param list<ProviderFeature> $covered
+     */
+    private function refreshForMail(ProviderGrant $grant, #[\SensitiveParameter] string $refreshToken, array $covered): ?TokenSet
+    {
+        $provider = $grant->getProvider();
+        if (OAuthProvider::Microsoft !== $provider || !\in_array(ProviderFeature::Mail, $covered, true) || [ProviderFeature::Mail] === $covered) {
+            return null;
+        }
+        try {
+            $refreshed = $this->client->refresh($provider, $refreshToken, ProviderScopes::request($provider, [ProviderFeature::Mail]));
+        } catch (GrantRejected|ProviderUnavailable) {
+            return null;
+        }
+        $grant->updateScopes($refreshed->scopes ?? ProviderScopes::required($provider, ProviderFeature::Mail));
+        foreach ($this->mailAccounts->findByProviderGrant($grant) as $account) {
+            $account->setCalendarStatus(CalendarSyncStatus::NotGranted, \sprintf('%s no longer lets Tresso use the calendars of this account. Allow calendar access to sync them again.', $provider->label()));
+        }
+
+        return $refreshed;
     }
 
     /**
