@@ -43,7 +43,7 @@ final readonly class SenderStatistics
         /** @var array{conversations: int, messages: int|null, unread: int|null} $totals */
         $totals = $this->connection->fetchAssociative(
             "SELECT COUNT(DISTINCT m.thread_id) AS conversations, COUNT(m.id) AS messages, COUNT(m.id) FILTER (WHERE NOT m.seen) AS unread
-             FROM ({$listed}) listed JOIN message m ON m.thread_id = listed.id",
+             FROM ({$listed}) listed JOIN message m ON m.thread_id = listed.id AND m.held_until IS NULL",
             $parameters,
         );
 
@@ -53,7 +53,7 @@ final readonly class SenderStatistics
                     (ARRAY_AGG(m.from_name ORDER BY m.received_at DESC) FILTER (WHERE m.from_name IS NOT NULL AND m.from_name <> ''))[1] AS name,
                     COUNT(DISTINCT m.thread_id) AS conversations, COUNT(*) AS messages,
                     COUNT(*) FILTER (WHERE NOT m.seen) AS unread, MAX(m.received_at) AS last_received_at
-             FROM ({$listed}) listed JOIN message m ON m.thread_id = listed.id
+             FROM ({$listed}) listed JOIN message m ON m.thread_id = listed.id AND m.held_until IS NULL
              WHERE m.from_address <> ALL(CAST(:own AS TEXT[]))
              GROUP BY m.from_address
              ORDER BY conversations DESC, messages DESC, address
