@@ -50,13 +50,15 @@ func run(logger *slog.Logger) error {
 
 	client := api.New(ctx, cfg.APIURL, cfg.TokenURL, cfg.ClientID, cfg.ClientSecret)
 
-	store, err := storage.NewS3(cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3Region)
+	objects, err := storage.NewS3(cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3Region)
 	if err != nil {
 		return fmt.Errorf("object storage: %w", err)
 	}
-	if err := store.EnsureBucket(ctx); err != nil {
+	if err := objects.EnsureBucket(ctx); err != nil {
 		return fmt.Errorf("object storage: %w", err)
 	}
+	// Content is encrypted with each account owner's key, which the API hands out per leased account.
+	store := storage.NewVault(objects, storageKeys{client: client, workerID: cfg.WorkerID})
 	if cfg.AllowUnsafeServers {
 		logger.Warn("MAIL_ALLOW_UNSAFE_SERVERS is on: private mail server addresses are allowed (local testing only)")
 	}
@@ -163,4 +165,14 @@ func graphOutboxOptions(logger *slog.Logger) graphsync.ClientOptions {
 // mail servers.
 func newUnsubscriber(_ config.Config) *unsubscribe.Sender {
 	return unsubscribe.New(netguard.New(false), unsubscribe.DefaultOptions())
+}
+
+// storageKeys asks the API for an account's storage keys as this worker, which must lease the account.
+type storageKeys struct {
+	client   *api.Client
+	workerID string
+}
+
+func (k storageKeys) StorageKeys(ctx context.Context, accountID string) (api.StorageKeys, error) {
+	return k.client.StorageKeys(ctx, accountID, k.workerID)
 }

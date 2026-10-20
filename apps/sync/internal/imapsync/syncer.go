@@ -58,14 +58,14 @@ func DefaultOptions() Options {
 
 type Syncer struct {
 	api      API
-	store    storage.Store
+	store    storage.Blobs
 	dialer   Dialer
 	workerID string
 	opts     Options
 	logger   *slog.Logger
 }
 
-func New(client API, store storage.Store, d Dialer, workerID string, opts Options, logger *slog.Logger) *Syncer {
+func New(client API, store storage.Blobs, d Dialer, workerID string, opts Options, logger *slog.Logger) *Syncer {
 	return &Syncer{api: client, store: store, dialer: d, workerID: workerID, opts: opts, logger: logger}
 }
 

@@ -19,7 +19,7 @@ import (
 	"tresso/sync/internal/fakeapi"
 	"tresso/sync/internal/providerauth"
 	"tresso/sync/internal/providersend"
-	"tresso/sync/internal/storage"
+	"tresso/sync/internal/storage/storagetest"
 )
 
 func testOptions(baseURL string) Options {
@@ -39,14 +39,14 @@ func testOptions(baseURL string) Options {
 type harness struct {
 	gmail   *fakeGmail
 	api     *fakeapi.API
-	store   *storage.Memory
+	store   *storagetest.Vault
 	syncer  *Syncer
 	session *session
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	h := &harness{gmail: newFakeGmail(t), api: fakeapi.New(), store: storage.NewMemory()}
+	h := &harness{gmail: newFakeGmail(t), api: fakeapi.New(), store: storagetest.New()}
 	h.syncer = New(h.api, h.store, "w1", testOptions(h.gmail.server.URL), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return h
 }
@@ -152,7 +152,7 @@ func TestBackfillIngestsNewestFirstIntoEveryFolder(t *testing.T) {
 			t.Errorf("%s downloaded %d times", id, got)
 		}
 	}
-	if h.store.Len() == 0 {
+	if h.store.Objects.Len() == 0 {
 		t.Error("raw messages were not stored")
 	}
 }

@@ -157,7 +157,7 @@ type Transport interface {
 
 type Dispatcher struct {
 	api         API
-	store       storage.Reader
+	store       storage.Blobs
 	transports  map[string]Transport // by account provider
 	unsubscribe Unsubscriber
 	workerID    string
@@ -174,7 +174,7 @@ type Dispatcher struct {
 
 type run struct{ again bool }
 
-func NewDispatcher(client API, store storage.Reader, transports map[string]Transport, unsubscriber Unsubscriber, workerID string, logger *slog.Logger) *Dispatcher {
+func NewDispatcher(client API, store storage.Blobs, transports map[string]Transport, unsubscriber Unsubscriber, workerID string, logger *slog.Logger) *Dispatcher {
 	return &Dispatcher{api: client, store: store, transports: transports, unsubscribe: unsubscriber, workerID: workerID, logger: logger, now: time.Now, running: map[string]*run{}, unsubscribing: map[string]*run{}}
 }
 
@@ -281,7 +281,7 @@ func (d *Dispatcher) fileDrafts(ctx context.Context, logger *slog.Logger, sender
 
 	for _, file := range work.Files {
 		fileLogger := logger.With("draft", file.DraftID, "version", file.Version)
-		raw, err := d.store.Get(ctx, file.RawObjectKey)
+		raw, err := d.store.Read(ctx, credentials.AccountID, file.RawObjectKey)
 		if err != nil {
 			fileLogger.Warn("reading the draft copy failed", "error", err)
 			continue
@@ -518,7 +518,7 @@ func refusalOutcome(err error) string {
 }
 
 func (d *Dispatcher) deliver(ctx context.Context, logger *slog.Logger, sender Sender, credentials api.Credentials, sent *lazy[SentStore], message api.OutgoingMessage) {
-	raw, err := d.store.Get(ctx, message.RawObjectKey)
+	raw, err := d.store.Read(ctx, credentials.AccountID, message.RawObjectKey)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			d.report(ctx, logger, credentials.AccountID, message.ID, api.OutcomeFailed, "The message could not be found any more.", false)

@@ -16,11 +16,12 @@ import (
 	"time"
 
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/blobcrypt"
 	"tresso/sync/internal/fakeapi"
 	"tresso/sync/internal/gmailsync"
 	"tresso/sync/internal/graphsync"
 	"tresso/sync/internal/providersend"
-	"tresso/sync/internal/storage"
+	"tresso/sync/internal/storage/storagetest"
 )
 
 // providerServer accepts only the renewed token, so every send first meets a 401 with the token the credentials
@@ -232,10 +233,10 @@ func (o *outboxAPI) ReportUnsubscribe(context.Context, string, string, string, s
 func TestARunSharesOneProviderClientAcrossMessages(t *testing.T) {
 	srv, delivered := providerServer(t, "/gmail/v1/users/me/messages/send", func(body []byte) string { return string(body) })
 	client := &outboxAPI{API: fakeapi.New(), provider: "gmail"} // its token-1 is refused by Gmail; the renewal is token-2
-	store := storage.NewMemory()
-	_ = store.PutIfAbsent(context.Background(), "outgoing/aa/o1", []byte(outgoing), "message/rfc822")
+	store := storagetest.New()
+	key := store.PutAsAPI(blobcrypt.KindOutgoing, []byte(outgoing))
 	for _, id := range []string{"o1", "o2", "o3"} {
-		client.queue = append(client.queue, api.OutgoingMessage{ID: id, RawObjectKey: "outgoing/aa/o1", Recipients: []string{"anna@example.test"}, MessageID: id + "@example.test", Attempt: 1})
+		client.queue = append(client.queue, api.OutgoingMessage{ID: id, RawObjectKey: key, Recipients: []string{"anna@example.test"}, MessageID: id + "@example.test", Attempt: 1})
 	}
 	opts := gmailsync.DefaultClientOptions()
 	opts.BaseURL = srv.URL

@@ -64,13 +64,13 @@ func DefaultOptions() Options {
 
 type Syncer struct {
 	api      providersync.API
-	store    storage.Store
+	store    storage.Blobs
 	workerID string
 	opts     Options
 	logger   *slog.Logger
 }
 
-func New(client providersync.API, store storage.Store, workerID string, opts Options, logger *slog.Logger) *Syncer {
+func New(client providersync.API, store storage.Blobs, workerID string, opts Options, logger *slog.Logger) *Syncer {
 	return &Syncer{api: client, store: store, workerID: workerID, opts: opts, logger: logger}
 }
 
@@ -320,7 +320,7 @@ func (s *session) fetcher(listed map[string]graphMessage, built *providersync.Me
 				return err
 			}
 			item := listed[id]
-			msg, err := ingestmsg.Build(ctx, s.store, raw, id, item.receivedAt(), item.flags())
+			msg, err := ingestmsg.Build(ctx, s.store, s.account.ID, raw, id, item.receivedAt(), item.flags())
 			if err != nil {
 				return err
 			}

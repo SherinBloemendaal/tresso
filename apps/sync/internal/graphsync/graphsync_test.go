@@ -19,7 +19,7 @@ import (
 	"tresso/sync/internal/fakeapi"
 	"tresso/sync/internal/providerauth"
 	"tresso/sync/internal/providersend"
-	"tresso/sync/internal/storage"
+	"tresso/sync/internal/storage/storagetest"
 )
 
 func testOptions(baseURL string) Options {
@@ -47,7 +47,7 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{graph: newFakeGraph(t), api: fakeapi.New()}
 	h.graph.standardTree()
-	h.syncer = New(h.api, storage.NewMemory(), "w1", testOptions(h.graph.base), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h.syncer = New(h.api, storagetest.New(), "w1", testOptions(h.graph.base), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return h
 }
 

@@ -15,12 +15,13 @@ import (
 	"github.com/emersion/go-imap/v2"
 
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/blobcrypt"
 	"tresso/sync/internal/fakeapi"
 	"tresso/sync/internal/imapsync"
 	"tresso/sync/internal/providerhttp"
 	"tresso/sync/internal/providersend"
 	"tresso/sync/internal/smtpsend"
-	"tresso/sync/internal/storage"
+	"tresso/sync/internal/storage/storagetest"
 )
 
 type report struct {
@@ -240,7 +241,7 @@ type harness struct {
 	mailbox *fakeMailbox
 	unsub   *fakeUnsubscriber
 	finder  *fakeFinder
-	store   *storage.Memory
+	store   *storagetest.Vault
 	sends   []smtpsend.Envelope
 	// via lists the transport of every send, and opened the transport of every Sent folder that was opened.
 	via    []string
@@ -250,9 +251,12 @@ type harness struct {
 	d      *Dispatcher
 }
 
+// hello is the outgoing message every harness has stored.
+var hello = []byte("Subject: Hi\r\n\r\nHello\r\n")
+
 func newHarness(messages ...api.OutgoingMessage) *harness {
-	h := &harness{api: &fakeAPI{provider: "imap", smtpHost: "smtp.company.example", queue: [][]api.OutgoingMessage{messages}}, sent: &fakeSent{contains: map[string]bool{}}, drafts: &fakeDrafts{}, mailbox: &fakeMailbox{errors: map[string]error{}}, unsub: &fakeUnsubscriber{outcomes: map[string][2]string{}}, store: storage.NewMemory()}
-	_ = h.store.PutIfAbsent(context.Background(), "outgoing/ab/raw1", []byte("Subject: Hi\r\n\r\nHello\r\n"), "message/rfc822")
+	h := &harness{api: &fakeAPI{provider: "imap", smtpHost: "smtp.company.example", queue: [][]api.OutgoingMessage{messages}}, sent: &fakeSent{contains: map[string]bool{}}, drafts: &fakeDrafts{}, mailbox: &fakeMailbox{errors: map[string]error{}}, unsub: &fakeUnsubscriber{outcomes: map[string][2]string{}}, store: storagetest.New()}
+	h.store.PutAsAPI(blobcrypt.KindOutgoing, hello)
 	password := func(c api.Credentials) error { _, err := c.Password(); return err }
 	token := func(c api.Credentials) error { _, _, err := c.AccessToken(); return err }
 	transports := map[string]Transport{"imap": &fakeTransport{h, "imap", password}, "gmail": &fakeTransport{h, "gmail", token}, "microsoft": &fakeTransport{h, "microsoft", token}}
@@ -333,7 +337,7 @@ func (h *harness) run() {
 }
 
 func message(id string, attempt int) api.OutgoingMessage {
-	return api.OutgoingMessage{ID: id, RawObjectKey: "outgoing/ab/raw1", EnvelopeFrom: "kim@company.example", Recipients: []string{"anna@finance.example", "archive@company.example"}, MessageID: id + "@company.example", Attempt: attempt}
+	return api.OutgoingMessage{ID: id, RawObjectKey: storagetest.KeyOf(blobcrypt.KindOutgoing, hello), EnvelopeFrom: "kim@company.example", Recipients: []string{"anna@finance.example", "archive@company.example"}, MessageID: id + "@company.example", Attempt: attempt}
 }
 
 func TestSendsAndFilesACopy(t *testing.T) {
@@ -389,7 +393,7 @@ func TestTemporaryProblemsAreRetried(t *testing.T) {
 }
 
 func TestMissingMessageFails(t *testing.T) {
-	h := newHarness(api.OutgoingMessage{ID: "m1", RawObjectKey: "outgoing/zz/missing", Attempt: 1})
+	h := newHarness(api.OutgoingMessage{ID: "m1", RawObjectKey: storagetest.KeyOf(blobcrypt.KindOutgoing, []byte("never stored")), Attempt: 1})
 
 	h.run()
 
@@ -542,10 +546,10 @@ func TestAutoSavesSent(t *testing.T) {
 
 func TestFilesTheNewDraftCopyBeforeRemovingTheOldOne(t *testing.T) {
 	h := newHarness()
-	_ = h.store.PutIfAbsent(context.Background(), "drafts/ab/v2", []byte("draft v2"), "message/rfc822")
+	v2 := h.store.PutAsAPI(blobcrypt.KindDrafts, []byte("draft v2"))
 	previous := "d1.1@company.example"
 	h.api.drafts = api.DraftWork{
-		Files:    []api.DraftFile{{DraftID: "d1", Version: 2, RawObjectKey: "drafts/ab/v2", MessageID: "d1.2@company.example", PreviousMessageID: &previous}},
+		Files:    []api.DraftFile{{DraftID: "d1", Version: 2, RawObjectKey: v2, MessageID: "d1.2@company.example", PreviousMessageID: &previous}},
 		Removals: []api.DraftRemoval{{ID: "r1", MessageID: "d9.4@company.example"}},
 	}
 
@@ -561,9 +565,9 @@ func TestFilesTheNewDraftCopyBeforeRemovingTheOldOne(t *testing.T) {
 
 func TestAFailedDraftCopyIsNotReported(t *testing.T) {
 	h := newHarness()
-	_ = h.store.PutIfAbsent(context.Background(), "drafts/ab/v1", []byte("draft v1"), "message/rfc822")
+	v1 := h.store.PutAsAPI(blobcrypt.KindDrafts, []byte("draft v1"))
 	h.drafts.failAppend = true
-	h.api.drafts = api.DraftWork{Files: []api.DraftFile{{DraftID: "d1", Version: 1, RawObjectKey: "drafts/ab/v1", MessageID: "d1.1@company.example"}}}
+	h.api.drafts = api.DraftWork{Files: []api.DraftFile{{DraftID: "d1", Version: 1, RawObjectKey: v1, MessageID: "d1.1@company.example"}}}
 
 	h.run()
 

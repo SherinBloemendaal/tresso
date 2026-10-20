@@ -16,10 +16,11 @@ import (
 	"testing"
 
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/blobcrypt"
 	"tresso/sync/internal/fakeapi"
 	"tresso/sync/internal/gmailsync"
 	"tresso/sync/internal/graphsync"
-	"tresso/sync/internal/storage"
+	"tresso/sync/internal/storage/storagetest"
 )
 
 var messageIDHeader = regexp.MustCompile(`(?m)^Message-ID: <([^>]+)>`)
@@ -240,11 +241,11 @@ func writeJSONResponse(w http.ResponseWriter, v any) {
 }
 
 // providerDispatcher runs the dispatcher with the real transport of provider against its fake.
-func providerDispatcher(t *testing.T, provider string, box *providerMailbox) (*Dispatcher, *outboxAPI, *storage.Memory) {
+func providerDispatcher(t *testing.T, provider string, box *providerMailbox) (*Dispatcher, *outboxAPI, *storagetest.Vault) {
 	t.Helper()
 	client := &outboxAPI{API: fakeapi.New(), provider: provider}
 	client.API.RefreshedToken = "" // the fakes take any token
-	store := storage.NewMemory()
+	store := storagetest.New()
 	var transport Transport
 	switch provider {
 	case "gmail":
@@ -271,22 +272,22 @@ func TestProviderDraftsAreReplacedOnlyAfterTheNewCopyIsIn(t *testing.T) {
 		t.Run(provider, func(t *testing.T) {
 			box := newProviderMailbox()
 			d, client, store := providerDispatcher(t, provider, box)
-			_ = store.PutIfAbsent(context.Background(), "drafts/aa/1", draftRaw("d1.1@example.test"), "message/rfc822")
-			_ = store.PutIfAbsent(context.Background(), "drafts/aa/2", draftRaw("d1.2@example.test"), "message/rfc822")
-			_ = store.PutIfAbsent(context.Background(), "drafts/aa/9", draftRaw("d9.1@example.test"), "message/rfc822")
+			d11 := store.PutAsAPI(blobcrypt.KindDrafts, draftRaw("d1.1@example.test"))
+			d12 := store.PutAsAPI(blobcrypt.KindDrafts, draftRaw("d1.2@example.test"))
+			d91 := store.PutAsAPI(blobcrypt.KindDrafts, draftRaw("d9.1@example.test"))
 			run := func() {
 				d.Trigger(context.Background(), "acc")
 				d.Wait()
 			}
 
 			client.drafts = api.DraftWork{Files: []api.DraftFile{
-				{DraftID: "d1", Version: 1, RawObjectKey: "drafts/aa/1", MessageID: "d1.1@example.test"},
-				{DraftID: "d9", Version: 1, RawObjectKey: "drafts/aa/9", MessageID: "d9.1@example.test"},
+				{DraftID: "d1", Version: 1, RawObjectKey: d11, MessageID: "d1.1@example.test"},
+				{DraftID: "d9", Version: 1, RawObjectKey: d91, MessageID: "d9.1@example.test"},
 			}}
 			run()
 			previous := "d1.1@example.test"
 			client.drafts = api.DraftWork{
-				Files:    []api.DraftFile{{DraftID: "d1", Version: 2, RawObjectKey: "drafts/aa/2", MessageID: "d1.2@example.test", PreviousMessageID: &previous}},
+				Files:    []api.DraftFile{{DraftID: "d1", Version: 2, RawObjectKey: d12, MessageID: "d1.2@example.test", PreviousMessageID: &previous}},
 				Removals: []api.DraftRemoval{{ID: "r9", MessageID: "d9.1@example.test"}, {ID: "r0", MessageID: "never-filed@example.test"}},
 			}
 			run()
@@ -310,12 +311,12 @@ func TestProviderDraftWorkGoesOnAfterALostClaim(t *testing.T) {
 		t.Run(provider, func(t *testing.T) {
 			box := newProviderMailbox()
 			d, client, store := providerDispatcher(t, provider, box)
-			_ = store.PutIfAbsent(context.Background(), "drafts/aa/1", draftRaw("d1.1@example.test"), "message/rfc822")
-			_ = store.PutIfAbsent(context.Background(), "drafts/aa/2", draftRaw("d2.1@example.test"), "message/rfc822")
+			d11 := store.PutAsAPI(blobcrypt.KindDrafts, draftRaw("d1.1@example.test"))
+			d21 := store.PutAsAPI(blobcrypt.KindDrafts, draftRaw("d2.1@example.test"))
 			client.lostClaims = map[string]bool{"d1": true}
 			client.drafts = api.DraftWork{Files: []api.DraftFile{
-				{DraftID: "d1", Version: 1, RawObjectKey: "drafts/aa/1", MessageID: "d1.1@example.test"},
-				{DraftID: "d2", Version: 1, RawObjectKey: "drafts/aa/2", MessageID: "d2.1@example.test"},
+				{DraftID: "d1", Version: 1, RawObjectKey: d11, MessageID: "d1.1@example.test"},
+				{DraftID: "d2", Version: 1, RawObjectKey: d21, MessageID: "d2.1@example.test"},
 			}}
 
 			d.Trigger(context.Background(), "acc")
@@ -413,12 +414,12 @@ func TestLostAccessReportsNothingAndSendsStayQueued(t *testing.T) {
 				box := newProviderMailbox()
 				box.refuse = status
 				d, client, store := providerDispatcher(t, provider, box)
-				_ = store.PutIfAbsent(context.Background(), "outgoing/aa/1", draftRaw("o1@example.test"), "message/rfc822")
-				_ = store.PutIfAbsent(context.Background(), "drafts/aa/1", draftRaw("d1.1@example.test"), "message/rfc822")
+				o1 := store.PutAsAPI(blobcrypt.KindOutgoing, draftRaw("o1@example.test"))
+				d11 := store.PutAsAPI(blobcrypt.KindDrafts, draftRaw("d1.1@example.test"))
 				yes := true
-				client.queue = []api.OutgoingMessage{{ID: "o1", RawObjectKey: "outgoing/aa/1", Recipients: []string{"anna@example.test"}, MessageID: "o1@example.test", Attempt: 1}}
+				client.queue = []api.OutgoingMessage{{ID: "o1", RawObjectKey: o1, Recipients: []string{"anna@example.test"}, MessageID: "o1@example.test", Attempt: 1}}
 				client.drafts = api.DraftWork{
-					Files:    []api.DraftFile{{DraftID: "d1", Version: 1, RawObjectKey: "drafts/aa/1", MessageID: "d1.1@example.test"}, {DraftID: "d2", Version: 1, RawObjectKey: "drafts/aa/1", MessageID: "d1.1@example.test"}},
+					Files:    []api.DraftFile{{DraftID: "d1", Version: 1, RawObjectKey: d11, MessageID: "d1.1@example.test"}, {DraftID: "d2", Version: 1, RawObjectKey: d11, MessageID: "d1.1@example.test"}},
 					Removals: []api.DraftRemoval{{ID: "r1", MessageID: "d0@example.test"}},
 				}
 				client.changes = []api.MailboxChange{

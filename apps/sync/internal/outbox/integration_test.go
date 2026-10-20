@@ -24,8 +24,9 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/blobcrypt"
 	"tresso/sync/internal/netguard"
-	"tresso/sync/internal/storage"
+	"tresso/sync/internal/storage/storagetest"
 )
 
 const (
@@ -138,8 +139,8 @@ func TestSendsFilesAndNeverSendsTwice(t *testing.T) {
 
 	messageID := fmt.Sprintf("outbox-%d@tresso.test", time.Now().UnixNano())
 	raw := "From: Lisa <lisa@tresso.test>\r\nTo: Lisa <lisa@tresso.test>\r\nSubject: Outbox integration\r\nMessage-ID: <" + messageID + ">\r\nDate: " + time.Now().Format(time.RFC1123Z) + "\r\n\r\nHello from the outbox.\r\n"
-	store := storage.NewMemory()
-	_ = store.PutIfAbsent(context.Background(), "outgoing/aa/m1", []byte(raw), "message/rfc822")
+	store := storagetest.New()
+	key := store.PutAsAPI(blobcrypt.KindOutgoing, []byte(raw))
 
 	dialer := netguard.New(true)
 	client := &integrationAPI{credentials: api.Credentials{
@@ -153,7 +154,7 @@ func TestSendsFilesAndNeverSendsTwice(t *testing.T) {
 		Secrets: map[string]string{"type": "password", "password": password},
 	}}
 	dispatcher := NewDispatcher(client, store, map[string]Transport{"imap": IMAPTransport(dialer)}, nil, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
-	message := api.OutgoingMessage{ID: "m1", RawObjectKey: "outgoing/aa/m1", EnvelopeFrom: sender, Recipients: []string{sender}, MessageID: messageID, Attempt: 1}
+	message := api.OutgoingMessage{ID: "m1", RawObjectKey: key, EnvelopeFrom: sender, Recipients: []string{sender}, MessageID: messageID, Attempt: 1}
 
 	client.messages = []api.OutgoingMessage{message}
 	dispatcher.Trigger(context.Background(), "acc")
@@ -203,9 +204,9 @@ func TestKeepsTheDraftsFolderInStep(t *testing.T) {
 	raw := func(id string) []byte {
 		return []byte("From: Lisa <lisa@tresso.test>\r\nTo: anna@finance.example\r\nSubject: Draft\r\nMessage-ID: <" + id + ">\r\n\r\nNot done yet.\r\n")
 	}
-	store := storage.NewMemory()
-	_ = store.PutIfAbsent(context.Background(), "drafts/aa/1", raw(first), "message/rfc822")
-	_ = store.PutIfAbsent(context.Background(), "drafts/aa/2", raw(second), "message/rfc822")
+	store := storagetest.New()
+	firstKey := store.PutAsAPI(blobcrypt.KindDrafts, raw(first))
+	secondKey := store.PutAsAPI(blobcrypt.KindDrafts, raw(second))
 
 	dialer := netguard.New(true)
 	client := &integrationAPI{credentials: api.Credentials{
@@ -224,13 +225,13 @@ func TestKeepsTheDraftsFolderInStep(t *testing.T) {
 		dispatcher.Wait()
 	}
 
-	client.drafts = api.DraftWork{Files: []api.DraftFile{{DraftID: "d1", Version: 1, RawObjectKey: "drafts/aa/1", MessageID: first}}}
+	client.drafts = api.DraftWork{Files: []api.DraftFile{{DraftID: "d1", Version: 1, RawObjectKey: firstKey, MessageID: first}}}
 	run()
 	if n := count(t, check, "Drafts", first); n != 1 {
 		t.Fatalf("first version in Drafts = %d", n)
 	}
 
-	client.drafts = api.DraftWork{Files: []api.DraftFile{{DraftID: "d1", Version: 2, RawObjectKey: "drafts/aa/2", MessageID: second, PreviousMessageID: &first}}}
+	client.drafts = api.DraftWork{Files: []api.DraftFile{{DraftID: "d1", Version: 2, RawObjectKey: secondKey, MessageID: second, PreviousMessageID: &first}}}
 	run()
 	if count(t, check, "Drafts", first) != 0 || count(t, check, "Drafts", second) != 1 {
 		t.Fatalf("after the second version: first %d, second %d", count(t, check, "Drafts", first), count(t, check, "Drafts", second))
@@ -295,7 +296,7 @@ func TestMakesTheUsersChangesOnTheServer(t *testing.T) {
 		},
 	}
 	// Nothing is queued to send and no draft work, so only the connection for changes is opened.
-	dispatcher := NewDispatcher(client, storage.NewMemory(), map[string]Transport{"imap": IMAPTransport(dialer)}, nil, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	dispatcher := NewDispatcher(client, storagetest.New(), map[string]Transport{"imap": IMAPTransport(dialer)}, nil, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	dispatcher.Trigger(context.Background(), "acc")
 	dispatcher.Wait()
 
