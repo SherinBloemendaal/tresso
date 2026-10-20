@@ -42,6 +42,7 @@ final readonly class MessageInvitationProvider implements ProviderInterface
         private OccurrenceExpander $expander,
         private SelfAddresses $selfAddresses,
         private CurrentUser $currentUser,
+        private InvitationApplier $applier,
     ) {
     }
 
@@ -113,7 +114,7 @@ final readonly class MessageInvitationProvider implements ProviderInterface
             ($row?->getSelfPartstat() ?? $data->selfPartstat)?->value,
             ItipMethod::Request === $invitation->getMethod() && null !== $row && null !== $row->getSelfPartstat() && 'outdated' !== $kind,
             $conflicts,
-            null === $invitation->getAppliedAt() && \in_array($invitation->getMethod(), [ItipMethod::Request, ItipMethod::Cancel, ItipMethod::Reply], true),
+            null === $invitation->getAppliedAt() && \in_array($invitation->getMethod(), [ItipMethod::Request, ItipMethod::Cancel, ItipMethod::Reply], true) && null === $this->applier->blocker($invitation),
         );
     }
 

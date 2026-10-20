@@ -101,6 +101,33 @@ final readonly class InvitationApplier
     }
 
     /**
+     * Why the calendar mail cannot be applied now (the calendar it would change is read-only or scheduled by its
+     * provider), or null when it can. Nothing is created or changed; clients show the apply action only without one.
+     */
+    public function blocker(CalendarInvitation $invitation): ?string
+    {
+        $account = $invitation->getMessage()->getMailAccount();
+        $object = self::pick($this->objects->findForOwnerByUid($account->getOwner(), $invitation->getUid()), $account);
+        if (null !== $object) {
+            return self::blockedBy($object->getCalendar());
+        }
+        $default = $this->calendars->findDefaultFor($account);
+
+        return ItipMethod::Request === $invitation->getMethod() && null !== $default ? self::blockedBy($default) : null;
+    }
+
+    /** Why calendar mail cannot change this calendar, or null when it can. */
+    private static function blockedBy(Calendar $calendar): ?string
+    {
+        return match (true) {
+            // The provider puts invitations into its calendar itself; Tresso would only duplicate them.
+            $calendar->providerSchedules() => 'The provider of this calendar puts invitations into it itself.',
+            !$calendar->isWritable() => \sprintf('The calendar "%s" is read-only, so it cannot take the change.', $calendar->getName()),
+            default => null,
+        };
+    }
+
+    /**
      * Of the user's objects with this UID, the one this mail is about: in a calendar of the account it came to, else
      * a Tresso calendar, else the first.
      *
@@ -130,8 +157,9 @@ final readonly class InvitationApplier
         $itip = CalendarDocument::forUid(CalendarDocument::parse($invitation->getIcal()), $invitation->getUid());
 
         $object = self::pick($this->objects->findForOwnerByUid($user, $invitation->getUid()), $account);
-        if (null !== $object && $object->getCalendar()->providerSchedules()) {
-            return InvitationOutcome::noTarget('The provider of this calendar puts invitations into it itself.');
+        $blocked = null === $object ? null : self::blockedBy($object->getCalendar());
+        if (null !== $blocked) {
+            return InvitationOutcome::noTarget($blocked);
         }
         if (null !== $object) {
             $object = $this->objects->lock($object);
@@ -207,7 +235,8 @@ final readonly class InvitationApplier
             }
             foreach (CalendarDocument::events($itip) as $event) {
                 $key = CalendarDocument::recurrenceKey($event);
-                $old = '' === $key ? $currentMaster : CalendarDocument::override($current, $key);
+                // A new override keeps the answer the user gave the series.
+                $old = '' === $key ? $currentMaster : CalendarDocument::override($current, $key) ?? $currentMaster;
                 self::keepAnswers($event, $old, $self);
             }
             $this->save($object, $itip, $invitation);
@@ -228,7 +257,7 @@ final readonly class InvitationApplier
                 continue;
             }
             $new = clone $override;
-            self::keepAnswers($new, $old, $self);
+            self::keepAnswers($new, $old ?? $currentMaster, $self);
             if (null !== $old) {
                 $current->remove($old);
             }
@@ -319,6 +348,15 @@ final readonly class InvitationApplier
         if (null === $stored) {
             return InvitationOutcome::ignored('The sender is not a guest of the event.');
         }
+        // One spelling of the guest on every component, so sabre (which compares exactly) updates an occurrence that
+        // spells them differently instead of adding them again.
+        foreach (CalendarDocument::events($current) as $event) {
+            foreach (Props::all($event, 'ATTENDEE') as $attendee) {
+                if (Props::address(Props::value($attendee)) === $sender) {
+                    $attendee->setValue($stored);
+                }
+            }
+        }
         $answers = 0;
         foreach (CalendarDocument::events($itip) as $event) {
             foreach (Props::all($event, 'ATTENDEE') as $attendee) {
@@ -378,15 +416,9 @@ final readonly class InvitationApplier
         if (null === $default) {
             return [$this->localCalendars->ensure($user), null];
         }
-        if ($default->providerSchedules()) {
-            // The account's provider puts invitations into its calendar itself; Tresso would only duplicate them.
-            return [null, 'The provider of this account puts invitations into its calendar itself.'];
-        }
-        if (!$default->isWritable()) {
-            return [null, 'The default calendar of this account is read-only. Choose a writable default calendar, then add the invitation.'];
-        }
+        $blocked = self::blockedBy($default);
 
-        return [$default, null];
+        return null === $blocked ? [$default, null] : [null, $blocked];
     }
 
     /**

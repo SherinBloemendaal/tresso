@@ -361,7 +361,123 @@ final class CalendarInvitationTest extends DatabaseTestCase
 
         self::assertResponseStatusCodeSame(422);
         self::assertStringContainsString('read-only', (string) $this->client->getResponse()->getContent());
-        self::assertTrue($this->getJson('/api/v1/messages/'.$messageId.'/invitation', $this->kim)['canApply'], 'Still there to apply once a writable calendar is the default.');
+        self::assertFalse($this->getJson('/api/v1/messages/'.$messageId.'/invitation', $this->kim)['canApply'], 'Not offered while it cannot work.');
+
+        $this->connection()->executeStatement('UPDATE calendar SET writable = true WHERE mail_account_id = :account', ['account' => $this->accountId]);
+        self::assertTrue($this->getJson('/api/v1/messages/'.$messageId.'/invitation', $this->kim)['canApply'], 'Still there to apply once the calendar takes it.');
+    }
+
+    public function testCalendarMailForAnEventInAReadOnlyCalendarIsNotSavedThere(): void
+    {
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/calendars', ['workerId' => 'w1', 'serverUrl' => 'https://caldav.company.example/dav/', 'calendars' => [
+            ['remoteId' => 'https://caldav.company.example/dav/kim/home/', 'name' => 'Home', 'isDefault' => true],
+        ]], $this->worker);
+        self::assertResponseIsSuccessful();
+        $this->receive('Invitation: Budget review', self::invitation('REQUEST', 0, '20261021T140000'));
+        // The worker wrote it to the provider.
+        $this->connection()->executeStatement('DELETE FROM calendar_operation');
+        // The calendar was shared read-only with the user since.
+        $this->connection()->executeStatement('UPDATE calendar SET writable = false WHERE mail_account_id = :account', ['account' => $this->accountId]);
+
+        $update = $this->receive('Updated: Budget review', self::invitation('REQUEST', 1, '20261021T160000'));
+
+        self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM calendar_operation'), 'No write that the provider can only refuse.');
+        self::assertSame(['dateTime' => '2026-10-21T12:00:00+00:00'], $this->occurrences($this->kim, '2026-10-21T00:00:00+00:00', '2026-10-22T00:00:00+00:00')[0]['start']);
+        self::assertFalse($this->getJson('/api/v1/messages/'.$update.'/invitation', $this->kim)['canApply']);
+        $this->client->request('POST', '/api/v1/messages/'.$update.'/invitation/apply', server: $this->kim);
+        self::assertResponseStatusCodeSame(422);
+        self::assertNull($this->connection()->fetchOne('SELECT applied_at FROM calendar_invitation i JOIN message m ON m.id = i.message_id WHERE m.subject = :subject', ['subject' => 'Updated: Budget review']), 'Kept, to apply once the calendar takes it.');
+    }
+
+    public function testAnInvitationForAProviderScheduledEventIsNotOffered(): void
+    {
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/calendars', ['workerId' => 'w1', 'serverUrl' => 'https://caldav.company.example/dav/', 'providerSchedules' => true, 'calendars' => [
+            ['remoteId' => 'https://caldav.company.example/dav/kim/home/', 'name' => 'Home', 'isDefault' => true],
+        ]], $this->worker);
+        $home = $this->firstCalendarId();
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/calendars/'.$home.'/objects', ['workerId' => 'w1', 'changed' => [
+            ['remoteId' => 'https://caldav.company.example/dav/kim/home/budget.ics', 'etag' => '"1"', 'ical' => str_replace("METHOD:REQUEST\r\n", '', self::invitation('REQUEST', 0, '20261021T140000'))],
+        ]], $this->worker);
+        self::assertResponseIsSuccessful();
+
+        $update = $this->receive('Updated: Budget review', self::invitation('REQUEST', 1, '20261021T160000'));
+
+        self::assertFalse($this->getJson('/api/v1/messages/'.$update.'/invitation', $this->kim)['canApply'], 'The provider puts it in; there is nothing to apply.');
+    }
+
+    public function testAChangeToOneOccurrenceKeepsTheAnswerToTheSeries(): void
+    {
+        $series = str_replace("SEQUENCE:0\r\n", "SEQUENCE:0\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\n", self::invitation('REQUEST', 0, '20261021T140000'));
+        $messageId = $this->receive('Invitation: Budget review', $series);
+        $eventId = self::string($this->getJson('/api/v1/messages/'.$messageId.'/invitation', $this->kim)['eventId']);
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events/'.$eventId.'/response', ['response' => 'accepted', 'notify' => false], $this->kim);
+        self::assertResponseIsSuccessful();
+
+        // The organizer moves the room of one occurrence: same SEQUENCE, later DTSTAMP, NEEDS-ACTION in their copy.
+        $this->receive('Updated: Budget review', str_replace(
+            ["BEGIN:VEVENT\r\n", 'LOCATION:Room 3', 'DTSTAMP:20261019T080000Z'],
+            ["BEGIN:VEVENT\r\nRECURRENCE-ID;TZID=W. Europe Standard Time:20261028T140000\r\n", 'LOCATION:Room 5', 'DTSTAMP:20261019T090000Z'],
+            self::invitation('REQUEST', 0, '20261028T140000'),
+        ));
+
+        $occurrence = $this->occurrences($this->kim, '2026-10-28T00:00:00+00:00', '2026-10-29T00:00:00+00:00')[0];
+        self::assertSame('Room 5', $occurrence['location']);
+        self::assertSame('accepted', $occurrence['selfResponse'], 'The answer to the series holds for the changed occurrence.');
+    }
+
+    public function testASeriesUpdateThatChangesOneOccurrenceKeepsTheAnswer(): void
+    {
+        $series = str_replace("SEQUENCE:0\r\n", "SEQUENCE:0\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\n", self::invitation('REQUEST', 0, '20261021T140000'));
+        $messageId = $this->receive('Invitation: Budget review', $series);
+        $eventId = self::string($this->getJson('/api/v1/messages/'.$messageId.'/invitation', $this->kim)['eventId']);
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events/'.$eventId.'/response', ['response' => 'accepted', 'notify' => false], $this->kim);
+        self::assertResponseIsSuccessful();
+
+        // The whole series again, now with one occurrence in another room: same SEQUENCE, later DTSTAMP.
+        $override = str_replace(
+            ["BEGIN:VEVENT\r\n", 'LOCATION:Room 3', 'DTSTAMP:20261019T080000Z'],
+            ["BEGIN:VEVENT\r\nRECURRENCE-ID;TZID=W. Europe Standard Time:20261028T140000\r\n", 'LOCATION:Room 5', 'DTSTAMP:20261019T090000Z'],
+            self::invitation('REQUEST', 0, '20261028T140000'),
+        );
+        $overrideEvent = substr($override, (int) strpos($override, 'BEGIN:VEVENT'), (int) strpos($override, "END:VEVENT\r\n") + \strlen("END:VEVENT\r\n") - (int) strpos($override, 'BEGIN:VEVENT'));
+        $update = str_replace(["DTSTAMP:20261019T080000Z", "END:VCALENDAR"], ["DTSTAMP:20261019T090000Z", $overrideEvent.'END:VCALENDAR'], $series);
+        $this->receive('Updated: Budget review', $update);
+
+        $occurrence = $this->occurrences($this->kim, '2026-10-28T00:00:00+00:00', '2026-10-29T00:00:00+00:00')[0];
+        self::assertSame('Room 5', $occurrence['location']);
+        self::assertSame('accepted', $occurrence['selfResponse'], 'The answer to the series holds for the changed occurrence.');
+    }
+
+    public function testAReplyAnswersForAGuestAnOccurrenceSpellsDifferently(): void
+    {
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events', self::event($this->localCalendarId($this->kim), [
+            'summary' => 'Planning',
+            'recurrence' => 'FREQ=WEEKLY;COUNT=2',
+            'attendees' => [['address' => 'anna@finance.example', 'name' => 'Anna de Vries']],
+            'organizerMailAccountId' => $this->accountId,
+        ]), $this->kim);
+        self::assertResponseStatusCodeSame(201);
+        $this->organizedUid = self::string($this->decodedResponse()['uid']);
+        $seriesId = self::string($this->decodedResponse()['id']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$seriesId.'?scope=this&recurrenceId=20261026T080000Z&notify=false', self::event($this->localCalendarId($this->kim), [
+            'summary' => 'Planning, room 2',
+            'start' => ['dateTime' => '2026-10-26T09:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-26T09:30:00', 'timeZone' => 'Europe/Amsterdam'],
+            'attendees' => [['address' => 'anna@finance.example', 'name' => 'Anna de Vries']],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+        // Another client wrote the guest in capitals on that occurrence.
+        $ical = self::string($this->connection()->fetchOne('SELECT ical FROM calendar_object WHERE uid = :uid', ['uid' => $this->organizedUid]));
+        $at = strrpos($ical, 'mailto:anna@finance.example');
+        self::assertIsInt($at);
+        $this->connection()->executeStatement('UPDATE calendar_object SET ical = :ical WHERE uid = :uid', ['ical' => substr_replace($ical, 'mailto:ANNA@finance.example', $at, \strlen('mailto:anna@finance.example')), 'uid' => $this->organizedUid]);
+
+        $this->receive('Accepted: Planning', str_replace('DTSTART;TZID=Europe/Amsterdam:20261019T090000', "RECURRENCE-ID:20261026T080000Z\r\nDTSTART;TZID=Europe/Amsterdam:20261026T090000", $this->replyFrom('anna@finance.example', 'ACCEPTED')), 'anna@finance.example');
+
+        $occurrence = $this->occurrences($this->kim, '2026-10-26T00:00:00+00:00', '2026-10-27T00:00:00+00:00')[0];
+        $attendees = $this->getJson('/api/v1/calendar-events/'.self::string($occurrence['eventId']), $this->kim)['attendees'];
+        self::assertIsArray($attendees);
+        self::assertSame(['accepted'], array_column($attendees, 'partstat'), 'No second Anna on the occurrence.');
     }
 
     public function testAReplyGoesFromTheAccountTheInvitationCameToWhenNoAccountSendsAsTheInvitedAddress(): void
@@ -603,6 +719,16 @@ final class CalendarInvitationTest extends DatabaseTestCase
     }
 
     /** An event Kim organizes with Anna as guest; returns its id. */
+    private function firstCalendarId(): string
+    {
+        $calendars = $this->decodedResponse()['calendars'] ?? null;
+        self::assertIsArray($calendars);
+        $first = $calendars[0] ?? null;
+        self::assertIsArray($first);
+
+        return self::string($first['id'] ?? null);
+    }
+
     private function organize(): string
     {
         $this->client->jsonRequest('POST', '/api/v1/calendar-events', self::event($this->localCalendarId($this->kim), [
