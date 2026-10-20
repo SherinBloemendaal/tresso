@@ -63,6 +63,14 @@ func (a *integrationAPI) ReportMailbox(_ context.Context, _, changeID, _, outcom
 	return nil
 }
 
+func (a *integrationAPI) ClaimUnsubscribes(context.Context, string, string) ([]api.UnsubscribeRequest, error) {
+	return nil, nil
+}
+
+func (a *integrationAPI) ReportUnsubscribe(context.Context, string, string, string, string, string) error {
+	return nil
+}
+
 func (a *integrationAPI) Credentials(context.Context, string, string) (api.Credentials, error) {
 	return a.credentials, nil
 }
@@ -144,7 +152,7 @@ func TestSendsFilesAndNeverSendsTwice(t *testing.T) {
 		},
 		Secrets: map[string]string{"type": "password", "password": password},
 	}}
-	dispatcher := NewDispatcher(client, store, map[string]Transport{"imap": IMAPTransport(dialer)}, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	dispatcher := NewDispatcher(client, store, map[string]Transport{"imap": IMAPTransport(dialer)}, nil, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	message := api.OutgoingMessage{ID: "m1", RawObjectKey: "outgoing/aa/m1", EnvelopeFrom: sender, Recipients: []string{sender}, MessageID: messageID, Attempt: 1}
 
 	client.messages = []api.OutgoingMessage{message}
@@ -210,7 +218,7 @@ func TestKeepsTheDraftsFolderInStep(t *testing.T) {
 		Secrets: map[string]string{"type": "password", "password": password},
 	}}
 	// Nothing is queued to send, so only the Drafts folder is opened.
-	dispatcher := NewDispatcher(client, store, map[string]Transport{"imap": IMAPTransport(dialer)}, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	dispatcher := NewDispatcher(client, store, map[string]Transport{"imap": IMAPTransport(dialer)}, nil, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	run := func() {
 		dispatcher.Trigger(context.Background(), "acc")
 		dispatcher.Wait()
@@ -287,7 +295,7 @@ func TestMakesTheUsersChangesOnTheServer(t *testing.T) {
 		},
 	}
 	// Nothing is queued to send and no draft work, so only the connection for changes is opened.
-	dispatcher := NewDispatcher(client, storage.NewMemory(), map[string]Transport{"imap": IMAPTransport(dialer)}, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	dispatcher := NewDispatcher(client, storage.NewMemory(), map[string]Transport{"imap": IMAPTransport(dialer)}, nil, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	dispatcher.Trigger(context.Background(), "acc")
 	dispatcher.Wait()
 

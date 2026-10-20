@@ -221,6 +221,14 @@ func (o *outboxAPI) ReportMailbox(_ context.Context, _, changeID, _, outcome, te
 	return nil
 }
 
+func (o *outboxAPI) ClaimUnsubscribes(context.Context, string, string) ([]api.UnsubscribeRequest, error) {
+	return nil, nil
+}
+
+func (o *outboxAPI) ReportUnsubscribe(context.Context, string, string, string, string, string) error {
+	return nil
+}
+
 func TestARunSharesOneProviderClientAcrossMessages(t *testing.T) {
 	srv, delivered := providerServer(t, "/gmail/v1/users/me/messages/send", func(body []byte) string { return string(body) })
 	client := &outboxAPI{API: fakeapi.New(), provider: "gmail"} // its token-1 is refused by Gmail; the renewal is token-2
@@ -231,7 +239,7 @@ func TestARunSharesOneProviderClientAcrossMessages(t *testing.T) {
 	}
 	opts := gmailsync.DefaultClientOptions()
 	opts.BaseURL = srv.URL
-	d := NewDispatcher(client, store, map[string]Transport{"gmail": GmailTransport(client.API, "w1", opts)}, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := NewDispatcher(client, store, map[string]Transport{"gmail": GmailTransport(client.API, "w1", opts)}, nil, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	d.Trigger(context.Background(), "acc")
 	d.Wait()

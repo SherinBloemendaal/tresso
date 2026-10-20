@@ -258,7 +258,7 @@ func providerDispatcher(t *testing.T, provider string, box *providerMailbox) (*D
 		opts.BaseURL = srv.URL + "/v1.0"
 		transport = GraphTransport(client.API, "w1", opts)
 	}
-	d := NewDispatcher(client, store, map[string]Transport{provider: transport}, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := NewDispatcher(client, store, map[string]Transport{provider: transport}, nil, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return d, client, store
 }
 
