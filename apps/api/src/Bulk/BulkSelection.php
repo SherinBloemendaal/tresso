@@ -106,7 +106,7 @@ final readonly class BulkSelection
     }
 
     /**
-     * The messages of these conversations that reached Tresso before $boundary.
+     * The messages of these conversations that reached Tresso before $boundary and are not held for a batch.
      *
      * @param list<string> $threadIds
      *
@@ -120,7 +120,7 @@ final readonly class BulkSelection
 
         /** @var list<string> */
         return $this->connection->fetchFirstColumn(
-            'SELECT id FROM message WHERE thread_id = ANY(CAST(:threads AS UUID[])) AND id < :boundary ORDER BY id',
+            'SELECT id FROM message WHERE thread_id = ANY(CAST(:threads AS UUID[])) AND id < :boundary AND held_until IS NULL ORDER BY id',
             ['threads' => '{'.implode(',', $threadIds).'}', 'boundary' => $boundary->toRfc4122()],
         );
     }
@@ -148,7 +148,8 @@ final readonly class BulkSelection
      */
     private function filters(User $owner, BulkScope $scope): array
     {
-        $conditions = [];
+        // Held mail waits for its batch (batched delivery): no list shows it yet, so no bulk action takes it.
+        $conditions = ['t.held_until IS NULL'];
         $parameters = ['owner' => $owner->getId()->toRfc4122()];
 
         switch ($scope->area) {

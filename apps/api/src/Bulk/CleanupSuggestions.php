@@ -73,8 +73,8 @@ final readonly class CleanupSuggestions
                  FROM mail_account a
                  JOIN folder f ON f.mail_account_id = a.id AND f.role = 'inbox'
                  JOIN message_location l ON l.folder_id = f.id
-                 JOIN message m ON m.id = l.message_id AND NOT m.seen
-                 JOIN thread t ON t.id = m.thread_id
+                 JOIN message m ON m.id = l.message_id AND NOT m.seen AND m.held_until IS NULL
+                 JOIN thread t ON t.id = m.thread_id AND t.held_until IS NULL
                  WHERE a.owner_id = :owner AND m.from_address <> ALL(CAST(:own AS TEXT[]))
                    AND NOT EXISTS (SELECT 1 FROM category c WHERE c.id = t.category_id AND c.builtin = :spam)
                  GROUP BY m.from_address
@@ -87,6 +87,7 @@ final readonly class CleanupSuggestions
                         COUNT(*) FILTER (WHERE sig.headers->>'list-unsubscribe' IS NOT NULL OR sig.headers->>'list-id' IS NOT NULL) AS listed
                  FROM mail_account wa
                  JOIN message wm ON wm.mail_account_id = wa.id AND wm.from_address = s.address AND wm.received_at >= :since
+                     AND wm.held_until IS NULL
                  LEFT JOIN message_signals sig ON sig.message_id = wm.id
                  WHERE wa.owner_id = :owner
              ) w ON w.received > 0 AND w.seen = 0

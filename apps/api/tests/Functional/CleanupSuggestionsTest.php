@@ -103,6 +103,17 @@ final class CleanupSuggestionsTest extends DatabaseTestCase
         self::assertSame([], $this->suggestions());
     }
 
+    public function testMailHeldForItsBatchCountsForNothing(): void
+    {
+        $this->mail('Deals', 'news@shop.example', CleanupSuggestions::NEWSLETTER_UNREAD, newsletter: true, smartInbox: 'advertise');
+        $this->connection()->executeStatement("UPDATE message SET held_until = now() + interval '1 hour' WHERE from_address = 'news@shop.example'");
+        $this->connection()->executeStatement("UPDATE thread SET held_until = now() + interval '1 hour' WHERE id IN (SELECT thread_id FROM message WHERE from_address = 'news@shop.example')");
+
+        self::assertSame([], $this->suggestions());
+        $this->client->request('GET', '/api/v1/smart-inboxes/'.$this->smartInboxId('advertise').'/senders', server: $this->kim);
+        self::assertSame(['conversations' => 0, 'messages' => 0, 'unread' => 0, 'senders' => []], array_diff_key($this->decodedResponse(), ['id' => true]));
+    }
+
     public function testTheUsersOwnAddressIsNeverSuggested(): void
     {
         $this->mail('Note to self', 'kim@company.example', CleanupSuggestions::SENDER_UNREAD);

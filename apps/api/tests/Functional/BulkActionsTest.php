@@ -474,6 +474,26 @@ final class BulkActionsTest extends DatabaseTestCase
         self::assertResponseStatusCodeSame(409);
     }
 
+    public function testLeavesMailHeldForItsBatch(): void
+    {
+        $this->newsletters('Deals', 'news@shop.example', 2);
+        $this->ingest('Re: Deals 1', 'news@shop.example', inReplyTo: 'Deals 1');
+        // Batched delivery holds Deals 2 and the reply in Deals 1 until the next batch: no list shows them yet.
+        $this->connection()->executeStatement("UPDATE thread SET held_until = now() + interval '1 hour' WHERE id = (SELECT thread_id FROM message WHERE id = :id)", ['id' => $this->messageId('Deals 2')]);
+        $this->connection()->executeStatement("UPDATE message SET held_until = now() + interval '1 hour' WHERE id IN (:deals, :reply)", ['deals' => $this->messageId('Deals 2'), 'reply' => $this->messageId('Re: Deals 1')]);
+        $scope = ['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise')];
+
+        $this->client->request('GET', '/api/v1/bulk-selection?'.http_build_query($scope), server: $this->kim);
+        self::assertSame(['conversations' => 1, 'messages' => 2, 'mailAccountIds' => [$this->accountId]], $this->decodedResponse());
+        $bulk = $this->start([...$scope, 'action' => 'archive']);
+        $this->runQueued();
+
+        self::assertSame(1, $this->bulkAction($bulk['id'])['changed']);
+        self::assertSame(['Archive'], $this->foldersOf('Deals 1'));
+        self::assertSame(['INBOX'], $this->foldersOf('Re: Deals 1'));
+        self::assertSame(['INBOX'], $this->foldersOf('Deals 2'));
+    }
+
     public function testLooksAtEachAccountInSmallWindowsAndTakesEveryMatch(): void
     {
         $home = $this->createAccount('kim@home.example', $this->kim);
