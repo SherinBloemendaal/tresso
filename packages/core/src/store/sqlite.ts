@@ -1,8 +1,9 @@
 import { actionResult, type AppliedAction, type MessageAction } from '../actions'
 import type { Verdict } from '../domain'
 import { sortSmartInboxes } from '../smartInboxes'
+import { compareTodos } from '../todos'
 import { inList, summarizeConversation, type ConversationSummary, type ListFolders, type ListScope } from '../sync/conversation'
-import type { ChangePage, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread } from '../sync/types'
+import type { ChangePage, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo } from '../sync/types'
 import { CopyClosingError, type Arrival, type Contact, type Draft, type MailStore } from './mailStore'
 import { arrivalOf, classifiedByUser, contactMatches, deletedDraft, draftOnlyHere, mergeContact, peopleOn, stillAsClassified, storedDraft, syncedDraft } from './rules'
 import type { Sql, SqlValue } from './sql'
@@ -11,7 +12,7 @@ import type { Sql, SqlValue } from './sql'
  * Raised whenever the copy changes shape. A copy made by another version is emptied and synced again from the start,
  * so nothing it skipped stays missing; drafts that exist only on this device are carried over.
  */
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
@@ -44,10 +45,13 @@ CREATE INDEX IF NOT EXISTS contacts_by_last_seen ON contacts (last_seen);
 CREATE TABLE IF NOT EXISTS drafts (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT, updated_at INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS drafts_by_updated_at ON drafts (updated_at);
 CREATE TABLE IF NOT EXISTS signatures (id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS todos (id TEXT PRIMARY KEY NOT NULL, message_id TEXT, thread_id TEXT, json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS todos_by_message ON todos (message_id);
+CREATE INDEX IF NOT EXISTS todos_by_thread ON todos (thread_id);
 `
 
 /** Every table any version made, so a rebuild leaves none of an old shape behind. */
-const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'meta']
+const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'todos', 'meta']
 
 type JsonRow = { json: string }
 
@@ -220,6 +224,9 @@ export class SqliteMailStore implements MailStore {
           case 'smartInbox':
             await tx.run('DELETE FROM smart_inboxes WHERE id = ?', [deleted.id])
             break
+          case 'todo':
+            await tx.run('DELETE FROM todos WHERE id = ?', [deleted.id])
+            break
           case 'draft': {
             const local = await readDraft(tx, deleted.id)
             if (local !== null) {
@@ -286,6 +293,9 @@ export class SqliteMailStore implements MailStore {
         if (next !== null) {
           await writeDraft(tx, next)
         }
+      }
+      for (const todo of page.todos) {
+        await tx.run('INSERT OR REPLACE INTO todos (id, message_id, thread_id, json) VALUES (?, ?, ?, ?)', [todo.id, todo.messageId, todo.threadId, JSON.stringify(todo)])
       }
 
       const lists = await listFoldersOf(tx)
@@ -528,6 +538,38 @@ export class SqliteMailStore implements MailStore {
     const messages = (await this.reader.all<JsonRow>('SELECT json FROM messages WHERE thread_id = ?', [threadId])).map((m) => parse<SyncedMessage>(m))
     messages.sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt))
     return { thread: parse<SyncedThread>(row), messages }
+  }
+
+  async messages(ids: string[]): Promise<SyncedMessage[]> {
+    const found = new Map<string, SyncedMessage>()
+    for (const chunk of chunks([...new Set(ids)])) {
+      for (const row of await this.reader.all<JsonRow>(`SELECT json FROM messages WHERE id IN (${placeholders(chunk)})`, chunk)) {
+        const message = parse<SyncedMessage>(row)
+        found.set(message.id, message)
+      }
+    }
+    return ids.flatMap((id) => found.get(id) ?? [])
+  }
+
+  async todos(): Promise<SyncedTodo[]> {
+    return (await this.reader.all<JsonRow>('SELECT json FROM todos')).map((row) => parse<SyncedTodo>(row)).sort(compareTodos)
+  }
+
+  async todo(id: string): Promise<SyncedTodo | null> {
+    const row = await this.reader.first<JsonRow>('SELECT json FROM todos WHERE id = ?', [id])
+    return row === null ? null : parse<SyncedTodo>(row)
+  }
+
+  async todosOfThread(threadId: string): Promise<SyncedTodo[]> {
+    // A message can move to another thread after its todo was made: the thread of the message on this device wins.
+    const rows = await this.reader.all<{ json: string; message_thread_id: string | null }>(
+      'SELECT t.json, m.thread_id AS message_thread_id FROM todos t LEFT JOIN messages m ON m.id = t.message_id WHERE t.thread_id = ? OR m.thread_id = ?',
+      [threadId, threadId],
+    )
+    return rows
+      .filter((row) => (row.message_thread_id ?? parse<SyncedTodo>(row).threadId) === threadId)
+      .map((row) => parse<SyncedTodo>(row))
+      .sort(compareTodos)
   }
 }
 

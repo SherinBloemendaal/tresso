@@ -11,6 +11,8 @@ export interface NewSmartInbox {
   includeSenders: string[]
   excludeSenders: string[]
   verdict: Verdict
+  /** New unread mail judged `do` here becomes a todo; only with the `do` verdict. */
+  autoCreateTodo: boolean
 }
 
 /** JSON merge patch: omitted fields stay as they are; the lists are replaced as a whole. */

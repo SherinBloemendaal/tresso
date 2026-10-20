@@ -132,11 +132,53 @@ export interface SyncedSmartInbox {
   /** Addresses or `@domain`s whose mail never lands here; wins over everything else. */
   excludeSenders: string[]
   verdict: Verdict
+  /** New unread mail judged `do` here becomes a todo; only with the `do` verdict. */
+  autoCreateTodo: boolean
   /** Sidebar order. */
   position: number
 }
 
-export type DeletedType = 'mailAccount' | 'folder' | 'thread' | 'message' | 'outgoingMessage' | 'signature' | 'draft' | 'smartInbox' | 'calendar' | 'calendarEvent' | 'notification' | 'eventNote'
+/** Who made a todo: the user, the user accepting a suggestion, or a smart inbox on its own. */
+export type TodoSource = 'manual' | 'suggested' | 'automatic'
+
+/**
+ * Something the user has to do. The due date and time are wall-clock values in the user's own time zone. `messageId`
+ * and `threadId` point at the email it came from; a link to an email this device does not have counts as none.
+ */
+export interface SyncedTodo {
+  id: string
+  title: string
+  notes: string
+  /** YYYY-MM-DD, or null. */
+  dueDate: string | null
+  /** HH:MM, only with a due date; null means some time that day. */
+  dueTime: string | null
+  durationMinutes: number | null
+  /** When it was done; null while open. */
+  completedAt: string | null
+  /** The place among the open todos; lower comes first. */
+  position: number
+  source: TodoSource
+  messageId: string | null
+  threadId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type DeletedType =
+  | 'mailAccount'
+  | 'folder'
+  | 'thread'
+  | 'message'
+  | 'outgoingMessage'
+  | 'signature'
+  | 'draft'
+  | 'smartInbox'
+  | 'calendar'
+  | 'calendarEvent'
+  | 'notification'
+  | 'eventNote'
+  | 'todo'
 
 export type DraftKind = 'new' | 'reply' | 'replyAll' | 'forward'
 
@@ -200,6 +242,7 @@ export interface ChangePage {
   calendarEvents: SyncedCalendarEvent[]
   notifications: SyncedNotification[]
   eventNotes: SyncedEventNote[]
+  todos: SyncedTodo[]
   deleted: Deleted[]
 }
 
