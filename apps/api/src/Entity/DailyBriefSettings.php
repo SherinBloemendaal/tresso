@@ -78,18 +78,28 @@ class DailyBriefSettings
         $this->reschedule($timeZone, $now);
     }
 
-    /** The user's zone changed (or the time did): the next brief comes at the delivery time in that zone. */
+    /**
+     * The user's zone changed (or the time did): the next brief comes at the delivery time in that zone, and not again
+     * today when today's brief was made already.
+     */
     public function reschedule(string $timeZone, \DateTimeImmutable $now): void
     {
-        $this->nextRunAt = BriefTime::nextRun($this->deliverAt, $timeZone, $now);
+        $this->nextRunAt = BriefTime::nextRun($this->deliverAt, $timeZone, $now, $this->getLastRunAt());
     }
 
     /**
-     * A run made the brief up to $until: the next one covers what comes after, at the next delivery time after $now.
+     * A run made the brief up to $until: the next one covers what comes after, at the next delivery time on a later
+     * day.
      */
     public function ran(\DateTimeImmutable $until, string $timeZone, \DateTimeImmutable $now): void
     {
         $this->coveredUntil = $until;
         $this->reschedule($timeZone, $now);
+    }
+
+    /** When the last brief was made: a run covers up to the second before it. */
+    public function getLastRunAt(): ?\DateTimeImmutable
+    {
+        return $this->coveredUntil?->modify('+1 second');
     }
 }

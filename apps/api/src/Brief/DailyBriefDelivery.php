@@ -117,24 +117,41 @@ final readonly class DailyBriefDelivery
     }
 
     /**
+     * Sends the digest at most once: the send is recorded first, in its own short transaction under a row lock, so a
+     * retry or a second worker finds it taken; the mail goes out after that commit, never inside a transaction. When
+     * the mail server refuses it the record is taken back, so Messenger's retry sends it. A crash between the two
+     * loses this digest rather than sending it twice; the brief itself is in the app either way.
+     *
      * @param list<array{name: string, entries: list<array<string, mixed>>}> $sections
      */
     private function sendDigest(string $briefId, NotificationPreferences $preferences, array $sections, \DateTimeImmutable $now): void
     {
-        $this->entityManager->wrapInTransaction(function () use ($briefId, $preferences, $sections, $now): void {
+        $claimed = $this->entityManager->wrapInTransaction(function () use ($briefId, $now): ?DailyBrief {
             $brief = $this->briefs->findOneById($briefId);
             if (null === $brief) {
-                return;
+                return null;
             }
-            // Locked, so a retry running beside this one waits and then sees the digest went out.
             $this->entityManager->refresh($brief, LockMode::PESSIMISTIC_WRITE);
             if (null !== $brief->getEmailedAt()) {
-                return;
+                return null;
             }
-            $this->mailer->send($this->digest($brief, $preferences, $sections));
             $brief->emailed($now);
             $this->entityManager->flush();
+
+            return $brief;
         });
+        if (null === $claimed) {
+            return;
+        }
+
+        try {
+            $this->mailer->send($this->digest($claimed, $preferences, $sections));
+        } catch (\Throwable $error) {
+            $this->entityManager->wrapInTransaction(function () use ($briefId): void {
+                $this->entityManager->getConnection()->executeStatement('UPDATE daily_brief SET emailed_at = NULL WHERE id = :id', ['id' => $briefId]);
+            });
+            throw $error;
+        }
     }
 
     /**

@@ -6,14 +6,19 @@ namespace App\Tests\Functional;
 
 use App\Brief\BriefHandlers;
 use App\Brief\CreateMissingBriefSettings;
+use App\Brief\DailyBriefDelivery;
 use App\Brief\DailyBriefs;
 use App\Brief\DeliverDailyBrief;
 use App\Entity\DailyBrief;
 use App\Entity\User;
+use App\Repository\DailyBriefSettingsRepository;
 use App\Repository\UserRepository;
 use App\Tests\Support\MockHttpRouter;
 use Doctrine\ORM\EntityManagerInterface;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Psr\Clock\ClockInterface;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+use Symfony\Component\Mailer\Event\MessageEvent;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Messenger\Stamp\ReceivedStamp;
@@ -89,6 +94,18 @@ final class DailyBriefTest extends DatabaseTestCase
         self::assertResponseIsSuccessful();
         self::assertTrue($this->decodedResponse()['enabled']);
         self::assertSame(1, $this->rowCount('SELECT COUNT(*) FROM daily_brief_settings WHERE user_id = :user', ['user' => $this->kimsId()]));
+    }
+
+    public function testTheBackfillGoesOnInBatchesUntilEveryUserHasSettings(): void
+    {
+        $this->createUser('sam@example.test', 'Sam');
+        $this->connection()->executeStatement('DELETE FROM daily_brief_settings');
+        $container = static::getContainer();
+        $handlers = new BriefHandlers($container->get(DailyBriefs::class), $container->get(DailyBriefSettingsRepository::class), $container->get(DailyBriefDelivery::class), $container->get(ClockInterface::class), backfillBatch: 1);
+
+        $handlers->createMissingSettings(new CreateMissingBriefSettings());
+
+        self::assertSame(3, $this->rowCount('SELECT COUNT(*) FROM daily_brief_settings'));
     }
 
     public function testTheHourlyBackfillGivesEveryUserWithoutSettingsTheirs(): void
@@ -237,12 +254,82 @@ final class DailyBriefTest extends DatabaseTestCase
         ]]);
         $this->runQueued('classify');
         $this->connection()->executeStatement("UPDATE message SET classified_at = classified_at + INTERVAL '2 seconds' WHERE subject = 'Build passed'");
-        $second = $this->sweep(new \DateTimeImmutable('+5 seconds'));
+        $second = $this->sweep(new \DateTimeImmutable('+1 day'));
 
         self::assertInstanceOf(DailyBrief::class, $second);
         $threads = array_column($this->changes(0)['threads'], 'id', 'subject');
         self::assertSame([$threads['Build passed']], $second->getThreadIds());
         self::assertEquals($first->getCoversUntil(), $second->getCoversFrom());
+    }
+
+    public function testASecondSweepTheSameDayMakesNoSecondBrief(): void
+    {
+        $this->ingestKnowMail();
+        self::assertInstanceOf(DailyBrief::class, $this->sweep());
+
+        // A sweep that read the row as due before the first one committed claims it after.
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('2', 'Build passed', ['from' => ['address' => 'ci@forge.example'], 'headers' => ['auto-submitted' => 'auto-generated']]),
+        ]]);
+        $this->runQueued('classify');
+        $this->connection()->executeStatement("UPDATE message SET classified_at = classified_at + INTERVAL '2 seconds' WHERE subject = 'Build passed'");
+
+        self::assertNull($this->sweep(new \DateTimeImmutable('+10 seconds')));
+        self::assertSame(1, $this->rowCount('SELECT COUNT(*) FROM daily_brief'));
+        $next = $this->connection()->fetchOne('SELECT next_run_at FROM daily_brief_settings WHERE user_id = :user', ['user' => $this->kimsId()]);
+        self::assertGreaterThan(new \DateTimeImmutable('+1 hour'), new \DateTimeImmutable(self::text($next)), 'The next brief is on another day.');
+    }
+
+    public function testAnotherUsersMailToKnowNeverEntersThisUsersBrief(): void
+    {
+        $lisa = $this->userHeaders('lisa@example.test', ['mail:read', 'mail:write', 'settings:read', 'settings:write']);
+        $this->client->jsonRequest('POST', '/api/v1/mail-accounts', [
+            'emailAddress' => 'lisa@company.example',
+            'displayName' => 'Lisa',
+            'username' => 'lisa@company.example',
+            'password' => 'app-password-2',
+            'imap' => ['host' => 'imap.company.example', 'port' => 993, 'security' => 'tls'],
+            'smtp' => ['host' => 'smtp.company.example', 'port' => 465, 'security' => 'tls'],
+        ], $lisa);
+        $lisasAccount = $this->responseString('id');
+        $this->client->jsonRequest('POST', '/internal/sync/leases', ['workerId' => 'w1'], $this->worker);
+        $this->ingest('folders', ['folders' => [['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1]]], $lisasAccount);
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('9', 'Lisas newsletter', ['from' => ['address' => 'news@lists.example'], 'headers' => ['list-id' => '<news.lists.example>'], 'to' => [['address' => 'lisa@company.example']]]),
+        ]], $lisasAccount);
+        $this->runQueued('classify');
+        $this->ingestKnowMail();
+        $lisasThread = $this->connection()->fetchOne("SELECT id FROM thread WHERE subject = 'Lisas newsletter'");
+        self::assertIsString($lisasThread);
+        self::assertSame('know', $this->connection()->fetchOne('SELECT verdict FROM thread WHERE id = :id', ['id' => $lisasThread]));
+
+        $brief = $this->sweep();
+
+        self::assertInstanceOf(DailyBrief::class, $brief);
+        self::assertNotContains($lisasThread, $brief->getThreadIds());
+        self::assertCount(1, $brief->getThreadIds());
+    }
+
+    public function testOneUsersFailingBriefHoldsUpNoOneElse(): void
+    {
+        $this->ingestKnowMail();
+        // Lisa's preferences are broken: her zone is unknown, so making her brief fails.
+        $this->connection()->executeStatement(
+            "UPDATE notification_preferences SET time_zone = 'Mars/Olympus' WHERE user_id = (SELECT id FROM app_user WHERE email = 'lisa@example.test')",
+        );
+        $lisa = $this->connection()->fetchOne("SELECT id FROM app_user WHERE email = 'lisa@example.test'");
+        self::assertIsString($lisa);
+        $now = new \DateTimeImmutable('+2 seconds');
+        // Lisa is due first, Kim right after.
+        $this->connection()->executeStatement('UPDATE daily_brief_settings SET next_run_at = :due WHERE user_id = :user', ['due' => $now->modify('-2 minutes')->format('Y-m-d H:i:s'), 'user' => $lisa]);
+        $this->connection()->executeStatement('UPDATE daily_brief_settings SET next_run_at = :due WHERE user_id = :user', ['due' => $now->modify('-1 minute')->format('Y-m-d H:i:s'), 'user' => $this->kimsId()]);
+
+        $handled = static::getContainer()->get(DailyBriefs::class)->sweep($now);
+
+        self::assertSame(1, $handled);
+        self::assertSame(1, $this->rowCount('SELECT COUNT(*) FROM daily_brief WHERE owner_id = :user', ['user' => $this->kimsId()]));
+        $postponed = $this->connection()->fetchOne('SELECT next_run_at FROM daily_brief_settings WHERE user_id = :user', ['user' => $lisa]);
+        self::assertEquals($now->modify(DailyBriefs::RETRY_AFTER)->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d H:i:s'), self::text($postponed));
     }
 
     public function testNothingToKnowMakesNoBriefButTheNextBriefIsPlanned(): void
@@ -336,6 +423,51 @@ final class DailyBriefTest extends DatabaseTestCase
         self::assertStringContainsString('Version 2 is out', (string) $email->getTextBody());
         self::assertStringContainsString('/brief/'.$brief->getId()->toRfc4122(), (string) $email->getTextBody());
         self::assertNotNull($this->connection()->fetchOne('SELECT emailed_at FROM daily_brief WHERE id = :id', ['id' => $brief->getId()->toRfc4122()]));
+    }
+
+    public function testTheDigestEscapesWhatTheMailSays(): void
+    {
+        $this->client->jsonRequest('PUT', '/api/v1/daily-brief-settings', $this->settings(['channels' => ['email']]), $this->kim);
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', '<b>Big</b> & <script>alert(1)</script>', ['from' => ['address' => 'announce@lists.example', 'name' => '<img src=x onerror=alert(2)>'], 'headers' => ['list-id' => '<announce.lists.example>'], 'snippet' => '<a href="https://evil.example">click</a>']),
+        ]]);
+        $this->runQueued('classify');
+        $this->sweep();
+
+        $this->runQueued('push');
+
+        $email = self::getMailerMessage();
+        self::assertInstanceOf(Email::class, $email);
+        $html = (string) $email->getHtmlBody();
+        self::assertStringContainsString('&lt;b&gt;Big&lt;/b&gt; &amp; &lt;script&gt;', $html);
+        self::assertStringNotContainsString('<script', $html);
+        self::assertStringNotContainsString('<img', $html);
+        self::assertStringNotContainsString('href="https://evil.example"', $html);
+    }
+
+    public function testTheDigestIsRecordedBeforeItIsSentAndSentOutsideAnyTransaction(): void
+    {
+        $this->client->jsonRequest('PUT', '/api/v1/daily-brief-settings', $this->settings(['channels' => ['email']]), $this->kim);
+        $this->ingestKnowMail();
+        $brief = $this->sweep();
+        self::assertInstanceOf(DailyBrief::class, $brief);
+        $queued = $this->takeQueued('push');
+        $connection = $this->connection();
+        // The test runs inside one transaction of its own (DAMA): level 1 is "outside" for the code under test.
+        $outside = $connection->getTransactionNestingLevel();
+        $seen = [];
+        static::getContainer()->get(EventDispatcherInterface::class)->addListener(MessageEvent::class, static function () use ($connection, $brief, &$seen): void {
+            $seen[] = [$connection->getTransactionNestingLevel(), $connection->fetchOne('SELECT emailed_at FROM daily_brief WHERE id = :id', ['id' => $brief->getId()->toRfc4122()])];
+        });
+
+        $this->runQueued('push', $queued);
+
+        self::assertEmailCount(1);
+        self::assertNotSame([], $seen);
+        foreach ($seen as [$level, $emailedAt]) {
+            self::assertSame($outside, $level, 'No transaction is held while the mail server is talked to.');
+            self::assertIsString($emailedAt, 'The digest is taken before it goes out, so a second worker never sends it too.');
+        }
     }
 
     public function testTheDigestFallsBackToTheSignInAddressWhenTheAccountIsGone(): void
@@ -435,6 +567,8 @@ final class DailyBriefTest extends DatabaseTestCase
     {
         $now ??= new \DateTimeImmutable('+2 seconds');
         $this->connection()->executeStatement('UPDATE daily_brief_settings SET next_run_at = :due WHERE user_id = :user', ['due' => $now->modify('-1 minute')->format('Y-m-d H:i:s'), 'user' => $this->kimsId()]);
+        // Only Kim is due: the other users' briefs are far off.
+        $this->connection()->executeStatement('UPDATE daily_brief_settings SET next_run_at = :later WHERE user_id <> :user', ['later' => $now->modify('+1 year')->format('Y-m-d H:i:s'), 'user' => $this->kimsId()]);
         $before = $this->connection()->fetchOne('SELECT id FROM daily_brief ORDER BY id DESC LIMIT 1');
 
         self::assertSame(1, static::getContainer()->get(DailyBriefs::class)->sweep($now));
@@ -570,9 +704,9 @@ final class DailyBriefTest extends DatabaseTestCase
     /**
      * @param array<string, mixed> $payload
      */
-    private function ingest(string $action, array $payload): void
+    private function ingest(string $action, array $payload, ?string $accountId = null): void
     {
-        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/'.$action, ['workerId' => 'w1'] + $payload, $this->worker);
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.($accountId ?? $this->accountId).'/'.$action, ['workerId' => 'w1'] + $payload, $this->worker);
         self::assertResponseIsSuccessful();
     }
 

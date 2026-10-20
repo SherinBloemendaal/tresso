@@ -14,6 +14,8 @@ use App\Repository\DailyBriefSettingsRepository;
 use App\Repository\NotificationPreferencesRepository;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\Persistence\ManagerRegistry;
+use Psr\Log\LoggerInterface;
 
 /**
  * Makes the daily briefs that are due: per user, the conversations judged `know` since the previous brief that are
@@ -33,6 +35,9 @@ final readonly class DailyBriefs
     /** Users handled per sweep; the rest wait for the next minute. */
     public const int USERS_PER_SWEEP = 100;
 
+    /** A user whose brief failed is tried again this much later. */
+    public const string RETRY_AFTER = '+15 minutes';
+
     /**
      * How far back a brief reaches: after a long pause (brief turned off, a worker down) it covers this much, and mail
      * received before it stays out also when it was classified late (a first sync of an old mailbox).
@@ -50,37 +55,54 @@ final readonly class DailyBriefs
         private AfterCommitDispatcher $afterCommit,
         private UserLocks $locks,
         private NotificationPreferencesRepository $preferences,
+        private ManagerRegistry $doctrine,
+        private LoggerInterface $logger,
     ) {
     }
 
     /**
-     * Makes the briefs due at $now, for at most {@see USERS_PER_SWEEP} users.
+     * Makes the briefs due at $now, for at most {@see USERS_PER_SWEEP} users. A user whose brief fails is logged and
+     * put off for {@see RETRY_AFTER}, so one broken account never holds up the others.
      *
-     * @return int how many users were handled
+     * @return int how many users got their brief made (or found nothing to make)
      */
     public function sweep(\DateTimeImmutable $now): int
     {
-        for ($handled = 0; $handled < self::USERS_PER_SWEEP; ++$handled) {
-            $done = $this->entityManager->wrapInTransaction(fn (): bool => $this->runNext($now));
-            $this->entityManager->clear();
+        $handled = 0;
+        for ($claimed = 0; $claimed < self::USERS_PER_SWEEP; ++$claimed) {
+            $userId = null;
+            try {
+                $done = $this->entityManager->wrapInTransaction(function () use ($now, &$userId): bool {
+                    $userId = $this->settings->claimDue($now);
+                    if (null === $userId) {
+                        return false;
+                    }
+                    $settings = $this->settings->find($userId) ?? throw new \LogicException('The claimed brief settings are gone.');
+                    $this->make($settings, $now);
+
+                    return true;
+                });
+            } catch (\Throwable $error) {
+                if (null === $userId) {
+                    throw $error;
+                }
+                $this->logger->error('The daily brief of a user could not be made', ['user' => $userId->toRfc4122(), 'exception' => $error]);
+                // A failed flush closes the entity manager; the next user gets a fresh one.
+                $this->doctrine->resetManager();
+                $this->settings->postpone($userId, $now->modify(self::RETRY_AFTER));
+                continue;
+            } finally {
+                if ($this->entityManager->isOpen()) {
+                    $this->entityManager->clear();
+                }
+            }
             if (!$done) {
                 break;
             }
+            ++$handled;
         }
 
         return $handled;
-    }
-
-    private function runNext(\DateTimeImmutable $now): bool
-    {
-        $userId = $this->settings->claimDue($now);
-        if (null === $userId) {
-            return false;
-        }
-        $settings = $this->settings->find($userId) ?? throw new \LogicException('The claimed brief settings are gone.');
-        $this->make($settings, $now);
-
-        return true;
     }
 
     /**
@@ -102,6 +124,13 @@ final readonly class DailyBriefs
         }
 
         $preferences = $this->preferences->forUser($user);
+        if (BriefTime::ranToday($settings->getLastRunAt(), $preferences->getTimeZone(), $now)) {
+            // Another sweep made today's brief while this one waited, or the clock repeated the hour: one a day.
+            $settings->reschedule($preferences->getTimeZone(), $now);
+            $this->entityManager->flush();
+
+            return null;
+        }
         $threadIds = $this->knowThreads($user, $from, $until, $reach);
         $brief = null;
         if ([] !== $threadIds) {
