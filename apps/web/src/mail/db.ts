@@ -4,6 +4,7 @@ import {
   classifiedByUser,
   compareTodos,
   compareHandOvers,
+  compareBriefs,
   contactMatches,
   deletedDraft,
   inList,
@@ -31,6 +32,7 @@ import {
   type SyncedMessage,
   type SyncedOutgoingMessage,
   type SyncedSignature,
+  type SyncedDailyBrief,
   type SyncedDraft,
   type SyncedSmartInbox,
   type SyncedThread,
@@ -117,13 +119,14 @@ interface MailSchema extends DBSchema {
   todos: { key: string; value: SyncedTodo; indexes: { byMessage: string; byThread: string } }
   unsubscriptions: { key: string; value: SyncedUnsubscription; indexes: { byAccount: string } }
   handOvers: { key: string; value: SyncedHandOver; indexes: { byAccount: string } }
+  dailyBriefs: { key: string; value: SyncedDailyBrief }
 }
 
 type Stores = StoreNames<MailSchema>[]
 type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
-const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes', 'todos', 'unsubscriptions', 'handOvers']
-const VERSION = 8
+const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes', 'todos', 'unsubscriptions', 'handOvers', 'dailyBriefs']
+const VERSION = 9
 
 export function databaseName(userId: string): string {
   return `tresso-mail-${userId}`
@@ -213,8 +216,11 @@ export class IndexedDbMailStore implements MailStore {
         if (oldVersion < 8) {
           database.createObjectStore('handOvers', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
         }
-        // Outgoing mail, contacts, signatures, drafts, smart inboxes, todos, unsubscriptions and hand-overs come from the
-        // delta: an existing copy syncs again from the start.
+        if (oldVersion < 9) {
+          database.createObjectStore('dailyBriefs', { keyPath: 'id' })
+        }
+        // Outgoing mail, contacts, signatures, drafts, smart inboxes, todos, unsubscriptions, hand-overs and daily briefs
+        // come from the delta: an existing copy syncs again from the start.
         if (oldVersion >= 1) {
           await transaction.objectStore('meta').delete('cursor')
         }
@@ -274,6 +280,9 @@ export class IndexedDbMailStore implements MailStore {
         case 'todo':
           await tx.objectStore('todos').delete(deleted.id)
           break
+        case 'dailyBrief':
+          await tx.objectStore('dailyBriefs').delete(deleted.id)
+          break
         case 'draft': {
           const local = await tx.objectStore('drafts').get(deleted.id)
           if (local !== undefined) {
@@ -309,6 +318,9 @@ export class IndexedDbMailStore implements MailStore {
           affected.add(threadId)
         }
       }
+    }
+    for (const brief of page.dailyBriefs ?? []) {
+      await tx.objectStore('dailyBriefs').put(brief)
     }
     for (const thread of page.threads) {
       await tx.objectStore('threads').put(thread)
@@ -440,6 +452,26 @@ export class IndexedDbMailStore implements MailStore {
   /** In sidebar order. */
   async smartInboxes(): Promise<SyncedSmartInbox[]> {
     return sortSmartInboxes(await this.db.getAll('smartInboxes'))
+  }
+
+  /** The daily briefs, newest first. */
+  async dailyBriefs(): Promise<SyncedDailyBrief[]> {
+    return (await this.db.getAll('dailyBriefs')).sort(compareBriefs)
+  }
+
+  /** The summaries of these threads that exist, in the order asked for; each thread once. */
+  async conversations(threadIds: string[]): Promise<ConversationSummary[]> {
+    const tx = this.db.transaction('conversations')
+    const conversations: ConversationSummary[] = []
+    for (const threadId of new Set(threadIds)) {
+      const stored = await tx.store.get(threadId)
+      if (stored !== undefined) {
+        conversations.push(toSummary(stored))
+      }
+    }
+    await tx.done
+
+    return conversations
   }
 
   /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
