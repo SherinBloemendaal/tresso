@@ -97,7 +97,8 @@ final class CleanupSuggestionsTest extends DatabaseTestCase
 
     public function testASenderWhoSentNothingLatelyIsNotSaidToBeUnopened(): void
     {
-        $this->mail('Old deals', 'news@shop.example', 5, newsletter: true, receivedAt: new \DateTimeImmutable(\sprintf('-%d days', CleanupSuggestions::WINDOW_DAYS + 10)));
+        // Enough unread for either rule: only having sent nothing in the window keeps it out.
+        $this->mail('Old deals', 'news@shop.example', CleanupSuggestions::SENDER_UNREAD, newsletter: true, receivedAt: new \DateTimeImmutable(\sprintf('-%d days', CleanupSuggestions::WINDOW_DAYS + 10)));
 
         self::assertSame([], $this->suggestions());
     }

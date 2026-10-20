@@ -21,6 +21,9 @@ use App\State\BulkActionProvider;
  * at once and reaches clients through the delta, and the mail servers follow as for a single action. Only mail that
  * reached Tresso before the action started is taken.
  *
+ * While a mail server is behind on the user's changes, the action waits (`waitingSince`), and stops after an hour.
+ * `POST /bulk-actions/{id}/cancel` stops it, or its undo, at once. Either way what was done stays done.
+ *
  * An archive, trash or move can be undone for a day (`canUndo`): only what it moved goes back, each message from
  * where it went into the one folder it came from; `unrestorable` counts the messages no move puts back exactly
  * (they were in several folders, or were archived into Gmail's All Mail).
@@ -53,6 +56,16 @@ use App\State\BulkActionProvider;
             processor: BulkActionProcessor::class,
             name: 'bulk_action_undo',
         ),
+        // Stops the action or its undo; what it did so far stays done and can be undone.
+        new Post(
+            uriTemplate: '/bulk-actions/{id}/cancel',
+            status: 200,
+            security: "is_granted('".Scope::ROLE_MAIL_WRITE."')",
+            input: false,
+            read: false,
+            processor: BulkActionProcessor::class,
+            name: 'bulk_action_cancel',
+        ),
     ],
 )]
 final readonly class BulkActionResource
@@ -75,6 +88,8 @@ final readonly class BulkActionResource
         public int $restored,
         public bool $canUndo,
         public ?string $error,
+        /** Since when it waits for a mail server that is behind on the user's changes; null while it goes on. */
+        public ?\DateTimeImmutable $waitingSince,
         public \DateTimeImmutable $createdAt,
         public ?\DateTimeImmutable $finishedAt,
     ) {
@@ -96,6 +111,7 @@ final readonly class BulkActionResource
             $bulkAction->getRestored(),
             $bulkAction->canUndo(),
             $bulkAction->getError(),
+            $bulkAction->getWaitingSince(),
             $bulkAction->getCreatedAt(),
             $bulkAction->getFinishedAt(),
         );

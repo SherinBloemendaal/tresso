@@ -48,11 +48,19 @@ final readonly class BulkActionProcessor implements ProcessorInterface
             return $this->entityManager->wrapInTransaction(fn (): BulkActionResource => $this->start($owner, $data));
         }
 
-        return $this->entityManager->wrapInTransaction(function () use ($owner, $uriVariables): BulkActionResource {
+        return $this->entityManager->wrapInTransaction(function () use ($owner, $uriVariables, $operation): BulkActionResource {
             $id = $uriVariables['id'] ?? null;
             $bulkAction = \is_string($id) ? $this->repository->findOneOwnedBy($owner, $id, lock: true) : null;
             if (null === $bulkAction) {
                 throw new NotFoundHttpException('Bulk action not found.');
+            }
+            if ('bulk_action_cancel' === $operation->getName()) {
+                if (!$bulkAction->canCancel()) {
+                    throw new ConflictHttpException('This action is not under way.');
+                }
+                $this->bulkActions->cancel($bulkAction);
+
+                return BulkActionResource::fromEntity($bulkAction);
             }
             if (!$bulkAction->canUndo()) {
                 throw new ConflictHttpException('This action cannot be undone (anymore).');

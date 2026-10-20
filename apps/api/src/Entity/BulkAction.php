@@ -96,6 +96,10 @@ class BulkAction
     #[ORM\Column(length: 255, nullable: true)]
     private ?string $error = null;
 
+    /** Since when the run waits for a mail server that is behind; null while it goes on. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $waitingSince = null;
+
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
@@ -222,6 +226,28 @@ class BulkAction
         return $this->createdAt;
     }
 
+    public function getWaitingSince(): ?\DateTimeImmutable
+    {
+        return $this->waitingSince;
+    }
+
+    /** Notes that the run waits, from now unless it waited already; returns since when. */
+    public function waitFrom(\DateTimeImmutable $now): \DateTimeImmutable
+    {
+        return $this->waitingSince ??= $now;
+    }
+
+    public function resume(): void
+    {
+        $this->waitingSince = null;
+    }
+
+    /** Whether it can be stopped: it, or its undo, is under way. */
+    public function canCancel(): bool
+    {
+        return \in_array($this->status, [BulkActionStatus::Running, BulkActionStatus::Undoing], true);
+    }
+
     public function getFinishedAt(): ?\DateTimeImmutable
     {
         return $this->finishedAt;
@@ -251,6 +277,7 @@ class BulkAction
 
     public function finish(\DateTimeImmutable $now): void
     {
+        $this->waitingSince = null;
         $this->status = BulkActionStatus::Undoing === $this->status ? BulkActionStatus::Undone : BulkActionStatus::Done;
         $this->resumeAccount = null;
         $this->resumeAfter = null;
@@ -259,6 +286,7 @@ class BulkAction
 
     public function fail(string $error, \DateTimeImmutable $now): void
     {
+        $this->waitingSince = null;
         $this->status = BulkActionStatus::Failed;
         $this->error = mb_substr($error, 0, 255);
         $this->resumeAccount = null;
