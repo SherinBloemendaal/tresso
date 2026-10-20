@@ -545,6 +545,14 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   policy, so its From address could be anyone's) or `server_spam` (the mail server marks it as spam and its sender is
   not authenticated in a header Tresso can trust, which on a generic IMAP account is never). The web client tells the
   user in an app-wide notice, which stays when the conversation leaves the list it was moved from.
+  With `remember: false` only the conversation moves: no sender rule, no change to an exclude list, nothing classified
+  again (triage decides one email at a time). Every placement by the user gets a new `placementId` (in the answer,
+  stored on the conversation), also one identical to the last. `DELETE
+  /api/v1/threads/{id}/classification?placementId=` (scope `mail:write`) takes that placement back under the same
+  locks: the conversation and its newest incoming message go where the rules put that message now (sender rules
+  stay), a conversation of only the user's own mail leaves its smart inbox, and one the user did not place is left
+  alone. When the conversation was placed again since (another device, even to the same place) the answer is 409 and
+  that choice stays. Triage's undo uses it.
   `GET /api/v1/sender-rules` and `DELETE /api/v1/sender-rules/{id}` (scopes `settings:read`, `settings:write`) list
   and forget them; forgetting one takes the classification lock first, so it waits for a correction of the same user,
   and classifies that sender's recent mail again.
@@ -939,6 +947,43 @@ found and one button. The server works through the action; the web client asks h
 every four seconds), shows the progress, pulls the delta when it is done and says how it went with the undo
 (`apps/web/src/stores/bulk.ts`), with a Stop button while it runs. One bulk action runs at a time: the buttons are
 disabled from the first click.
+
+Triage (`packages/core/src/triage.ts` for the state, `triageSession.ts` for the round; the web client and the phone
+run the same code): a round over the conversations in the inboxes that wait for a decision (`needsTriage`: in an
+inbox, not placed by the user), newest first, one at a time, at most 100 a round ("Start the next round" takes the
+rest). A placed conversation stays out of triage for good, also when a reply arrives in it: replies do not reopen a
+user's decision. The round starts once the first pull after opening the copy is over (`synced`) and the smart inboxes
+are there, so a new browser or a phone that was offline starts from what the server has, and spam is known.
+
+Do (D) and hand over (H) place the conversation with that verdict, for this conversation only (`remember: false`): it
+keeps its smart inbox, or goes to Todo when it has none. Know (K) archives it. Each marks the conversation read. Skip
+(J) leaves it as it is. Decisions and undos run one after another in the order the keys were pressed; none is dropped,
+one that fails is reported and the next still runs, and the screen moves on at once (a key pressed while the next
+email loads is for that email). Hooks plug in other features and return how to take back what they did: `afterDo`
+(by default `todoOnDo`: do makes the conversation's todo from its newest email someone else sent, with
+`perConversation`, so a conversation that has an open todo gets none) and `handOver` (by default the hand-over dialog
+on the web and the hand-over screen on the phone, opened for triage with `handOverAndWait`, which settles when it
+closes; inside triage the dialog leaves the notice and its undo to triage).
+Hand over runs its hook outside that order, so the round goes on while a dialog is open, and places the conversation
+only once the hook says it was handed over; cancelled, nothing is placed and the conversation waits again.
+
+Undo (Z, or the notice's button) takes back one decision, by its id, once that decision is done, and exactly. Do and
+hand over first mark unread what the decision read and take back what the hook did (the todo, only when do made it;
+the hand-over through `HandOverFlow.takeBack`: the forward too while it has not left, only the hand-over once it has),
+then `DELETE /threads/{id}/classification?placementId=`: the rules place the conversation again and, as classification
+does for new mail, a smart inbox that asks for todos gives it its automatic todo (unread, recent, `do`, no open todo in
+the conversation). A choice made again elsewhere since stays, and the user is told; a step that failed is tried again
+from there on the next undo. Know goes back by the archive's undo plan (messages that were in several folders cannot be
+put back, and the notice says how many; what failed to go back is tried again on the next undo), and what it marked
+read is unread again. An undone conversation shows again; when the copy has not synced the undo
+yet, it joins the end of the round once it has.
+
+The round follows the copy with two small reads per change (the round's own conversations, and the 50 newest of the
+inboxes): conversations decided or archived elsewhere are passed over, mail that arrives during the round joins it at
+the end. The web client opens triage at `/triage` (a link in the sidebar); its keys work as the other shortcuts do (not
+while typing, writing, in a menu or dialog, or with a modifier), Escape leaves, and focus moves to the next email's
+subject after a decision (and to the summary at the end) when it was in triage. The phone has the same round with
+buttons (`apps/mobile/src/app/triage.tsx`), showing earlier messages of the conversation folded.
 
 Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
 addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is
@@ -1603,7 +1648,9 @@ planned again. A deadline that has passed, or a duration outside 5 minutes to 24
   cleared date takes its time with it; `done: true` or `false` completes or reopens, keeping the first completion
   moment) and deletes the user's own todos; other users' todos are a 404.
   `POST /api/v1/messages/{id}/todo` makes a todo from one of the user's emails, titled after its subject (or "Email
-  from" the sender when it has none), or returns the one it has (always 200).
+  from" the sender when it has none), or returns the one it has (always 200; `made` says whether this request made
+  it, so a client undoing its own action removes only a todo it made). With `perConversation` an open todo of another
+  email of the conversation is returned instead of making one (triage's do).
 - Todos are in the delta (`todos`, tombstone type `todo`) with `messageId` and `threadId`. Clients treat a link to an
   email they do not have as none, and the thread of the message on the device wins over `threadId`, since a message
   can move to another thread. The delta is built with named arguments, so a list added to `SyncChanges` and not to its
