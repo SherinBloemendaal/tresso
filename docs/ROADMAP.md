@@ -66,9 +66,12 @@ Built next to phase 1, each step its own pull request. See "3.13 Calendar" in th
 - [ ] C4 Calendar clients: day, week, month and agenda views and the event editor in the web client, the invitation
   card with RSVP in the reading pane, a mini agenda next to mail, notification settings and push registration;
   agenda and event detail on mobile with Expo push, on shared types and recurrence expansion in `packages/core`
-- [ ] C5 Google and Microsoft calendars and online meetings: Google Calendar API and Microsoft Graph calendar sync
-  through the provider OAuth layer (1.6), Teams meetings through Graph, Google Meet through `conferenceData`, join
-  buttons for every recognized meeting link
+- [x] C5 Google and Microsoft calendars and online meetings: Google Calendar API and Microsoft Graph calendar sync
+  in both directions through the provider OAuth layer (1.6), with calendars as a feature of their own (incremental
+  consent, a `not_granted` calendar status and "Allow calendar access" in the account settings); invitations,
+  updates and replies sent by the providers (`notify` and the reply comment on each write); Teams meetings through
+  Graph, Google Meet through `conferenceData`, asked for with `conferenceProvider` per calendar; a join link for
+  every recognized meeting (`conference.url`; the join buttons themselves come with the calendar views of C4)
 - [x] C6 Calendar assistant interfaces in the open edition with the deterministic meeting time finder: the
   `EventDraftInterpreter`, `MeetingTimeFinder`, `EventExtractor` and `MeetingBriefWriter` interfaces with their
   capabilities; meeting times from the user's calendars within their working hours, focus blocks, buffer, travel time
