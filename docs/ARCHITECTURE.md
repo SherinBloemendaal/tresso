@@ -630,14 +630,19 @@ Mail judged `know` asks nothing of the user, so it does not interrupt: once a da
   covers a day, a long pause at most 7 days) to the second before the sweep: the sweep takes the user's
   classification lock first, so every classification stamped earlier has committed, and times are stored in whole
   seconds. An empty period makes no brief but still counts as covered. The next run is the next delivery time in the
-  user's zone (a time the clock skips moves on as PHP moves it).
+  user's zone (a time the clock skips moves on as PHP moves it), and always on a later day than the last brief: a
+  time or zone changed after today's brief, a late sweep in the hour the clock repeats in autumn, or a second sweep
+  that claimed the row as it was committed, makes no second brief that day. A user whose brief fails is logged and
+  put off for 15 minutes, so the sweep goes on with the others. The hourly backfill goes on in batches of 500 users for
+  at most 30 seconds.
 - **Storage and sync:** `daily_brief` (owner, period, thread ids, made at) is a synced entity: the delta carries
   `dailyBriefs` and tombstones of type `dailyBrief`. Each user keeps the newest 14. Clients show a brief from their
   own copy (subject, newest sender and snippet, smart inbox, account), so it needs no endpoint of its own; a
-  conversation of the brief is noted once the inboxes no longer list it.
+  conversation of the brief is noted once the inboxes no longer list it, and moved once its verdict is no longer `know`
+  (after "Needs me", a correction or a sender rule): a moved one counts neither as noted nor as left to note.
 - **Noted:** one click marks a conversation read and archives it through the message actions (`POST
   /api/v1/message-actions`, `markRead` then `archive`); "Mark all noted" (Shift K on the web) does the whole brief.
-  The undo moves the messages back and marks unread what was unread. "Needs me" corrects the conversation to the To
+  It never notes a moved conversation. The undo moves the messages back and marks unread what was unread. "Needs me" corrects the conversation to the To
   do smart inbox with verdict `do`, which is remembered for the sender.
 - **Delivery:** a brief made for a user with channels queues `DeliverDailyBrief` after the commit (transport `push`),
   which reads the channels again when it runs. Phones and desktops get a push through the `NotificationDispatcher`
@@ -645,8 +650,9 @@ Mail judged `know` asks nothing of the user, so it does not interrupt: once a da
   quiet hours; it opens `/brief`). Email gets a digest instead of the generic notification email: the conversations
   per smart inbox with sender, snippet and a link, from the system sender (`NOTIFICATIONS_FROM`) with
   `Auto-Submitted: auto-generated`, to the notification address (the sign-in address or one of the user's mail
-  accounts' addresses, the sign-in address when the chosen account is gone). It goes out once (`emailed_at`, under a
-  row lock).
+  accounts' addresses, the sign-in address when the chosen account is gone). It goes out at most once: `emailed_at`
+  is set under a row lock and committed before the mail is sent, outside any transaction; a refusal by the mail server
+  clears it again for Messenger's retry, and a crash in between loses that digest rather than sending it twice.
 - Tresso Cloud adds AI summaries of the brief's conversations; the open edition shows subject and snippet.
 
 ### 3.8 Virus scanning
