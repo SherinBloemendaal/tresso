@@ -81,6 +81,7 @@ framework:
             App\Bulk\RunBulkAction: bulk
             App\Brief\DeliverDailyBrief: push
             App\Storage\ReencryptUserData: reencrypt
+            App\Todo\ReplanTodos: async
 
 when@test:
     framework:

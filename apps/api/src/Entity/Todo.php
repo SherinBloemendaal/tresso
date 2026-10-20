@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Entity;
 
+use App\Enum\TodoPlanState;
 use App\Enum\TodoSource;
 use App\Repository\TodoRepository;
 use App\Sync\Change\TracksChanges;
@@ -16,10 +17,14 @@ use Symfony\Component\Uid\Uuid;
  * Something the user has to do, synced to every device. It may come from an email (made by hand or automatically by a
  * smart inbox); one email has at most one todo. The due date and time are wall-clock values in the user's own time
  * zone, like a paper diary: "Friday 17:00" stays Friday 17:00 when the user travels.
+ *
+ * An open todo with a deadline and a duration can be planned: it then holds time in the user's calendar (instants, from
+ * {@see \App\Todo\TodoPlanner}) that counts as busy, so no meeting is booked over it.
  */
 #[ORM\Entity(repositoryClass: TodoRepository::class)]
 #[ORM\Index(columns: ['owner_id', 'completed_at', 'due_date'])]
 #[ORM\Index(columns: ['owner_id', 'change_seq'])]
+#[ORM\Index(columns: ['owner_id', 'planned_start'])]
 #[ORM\UniqueConstraint(columns: ['message_id'])]
 class Todo implements TracksChanges
 {
@@ -58,6 +63,16 @@ class Todo implements TracksChanges
 
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $completedAt = null;
+
+    /** The time it holds in the calendar, in UTC; null while it is not planned. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $plannedStart = null;
+
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $plannedEnd = null;
+
+    #[ORM\Column(length: 16, nullable: true, enumType: TodoPlanState::class)]
+    private ?TodoPlanState $planState = null;
 
     /** The email this todo came from, if any. */
     #[ORM\ManyToOne]
@@ -129,7 +144,7 @@ class Todo implements TracksChanges
         return $this->dueTime;
     }
 
-    /** A time needs a date: without one there is nothing to be due on. */
+    /** A time needs a date: without one there is nothing to be due on, nor anything to plan before. */
     public function setDue(?\DateTimeImmutable $date, ?\DateTimeImmutable $time): void
     {
         if (null === $date && null !== $time) {
@@ -137,6 +152,9 @@ class Todo implements TracksChanges
         }
         $this->dueDate = $date;
         $this->dueTime = $time;
+        if (null === $date) {
+            $this->unplan();
+        }
         $this->touch();
     }
 
@@ -145,9 +163,13 @@ class Todo implements TracksChanges
         return $this->durationMinutes;
     }
 
+    /** Without a duration there is no time to hold in the calendar. */
     public function setDurationMinutes(?int $durationMinutes): void
     {
         $this->durationMinutes = $durationMinutes;
+        if (null === $durationMinutes) {
+            $this->unplan();
+        }
         $this->touch();
     }
 
@@ -161,13 +183,17 @@ class Todo implements TracksChanges
         return null !== $this->completedAt;
     }
 
-    /** Completing a todo that is done already keeps the moment it was first completed. */
+    /**
+     * Completing a todo that is done already keeps the moment it was first completed. A done todo holds no time in the
+     * calendar.
+     */
     public function complete(\DateTimeImmutable $at): void
     {
         if (null !== $this->completedAt) {
             return;
         }
         $this->completedAt = $at;
+        $this->unplan();
         $this->touch();
     }
 
@@ -177,6 +203,70 @@ class Todo implements TracksChanges
             return;
         }
         $this->completedAt = null;
+        $this->touch();
+    }
+
+    public function getPlannedStart(): ?\DateTimeImmutable
+    {
+        return $this->plannedStart;
+    }
+
+    public function getPlannedEnd(): ?\DateTimeImmutable
+    {
+        return $this->plannedEnd;
+    }
+
+    public function getPlanState(): ?TodoPlanState
+    {
+        return $this->planState;
+    }
+
+    public function isPlanned(): bool
+    {
+        return null !== $this->plannedStart;
+    }
+
+    /** Holds this free time in the calendar. */
+    public function planAt(\DateTimeImmutable $start, \DateTimeImmutable $end): void
+    {
+        if (null !== $this->completedAt || null === $this->dueDate || null === $this->durationMinutes) {
+            throw new \LogicException('Only an open todo with a deadline and a duration can be planned.');
+        }
+        if ($end <= $start) {
+            throw new \InvalidArgumentException('Planned time must end after it starts.');
+        }
+        $start = $start->setTimezone(new \DateTimeZone('UTC'));
+        $end = $end->setTimezone(new \DateTimeZone('UTC'));
+        if ($start == $this->plannedStart && $end == $this->plannedEnd && TodoPlanState::Planned === $this->planState) {
+            return;
+        }
+        $this->plannedStart = $start;
+        $this->plannedEnd = $end;
+        $this->planState = TodoPlanState::Planned;
+        $this->touch();
+    }
+
+    /** The planned time is no longer free and nothing else was: it stays, flagged. */
+    public function flagConflict(): void
+    {
+        if (null === $this->plannedStart) {
+            throw new \LogicException('Only planned time can conflict.');
+        }
+        if (TodoPlanState::Conflict === $this->planState) {
+            return;
+        }
+        $this->planState = TodoPlanState::Conflict;
+        $this->touch();
+    }
+
+    public function unplan(): void
+    {
+        if (null === $this->plannedStart) {
+            return;
+        }
+        $this->plannedStart = null;
+        $this->plannedEnd = null;
+        $this->planState = null;
         $this->touch();
     }
 

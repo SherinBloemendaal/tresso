@@ -19,13 +19,16 @@ use App\Repository\MessageRepository;
 use App\Repository\TodoRepository;
 use App\Security\CurrentUser;
 use App\Todo\EmailTodos;
+use App\Todo\TodoPlanner;
 use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\Clock\ClockInterface;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Validator\ConstraintViolation;
 use Symfony\Component\Validator\ConstraintViolationList;
 
 /**
- * Creates, updates and deletes the signed-in user's todos, and makes todos from their emails.
+ * Creates, updates and deletes the signed-in user's todos, and makes todos from their emails. The time a todo holds in
+ * the calendar follows its changes ({@see TodoPlanner::follow()}).
  *
  * @implements ProcessorInterface<CreateTodo|MakeTodo|UpdateTodo|TodoResource, TodoResource|null>
  */
@@ -37,6 +40,8 @@ final readonly class TodoProcessor implements ProcessorInterface
         private EmailTodos $emailTodos,
         private CurrentUser $currentUser,
         private EntityManagerInterface $entityManager,
+        private TodoPlanner $planner,
+        private ClockInterface $clock,
     ) {
     }
 
@@ -60,6 +65,8 @@ final readonly class TodoProcessor implements ProcessorInterface
             $todo->setDurationMinutes($data->durationMinutes);
             $todo->setPosition($this->todos->nextPosition($owner));
             $this->entityManager->persist($todo);
+            $this->entityManager->flush();
+            $this->planner->follow($todo, true, $this->clock->now());
             $this->entityManager->flush();
 
             return TodoResource::fromEntity($todo);
@@ -88,7 +95,11 @@ final readonly class TodoProcessor implements ProcessorInterface
             throw new \LogicException(\sprintf('Unexpected input %s for %s.', get_debug_type($data), $operation->getName()));
         }
 
+        $schedule = [$todo->getDueDate(), $todo->getDueTime(), $todo->getDurationMinutes(), $todo->isDone()];
         $this->update($todo, $data);
+        $this->entityManager->flush();
+        // Equal by value: a date set again to the same day is no change.
+        $this->planner->follow($todo, $schedule != [$todo->getDueDate(), $todo->getDueTime(), $todo->getDurationMinutes(), $todo->isDone()], $this->clock->now());
         $this->entityManager->flush();
 
         return TodoResource::fromEntity($todo);
@@ -108,6 +119,8 @@ final readonly class TodoProcessor implements ProcessorInterface
             $todo->setNotes($data->notes);
             $todo->setDue(self::date($data->dueDate), self::time($data->dueTime));
             $todo->setDurationMinutes($data->durationMinutes);
+            $this->entityManager->flush();
+            $this->planner->follow($todo, true, $this->clock->now());
             $this->entityManager->flush();
         }
 

@@ -68,7 +68,7 @@ final class CalendarAssistantTest extends DatabaseTestCase
 
     public function testSchedulingPreferencesStartWithTheDefaults(): void
     {
-        self::assertSame(['bufferMinutes' => 0, 'travelMinutes' => 0, 'minimumNoticeMinutes' => 0], $this->getJson('/api/v1/calendar/scheduling-preferences', $this->kim));
+        self::assertSame(['bufferMinutes' => 0, 'travelMinutes' => 0, 'minimumNoticeMinutes' => 0, 'planTodos' => false], $this->getJson('/api/v1/calendar/scheduling-preferences', $this->kim));
     }
 
     public function testSchedulingPreferencesChangeOnlyWhatIsSent(): void
@@ -76,7 +76,7 @@ final class CalendarAssistantTest extends DatabaseTestCase
         $this->patchPreferences(['bufferMinutes' => 10, 'minimumNoticeMinutes' => 60]);
         $this->patchPreferences(['travelMinutes' => 25]);
 
-        self::assertSame(['bufferMinutes' => 10, 'travelMinutes' => 25, 'minimumNoticeMinutes' => 60], $this->getJson('/api/v1/calendar/scheduling-preferences', $this->kim));
+        self::assertSame(['bufferMinutes' => 10, 'travelMinutes' => 25, 'minimumNoticeMinutes' => 60, 'planTodos' => false], $this->getJson('/api/v1/calendar/scheduling-preferences', $this->kim));
     }
 
     public function testTheFirstChangeCreatesThePreferencesOnceAndLocksThem(): void
@@ -90,7 +90,7 @@ final class CalendarAssistantTest extends DatabaseTestCase
         self::assertStringContainsString('ON CONFLICT (user_id) DO NOTHING', $sql, 'Two first changes at once find one row.');
         self::assertStringContainsString('FOR UPDATE', $sql);
         $this->patchPreferences(['travelMinutes' => 20]);
-        self::assertSame(['bufferMinutes' => 5, 'travelMinutes' => 20, 'minimumNoticeMinutes' => 0], $this->getJson('/api/v1/calendar/scheduling-preferences', $this->kim));
+        self::assertSame(['bufferMinutes' => 5, 'travelMinutes' => 20, 'minimumNoticeMinutes' => 0, 'planTodos' => false], $this->getJson('/api/v1/calendar/scheduling-preferences', $this->kim));
     }
 
     public function testAChangeLocksThePreferencesAsAnotherRequestLeftThem(): void

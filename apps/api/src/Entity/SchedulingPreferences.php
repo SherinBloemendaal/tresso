@@ -10,7 +10,7 @@ use Doctrine\ORM\Mapping as ORM;
 /**
  * What the meeting time finder keeps free besides the working hours and zone of the notification settings: a buffer
  * around busy time, the travel time to busy time at a place that names none, and the notice the user needs. A user
- * without a row has none of them.
+ * without a row has none of them. Also whether todos are planned in the calendar on their own.
  */
 #[ORM\Entity(repositoryClass: SchedulingPreferencesRepository::class)]
 class SchedulingPreferences
@@ -28,6 +28,13 @@ class SchedulingPreferences
 
     #[ORM\Column]
     private int $minimumNoticeMinutes = 0;
+
+    /**
+     * Open todos with a deadline and a duration get free time before their deadline on their own: when this is
+     * switched on, and whenever such a todo is made, reopened or gets a new deadline or duration.
+     */
+    #[ORM\Column(options: ['default' => false])]
+    private bool $planTodos = false;
 
     #[ORM\Column]
     private \DateTimeImmutable $updatedAt;
@@ -73,6 +80,17 @@ class SchedulingPreferences
     public function setMinimumNoticeMinutes(int $minimumNoticeMinutes): void
     {
         $this->minimumNoticeMinutes = $minimumNoticeMinutes;
+        $this->touch();
+    }
+
+    public function plansTodos(): bool
+    {
+        return $this->planTodos;
+    }
+
+    public function setPlanTodos(bool $planTodos): void
+    {
+        $this->planTodos = $planTodos;
         $this->touch();
     }
 

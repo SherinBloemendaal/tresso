@@ -19,6 +19,9 @@ final class AfterCommitDispatcher implements TransactionListener, ResetInterface
     /** @var list<array{object, list<StampInterface>}> */
     private array $pending = [];
 
+    /** @var array<string, true> keys of the messages {@see dispatchOnce()} holds */
+    private array $once = [];
+
     public function __construct(
         private readonly MessageBusInterface $bus,
         private readonly ManagerRegistry $doctrine,
@@ -37,10 +40,24 @@ final class AfterCommitDispatcher implements TransactionListener, ResetInterface
         $this->pending[] = [$message, $stamps];
     }
 
+    /**
+     * Like {@see dispatch()}, but a message with the same key already waiting for this commit makes this one
+     * unnecessary: a sync that saves many calendar events asks once for what follows from all of them.
+     */
+    public function dispatchOnce(string $key, object $message): void
+    {
+        if (isset($this->once[$key])) {
+            return;
+        }
+        $this->dispatch($message);
+        $this->once[$key] = true;
+    }
+
     public function transactionCommitted(): void
     {
         $pending = $this->pending;
         $this->pending = [];
+        $this->once = [];
         foreach ($pending as [$message, $stamps]) {
             $this->bus->dispatch($message, $stamps);
         }
@@ -49,10 +66,12 @@ final class AfterCommitDispatcher implements TransactionListener, ResetInterface
     public function transactionRolledBack(): void
     {
         $this->pending = [];
+        $this->once = [];
     }
 
     public function reset(): void
     {
         $this->pending = [];
+        $this->once = [];
     }
 }
