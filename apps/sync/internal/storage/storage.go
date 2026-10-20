@@ -41,6 +41,8 @@ const maxObjectBytes = 100 << 20
 type S3 struct {
 	client *minio.Client
 	bucket string
+	// beforePut runs between looking at an object and writing it; tests use it to make another writer win the race.
+	beforePut func(key string)
 }
 
 // NewS3 connects to an S3 endpoint such as "http://s3:9000" or "https://s3.eu-central-1.amazonaws.com".
@@ -97,6 +99,9 @@ func (s *S3) PutUnlessCurrent(ctx context.Context, key string, data []byte, vers
 			return fmt.Errorf("stat %s: %w", key, err)
 		}
 
+		if s.beforePut != nil {
+			s.beforePut(key)
+		}
 		_, err = s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), opts)
 		if err == nil {
 			return nil

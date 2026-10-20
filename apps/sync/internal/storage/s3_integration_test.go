@@ -99,3 +99,62 @@ func TestS3HonoursTheConditionsTheWritesRelyOn(t *testing.T) {
 		t.Errorf("If-Match with another ETag: %v", err)
 	}
 }
+
+// A writer that loses the race (another one wrote between its look and its write) never overwrites a newer version,
+// and does replace an older one.
+func TestS3ConcurrentWritersNeverLoseTheNewerVersion(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name               string
+		before             *uint32 // what is stored before both writers start; nil for nothing
+		mine, theirs, want uint32  // the version this writer writes, the one that slips in, the one that must remain
+	}{
+		{"a newer version slips in over an older one", ptr(1), 2, 3, 3},
+		{"an older version slips in over an older one", ptr(1), 3, 2, 3},
+		{"a newer version is created first", nil, 2, 3, 3},
+		{"an older version is created first", nil, 3, 2, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, _, bucket := s3(t)
+			other := onBucket(t, bucket)
+			key := "raw/race"
+			if tc.before != nil {
+				if err := store.PutUnlessCurrent(ctx, key, []byte(fmt.Sprintf("v%d", *tc.before)), *tc.before); err != nil {
+					t.Fatal(err)
+				}
+			}
+			raced := 0
+			store.SetBeforePut(func(string) {
+				if raced++; raced == 1 {
+					if err := other.PutUnlessCurrent(ctx, key, []byte(fmt.Sprintf("v%d", tc.theirs)), tc.theirs); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+
+			if err := store.PutUnlessCurrent(ctx, key, []byte(fmt.Sprintf("v%d", tc.mine)), tc.mine); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := store.Get(ctx, key)
+			if err != nil || string(got) != fmt.Sprintf("v%d", tc.want) {
+				t.Errorf("stored %q, %v; want v%d", got, err, tc.want)
+			}
+			if raced < 1 {
+				t.Error("the other writer never got in between")
+			}
+		})
+	}
+}
+
+func ptr(v uint32) *uint32 { return &v }
+
+// onBucket is a second, separate writer on the same bucket.
+func onBucket(t *testing.T, bucket string) *storage.S3 {
+	t.Helper()
+	store, err := storage.NewS3(os.Getenv("S3_TEST_ENDPOINT"), os.Getenv("S3_TEST_ACCESS_KEY"), os.Getenv("S3_TEST_SECRET_KEY"), bucket, "us-east-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
