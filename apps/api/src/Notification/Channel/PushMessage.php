@@ -43,6 +43,15 @@ final readonly class PushMessage
     }
 
     /**
+     * The same message, naming the user it is for (data.userId): a browser shows a push only for the user who turned
+     * notifications on there. The dispatcher adds it to every push, so no feature has to.
+     */
+    public function forUser(string $userId): self
+    {
+        return new self($this->id, $this->kind, $this->title, $this->body, $this->path, $this->silent, $this->expiresAt, [...$this->data, 'userId' => $userId], $this->androidChannel);
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function payload(): array

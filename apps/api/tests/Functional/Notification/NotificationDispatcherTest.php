@@ -61,7 +61,7 @@ final class NotificationDispatcherTest extends DatabaseTestCase
         self::assertCount(1, $expo);
         $body = json_decode($expo[0]['body'], true, flags: \JSON_THROW_ON_ERROR);
         self::assertIsArray($body);
-        self::assertSame(['threadId' => 't1', 'id' => 'm1', 'kind' => 'mail', 'title' => 'Anna de Vries', 'body' => 'Budget review', 'path' => '/thread/t1', 'silent' => false], $body['data']);
+        self::assertSame(['threadId' => 't1', 'userId' => $this->user()->getId()->toRfc4122(), 'id' => 'm1', 'kind' => 'mail', 'title' => 'Anna de Vries', 'body' => 'Budget review', 'path' => '/thread/t1', 'silent' => false], $body['data'], 'Every push names its user, whichever feature sends it.');
         self::assertSame('mail', $body['channelId'], 'Shown in its own Android channel.');
         self::assertCount(1, array_filter($this->http()->calls(), static fn (array $call): bool => self::PUSH_ENDPOINT === $call['url']));
     }
