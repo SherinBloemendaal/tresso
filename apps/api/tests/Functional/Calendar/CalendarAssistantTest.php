@@ -6,7 +6,11 @@ namespace App\Tests\Functional\Calendar;
 
 use App\Entity\CalendarInvitation;
 use App\Entity\Message;
+use App\Entity\SchedulingPreferences;
+use App\Entity\User;
 use App\Enum\ItipMethod;
+use App\Repository\SchedulingPreferencesRepository;
+use App\Repository\UserRepository;
 use App\Tests\Functional\AuthenticatesUsers;
 use App\Tests\Functional\DatabaseTestCase;
 use App\Tests\Support\QueryLog;
@@ -85,6 +89,22 @@ final class CalendarAssistantTest extends DatabaseTestCase
         self::assertStringContainsString('FOR UPDATE', $sql);
         $this->patchPreferences(['travelMinutes' => 20]);
         self::assertSame(['bufferMinutes' => 5, 'travelMinutes' => 20, 'minimumNoticeMinutes' => 0], $this->getJson('/api/v1/calendar/scheduling-preferences', $this->kim));
+    }
+
+    public function testAChangeLocksThePreferencesAsAnotherRequestLeftThem(): void
+    {
+        $this->patchPreferences(['bufferMinutes' => 5, 'travelMinutes' => 20]);
+        $user = static::getContainer()->get(UserRepository::class)->findOneBy(['email' => 'kim@example.test']);
+        self::assertInstanceOf(User::class, $user);
+        $preferences = static::getContainer()->get(SchedulingPreferencesRepository::class);
+        // This request read them first (as the API's provider does), then another request saved its change.
+        self::assertSame(5, $preferences->forUser($user)->getBufferMinutes());
+        $this->connection()->executeStatement('UPDATE scheduling_preferences SET buffer_minutes = 30, travel_minutes = 45');
+
+        $locked = static::getContainer()->get(EntityManagerInterface::class)->wrapInTransaction(static fn (): SchedulingPreferences => $preferences->lockForUser($user));
+
+        self::assertSame(30, $locked->getBufferMinutes());
+        self::assertSame(45, $locked->getTravelMinutes());
     }
 
     public function testSchedulingPreferencesStayWithinTheirLimits(): void

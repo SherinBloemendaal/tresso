@@ -9,6 +9,7 @@ use App\Entity\User;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\DBAL\LockMode;
 use Doctrine\DBAL\Types\Types;
+use Doctrine\ORM\Query;
 use Doctrine\Persistence\ManagerRegistry;
 
 /**
@@ -30,8 +31,9 @@ class SchedulingPreferencesRepository extends ServiceEntityRepository
     }
 
     /**
-     * The user's preferences to change, locked until the transaction ends. The row is created with the defaults when
-     * missing, and two first changes at the same moment both find the one row instead of both creating it.
+     * The user's preferences to change, locked until the transaction ends and read as they are then. The row is created
+     * with the defaults when missing, and two first changes at the same moment both find the one row instead of both
+     * creating it.
      */
     public function lockForUser(User $user): SchedulingPreferences
     {
@@ -49,12 +51,14 @@ class SchedulingPreferencesRepository extends ServiceEntityRepository
             ['updated' => Types::DATETIME_IMMUTABLE],
         );
 
+        // Refreshed: this request may have loaded the row before another request changed it and released the lock.
         /** @var SchedulingPreferences */
         return $this->createQueryBuilder('p')
             ->where('p.user = :user')
             ->setParameter('user', $user->getId(), 'uuid')
             ->getQuery()
             ->setLockMode(LockMode::PESSIMISTIC_WRITE)
+            ->setHint(Query::HINT_REFRESH, true)
             ->getSingleResult();
     }
 }
