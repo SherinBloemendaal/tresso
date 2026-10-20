@@ -1,7 +1,6 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb'
 import {
   actionResult,
-  arrivalOf,
   classifiedByUser,
   compareTodos,
   contactMatches,
@@ -16,7 +15,6 @@ import {
   summarizeConversation,
   syncedDraft,
   type AppliedAction,
-  type Arrival,
   type ChangePage,
   type Contact,
   type ConversationSummary,
@@ -37,7 +35,7 @@ import {
   type Verdict,
 } from '@tresso/core'
 
-export type { Arrival, Contact, Draft, ListScope } from '@tresso/core'
+export type { Contact, Draft, ListScope } from '@tresso/core'
 
 /** What a thread looks like in a mailbox list. */
 export type Conversation = ConversationSummary
@@ -127,8 +125,6 @@ export function deleteMailDatabase(userId: string): Promise<void> {
 
 /** The signed-in user's mail in the browser's IndexedDB. The desktop app keeps it in SQLite instead (SqliteMailStore). */
 export class IndexedDbMailStore implements MailStore {
-  /** Collected by {@link apply}, handed out by {@link takeArrivals}. */
-  private arrivals: Arrival[] = []
   /** Threads classified on this device whose server version has not arrived yet; see {@link restoreThread}. */
   private readonly unconfirmed = new Set<string>()
 
@@ -285,10 +281,6 @@ export class IndexedDbMailStore implements MailStore {
       affected.add(thread.id)
       this.unconfirmed.delete(thread.id)
     }
-    const inboxFolders = new Set(
-      (await tx.objectStore('folders').getAll()).filter((folder) => folder.role === 'inbox').map((folder) => folder.id),
-    )
-    const arrivals: Arrival[] = []
     for (const message of page.messages) {
       const previous = await tx.objectStore('messages').get(message.id)
       if (previous !== undefined && previous.threadId !== message.threadId) {
@@ -298,10 +290,6 @@ export class IndexedDbMailStore implements MailStore {
       affected.add(message.threadId)
       if (previous === undefined) {
         await rememberContacts(tx, message)
-      }
-      const arrival = arrivalOf(previous, message, inboxFolders)
-      if (arrival !== null) {
-        arrivals.push(arrival)
       }
     }
     for (const outgoing of page.outgoingMessages) {
@@ -321,7 +309,6 @@ export class IndexedDbMailStore implements MailStore {
 
     await tx.objectStore('meta').put(page.cursor, 'cursor')
     await tx.done
-    this.arrivals.push(...arrivals)
   }
 
   /**
@@ -380,12 +367,6 @@ export class IndexedDbMailStore implements MailStore {
     await tx.done
   }
 
-  /** The arrivals of the pages applied since the last call, oldest first. */
-  takeArrivals(): Arrival[] {
-    const taken = this.arrivals
-    this.arrivals = []
-    return taken
-  }
 
   async mailAccounts(): Promise<SyncedMailAccount[]> {
     const accounts = await this.db.getAll('mailAccounts')

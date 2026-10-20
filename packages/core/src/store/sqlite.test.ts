@@ -21,8 +21,7 @@ describe('SqliteMailStore', () => {
     await db.apply(firstPage)
   })
 
-  it('stores a page completely or not at all, and hands out no arrivals of a page it refused', async () => {
-    db.takeArrivals()
+  it('stores a page completely or not at all', async () => {
     const broken = page({
       cursor: 11,
       messages: [message('m9', 't1', 'work', ['work-inbox'], '2026-10-19T11:00:00+00:00', { verdict: 'do' }), { ...message('m10', 't1', 'work', [], 'x'), threadId: null as unknown as string }],
@@ -32,7 +31,6 @@ describe('SqliteMailStore', () => {
 
     expect(await db.cursor()).toBe(10)
     expect((await db.thread('t1'))?.messages.map((m) => m.id)).toEqual(['m2', 'm1'])
-    expect(db.takeArrivals()).toEqual([])
   })
 
   it('refuses writes once closing, after finishing the one in progress, and then closes the database', async () => {

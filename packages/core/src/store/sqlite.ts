@@ -4,8 +4,8 @@ import { sortSmartInboxes } from '../smartInboxes'
 import { compareTodos } from '../todos'
 import { inList, summarizeConversation, type ConversationSummary, type ListFolders, type ListScope } from '../sync/conversation'
 import type { ChangePage, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo } from '../sync/types'
-import { CopyClosingError, type Arrival, type Contact, type Draft, type MailStore } from './mailStore'
-import { arrivalOf, classifiedByUser, contactMatches, deletedDraft, draftOnlyHere, mergeContact, peopleOn, stillAsClassified, storedDraft, syncedDraft } from './rules'
+import { CopyClosingError, type Contact, type Draft, type MailStore } from './mailStore'
+import { classifiedByUser, contactMatches, deletedDraft, draftOnlyHere, mergeContact, peopleOn, stillAsClassified, storedDraft, syncedDraft } from './rules'
 import type { Sql, SqlValue } from './sql'
 
 /**
@@ -80,8 +80,6 @@ export class SqliteMailStore implements MailStore {
    * connection without a busy timeout, so a second write while one is open would fail with "database is locked".
    */
   private queue: Promise<void> = Promise.resolve()
-  /** Collected by {@link apply}, handed out by {@link takeArrivals}. */
-  private arrivals: Arrival[] = []
   /** Threads classified on this device whose server version has not arrived yet; see {@link restoreThread}. */
   private readonly unconfirmed = new Set<string>()
   /** Set while the copy must sync from the start (see resyncFromStart); kept in the database too, so it holds after a restart. */
@@ -186,7 +184,6 @@ export class SqliteMailStore implements MailStore {
 
   private async store(page: ChangePage): Promise<void> {
     let finished: number | null = null
-    const arrivals: Arrival[] = []
     await this.sql.transaction(async (tx) => {
       const affected = new Set<string>()
 
@@ -268,7 +265,6 @@ export class SqliteMailStore implements MailStore {
         affected.add(thread.id)
         this.unconfirmed.delete(thread.id)
       }
-      const inboxFolders = await inboxFolderIds(tx)
       for (const message of page.messages) {
         const row = await tx.first<JsonRow>('SELECT json FROM messages WHERE id = ?', [message.id])
         const previous = row === null ? null : parse<SyncedMessage>(row)
@@ -279,10 +275,6 @@ export class SqliteMailStore implements MailStore {
         affected.add(message.threadId)
         if (previous === null) {
           await rememberContacts(tx, message)
-        }
-        const arrival = arrivalOf(previous, message, inboxFolders)
-        if (arrival !== null) {
-          arrivals.push(arrival)
         }
       }
       for (const outgoing of page.outgoingMessages) {
@@ -310,7 +302,6 @@ export class SqliteMailStore implements MailStore {
         finished = this.resyncsAsked
       }
     })
-    this.arrivals.push(...arrivals)
     // A resync asked for while this page was being stored still stands: the next pull begins from the start again.
     if (finished !== null && finished === this.resyncsAsked) {
       this.resyncing = false
@@ -354,11 +345,6 @@ export class SqliteMailStore implements MailStore {
     )
   }
 
-  takeArrivals(): Arrival[] {
-    const taken = this.arrivals
-    this.arrivals = []
-    return taken
-  }
 
   async mailAccounts(): Promise<SyncedMailAccount[]> {
     const accounts = (await this.reader.all<JsonRow>('SELECT json FROM mail_accounts')).map((row) => parse<SyncedMailAccount>(row))

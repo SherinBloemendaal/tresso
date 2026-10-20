@@ -49,21 +49,6 @@ export interface Draft {
   attachments: DraftAttachment[]
 }
 
-/**
- * A message that needs the user and is new to them: unread, in an inbox, and judged `do` or `delegate` for the first
- * time, either when it arrived or when it was classified later.
- */
-export interface Arrival {
-  messageId: string
-  threadId: string
-  mailAccountId: string
-  from: SyncedMessage['from']
-  subject: string
-  snippet: string
-  receivedAt: string
-  verdict: 'do' | 'delegate'
-}
-
 /** The copy is being closed (a sign-out or another user), so it takes no more writes. */
 export class CopyClosingError extends Error {
   constructor() {
@@ -88,8 +73,6 @@ export interface MailStore extends SyncStore {
    * messages whose request the server did not take, so a delta can only have brought them someone else's change.
    */
   revertAction(applied: AppliedAction): Promise<void>
-  /** The arrivals of the pages applied since the last call, oldest first. */
-  takeArrivals(): Arrival[]
   /** By display name, then address. */
   mailAccounts(): Promise<SyncedMailAccount[]>
   folders(): Promise<SyncedFolder[]>
