@@ -1,91 +1,92 @@
 import { describe, expect, it } from 'vitest'
-import { keepTimeZone, syncTimeZone, type TimeZoneSettings } from './timeZone'
-
-function fakeSettings(timeZone: string, failSaves = 0): TimeZoneSettings & { saved: string[]; reads: number } {
-  let failures = failSaves
-  const settings = {
-    saved: [] as string[],
-    reads: 0,
-    timeZone,
-    async read() {
-      settings.reads++
-      return { timeZone: settings.timeZone }
-    },
-    async save(zone: string) {
-      if (failures > 0) {
-        failures--
-        throw new Error('offline')
-      }
-      settings.saved.push(zone)
-      settings.timeZone = zone
-    },
-  }
-  return settings
-}
+import { keepTimeZone, type SentZone } from './timeZone'
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-describe('syncTimeZone', () => {
-  it('saves the device zone when the settings have another one', async () => {
-    const settings = fakeSettings('UTC')
+function memory(initial: string | null = null): SentZone & { value: string | null } {
+  const sent = {
+    value: initial,
+    async get() {
+      return sent.value
+    },
+    async set(zone: string) {
+      sent.value = zone
+    },
+  }
+  return sent
+}
 
-    expect(await syncTimeZone(settings, 'Europe/Amsterdam')).toBe(true)
-    expect(settings.saved).toEqual(['Europe/Amsterdam'])
-  })
-
-  it('leaves the settings alone when they have the zone already', async () => {
-    const settings = fakeSettings('Europe/Amsterdam')
-
-    expect(await syncTimeZone(settings, 'Europe/Amsterdam')).toBe(false)
-    expect(settings.saved).toEqual([])
-  })
-})
+function wakeable() {
+  let wake = (): void => undefined
+  let unsubscribed = false
+  return {
+    onWake: (check: () => void) => ((wake = check), () => (unsubscribed = true)),
+    wake: () => wake(),
+    unsubscribed: () => unsubscribed,
+  }
+}
 
 describe('keepTimeZone', () => {
-  it('sends the zone at start and again only when the device zone changed', async () => {
-    const settings = fakeSettings('UTC')
+  it('sends the zone the first time and again only when the device zone changed', async () => {
+    const saved: string[] = []
+    const sent = memory()
+    const device = wakeable()
     let zone = 'Europe/Amsterdam'
-    let wake = (): void => undefined
-    keepTimeZone(settings, (check) => ((wake = check), () => undefined), () => undefined, () => zone)
+    keepTimeZone(async (z) => void saved.push(z), sent, device.onWake, () => undefined, () => zone)
     await settle()
-    expect(settings.saved).toEqual(['Europe/Amsterdam'])
+    expect(saved).toEqual(['Europe/Amsterdam'])
 
-    wake()
+    device.wake()
     await settle()
-    expect(settings.reads).toBe(1)
+    expect(saved).toEqual(['Europe/Amsterdam'])
 
     zone = 'America/New_York'
-    wake()
+    device.wake()
     await settle()
-    expect(settings.saved).toEqual(['Europe/Amsterdam', 'America/New_York'])
+    expect(saved).toEqual(['Europe/Amsterdam', 'America/New_York'])
+    expect(sent.value).toBe('America/New_York')
   })
 
-  it('reports a failure and tries again on the next wake', async () => {
-    const settings = fakeSettings('UTC', 1)
+  it('does not send again after a reload when the device zone is the one it sent', async () => {
+    const saved: string[] = []
+    keepTimeZone(async (z) => void saved.push(z), memory('Europe/Amsterdam'), wakeable().onWake, () => undefined, () => 'Europe/Amsterdam')
+    await settle()
+
+    expect(saved).toEqual([])
+  })
+
+  it('reports a failure, remembers nothing and tries again on the next wake', async () => {
+    let failures = 1
+    const saved: string[] = []
     const errors: unknown[] = []
-    let wake = (): void => undefined
-    keepTimeZone(settings, (check) => ((wake = check), () => undefined), (error) => errors.push(error), () => 'Asia/Tokyo')
+    const sent = memory()
+    const device = wakeable()
+    const save = async (z: string) => {
+      if (failures-- > 0) throw new Error('offline')
+      saved.push(z)
+    }
+    keepTimeZone(save, sent, device.onWake, (error) => errors.push(error), () => 'Asia/Tokyo')
     await settle()
     expect(errors).toHaveLength(1)
+    expect(sent.value).toBeNull()
 
-    wake()
+    device.wake()
     await settle()
-    expect(settings.saved).toEqual(['Asia/Tokyo'])
+    expect(saved).toEqual(['Asia/Tokyo'])
   })
 
   it('stops listening when stopped', async () => {
-    const settings = fakeSettings('UTC')
-    let unsubscribed = false
-    let wake = (): void => undefined
+    const saved: string[] = []
+    const device = wakeable()
     let zone = 'Europe/Amsterdam'
-    const stop = keepTimeZone(settings, (check) => ((wake = check), () => (unsubscribed = true)), () => undefined, () => zone)
+    const stop = keepTimeZone(async (z) => void saved.push(z), memory(), device.onWake, () => undefined, () => zone)
     await settle()
     stop()
 
     zone = 'Asia/Tokyo'
-    wake()
+    device.wake()
     await settle()
-    expect(unsubscribed).toBe(true)
-    expect(settings.saved).toEqual(['Europe/Amsterdam'])
+    expect(device.unsubscribed()).toBe(true)
+    expect(saved).toEqual(['Europe/Amsterdam'])
   })
 })
