@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MissingFolderError } from '../actions'
 import { briefView } from '../brief'
+import type { SyncedCalendar, SyncedCalendarEvent } from '../calendar/types'
 import type { ChangePage, SyncedDailyBrief, SyncedHandOver, SyncedMessage, SyncedOutgoingMessage, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
 import type { Draft, MailStore } from './mailStore'
 
@@ -51,6 +52,45 @@ export function todo(id: string, extra: Partial<SyncedTodo> = {}): SyncedTodo {
     threadId: null,
     createdAt: '2026-10-19T08:00:00+00:00',
     updatedAt: '2026-10-19T08:00:00+00:00',
+    ...extra,
+  }
+}
+
+export function calendar(id: string, mailAccountId: string | null, extra: Partial<SyncedCalendar> = {}): SyncedCalendar {
+  return { id, mailAccountId, source: mailAccountId === null ? 'local' : 'caldav', name: id, color: '#6E56CF', timeZone: 'Europe/Amsterdam', writable: true, isDefault: false, visible: true, work: false, providerSchedules: false, conferenceProviders: [], position: 0, ...extra }
+}
+
+/** A single timed event of an hour in Amsterdam, unless `extra` says otherwise. */
+export function calendarEvent(id: string, calendarId: string, extra: Partial<SyncedCalendarEvent> = {}): SyncedCalendarEvent {
+  return {
+    id,
+    calendarId,
+    uid: `${id}@tresso.test`,
+    recurrenceId: null,
+    sequence: 0,
+    status: 'confirmed',
+    summary: `Event ${id}`,
+    description: '',
+    location: '',
+    url: null,
+    transparency: 'busy',
+    visibility: 'public',
+    allDay: false,
+    start: { dateTime: '2026-10-20T10:00:00', timeZone: 'Europe/Amsterdam' },
+    end: { dateTime: '2026-10-20T11:00:00', timeZone: 'Europe/Amsterdam' },
+    recurrence: null,
+    rdates: [],
+    exdates: [],
+    organizer: null,
+    attendees: [],
+    selfResponse: null,
+    reminders: [],
+    conference: null,
+    messageId: null,
+    syncError: null,
+    travelMinutes: null,
+    defaultReminders: true,
+    important: false,
     ...extra,
   }
 }
@@ -791,6 +831,66 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
         await db.apply(page({ cursor: 12, deleted: [{ type: 'mailAccount', id: 'work' }] }))
 
         expect((await db.handOvers()).map((h) => h.id)).toEqual(['h2'])
+      })
+    })
+
+    describe('calendars', () => {
+      const october = (day: number): number => Date.UTC(2026, 9, day)
+      const weekly = calendarEvent('weekly', 'work-cal', {
+        uid: 'weekly@tresso.test',
+        start: { dateTime: '2026-01-05T09:00:00', timeZone: 'Europe/Amsterdam' },
+        end: { dateTime: '2026-01-05T09:30:00', timeZone: 'Europe/Amsterdam' },
+        recurrence: 'FREQ=WEEKLY;BYDAY=MO',
+      })
+      // An occurrence of October moved to December: it is out of October's range, yet October needs it.
+      const moved = calendarEvent('moved', 'work-cal', {
+        uid: 'weekly@tresso.test',
+        recurrenceId: '20261019T070000Z',
+        start: { dateTime: '2026-12-01T09:00:00', timeZone: 'Europe/Amsterdam' },
+        end: { dateTime: '2026-12-01T09:30:00', timeZone: 'Europe/Amsterdam' },
+      })
+      const ended = calendarEvent('ended', 'work-cal', {
+        start: { dateTime: '2025-01-06T09:00:00', timeZone: 'Europe/Amsterdam' },
+        end: { dateTime: '2025-01-06T10:00:00', timeZone: 'Europe/Amsterdam' },
+        recurrence: 'FREQ=DAILY;UNTIL=20250201T080000Z',
+      })
+      const allDay = calendarEvent('holiday', 'home-cal', { allDay: true, start: { date: '2026-10-21' }, end: { date: '2026-10-22' } })
+
+      beforeEach(async () => {
+        await db.apply(
+          page({
+            cursor: 30,
+            calendars: [calendar('work-cal', 'work', { position: 1, name: 'Work' }), calendar('home-cal', 'home', { position: 2, name: 'Home' }), calendar('tresso', null, { position: 0, name: 'Tresso' })],
+            calendarEvents: [weekly, moved, ended, allDay, calendarEvent('single', 'tresso')],
+          }),
+        )
+      })
+
+      it('lists calendars in the user order', async () => {
+        expect((await db.calendars()).map((c) => c.id)).toEqual(['tresso', 'work-cal', 'home-cal'])
+      })
+
+      it('finds the rows a range needs, with every row of the series that touch it', async () => {
+        const ids = (await db.calendarEvents(october(19), october(26))).map((e) => e.id).sort()
+        expect(ids).toEqual(['holiday', 'moved', 'single', 'weekly'])
+      })
+
+      it('leaves out series that ended before the range', async () => {
+        expect((await db.calendarEvents(october(1), october(2))).map((e) => e.id).sort()).toEqual(['moved', 'weekly'])
+      })
+
+      it('reads one event and drops deleted ones', async () => {
+        expect((await db.calendarEvent('single'))?.summary).toBe('Event single')
+        await db.apply(page({ cursor: 31, deleted: [{ type: 'calendarEvent', id: 'single' }] }))
+        expect(await db.calendarEvent('single')).toBeNull()
+      })
+
+      it('drops the events of a deleted calendar, and the calendars of a deleted account', async () => {
+        await db.apply(page({ cursor: 31, deleted: [{ type: 'calendar', id: 'home-cal' }, { type: 'mailAccount', id: 'work' }] }))
+        expect((await db.calendars()).map((c) => c.id)).toEqual(['tresso'])
+        expect(await db.calendarEvent('holiday')).toBeNull()
+        expect(await db.calendarEvent('weekly')).toBeNull()
+        expect((await db.calendarEvents(october(1), october(31))).map((e) => e.id)).toEqual(['single'])
       })
     })
   })
