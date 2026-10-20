@@ -57,7 +57,16 @@ export function overdueNotifications(handOvers: SyncedHandOver[]): MailNotificat
     return handOvers.map((handOver) => ({
       title: `No reply from ${firstName(handOver.delegate)} yet`,
       body: `${handOver.subject || '(no subject)'} is past its due date. Nudge from Waiting on.`,
+      path: `/waiting?nudge=${encodeURIComponent(handOver.id)}`,
+      silent: handOver.notifiedSilently,
     }))
   }
-  return [{ title: `${handOvers.length} hand-overs are past their due date`, body: 'Nudge from Waiting on.' }]
+  return [
+    {
+      title: `${handOvers.length} hand-overs are past their due date`,
+      body: 'Nudge from Waiting on.',
+      path: '/waiting',
+      silent: handOvers.every((handOver) => handOver.notifiedSilently),
+    },
+  ]
 }

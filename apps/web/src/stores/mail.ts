@@ -6,6 +6,8 @@ import {
   MAX_MESSAGES_PER_ACTION,
   appliedFor,
   CopyClosingError,
+  deliveredNotices,
+  noticeKey,
   DraftSync,
   PartialActionError,
   type AppliedAction,
@@ -76,7 +78,7 @@ export const useMailStore = defineStore('mail', () => {
   const todos = ref<SyncedTodo[]>([])
   /** Every hand-over, in "Waiting on" order. */
   const handOvers = ref<SyncedHandOver[]>([])
-  /** Hand-overs that became overdue since the screens last took them (see takeOverdue). */
+  /** Overdue notices the server delivered, not yet taken by the screens (see takeOverdue). */
   const overdue = ref<SyncedHandOver[]>([])
   /** The user's unsubscribe requests, of every account. */
   const unsubscriptions = ref<SyncedUnsubscription[]>([])
@@ -112,6 +114,10 @@ export const useMailStore = defineStore('mail', () => {
   let delivered: SyncedMailNotification[] = []
   /** The mail notifications shown in this session, so a page that brings one again never shows it twice. */
   const shown = new Set<string>()
+  /** Hand-overs from the pages applied since their overdue notices were last looked at. */
+  let deliveredHandOvers: SyncedHandOver[] = []
+  /** The overdue notices shown in this session (see noticeKey). */
+  const shownNotices = new Set<string>()
   /**
    * Raised by every start and stop. A start overtaken while it waited (by a stop, or by another start) gives up, so it
    * never overwrites a newer session's state; the copy it opened is closed again.
@@ -166,6 +172,7 @@ export const useMailStore = defineStore('mail', () => {
       fetchPage: (since, limit) => auth.api<ChangePage>(`/api/v1/sync/changes?since=${since}&limit=${limit}`),
       onApplied: (page) => {
         delivered.push(...page.mailNotifications)
+        deliveredHandOvers.push(...page.handOvers)
         void refresh()
         void notifyMail()
         void notifyOverdue()
@@ -200,7 +207,7 @@ export const useMailStore = defineStore('mail', () => {
       pulls.value += 1
       if (notifyingSince === null) {
         delivered = []
-        db.value?.takeOverdueHandOvers()
+        deliveredHandOvers = []
         notifyingSince = Date.now()
       }
     } catch (error) {
@@ -243,26 +250,27 @@ export const useMailStore = defineStore('mail', () => {
   }
 
   /**
-   * Tells the user about hand-overs whose due date passed without a reply: in the app always (see takeOverdue), and
-   * natively when they are not looking at Tresso. This is the desktop app's only way to show them: the server's
-   * dispatcher claims the desktop app's device without sending anything (it has no push service), and the delta's
-   * `notifications` carry calendar notifications only, so one overdue hand-over is shown once.
+   * Tells the user about hand-overs whose due date passed without a reply, as the server delivered them (it decided
+   * when and how: channels, focus holds, quiet hours): in the app (see takeOverdue), and natively the ones sent to the
+   * desktop, unless the user is looking at Tresso already. Each round is shown once.
    */
   async function notifyOverdue(): Promise<void> {
-    const database = db.value
-    if (database === null || notifyingSince === null) {
+    if (notifyingSince === null) {
       return
     }
-    const taken = database.takeOverdueHandOvers()
-    if (taken.length === 0) {
+    const due = deliveredNotices(deliveredHandOvers, notifyingSince, shownNotices)
+    deliveredHandOvers = []
+    if (due.length === 0) {
       return
     }
-    overdue.value = [...overdue.value, ...taken]
-    if (notifier === null || document.hasFocus()) {
+    due.forEach((handOver) => shownNotices.add(noticeKey(handOver)))
+    overdue.value = [...overdue.value, ...due]
+    const desktop = due.filter((handOver) => handOver.notifiedChannels.includes('desktop'))
+    if (desktop.length === 0 || notifier === null || document.hasFocus()) {
       return
     }
     try {
-      await notifier.show(overdueNotifications(taken))
+      await notifier.show(overdueNotifications(desktop))
     } catch (error) {
       console.error('Showing a notification failed', error)
     }
@@ -290,6 +298,8 @@ export const useMailStore = defineStore('mail', () => {
     notifyingSince = null
     delivered = []
     shown.clear()
+    deliveredHandOvers = []
+    shownNotices.clear()
     db.value = null
     userId = null
     live.value = false

@@ -95,7 +95,7 @@ describe('ClassificationMenu', () => {
   it('does not offer a hand-over when it is handed over already', async () => {
     mail.smartInboxes = [...mail.smartInboxes, smartInbox('others', 'For others', 'delegate', 3)]
     mail.handOvers = [
-      { id: 'h1', mailAccountId: 'work', messageId: 'm1', threadId: 't1', subject: 'Budget', delegate: { address: 'lisa@company.example', name: null }, note: '', dueAt: '2026-10-30T15:00:00Z', state: 'open', forwardId: 'f1', overdueAt: null, nudgedAt: null, lastNudgeId: null, replyMessageId: null, createdAt: '2026-10-20T08:00:00Z', closedAt: null, updatedAt: '2026-10-20T08:00:00Z' },
+      { id: 'h1', mailAccountId: 'work', messageId: 'm1', threadId: 't1', subject: 'Budget', delegate: { address: 'lisa@company.example', name: null }, note: '', dueAt: '2026-10-30T15:00:00Z', state: 'open', forwardId: 'f1', overdueAt: null, notifiedAt: null, notifiedChannels: [], notifiedSilently: false, nudgedAt: null, lastNudgeId: null, replyMessageId: null, createdAt: '2026-10-20T08:00:00Z', closedAt: null, updatedAt: '2026-10-20T08:00:00Z' },
     ]
     const wrapper = mountMenu('info', 'know')
 

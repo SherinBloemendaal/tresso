@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import type { ChangePage, SyncedMailNotification } from '@tresso/core'
+import type { ChangePage, SyncedHandOver, SyncedMailNotification } from '@tresso/core'
 import { deleteMailDatabase } from '@/mail/db'
 import type { MailNotification } from '@/mail/mailNotifications'
 
@@ -98,5 +98,56 @@ describe('notifications for new mail', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(shown).toHaveLength(1)
+  })
+
+  describe('hand-overs past their due date', () => {
+    function overdue(notifiedAt: string, channels: string[], extra: Partial<SyncedHandOver> = {}): SyncedHandOver {
+      return {
+        id: 'h1',
+        mailAccountId: 'work',
+        messageId: null,
+        threadId: null,
+        subject: 'Invoice question',
+        delegate: { address: 'lisa@company.example', name: 'Lisa Bakker' },
+        note: '',
+        dueAt: '2026-10-23T15:00:00Z',
+        state: 'open',
+        forwardId: null,
+        overdueAt: notifiedAt,
+        notifiedAt,
+        notifiedChannels: channels,
+        notifiedSilently: false,
+        nudgedAt: null,
+        lastNudgeId: null,
+        replyMessageId: null,
+        createdAt: '2026-10-20T08:00:00Z',
+        closedAt: null,
+        updatedAt: notifiedAt,
+        ...extra,
+      }
+    }
+
+    it('shows the notice the server delivered to the desktop once, whatever else changes on the hand-over', async () => {
+      const at = new Date().toISOString()
+      pages.push(page(2, { handOvers: [overdue(at, ['phone', 'desktop'])] }))
+      await useMailStore().syncNow()
+      pages.push(page(3, { handOvers: [overdue(at, ['phone', 'desktop'], { nudgedAt: new Date().toISOString() })] }))
+      await useMailStore().syncNow()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(shown).toEqual([[{ title: 'No reply from Lisa yet', body: 'Invoice question is past its due date. Nudge from Waiting on.', path: '/waiting?nudge=h1', silent: false }]])
+      expect(useMailStore().takeOverdue().map((handOver) => handOver.id)).toEqual(['h1'])
+    })
+
+    it('shows nothing natively for a notice sent to the phone only, nor before the server delivered one', async () => {
+      pages.push(page(2, { handOvers: [{ ...overdue(new Date().toISOString(), []), notifiedAt: null }] }))
+      await useMailStore().syncNow()
+      pages.push(page(3, { handOvers: [overdue(new Date().toISOString(), ['phone'])] }))
+      await useMailStore().syncNow()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(shown).toEqual([])
+      expect(useMailStore().takeOverdue().map((handOver) => handOver.id)).toEqual(['h1'])
+    })
   })
 })
