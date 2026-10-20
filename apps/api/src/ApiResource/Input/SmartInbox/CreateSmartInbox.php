@@ -46,4 +46,7 @@ final class CreateSmartInbox
 
     /** New mail judged `do` here becomes a todo; only with the `do` verdict. */
     public bool $autoCreateTodo = false;
+
+    /** Hold new mail until the user's next batch time instead of delivering it as it comes. */
+    public bool $batchDelivery = false;
 }

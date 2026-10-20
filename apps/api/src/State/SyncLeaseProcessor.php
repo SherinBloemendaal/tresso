@@ -17,6 +17,7 @@ use App\Repository\OutgoingMessageRepository;
 use App\Sync\AccountLeaser;
 use App\Sync\LeaseResult;
 use App\Sync\LeasedAccount;
+use App\Unsubscribe\Unsubscriptions;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
@@ -33,6 +34,7 @@ final readonly class SyncLeaseProcessor implements ProcessorInterface
         private DraftRepository $drafts,
         private DraftCopyRemovalRepository $removals,
         private MailboxChangeRepository $mailboxChanges,
+        private Unsubscriptions $unsubscriptions,
     ) {
     }
 
@@ -49,14 +51,15 @@ final readonly class SyncLeaseProcessor implements ProcessorInterface
         $now = new \DateTimeImmutable();
         $this->entityManager->wrapInTransaction(fn () => $this->outbox->releaseDue($accountIds, $now));
 
-        // Mail to send, drafts to file or remove, changes to messages and calendar changes to write are all handled
-        // when the worker hears the account has outbound work.
+        // Mail to send, drafts to file or remove, changes to messages, calendar changes to write and one-click
+        // unsubscribes are all handled when the worker hears the account has outbound work.
         $work = array_values(array_unique([
             ...$this->outgoing->accountsWithClaimable($accountIds, $now),
             ...$this->drafts->accountsWithFiling($accountIds, $now, $now->sub(new \DateInterval(DraftFiling::REST))),
             ...$this->removals->accountsWithRemovals($accountIds, $now),
             ...$this->mailboxChanges->accountsWithDueChanges($accountIds, $now),
             ...$this->calendarOperations->accountsWithClaimable($accountIds, $now),
+            ...$this->unsubscriptions->accountsWithDueRequests($accountIds, $now),
         ]));
 
         return new LeaseResult(AccountLeaser::LEASE_SECONDS, $accounts, $work);

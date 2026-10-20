@@ -28,6 +28,7 @@ use App\Repository\OutgoingMessageRepository;
 use App\Scan\AttachmentAccess;
 use App\Scan\DownloadPolicy;
 use App\Security\CurrentUser;
+use App\Unsubscribe\Unsubscriptions;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
@@ -51,6 +52,7 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
         private DraftFiling $filing,
         private AttachmentLimits $limits,
         private DownloadPolicy $downloads,
+        private Unsubscriptions $unsubscriptions,
     ) {
     }
 
@@ -127,6 +129,7 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
                 throw new ConflictHttpException(\sprintf('This message is %s and can no longer be cancelled.', $message->getStatus()->value));
             }
             $this->outbox->cancel($message);
+            $this->unsubscriptions->outgoingSettled($message, new \DateTimeImmutable());
 
             return $message;
         }));

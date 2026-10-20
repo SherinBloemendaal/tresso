@@ -18,6 +18,11 @@ final class ReceivingServers
 {
     public static function trustsTopmostHeader(MailAccount $account): bool
     {
-        return MailProvider::Imap !== $account->getProvider();
+        return self::trustsTopmostHeaderAt($account->getProvider());
+    }
+
+    public static function trustsTopmostHeaderAt(MailProvider $provider): bool
+    {
+        return MailProvider::Imap !== $provider;
     }
 }

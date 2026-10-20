@@ -78,6 +78,8 @@ final readonly class SmartInboxResource
         public string $verdict,
         /** Whether new mail judged `do` here becomes a todo; only with the `do` verdict. */
         public bool $autoCreateTodo,
+        /** New mail waits for the user's next batch time (see /api/v1/batch-delivery). */
+        public bool $batchDelivery,
         public int $position,
     ) {
     }
@@ -93,6 +95,7 @@ final readonly class SmartInboxResource
             $smartInbox->getExcludeSenders(),
             $smartInbox->getVerdict()->value,
             $smartInbox->isAutoCreateTodo(),
+            $smartInbox->isBatchDelivery(),
             $smartInbox->getPosition(),
         );
     }

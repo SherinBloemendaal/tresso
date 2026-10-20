@@ -271,7 +271,7 @@ class Category implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        return ['builtin', 'name', 'instructions', 'includeSenders', 'excludeSenders', 'verdict', 'autoCreateTodo', 'position'];
+        return ['builtin', 'name', 'instructions', 'includeSenders', 'excludeSenders', 'verdict', 'autoCreateTodo', 'batchDelivery', 'position'];
     }
 
     public static function changeType(): string
