@@ -26,6 +26,19 @@ describe('DraftAttachments', () => {
     expect(wrapper.findAll('button.name')[1]!.attributes('disabled')).toBeDefined()
   })
 
+  it('opens a file that could not be scanned only after the warning', async () => {
+    const statement = { id: 'f3', filename: 'statement.pdf', contentType: 'application/pdf', size: 1000, scanStatus: 'failed' as const }
+    const wrapper = mount(DraftAttachments, { props: { attachments: [statement], attaching: [] } })
+
+    await wrapper.get('button.name').trigger('click')
+    expect(wrapper.emitted('open')).toBeUndefined()
+    expect(wrapper.text()).toContain('Not checked for malware.')
+
+    await wrapper.get('button.confirm-link').trigger('click')
+
+    expect(wrapper.emitted('openUnscanned')).toEqual([['f3']])
+  })
+
   it('shows nothing without files', () => {
     expect(mount(DraftAttachments, { props: { attachments: [], attaching: [] } }).find('ul').exists()).toBe(false)
   })

@@ -58,7 +58,10 @@ describe('SearchView', () => {
           hit('m1', ['Q4 ', 'budget', ', revised'], {
             seen: false,
             hasAttachments: true,
-            attachments: [{ id: 'a1', filename: [{ text: 'budget', match: true }, { text: '-q4.xlsx', match: false }], contentType: 'application/vnd.ms-excel', size: 48000, matched: true }],
+            attachments: [
+              { id: 'a1', filename: [{ text: 'budget', match: true }, { text: '-q4.xlsx', match: false }], contentType: 'application/vnd.ms-excel', size: 48000, matched: true, scanStatus: 'clean' },
+              { id: 'a2', filename: [{ text: 'budget', match: true }, { text: '.exe', match: false }], contentType: 'application/octet-stream', size: 900, matched: true, scanStatus: 'infected' },
+            ],
           }),
         ],
       },
@@ -128,7 +131,7 @@ describe('SearchView', () => {
     expect(row.classes()).not.toContain('unread')
     expect(row.get('.row').classes()).toContain('unread')
     expect(row.text()).toContain('Work')
-    expect(wrapper.text()).toContain('2 emails, 1 attachment')
+    expect(wrapper.text()).toContain('2 emails, 2 attachments')
   })
 
   it('lists matching attachments apart', async () => {
@@ -138,6 +141,17 @@ describe('SearchView', () => {
     expect(attachments.text()).toContain('budget-q4.xlsx')
     expect(attachments.text()).toContain('XLSX')
     expect(attachments.get('mark').text()).toBe('budget')
+  })
+
+  it('marks attachments that were blocked', async () => {
+    const { wrapper } = await mountView('budget')
+
+    const [clean, blocked] = wrapper.get('section[aria-label="Matching attachments"]').findAll('a')
+    expect(clean!.classes()).not.toContain('blocked')
+    expect(clean!.text()).not.toContain('malware')
+    expect(blocked!.classes()).toContain('blocked')
+    expect(blocked!.text()).toContain('blocked: contains malware')
+    expect(blocked!.find('[aria-label="Blocked: contains malware"]').exists()).toBe(true)
   })
 
   it('opens the thread of a result', async () => {

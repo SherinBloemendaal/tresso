@@ -189,7 +189,13 @@ function keydown(event: KeyboardEvent): void {
     <RichEditor v-model="html" @submit="send" />
     <small v-if="errors.html" class="field-error">{{ errors.html }}</small>
 
-    <DraftAttachments :attachments="attachments" :attaching="compose.attaching" @open="compose.openAttachment" @remove="compose.removeAttachment" />
+    <DraftAttachments
+      :attachments="attachments"
+      :attaching="compose.attaching"
+      @open="(id) => compose.openAttachment(id)"
+      @open-unscanned="(id) => compose.openAttachment(id, true)"
+      @remove="compose.removeAttachment"
+    />
 
     <div class="signature">
       <label for="compose-signature" class="label">Signature</label>
@@ -209,6 +215,14 @@ function keydown(event: KeyboardEvent): void {
     </div>
 
     <p v-if="compose.error" class="form-error" role="alert">{{ compose.error }}</p>
+
+    <div v-if="compose.unscannedToConfirm" class="unscanned" role="alertdialog" aria-labelledby="compose-unscanned">
+      <p id="compose-unscanned">{{ compose.unscannedToConfirm.message }} Files that were not checked can contain malware.</p>
+      <div class="unscanned-actions">
+        <button type="button" class="button button-quiet" @click="compose.keepEditing()">Keep editing</button>
+        <button type="button" class="button button-danger" :disabled="compose.sending" @click="compose.sendAnyway()">Send anyway</button>
+      </div>
+    </div>
 
     <footer class="actions">
       <button type="submit" class="button button-primary" :disabled="compose.sending">Send <kbd>⌘ Enter</kbd></button>
@@ -236,6 +250,27 @@ function keydown(event: KeyboardEvent): void {
 </template>
 
 <style scoped>
+.unscanned {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-card);
+  background: var(--danger-soft);
+  color: var(--ink);
+}
+.unscanned p {
+  flex: 1 1 260px;
+  margin: 0;
+  font-size: 13px;
+}
+.unscanned-actions {
+  display: flex;
+  gap: 8px;
+}
 .file-input {
   display: none;
 }

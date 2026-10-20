@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { searchDay, searchFilters, withSearchFilter, type SearchAttachment, type SearchFilterName, type SearchHit, type SyncedFolder } from '@tresso/core'
+import { SCAN_TEXT, searchDay, searchFilters, withSearchFilter, type SearchAttachment, type SearchFilterName, type SearchHit, type SyncedFolder } from '@tresso/core'
 import { fileSize, shortTime } from '@/mail/format'
 import { useAuthStore } from '@/stores/auth'
 import { useMailStore } from '@/stores/mail'
@@ -197,11 +197,21 @@ function threadLink(hit: SearchHit) {
           <aside class="side">
             <section v-if="matchedAttachments.length > 0" aria-label="Matching attachments" class="attachments">
               <h2>Attachments</h2>
-              <RouterLink v-for="{ hit, attachment } in matchedAttachments" :key="attachment.id" :to="threadLink(hit)" class="attachment">
-                <span class="extension">{{ extension(attachment) }}</span>
+              <RouterLink
+                v-for="{ hit, attachment } in matchedAttachments"
+                :key="attachment.id"
+                :to="threadLink(hit)"
+                class="attachment"
+                :class="{ blocked: attachment.scanStatus === 'infected' }"
+              >
+                <span v-if="attachment.scanStatus === 'infected'" class="extension"><AppIcon name="shieldAlert" :size="16" label="Blocked: contains malware" /></span>
+                <span v-else class="extension">{{ extension(attachment) }}</span>
                 <span class="attachment-text">
                   <span class="attachment-name"><HighlightText :segments="attachment.filename" /></span>
-                  <span class="attachment-meta">{{ fileSize(attachment.size) }}, {{ shortTime(Date.parse(hit.receivedAt)) }}</span>
+                  <span class="attachment-meta">
+                    {{ fileSize(attachment.size) }}, {{ shortTime(Date.parse(hit.receivedAt))
+                    }}<template v-if="attachment.scanStatus !== null && attachment.scanStatus !== 'clean'">, {{ SCAN_TEXT[attachment.scanStatus] }}</template>
+                  </span>
                 </span>
               </RouterLink>
             </section>
@@ -469,6 +479,13 @@ h2 {
   background: var(--ground);
   color: var(--ink-2);
   font: 500 10px var(--font-mono);
+}
+.blocked .extension {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.blocked .attachment-meta {
+  color: var(--danger);
 }
 .attachment-text {
   flex: 1;

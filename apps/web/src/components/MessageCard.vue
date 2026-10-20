@@ -38,6 +38,21 @@ async function load(allowRemoteContent: boolean): Promise<void> {
   }
 }
 
+// A scan verdict changes the message. Reload the body for its attachment states and links when the summary moved,
+// or when a file was still being scanned (it may be done while another keeps the summary at pending).
+watch(
+  () => props.message,
+  (message, previous) => {
+    if (!props.expanded || body.value === null || loading.value || message.id !== previous.id) {
+      return
+    }
+    const scanning = body.value.attachments.some((attachment) => attachment.scanStatus === 'pending')
+    if (message.attachmentScan !== previous.attachmentScan || scanning) {
+      void load(body.value.remoteContentLoaded)
+    }
+  },
+)
+
 watch(
   () => [props.expanded, props.message.id] as const,
   ([expanded], previous) => {
@@ -72,6 +87,11 @@ watch(
         This message could not be loaded. <button type="button" class="link" @click="load(body?.remoteContentLoaded ?? false)">Try again</button>
       </p>
 
+      <div v-if="message.attachmentScan === 'infected'" class="malware" role="alert">
+        <AppIcon name="shieldAlert" />
+        <span><strong>An attachment contains malware.</strong> We blocked it. Be careful with links and requests in this message.</span>
+      </div>
+
       <template v-if="body">
         <div v-if="body.hasRemoteContent && !body.remoteContentLoaded" class="remote" role="note">
           <AppIcon name="image" />
@@ -96,6 +116,20 @@ watch(
 </template>
 
 <style scoped>
+.malware {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-card);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 13px;
+}
+.malware svg {
+  flex-shrink: 0;
+}
 .message {
   border-bottom: 1px solid var(--line);
 }

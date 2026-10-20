@@ -1,6 +1,6 @@
 import { computed, ref, shallowRef, watch } from 'vue'
 import { defineStore } from 'pinia'
-import { Composer, type Address, type ComposerNotice, type ComposerState, type SyncedMessage } from '@tresso/core'
+import { Composer, type Address, type AttachmentAccess, type ComposerNotice, type ComposerState, type SyncedMessage } from '@tresso/core'
 import { ApiError, errorMessage } from '@/api/errors'
 import type { Draft } from '@/mail/db'
 import { useMailStore } from '@/stores/mail'
@@ -64,14 +64,18 @@ export const useComposeStore = defineStore('compose', () => {
   const conflict = computed(() => state.value.conflict)
   const undoable = computed(() => state.value.undoable)
   const attaching = computed(() => state.value.attaching)
+  const unscannedToConfirm = computed(() => state.value.unscannedToConfirm)
 
   /** Attaches files the user picked or dropped. */
   function attach(files: File[]): Promise<void> {
     return composer.attach(files.map((file) => ({ name: file.name, type: file.type, size: file.size, body: file })))
   }
 
-  /** Opens one of the draft's files in a new tab, through a fresh link. */
-  async function openAttachment(attachmentId: string): Promise<void> {
+  /**
+   * Opens one of the draft's files in a new tab, through a fresh link. A file that could not be scanned only opens
+   * with `acceptUnscanned`, once the user confirmed the warning.
+   */
+  async function openAttachment(attachmentId: string, acceptUnscanned = false): Promise<void> {
     // Opened at once, in the click, so the browser does not block it; the link follows. Not with noopener, which
     // gives no handle to the tab; the tab loses its way back to this page by hand instead.
     const opened = window.open('about:blank', '_blank')
@@ -81,16 +85,28 @@ export const useComposeStore = defineStore('compose', () => {
     }
     opened.opener = null
     try {
-      const url = await composer.attachmentLink(attachmentId)
+      const link = await composer.attachmentLink(attachmentId)
+      const url = link?.access === 'confirm' && acceptUnscanned ? await composer.unscannedAttachmentLink(attachmentId) : (link?.url ?? null)
       if (url === null) {
         opened.close()
-        notify({ text: 'This file is blocked: it contains malware.', tone: 'error' })
+        notify({ text: unavailable(link?.access ?? 'blocked'), tone: 'error' })
         return
       }
       opened.location.href = url
     } catch (error) {
       opened.close()
       notify({ text: `The file could not be opened: ${errorMessage(error)}`, tone: 'error' })
+    }
+  }
+
+  function unavailable(access: AttachmentAccess): string {
+    switch (access) {
+      case 'scanning':
+        return 'This file is still being scanned for malware. Try again in a moment.'
+      case 'confirm':
+        return 'This file could not be scanned for malware. Confirm the warning to open it.'
+      default:
+        return 'This file is blocked: it contains malware, or this server only opens scanned files.'
     }
   }
 
@@ -140,6 +156,9 @@ export const useComposeStore = defineStore('compose', () => {
     attach,
     removeAttachment: (attachmentId: string) => composer.removeAttachment(attachmentId),
     openAttachment,
+    unscannedToConfirm,
+    sendAnyway: () => composer.sendAnyway(),
+    keepEditing: () => composer.keepEditing(),
     shownQuote: (quoteHtml: string) => composer.shownQuote(quoteHtml),
     openNew,
     openReply,
