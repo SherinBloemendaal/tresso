@@ -65,11 +65,16 @@ export async function forgetPushDevice(api: Api, store: DeviceIdStore): Promise<
   await store.set(null)
 }
 
-/** The conversation a tapped notification is about: mail notifications lead to /thread/{id}. */
-export function tappedThread(data: unknown): string | null {
+/**
+ * The screens a notification may open on the phone, by the path the server gives (PushMessage.php): a conversation
+ * (mail), the daily brief and the todos. Paths the phone has no screen for (a calendar event) open the app as it is.
+ */
+const TAP_ROUTES = [/^\/thread\/[^/?#]+$/, /^\/brief(\?[^#]*)?$/, /^\/todos$/]
+
+/** Where a tapped notification leads in the app, or null to open it as it is. */
+export function tappedRoute(data: unknown): string | null {
   const path = typeof data === 'object' && data !== null ? (data as { path?: unknown }).path : undefined
-  const match = typeof path === 'string' ? /^\/thread\/([^/?#]+)$/.exec(path) : null
-  return match === null ? null : decodeURIComponent(match[1]!)
+  return typeof path === 'string' && TAP_ROUTES.some((route) => route.test(path)) ? path : null
 }
 
 export interface ForegroundBehavior {

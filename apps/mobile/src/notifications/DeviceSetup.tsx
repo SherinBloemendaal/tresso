@@ -1,12 +1,12 @@
 import { useEffect, useRef } from 'react'
 import { AppState, Platform } from 'react-native'
-import { router } from 'expo-router'
+import { router, type Href } from 'expo-router'
 import * as Notifications from 'expo-notifications'
 import { useAuth } from '@/auth/AuthProvider'
 import { useNotices } from '@/components/Notices'
 import { createNotificationChannels } from './channels'
 import { expoPush, secureDeviceId } from './expoPush'
-import { foregroundBehavior, startPushRegistration, tappedThread } from './push'
+import { foregroundBehavior, startPushRegistration, tappedRoute } from './push'
 import { startTimeZoneSync, storedSentZone } from './timeZone'
 
 // How a push shows while the app is open; set before any push can arrive.
@@ -14,8 +14,8 @@ Notifications.setNotificationHandler({ handleNotification: async (notification) 
 
 /**
  * What the phone sets up for notifications: the Android channels the API's pushes name, at launch, and, once signed
- * in, this phone as a push device and the time zone reminders are planned in. A tapped mail notification opens its
- * conversation.
+ * in, this phone as a push device and the time zone reminders are planned in. A tapped notification opens what it is
+ * about (see tappedRoute).
  */
 export function DeviceSetup() {
   const auth = useAuth()
@@ -47,12 +47,13 @@ export function DeviceSetup() {
       return
     }
     const key = tapped.notification.request.identifier
-    const threadId = tappedThread(tapped.notification.request.content.data)
-    if (threadId === null || opened.current === key) {
+    const route = tappedRoute(tapped.notification.request.content.data)
+    if (route === null || opened.current === key) {
       return
     }
     opened.current = key
-    router.push({ pathname: '/thread/[id]', params: { id: threadId } })
+    // Checked against the screens notifications may open (TAP_ROUTES in push.ts), some of which other features add.
+    router.push(route as Href)
   }, [signedIn, tapped])
 
   useEffect(() => {

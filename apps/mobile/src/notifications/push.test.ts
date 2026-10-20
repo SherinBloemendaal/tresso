@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { foregroundBehavior, forgetPushDevice, startPushRegistration, tappedThread, type DeviceIdStore, type PushPlatform } from './push'
+import { foregroundBehavior, forgetPushDevice, startPushRegistration, tappedRoute, type DeviceIdStore, type PushPlatform } from './push'
 
 /** An api that answers every request with the same body (or failure), and records the requests. */
 function fakeApi(answer: () => Promise<unknown> = async () => ({ id: 'device-1' })) {
@@ -115,16 +115,20 @@ describe('forgetPushDevice', () => {
   })
 })
 
-describe('tappedThread', () => {
-  it('opens the conversation of a mail notification', () => {
-    expect(tappedThread({ kind: 'mail', path: '/thread/0199-abc' })).toBe('0199-abc')
+describe('tappedRoute', () => {
+  it('opens the conversation of a mail notification, the daily brief and the todos', () => {
+    expect(tappedRoute({ kind: 'mail', path: '/thread/0199-abc' })).toBe('/thread/0199-abc')
+    expect(tappedRoute({ kind: 'daily_brief', path: '/brief' })).toBe('/brief')
+    expect(tappedRoute({ path: '/brief?date=2026-10-20' })).toBe('/brief?date=2026-10-20')
+    expect(tappedRoute({ path: '/todos' })).toBe('/todos')
   })
 
-  it('opens nothing for other paths', () => {
-    expect(tappedThread({ kind: 'reminder', path: '/calendar/events/e1' })).toBeNull()
-    expect(tappedThread({ path: '/thread/t1/extra' })).toBeNull()
-    expect(tappedThread({ path: null })).toBeNull()
-    expect(tappedThread(null)).toBeNull()
+  it('opens nothing for paths the phone has no screen for, or that leave the app', () => {
+    expect(tappedRoute({ kind: 'reminder', path: '/calendar/events/e1' })).toBeNull()
+    expect(tappedRoute({ path: '/thread/t1/extra' })).toBeNull()
+    expect(tappedRoute({ path: 'https://elsewhere.example/thread/t1' })).toBeNull()
+    expect(tappedRoute({ path: null })).toBeNull()
+    expect(tappedRoute(null)).toBeNull()
   })
 })
 

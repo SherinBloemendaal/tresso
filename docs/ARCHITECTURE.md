@@ -663,7 +663,8 @@ registers its Expo push token as an `expo` device, again when the token changes;
 in the build (`extra.eas.projectId`, which `eas init` writes to `app.json`), and without it the app says that this
 phone cannot get notifications. A sign-out removes the device first, so the user's notifications stop coming; when the
 server cannot be told, the app signs out anyway and says so (the next sign-in on the phone takes the device over). A
-tapped mail notification opens its conversation (`/thread/[id]`). While the app is open, mail goes to the list without
+tapped notification opens the screen its path names when the phone has it (`tappedRoute`: a conversation
+`/thread/{id}`, the daily brief `/brief`, the todos `/todos`); other paths (a calendar event) open the app as it is. While the app is open, mail goes to the list without
 a banner or sound (the user is in their mail already), and reminders show as a banner unless they came silently. A
 conversation opened from a notification before the delta brought it shows as loading, pulls once, and says it is
 gone only after a pull that completed (the web client does the same).
