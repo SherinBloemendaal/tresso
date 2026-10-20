@@ -603,7 +603,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private function mailNotifications(array $range): array
     {
         $rows = $this->connection->fetchAllAssociative(
-            'SELECT n.id, n.message_id, n.thread_id, n.title, n.body, n.delivered_at, n.channels, n.silent
+            'SELECT n.id, n.message_id, n.thread_id, n.title, n.body, n.delivered_at, n.channels, n.silent, n.summary
              FROM mail_notification n
              WHERE n.user_id = :user AND n.change_seq > :since AND n.change_seq <= :until AND n.delivered_at > :recent
              ORDER BY n.change_seq',
@@ -619,6 +619,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'deliveredAt' => self::date($r['delivered_at']),
             'channels' => self::json($r['channels'], '[]'),
             'silent' => (bool) $r['silent'],
+            'summary' => (bool) $r['summary'],
         ], $rows);
     }
 
