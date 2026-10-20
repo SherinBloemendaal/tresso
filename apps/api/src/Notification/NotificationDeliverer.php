@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace App\Notification;
 
 use App\Calendar\Assistant\MeetingBriefWriter;
-use App\Calendar\OccurrenceExpander;
 use App\Entity\ScheduledNotification;
 use App\Enum\NotificationChannel;
 use App\Enum\NotificationKind;
@@ -42,7 +41,7 @@ final readonly class NotificationDeliverer
         private EntityManagerInterface $entityManager,
         private NotificationPreferencesRepository $preferences,
         private NotificationPlanner $planner,
-        private OccurrenceExpander $occurrences,
+        private CalendarPresence $presence,
         private MeetingBriefWriter $briefs,
         private NotificationDispatcher $dispatcher,
     ) {
@@ -161,7 +160,7 @@ final readonly class NotificationDeliverer
         // silently when the event starts before the block ends.
         $comesThrough = $important || NotificationKind::LeaveNow === $notification->getKind() || (NotificationKind::Reminder === $notification->getKind() && [] !== $event->getAttendees());
         if (!$comesThrough && $preferences->isHoldDuringFocus()) {
-            $focusEnd = $this->focusBlockEnd($notification, $now);
+            $focusEnd = $this->presence->focusBlockEnd($notification->getUser(), $now, $event->getId()->toRfc4122());
             if (null !== $focusEnd) {
                 if ($notification->getOccurrenceStartsAt() > $focusEnd || NotificationKind::FollowUp === $notification->getKind()) {
                     return $this->postpone($notification, $focusEnd);
@@ -169,7 +168,7 @@ final readonly class NotificationDeliverer
                 $silent = true;
             }
         }
-        if (!$silent && !$important && $preferences->isFocusDuringBusy() && NotificationKind::LeaveNow !== $notification->getKind() && null !== $event->getSelfPartstat() && $this->inBusyEvent($notification, $now)) {
+        if (!$silent && !$important && $preferences->isFocusDuringBusy() && NotificationKind::LeaveNow !== $notification->getKind() && null !== $event->getSelfPartstat() && $this->presence->inBusyEvent($notification->getUser(), $now, $event->getId()->toRfc4122())) {
             $silent = true;
         }
 
@@ -224,42 +223,6 @@ final readonly class NotificationDeliverer
             new NotificationChannelChoice(NotificationChannel::Phone),
             $now,
         );
-    }
-
-    /** The end of the focus block the user is in now (busy, only them, titled "Focus ..."), or null. */
-    private function focusBlockEnd(ScheduledNotification $notification, \DateTimeImmutable $now): ?\DateTimeImmutable
-    {
-        $eventId = $notification->getEvent()?->getId()->toRfc4122();
-        foreach ($this->occurrences->expand($notification->getUser(), [], $now, $now->modify('+1 minute'), new \DateTimeZone('UTC')) as $occurrence) {
-            if ($occurrence->eventId === $eventId || $occurrence->allDay || 'busy' !== $occurrence->transparency || 'cancelled' === $occurrence->status || 0 !== $occurrence->attendeeCount) {
-                continue;
-            }
-            if (!str_starts_with(mb_strtolower(trim($occurrence->summary)), 'focus') || !isset($occurrence->end['dateTime'])) {
-                continue;
-            }
-
-            return new \DateTimeImmutable($occurrence->end['dateTime']);
-        }
-
-        return null;
-    }
-
-    /** Whether the user is in another busy event they take part in right now. */
-    private function inBusyEvent(ScheduledNotification $notification, \DateTimeImmutable $now): bool
-    {
-        $eventId = $notification->getEvent()?->getId()->toRfc4122();
-        foreach ($this->occurrences->expand($notification->getUser(), [], $now, $now->modify('+1 minute'), new \DateTimeZone('UTC')) as $occurrence) {
-            if ($occurrence->eventId === $eventId || $occurrence->allDay || 'busy' !== $occurrence->transparency || 'cancelled' === $occurrence->status) {
-                continue;
-            }
-            if (\in_array($occurrence->selfResponse, ['declined', 'needs-action'], true)) {
-                continue;
-            }
-
-            return true;
-        }
-
-        return false;
     }
 
     private function message(ScheduledNotification $notification, \DateTimeImmutable $now): PushMessage

@@ -10,6 +10,7 @@ use App\Entity\Thread;
 use App\Entity\User;
 use App\Enum\FolderRole;
 use App\Enum\Verdict;
+use App\Notification\MailNotifier;
 use App\Repository\CategoryRepository;
 use App\Repository\MailAccountRepository;
 use App\Repository\SenderRuleRepository;
@@ -19,11 +20,11 @@ use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * Runs the {@see Classifier} over a user's mail and stores the outcome: on each incoming message (clients notify on
- * its verdict) and on its conversation, which takes the smart inbox and verdict of its newest incoming message. The
- * user's own messages are never classified. Conversations the user put in a smart inbox themselves keep it. New mail
- * in a smart inbox that asks for todos gets one (see {@see EmailTodos::makeAutomatically()}); classifying again later
- * makes none.
+ * Runs the {@see Classifier} over a user's mail and stores the outcome: on each incoming message and on its
+ * conversation, which takes the smart inbox and verdict of its newest incoming message. The user's own messages are
+ * never classified. Conversations the user put in a smart inbox themselves keep it. New mail in a smart inbox that
+ * asks for todos gets one (see {@see EmailTodos::makeAutomatically()}); classifying again later makes none. A message
+ * that comes to need the user (`do` or `delegate`) is handed to the {@see MailNotifier} in the same transaction.
  *
  * Work goes in batches, each in its own transaction, so change numbers commit in order and a crash loses at most one
  * batch, which the next run picks up again. Runs for one user take turns on an advisory lock, so two runs never
@@ -51,6 +52,7 @@ final readonly class MailClassification
         private MailAccountRepository $accounts,
         private UserLocks $locks,
         private EmailTodos $emailTodos,
+        private MailNotifier $mailNotifier,
     ) {
     }
 
@@ -120,13 +122,16 @@ final readonly class MailClassification
 
         /** @var array<string, Classification> $byMessage */
         $byMessage = [];
+        $classified = [];
         foreach ($this->mailToClassify($messages) as $id => $mail) {
             $classification = $this->classifier->classify($mail, $context);
+            $classified[] = [$messages[$id], $messages[$id]->getVerdict()];
             $messages[$id]->classify($classification->smartInbox, $classification->verdict, $now);
             $byMessage[$id] = $classification;
         }
         $this->entityManager->flush();
         $this->emailTodos->makeAutomatically($user, array_values(array_intersect_key($messages, $byMessage)), $now);
+        $this->mailNotifier->consider($user, $classified, $now);
 
         // A conversation follows its newest incoming message, if that is one classified just now.
         $threads = [];
@@ -191,13 +196,16 @@ final readonly class MailClassification
         $now = new \DateTimeImmutable();
         $newest = $this->newestIncomingIds($threadIds, $context);
         $messages = $this->incomingMessages(array_values($newest), $context);
+        $classified = [];
         foreach ($this->mailToClassify($messages) as $id => $mail) {
             $classification = $this->classifier->classify($mail, $context);
             $message = $messages[$id];
+            $classified[] = [$message, $message->getVerdict()];
             $message->classify($classification->smartInbox, $classification->verdict, $now);
             $message->getThread()->classify($classification->smartInbox, $classification->verdict, $classification->reason, $now);
         }
         $this->entityManager->flush();
+        $this->mailNotifier->consider($user, $classified, $now);
 
         return $threadIds;
     }

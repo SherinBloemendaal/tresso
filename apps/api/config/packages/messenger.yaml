@@ -59,6 +59,7 @@ framework:
             App\Notification\PlanCalendarObject: push
             App\Notification\PlanUserNotifications: push
             App\Notification\FireNotification: push
+            App\Notification\SendMailNotification: push
 
 when@test:
     framework:

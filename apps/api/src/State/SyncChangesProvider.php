@@ -66,6 +66,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 notifications: [],
                 eventNotes: [],
                 todos: [],
+                mailNotifications: [],
                 deleted: [],
             );
         }
@@ -88,6 +89,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             notifications: $this->notifications($range),
             eventNotes: $this->eventNotes($range),
             todos: $this->todos($range),
+            mailNotifications: $this->mailNotifications($range),
             deleted: $this->deleted($range),
         );
     }
@@ -129,6 +131,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 SELECT o.change_seq, COUNT(*) FROM event_note o WHERE o.user_id = :user AND o.change_seq > :since GROUP BY o.change_seq
                 UNION ALL
                 SELECT o.change_seq, COUNT(*) FROM todo o WHERE o.owner_id = :user AND o.change_seq > :since GROUP BY o.change_seq
+                UNION ALL
+                SELECT n.change_seq, COUNT(*) FROM mail_notification n WHERE n.user_id = :user AND n.change_seq > :since GROUP BY n.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -518,6 +522,35 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'round' => self::int($r['round']),
             // Not delivered in this round: snoozed until a time, or waiting for the occurrence's new time.
             'snoozedUntil' => null === $r['delivered_at'] && (bool) $r['snoozed'] ? self::date($r['fire_at']) : null,
+        ], $rows);
+    }
+
+    /**
+     * Delivered mail notifications of the last week; waiting and dropped ones never reach clients.
+     *
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function mailNotifications(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT n.id, n.message_id, n.thread_id, n.title, n.body, n.delivered_at, n.channels, n.silent
+             FROM mail_notification n
+             WHERE n.user_id = :user AND n.change_seq > :since AND n.change_seq <= :until AND n.delivered_at > :recent
+             ORDER BY n.change_seq',
+            [...$range, 'recent' => new \DateTimeImmutable('-7 days')->format('Y-m-d H:i:s')],
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'messageId' => $r['message_id'],
+            'threadId' => $r['thread_id'],
+            'title' => $r['title'],
+            'body' => $r['body'],
+            'deliveredAt' => self::date($r['delivered_at']),
+            'channels' => self::json($r['channels'], '[]'),
+            'silent' => (bool) $r['silent'],
         ], $rows);
     }
 
