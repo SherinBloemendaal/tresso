@@ -271,6 +271,33 @@ final class ProviderCalendarTest extends DatabaseTestCase
         self::assertResponseIsSuccessful('An event without guests moves.');
     }
 
+    public function testAMoveTheProviderRefusedForAChangeLeavesTheEventWhereTheProviderHasIt(): void
+    {
+        $this->client->jsonRequest('POST', $this->base().'/calendars', ['workerId' => 'w1', 'source' => 'google', 'providerSchedules' => true, 'calendars' => [
+            ['remoteId' => self::PRIMARY, 'name' => 'Kim', 'isDefault' => true],
+            ['remoteId' => 'team@group.calendar.google.com', 'name' => 'Team'],
+        ]], $this->worker);
+        $calendars = $this->decodedResponse()['calendars'] ?? null;
+        self::assertIsArray($calendars);
+        [$primary, $team] = array_map(static fn (mixed $calendar): string => \is_array($calendar) ? self::string($calendar['id']) : '', $calendars);
+        $this->storeObject($primary, 'lunch', '"1"', self::object('lunch@google.com', 'Lunch'));
+        $eventId = self::string($this->occurrences($this->user, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($team, ['summary' => 'Lunch']), $this->user);
+        self::assertResponseIsSuccessful();
+        $operations = $this->claim();
+        self::assertSame(['delete', 'put'], array_column($operations, 'kind'));
+
+        // The worker found the event changed at Google: the create is held back, the delete reports Google's version.
+        $this->report($operations[1]['id'], ['outcome' => 'conflict']);
+        $this->report($operations[0]['id'], ['outcome' => 'conflict', 'current' => ['remoteId' => 'lunch', 'etag' => '"2"', 'ical' => self::object('lunch@google.com', 'Lunch, moved by Lisa')]]);
+
+        $occurrences = $this->occurrences($this->user, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00');
+        self::assertCount(1, $occurrences, 'One event, not a copy in each calendar.');
+        self::assertSame('Lunch, moved by Lisa', $occurrences[0]['summary']);
+        self::assertSame($primary, $occurrences[0]['calendarId']);
+        self::assertSame([], $this->claim());
+    }
+
     public function testAPartlyWrittenChangeWithoutRetriesLeftTakesTheProvidersVersion(): void
     {
         $primary = $this->reportCalendars()[0]['id'];
