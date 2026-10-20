@@ -53,7 +53,7 @@ function host(overrides: Partial<TriageHost> = {}) {
       triageWaiting: async () => ['t1'],
       newestInInbox: async () => [summary],
       summaries: async () => [summary],
-      thread: async () => ({ thread, messages: [message] }),
+      thread: async (id) => (id === 't1' ? { thread, messages: [message] } : { thread: { ...thread, id }, messages: [{ ...message, id: `m-${id}`, threadId: id }] }),
       smartInboxes: async () => [{ id: 'info', builtin: 'informational', name: 'Informational', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'know', autoCreateTodo: false, position: 0 }],
       folders: async () => [],
       classifyThread: async (threadId, smartInboxId, verdict, remember) => {
@@ -74,8 +74,8 @@ function host(overrides: Partial<TriageHost> = {}) {
       mailAccounts: async () => [],
     },
     handOvers: {
-      handOverAndWait: async (threadId) => {
-        calls.push(`hand over ${threadId}`)
+      handOverAndWait: async (threadId, messageId) => {
+        calls.push(`hand over ${threadId} ${messageId}`)
         return handed
       },
       takeBack: async (taken) => {
@@ -135,7 +135,23 @@ describe("the phone's triage", () => {
     session.undo()
     await session.idle()
 
-    expect(calls).toEqual(['hand over t1', 'place t1 delegate remember=false', 'take back h1', 'release t1 p1'])
+    expect(calls).toEqual(['hand over t1 m1', 'place t1 delegate remember=false', 'take back h1', 'release t1 p1'])
+  })
+
+  it('says when undo could only withdraw the hand-over because the forward had left', async () => {
+    const base = host()
+    const value = { ...base.value, handOvers: { ...base.value.handOvers, takeBack: async () => 'withdrawn' as const } }
+    const withdrawnHanded = { ...handed, handOver: { id: 'h1', delegate: { address: 'lisa@company.example', name: 'Lisa' } } } as unknown as HandedOver
+    value.handOvers.handOverAndWait = async () => withdrawnHanded
+    const session = createTriageSession(() => value, () => {})
+    await session.begin()
+
+    session.decide('delegate')
+    await session.idle()
+    session.undo()
+    await session.idle()
+
+    expect(base.notices.map((notice) => notice.text)).toContain('Lisa has the forward already; the hand-over is withdrawn, so nothing waits on them any more.')
   })
 
   it('keeps going while the hand-over screen is open', async () => {
@@ -156,8 +172,9 @@ describe("the phone's triage", () => {
     await session.begin()
 
     session.decide('delegate')
+    await vi.waitFor(() => expect(session.conversation?.thread.id).toBe('t2'))
     session.decide('know')
-    await vi.waitFor(() => expect(base.calls).toContain('archive m1'))
+    await vi.waitFor(() => expect(base.calls).toContain('archive m-t2'))
     expect(base.calls.some((call) => call.startsWith('place'))).toBe(false)
     close(null)
   })

@@ -1,4 +1,4 @@
-import { TriageSession, todoOnDo, type AppliedAction, type HandedOver, type MadeTodo, type MakeTodoRequest, type SyncedMailAccount, type ConversationSummary, type SyncedFolder, type SyncedMessage, type SyncedSmartInbox, type SyncedThread, type ThreadClassification, type TriageConversation, type TriageHooks, type TriageNotice, type TriageUndo, type UndoMove, type Verdict } from '@tresso/core'
+import { TriageSession, todoOnDo, withdrawnNotice, type AppliedAction, type HandedOver, type MadeTodo, type MakeTodoRequest, type SyncedMailAccount, type ConversationSummary, type SyncedFolder, type SyncedMessage, type SyncedSmartInbox, type SyncedThread, type ThreadClassification, type TriageConversation, type TriageHooks, type TriageNotice, type TriageUndo, type UndoMove, type Verdict } from '@tresso/core'
 
 /** What the phone's triage reads and changes; read again on every call, so it can follow re-renders. */
 export interface TriageHost {
@@ -16,8 +16,8 @@ export interface TriageHost {
     mailAccounts(): Promise<SyncedMailAccount[]>
   }
   handOvers: {
-    handOverAndWait(threadId: string): Promise<HandedOver | null>
-    takeBack(handed: HandedOver): Promise<unknown>
+    handOverAndWait(threadId: string, messageId: string): Promise<HandedOver | null>
+    takeBack(handed: HandedOver): Promise<'undone' | 'withdrawn'>
   }
   notify(notice: TriageNotice): void
   run(messageIds: string[], action: 'archive' | 'markRead' | 'markUnread'): Promise<AppliedAction | null>
@@ -37,13 +37,22 @@ function errorText(error: unknown): string {
 export function createTriageSession(host: () => TriageHost, changed: () => void): TriageSession {
   /** Hand over through the hand-over screen; undo takes the forward back while it has not left, the hand-over always. */
   async function handOver(conversation: TriageConversation): Promise<TriageUndo | null> {
-    const handed = await host().handOvers.handOverAndWait(conversation.thread.id)
+    const accounts = await host().mail.mailAccounts()
+    const own = new Set(accounts.map((account) => account.emailAddress.toLowerCase()))
+    const incoming = conversation.messages.filter((message) => !own.has(message.from.address.toLowerCase()))
+    const message = incoming[incoming.length - 1] ?? conversation.messages[conversation.messages.length - 1]
+    if (message === undefined) {
+      return null
+    }
+    const handed = await host().handOvers.handOverAndWait(conversation.thread.id, message.id)
     if (handed === null) {
       return null
     }
     return {
       undo: async () => {
-        await host().handOvers.takeBack(handed)
+        if ((await host().handOvers.takeBack(handed)) === 'withdrawn') {
+          host().notify({ text: withdrawnNotice(handed), tone: 'info' })
+        }
       },
     }
   }

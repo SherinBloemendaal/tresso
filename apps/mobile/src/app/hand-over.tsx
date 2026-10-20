@@ -16,7 +16,8 @@ const CHOICE_TEXT: Record<DueChoice, string> = { today: 'Today', tomorrow: 'Tomo
 
 /** Hands a conversation over: forwarded to one person with a note, and waited on until the due date. */
 export default function HandOverScreen() {
-  const { threadId } = useLocalSearchParams<{ threadId: string }>()
+  /** `messageId`: the message to hand over (triage hands over the one the user saw); else the conversation's newest. */
+  const { threadId, messageId } = useLocalSearchParams<{ threadId: string; messageId?: string }>()
   const mail = useMail()
   const handOvers = useHandOvers()
   const router = useRouter()
@@ -44,14 +45,15 @@ export default function HandOverScreen() {
       if (!current || found === null) {
         return
       }
+      const asked = messageId === undefined ? undefined : found.messages.find((candidate) => candidate.id === messageId)
       const own = new Set(accounts.map((account) => account.emailAddress.toLowerCase()))
       const incoming = found.messages.filter((candidate) => !own.has(candidate.from.address.toLowerCase()))
-      setMessage(incoming[incoming.length - 1] ?? found.messages[found.messages.length - 1] ?? null)
+      setMessage(asked ?? incoming[incoming.length - 1] ?? found.messages[found.messages.length - 1] ?? null)
     })
     return () => {
       current = false
     }
-  }, [thread, mailAccounts, threadId])
+  }, [thread, mailAccounts, threadId, messageId])
 
   const person = delegate[0]
   const submitText = person === undefined ? 'Hand over' : `Hand over to ${firstName(person)}`

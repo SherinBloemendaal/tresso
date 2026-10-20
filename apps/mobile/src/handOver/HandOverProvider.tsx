@@ -14,10 +14,10 @@ interface HandOvers {
    */
   handOver(message: SyncedMessage, input: HandOverInput): Promise<void>
   /**
-   * Opens the hand-over screen for a conversation and settles once it closes: with the hand-over, or null when the
-   * user closed it without handing over (triage).
+   * Opens the hand-over screen for a message of a conversation (one the user saw) and settles once it closes: with the
+   * hand-over, or null when the user closed it without handing over (triage).
    */
-  handOverAndWait(threadId: string): Promise<HandedOver | null>
+  handOverAndWait(threadId: string, messageId: string): Promise<HandedOver | null>
   /** The hand-over screen of a conversation closed. */
   closed(threadId: string): void
   /** Takes a hand-over back as far as it still can (see HandOverFlow.takeBack). */
@@ -61,6 +61,7 @@ function createFlow(latest: Latest, composer: Composer): HandOverFlow {
       nudge: (id, request) => latest.mail.handOverApi.nudge(id, request),
     },
     cancel: (outgoingId) => latest.mail.cancelOutgoing(outgoingId),
+    outgoing: (outgoingId) => latest.mail.outgoing(outgoingId),
     accounts: () => latest.accounts,
     signatures: () => latest.signatures,
     sync: () => latest.mail.syncNow(),
@@ -122,9 +123,9 @@ export function HandOverProvider({ children }: { children: ReactNode }) {
           Math.max(1000, handed.until - Date.now()),
         )
       },
-      handOverAndWait(threadId) {
+      handOverAndWait(threadId, messageId) {
         const waiting = waiters.wait(threadId)
-        router.push({ pathname: '/hand-over', params: { threadId } })
+        router.push({ pathname: '/hand-over', params: { threadId, messageId } })
         return waiting
       },
       closed(threadId) {
