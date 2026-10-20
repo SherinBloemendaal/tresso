@@ -71,6 +71,10 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         <AppIcon name="draft" />
         <span class="label">Drafts</span>
       </RouterLink>
+      <RouterLink :to="{ name: 'cleanup' }" class="item">
+        <AppIcon name="archive" />
+        <span class="label">Clean up</span>
+      </RouterLink>
       <RouterLink v-if="outboxCount > 0" :to="{ name: 'outbox' }" class="item">
         <AppIcon name="outbox" />
         <span class="label">Outbox</span>

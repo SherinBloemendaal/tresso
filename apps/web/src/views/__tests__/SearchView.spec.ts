@@ -96,6 +96,7 @@ describe('SearchView', () => {
         { path: '/outbox', name: 'outbox', component: { template: '<div />' } },
         { path: '/drafts', name: 'drafts', component: { template: '<div />' } },
         { path: '/todos', name: 'todos', component: { template: '<div />' } },
+        { path: '/cleanup', name: 'cleanup', component: { template: '<div />' } },
         { path: '/accounts/:accountId', name: 'account', component: { template: '<div />' } },
         { path: '/settings/accounts', name: 'settings-accounts', component: { template: '<div />' } },
         { path: '/settings/accounts/new', name: 'settings-accounts-new', component: { template: '<div />' } },

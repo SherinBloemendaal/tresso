@@ -6,9 +6,11 @@ import { useAuthStore } from '@/stores/auth'
 import { useBatchesStore } from '@/stores/batches'
 import { useMailStore } from '@/stores/mail'
 import { useSelectionStore } from '@/stores/selection'
+import CleanupPanel from '@/components/CleanupPanel.vue'
 import ConversationList from '@/components/ConversationList.vue'
 import MailboxSidebar from '@/components/MailboxSidebar.vue'
 import ReadingPane from '@/components/ReadingPane.vue'
+import SmartInboxManage from '@/components/SmartInboxManage.vue'
 import UnsubscribeAction from '@/components/UnsubscribeAction.vue'
 
 const auth = useAuthStore()
@@ -18,6 +20,8 @@ const batches = useBatchesStore()
 
 const accountId = computed(() => (typeof route.params.accountId === 'string' ? route.params.accountId : null))
 const smartInboxId = computed(() => (typeof route.params.smartInboxId === 'string' ? route.params.smartInboxId : null))
+/** A screen that takes the list's and the reading pane's place: a smart inbox's senders, or the cleanup suggestions. */
+const wide = computed(() => (route.name === 'smart-inbox-manage' || route.name === 'cleanup' ? route.name : null))
 const threadId = computed(() => (typeof route.params.threadId === 'string' ? route.params.threadId : null))
 const inBatches = computed(() => route.name === 'batches' || route.name === 'batches-thread')
 const title = computed(() => {
@@ -130,34 +134,39 @@ function signOut(): void {
       />
     </details>
 
-    <ConversationList
-      class="conversations"
-      :title="title"
-      :conversations="mail.conversations"
-      :selected-thread-id="threadId"
-      :has-more="mail.hasMore"
-      :loading="!mail.ready || mail.syncState === 'syncing'"
-      :has-accounts="mail.accounts.length > 0"
-      :empty-text="emptyText"
-      :link-to="linkTo"
-      :group-by="inBatches ? 'batch' : 'day'"
-      @show-more="mail.showMore()"
-    >
-      <template v-if="inBatches" #aside>
-        <p class="next-batch">
-          <span v-if="batches.nextBatchLabel">Next batch at {{ batches.nextBatchLabel }}</span>
-          <RouterLink :to="{ name: 'settings-batches' }">Change batch times</RouterLink>
-        </p>
-      </template>
-      <template v-if="inBatches" #extra="{ conversation }">
-        <UnsubscribeAction :offer="offers.get(conversation.threadId) ?? null" />
-      </template>
-    </ConversationList>
+    <SmartInboxManage v-if="wide === 'smart-inbox-manage' && smartInboxId" class="wide" :smart-inbox-id="smartInboxId" />
+    <CleanupPanel v-else-if="wide === 'cleanup'" class="wide" />
+    <template v-else>
+      <ConversationList
+        class="conversations"
+        :title="title"
+        :conversations="mail.conversations"
+        :selected-thread-id="threadId"
+        :has-more="mail.hasMore"
+        :loading="!mail.ready || mail.syncState === 'syncing'"
+        :has-accounts="mail.accounts.length > 0"
+        :empty-text="emptyText"
+        :link-to="linkTo"
+        :group-by="inBatches ? 'batch' : 'day'"
+        :manage-to="smartInboxId === null ? undefined : { name: 'smart-inbox-manage', params: { smartInboxId } }"
+        @show-more="mail.showMore()"
+      >
+        <template v-if="inBatches" #aside>
+          <p class="next-batch">
+            <span v-if="batches.nextBatchLabel">Next batch at {{ batches.nextBatchLabel }}</span>
+            <RouterLink :to="{ name: 'settings-batches' }">Change batch times</RouterLink>
+          </p>
+        </template>
+        <template v-if="inBatches" #extra="{ conversation }">
+          <UnsubscribeAction :offer="offers.get(conversation.threadId) ?? null" />
+        </template>
+      </ConversationList>
 
-    <ReadingPane v-if="threadId" :key="threadId" class="reading-pane" :thread-id="threadId" :back-to="backTo" />
-    <div v-else class="reading-pane placeholder">
-      <p>Select a conversation to read it.</p>
-    </div>
+      <ReadingPane v-if="threadId" :key="threadId" class="reading-pane" :thread-id="threadId" :back-to="backTo" />
+      <div v-else class="reading-pane placeholder">
+        <p>Select a conversation to read it.</p>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -176,6 +185,7 @@ function signOut(): void {
 }
 .conversations,
 .reading-pane,
+.wide,
 .mailboxes > :deep(nav) {
   min-height: 0;
 }
@@ -190,6 +200,9 @@ function signOut(): void {
 .next-batch a {
   font-weight: 600;
   text-decoration: none;
+}
+.wide {
+  grid-column: 2 / -1;
 }
 .placeholder {
   display: flex;
@@ -213,6 +226,9 @@ function signOut(): void {
   .shell {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
+  }
+  .wide {
+    grid-column: 1 / -1;
   }
   .mailboxes {
     display: block;

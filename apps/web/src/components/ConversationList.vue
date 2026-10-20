@@ -24,6 +24,8 @@ const props = defineProps<{
   emptyText?: string
   /** How the rows are grouped: by day (the default), or by the batch that delivered them. */
   groupBy?: 'day' | 'batch'
+  /** Where the list's senders are managed in bulk (a smart inbox's). */
+  manageTo?: RouteLocationRaw
 }>()
 defineSlots<{
   /** Under the title, e.g. when the next batch comes. */
@@ -107,7 +109,10 @@ const days = computed(() => {
     <header class="header">
       <div class="title">
         <h1>{{ title }}</h1>
-        <MenuButton label="Select" menu-label="Select conversations" :items="ages" :disabled="conversations.length === 0" @choose="selectOlderThan" />
+        <span class="title-actions">
+          <RouterLink v-if="manageTo" :to="manageTo" class="manage">Manage senders</RouterLink>
+          <MenuButton label="Select" menu-label="Select conversations" :items="ages" :disabled="conversations.length === 0" @choose="selectOlderThan" />
+        </span>
       </div>
       <slot name="aside" />
       <SearchField />
@@ -205,6 +210,17 @@ h1 {
   font-size: 13px;
   font-weight: 600;
   color: var(--ink-3);
+}
+.title-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.manage {
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
 }
 .title {
   display: flex;
