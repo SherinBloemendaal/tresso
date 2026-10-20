@@ -46,6 +46,9 @@ export const eventSchema = z
     repeatEnd: z.enum(['never', 'until', 'count']),
     repeatUntil: z.string(),
     repeatCount: z.number().int(),
+    /** The rule as stored, and the repeat fields it showed as: saved unchanged while those fields are. */
+    originalRule: z.string(),
+    originalRepeat: z.string(),
     location: z.string().max(EVENT_LOCATION_MAX, `Use at most ${EVENT_LOCATION_MAX} characters.`),
     conferenceUrl: z.string().trim().max(2048, 'Use at most 2048 characters.'),
     attendees: z.array(attendee).max(EVENT_ATTENDEES_MAX, `Invite at most ${EVENT_ATTENDEES_MAX} people.`),
@@ -125,6 +128,13 @@ export function valuesFromInput(input: EventInput, fallbackZone: string): EventV
   const shownEnd = allDay ? lastDay(end.date) : end.date
   const repeatEnd = endOf(input.recurrence)
   const repeat = presetOf(input.recurrence, startWall)
+  const repeatFields = {
+    repeat,
+    customRule: repeat === 'custom' ? (input.recurrence ?? '') : '',
+    repeatEnd: repeatEnd.kind,
+    repeatUntil: repeatEnd.kind === 'until' ? repeatEnd.date : '',
+    repeatCount: repeatEnd.kind === 'count' ? repeatEnd.count : 10,
+  }
   return {
     summary: input.summary,
     calendarId: input.calendarId,
@@ -134,11 +144,9 @@ export function valuesFromInput(input: EventInput, fallbackZone: string): EventV
     endDate: shownEnd,
     endTime: allDay ? '10:00' : end.time,
     timeZone: allDay ? fallbackZone : start.zone,
-    repeat,
-    customRule: repeat === 'custom' ? (input.recurrence ?? '') : '',
-    repeatEnd: repeatEnd.kind,
-    repeatUntil: repeatEnd.kind === 'until' ? repeatEnd.date : '',
-    repeatCount: repeatEnd.kind === 'count' ? repeatEnd.count : 10,
+    ...repeatFields,
+    originalRule: input.recurrence ?? '',
+    originalRepeat: repeatKey(repeatFields),
     location: input.location,
     conferenceUrl: input.conferenceUrl ?? '',
     attendees: input.attendees.map((person) => ({ ...person })),
@@ -166,8 +174,22 @@ function dayAfter(date: string): string {
   return wall === null ? date : new Date(wall + 86_400_000).toISOString().slice(0, 10)
 }
 
-/** The rule the form's repeat choice stands for, with its end; null when it does not repeat. */
+type RepeatFields = Pick<EventValues, 'repeat' | 'customRule' | 'repeatEnd' | 'repeatUntil' | 'repeatCount'>
+
+function repeatKey(fields: RepeatFields): string {
+  return JSON.stringify([fields.repeat, fields.customRule, fields.repeatEnd, fields.repeatUntil, fields.repeatCount])
+}
+
+/**
+ * The rule the form's repeat choice stands for, with its end; null when it does not repeat. While the user left the
+ * repeat fields as they were, it is the stored rule exactly as stored: moving one occurrence to another day keeps
+ * BYDAY=MO, and a rule from another app (an Outlook UNTIL, an Apple WKST, a bare FREQ=WEEKLY) is not rewritten, so
+ * saving "All events" never looks like a new rule to the server, which would drop every exception.
+ */
 export function ruleOf(values: EventValues): string | null {
+  if (values.originalRepeat !== '' && repeatKey(values) === values.originalRepeat) {
+    return values.originalRule === '' ? null : values.originalRule
+  }
   if (values.repeat === 'none') {
     return null
   }

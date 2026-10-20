@@ -66,8 +66,29 @@ watch(
 )
 const root = ref<HTMLElement | null>(null)
 
+/** The events and "+N more" of the cell an element is in, in order. */
+function cellItems(element: Element): HTMLElement[] {
+  const cell = element.closest<HTMLElement>('[data-day]')
+  return cell === null ? [] : [...cell.querySelectorAll<HTMLElement>('[data-cell-item]')]
+}
+
+/**
+ * The grid pattern: the arrow keys move between days; Enter moves into a day's events (or opens a day without any),
+ * where the up and down arrows move between them and "+N more", and Escape goes back to the day.
+ */
 function onKeydown(event: KeyboardEvent): void {
-  if ((event.target as HTMLElement).closest('[data-occurrence]') !== null && event.key !== 'Escape') {
+  const target = event.target as HTMLElement
+  if (target.closest('[data-cell-item]') !== null) {
+    const items = cellItems(target)
+    const at = items.indexOf(target)
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      items[Math.min(items.length - 1, Math.max(0, at + (event.key === 'ArrowDown' ? 1 : -1)))]?.focus()
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      target.closest<HTMLElement>('[data-day]')?.focus()
+    }
     return
   }
   const moves: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }
@@ -80,7 +101,12 @@ function onKeydown(event: KeyboardEvent): void {
     next = addDays(focused.value, 6 - ((weekdayOf(focused.value) + 6) % 7))
   } else if (event.key === 'Enter') {
     event.preventDefault()
-    emit('showDay', focused.value)
+    const first = cellItems(target)[0]
+    if (first !== undefined) {
+      first.focus()
+    } else {
+      emit('showDay', focused.value)
+    }
     return
   }
   if (next === null || !props.days.some((day) => day.wall === next)) {
@@ -97,7 +123,7 @@ function itemTime(occurrence: Occurrence): string {
 </script>
 
 <template>
-  <div ref="root" class="month" role="grid" aria-readonly="true" :aria-label="monthLabel" @keydown="onKeydown">
+  <div ref="root" class="month" role="grid" aria-readonly="true" :aria-label="monthLabel" aria-description="Arrow keys move between days. Enter moves to the events of a day, Escape back to the day." @keydown="onKeydown">
     <div class="row head" role="row">
       <span class="week-number" role="columnheader"><span class="visually-hidden">Week</span></span>
       <span v-for="name in headings" :key="name" role="columnheader" class="heading">{{ name }}</span>
@@ -126,6 +152,7 @@ function itemTime(occurrence: Occurrence): string {
               :class="{ ...blockState(item.occurrence, now), filled: inAllDayRow(item.occurrence), selected: item.occurrence.key === selectedKey }"
               :style="calendarColor(calendars(item.occurrence.event.calendarId))"
               data-occurrence=""
+              data-cell-item=""
               tabindex="-1"
               :aria-label="occurrenceLabel(item.occurrence, zone, calendars(item.occurrence.event.calendarId), now)"
               @click="emit('open', item.occurrence)"
@@ -136,7 +163,7 @@ function itemTime(occurrence: Occurrence): string {
             </button>
           </li>
           <li v-if="cell.more > 0">
-            <button type="button" class="more" tabindex="-1" @click="emit('showDay', cell.day.wall)">+{{ cell.more }} more</button>
+            <button type="button" class="more" tabindex="-1" data-cell-item="" @click="emit('showDay', cell.day.wall)">+{{ cell.more }} more</button>
           </li>
         </ul>
       </div>

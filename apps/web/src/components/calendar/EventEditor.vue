@@ -8,6 +8,7 @@ import {
   editScopes,
   formatDate,
   formatDateTime,
+  inputForScope,
   inputFromOccurrence,
   knownTimeZones,
   parseWall,
@@ -247,8 +248,9 @@ const save = handleSubmit(async (current) => {
   saving.value = true
   error.value = null
   try {
-    const input = inputFromValues(current, { status: before.status, url: before.url })
+    const edited = inputFromValues(current, { status: before.status, url: before.url })
     const target = occurrence.value === null ? null : { occurrence: occurrence.value, scope: occurrence.value.recurring ? scope.value : 'all' }
+    const input = target === null ? edited : inputForScope(target.occurrence, before, edited, target.scope)
     await calendar.save(input, target, notify.value)
     emit('saved')
   } catch (e) {

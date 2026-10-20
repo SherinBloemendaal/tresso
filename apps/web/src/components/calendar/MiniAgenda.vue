@@ -21,7 +21,7 @@ const error = ref<string | null>(null)
 async function load(): Promise<void> {
   upcoming.value = await calendar.upcoming(14)
 }
-watch([() => mail.revision, () => mail.ready, () => mail.calendars], () => void load(), { immediate: true })
+watch([() => mail.calendarRevision, () => mail.ready, () => mail.calendars], () => void load(), { immediate: true })
 
 let ticking: ReturnType<typeof setInterval> | null = null
 onMounted(() => {

@@ -72,6 +72,31 @@ describe('event form', () => {
     expect(ruleOf(custom)).toBe('FREQ=WEEKLY;BYDAY=MO,TH;COUNT=8')
   })
 
+  it('keeps a rule from another app exactly as stored while the repeat fields stay', () => {
+    for (const recurrence of [
+      // Outlook: UNTIL at the start time in UTC, INTERVAL and WKST written out.
+      'FREQ=WEEKLY;UNTIL=20261231T080000Z;INTERVAL=1;BYDAY=TH;WKST=SU',
+      // Apple: UNTIL one second before midnight.
+      'FREQ=WEEKLY;INTERVAL=1;UNTIL=20261231T065959Z;BYDAY=TH',
+      // Thunderbird: a bare weekly rule.
+      'FREQ=WEEKLY',
+      'FREQ=MONTHLY;BYDAY=4TH;COUNT=6',
+    ]) {
+      const shown = valuesFromInput(input({ recurrence }), AMS)
+      expect(inputFromValues(shown).recurrence).toBe(recurrence)
+      // Moving the occurrence to another day keeps the rule too (BYDAY stays on Thursday).
+      expect(inputFromValues({ ...shown, startDate: '2026-10-23', endDate: '2026-10-23' }).recurrence).toBe(recurrence)
+    }
+  })
+
+  it('writes a new rule once the user changes a repeat field', () => {
+    const shown = valuesFromInput(input({ recurrence: 'FREQ=WEEKLY;UNTIL=20261231T080000Z;INTERVAL=1;BYDAY=TH;WKST=SU' }), AMS)
+    expect(inputFromValues({ ...shown, repeatEnd: 'count', repeatCount: 3 }).recurrence).toBe('FREQ=WEEKLY;INTERVAL=1;BYDAY=TH;WKST=SU;COUNT=3')
+    expect(inputFromValues({ ...shown, repeat: 'none' }).recurrence).toBeNull()
+    const once = valuesFromInput(input(), AMS)
+    expect(inputFromValues({ ...once, repeat: 'weekly' }).recurrence).toBe('FREQ=WEEKLY;BYDAY=TH')
+  })
+
   it('refuses an end before the start, a bad time, a guest twice and an unsafe meeting link', () => {
     const result = eventSchema.safeParse(
       values({

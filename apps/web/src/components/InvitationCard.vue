@@ -68,6 +68,7 @@ const shown = computed<Occurrence | null>(() => {
     startDate: 'date' in value.start ? value.start.date : null,
     endDate: 'date' in value.end ? value.end.date : null,
     timeZone: 'dateTime' in value.start ? value.start.timeZone : null,
+    fromServer: false,
   }
 })
 
@@ -94,7 +95,8 @@ const repeats = computed(() => {
 })
 
 const people = computed(() => attendeeSummary(invitation.value?.attendees.map((person) => person.partstat) ?? []))
-const canAnswer = computed(() => invitation.value !== null && invitation.value.canRespond && invitation.value.eventId !== null && invitation.value.kind !== 'cancelled' && invitation.value.kind !== 'reply')
+// An update the calendar has not taken yet is applied first: an answer refers to the version in the calendar.
+const canAnswer = computed(() => invitation.value !== null && !invitation.value.canApply && invitation.value.canRespond && invitation.value.eventId !== null && invitation.value.kind !== 'cancelled' && invitation.value.kind !== 'reply')
 const day = computed(() => (shown.value === null ? null : formatDate(toWall(shown.value.start, calendar.zone))))
 
 /** Occurrences from the API carry UTC instants (2026-10-22T08:30:00+00:00) for timed events, dates otherwise. */
@@ -178,15 +180,18 @@ function onKeydown(event: KeyboardEvent): void {
         </p>
       </div>
 
-      <div v-if="canAnswer" class="answer">
+      <div v-if="invitation.canApply" class="answer">
+        <p class="label">
+          This {{ invitation.kind === 'cancelled' ? 'cancellation' : invitation.kind === 'reply' ? 'answer' : invitation.kind === 'update' ? 'update' : 'invitation' }} is not in your calendar yet.
+          <template v-if="invitation.canRespond && invitation.kind !== 'cancelled' && invitation.kind !== 'reply'">Add it before you answer, so your answer is about this version.</template>
+        </p>
+        <button type="button" class="button button-primary" :disabled="busy" @click="apply">{{ invitation.kind === 'cancelled' ? 'Apply the cancellation' : invitation.kind === 'reply' ? 'Apply the answer' : invitation.kind === 'update' ? 'Apply the update' : 'Add to calendar' }}</button>
+      </div>
+      <div v-else-if="canAnswer" class="answer">
         <p class="label">
           {{ invitation.selfResponse === null || invitation.selfResponse === 'needs-action' ? 'Going?' : `You answered: ${RESPONSE_WORDS[invitation.selfResponse]}` }}
         </p>
         <ResponseButtons :current="invitation.selfResponse" :busy="busy" label="Answer the invitation" shortcuts @respond="respond" />
-      </div>
-      <div v-else-if="invitation.canApply" class="answer">
-        <p class="label">This {{ invitation.kind === 'cancelled' ? 'cancellation' : invitation.kind === 'reply' ? 'answer' : 'invitation' }} is not in your calendar yet.</p>
-        <button type="button" class="button button-primary" :disabled="busy" @click="apply">{{ invitation.kind === 'cancelled' ? 'Apply the cancellation' : invitation.kind === 'reply' ? 'Apply the answer' : 'Add to calendar' }}</button>
       </div>
 
       <RouterLink v-if="day && invitation.eventId" class="open" :to="{ name: 'calendar', params: { view: 'day', date: day } }">Open in calendar</RouterLink>

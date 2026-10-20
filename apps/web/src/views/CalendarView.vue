@@ -100,7 +100,21 @@ onBeforeUnmount(() => {
 
 // Selection and detail
 const selectedKey = ref<string | null>(null)
-const selected = computed(() => calendar.occurrences.find((occurrence) => occurrence.key === selectedKey.value) ?? null)
+const listed = computed(() => calendar.occurrences.find((occurrence) => occurrence.key === selectedKey.value) ?? null)
+/** An occurrence the server read for an old range comes without its full event; the detail fetches it. */
+const completed = ref<Occurrence | null>(null)
+const selected = computed(() => (completed.value !== null && completed.value.key === listed.value?.key ? completed.value : listed.value))
+watch(listed, (occurrence) => {
+  completed.value = null
+  if (occurrence?.fromServer) {
+    calendar
+      .complete(occurrence)
+      .then((full) => {
+        if (selectedKey.value === full.key) completed.value = full
+      })
+      .catch((error: unknown) => (actionError.value = errorMessage(error)))
+  }
+})
 const busy = ref(false)
 const actionError = ref<string | null>(null)
 const status = ref('')
@@ -129,8 +143,14 @@ function newEvent(start?: number, allDay = false): void {
   const hour = Math.min(23, wallParts(nowWall).hour + 1)
   editor.value = { kind: 'new', start: start ?? toInstant(day + hour * 3_600_000, calendar.zone), allDay }
 }
-function edit(): void {
-  if (selected.value !== null) editor.value = { kind: 'edit', occurrence: selected.value }
+async function edit(): Promise<void> {
+  const occurrence = selected.value
+  if (occurrence === null) return
+  try {
+    editor.value = { kind: 'edit', occurrence: await calendar.complete(occurrence) }
+  } catch (error) {
+    actionError.value = errorMessage(error)
+  }
 }
 function saved(): void {
   status.value = 'Event saved.'
@@ -138,6 +158,15 @@ function saved(): void {
 }
 
 // Deleting
+async function deleteSelected(): Promise<void> {
+  const occurrence = selected.value
+  if (occurrence === null) return
+  try {
+    deleting.value = await calendar.complete(occurrence)
+  } catch (error) {
+    actionError.value = errorMessage(error)
+  }
+}
 const deleting = ref<Occurrence | null>(null)
 const deleteScopes = computed<EditScope[]>(() => (deleting.value === null ? [] : editScopes(deleting.value)))
 async function confirmDelete(scope: EditScope, notify: boolean): Promise<void> {
@@ -202,7 +231,7 @@ function onShortcut(event: KeyboardEvent): void {
   } else if (key === 'n') {
     newEvent()
   } else if (key === 'e' && selected.value !== null) {
-    edit()
+    void edit()
   } else if (key === 'escape' && selected.value !== null) {
     closeDetail()
   } else {
@@ -251,6 +280,7 @@ function pickDay(day: number): void {
         <button type="button" class="button button-primary" @click="newEvent()"><AppIcon name="plus" :size="16" /> New event <kbd>N</kbd></button>
       </header>
 
+      <p v-if="calendar.notice" class="empty" role="status">{{ calendar.notice }}</p>
       <p v-if="mail.ready && calendar.calendars.length === 0" class="empty">No calendars yet. They appear here once your accounts have synced.</p>
 
       <TimeGrid
@@ -320,7 +350,7 @@ function pickDay(day: number): void {
       :error="actionError"
       @close="closeDetail"
       @edit="edit"
-      @delete="deleting = selected"
+      @delete="deleteSelected"
       @respond="(response, onlyThis) => respond(selected!, response, onlyThis)"
     />
 
