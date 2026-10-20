@@ -35,6 +35,31 @@ final class DailyBriefSettingsTest extends TestCase
         $settings = new DailyBriefSettings(new User('kim@example.test', 'Kim'), 'UTC', new \DateTimeImmutable('2026-10-20T07:00:00+00:00'));
 
         self::assertSame('2026-10-20T08:00:00+00:00', $settings->getNextRunAt()->format(\DATE_ATOM));
-        self::assertNull($settings->getLastRunAt());
+        self::assertNull($settings->getLastDueDay());
+    }
+
+    public function testALateSlotSweptAfterMidnightStillGetsTheNextDaysBrief(): void
+    {
+        $settings = new DailyBriefSettings(new User('kim@example.test', 'Kim'), 'UTC', new \DateTimeImmutable('2026-10-20T07:00:00+00:00'));
+        $settings->change(true, '23:59', 'UTC', new \DateTimeImmutable('2026-10-20T07:00:00+00:00'));
+        self::assertSame('2026-10-20T23:59:00+00:00', $settings->getNextRunAt()->format(\DATE_ATOM));
+
+        // The sweep reached it only at 00:00:30 on the 21st.
+        $settings->ran(new \DateTimeImmutable('2026-10-21T00:00:29+00:00'), 'UTC', new \DateTimeImmutable('2026-10-21T00:00:30+00:00'));
+
+        self::assertSame('2026-10-20', $settings->getLastDueDay());
+        self::assertSame('2026-10-21T23:59:00+00:00', $settings->getNextRunAt()->format(\DATE_ATOM));
+    }
+
+    public function testTheBriefDueAgainOnTheDayOneWasMadeCountsAsMade(): void
+    {
+        $settings = new DailyBriefSettings(new User('kim@example.test', 'Kim'), 'UTC', new \DateTimeImmutable('2026-10-20T07:00:00+00:00'));
+        self::assertFalse($settings->isDueBriefMade('UTC'));
+
+        $settings->ran(new \DateTimeImmutable('2026-10-20T07:59:59+00:00'), 'UTC', new \DateTimeImmutable('2026-10-20T08:00:00+00:00'));
+
+        self::assertFalse($settings->isDueBriefMade('UTC'), 'The next one is due tomorrow.');
+        $settings->reschedule('Pacific/Kiritimati', new \DateTimeImmutable('2026-10-20T08:00:00+00:00'));
+        self::assertFalse($settings->isDueBriefMade('Pacific/Kiritimati'));
     }
 }

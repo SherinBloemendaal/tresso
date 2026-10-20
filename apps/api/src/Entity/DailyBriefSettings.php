@@ -40,6 +40,13 @@ class DailyBriefSettings
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $coveredUntil = null;
 
+    /**
+     * The local day (Y-m-d, in the zone of that run) the last brief was due on; the next one comes on a later day. The
+     * day it was due, not the day it was made: a 23:59 brief made just after midnight leaves the new day its own.
+     */
+    #[ORM\Column(length: 10, nullable: true)]
+    private ?string $lastDueDay = null;
+
     public function __construct(User $user, string $timeZone, \DateTimeImmutable $now)
     {
         $this->user = $user;
@@ -84,22 +91,31 @@ class DailyBriefSettings
      */
     public function reschedule(string $timeZone, \DateTimeImmutable $now): void
     {
-        $this->nextRunAt = BriefTime::nextRun($this->deliverAt, $timeZone, $now, $this->getLastRunAt());
+        $this->nextRunAt = BriefTime::nextRun($this->deliverAt, $timeZone, $now, $this->lastDueDay);
     }
 
     /**
-     * A run made the brief up to $until: the next one covers what comes after, at the next delivery time on a later
-     * day.
+     * A run made the brief that was due at the next run time, up to $until: the next one covers what comes after, at
+     * the delivery time on a later day than this one was due on.
      */
     public function ran(\DateTimeImmutable $until, string $timeZone, \DateTimeImmutable $now): void
     {
         $this->coveredUntil = $until;
+        $this->lastDueDay = BriefTime::localDay($this->nextRunAt, $timeZone);
         $this->reschedule($timeZone, $now);
     }
 
-    /** When the last brief was made: a run covers up to the second before it. */
-    public function getLastRunAt(): ?\DateTimeImmutable
+    public function getLastDueDay(): ?string
     {
-        return $this->coveredUntil?->modify('+1 second');
+        return $this->lastDueDay;
+    }
+
+    /**
+     * Whether the brief now due was made already: it is due on the day the last one was (another sweep made it as
+     * this one claimed the row, or the clock repeated the hour).
+     */
+    public function isDueBriefMade(string $timeZone): bool
+    {
+        return null !== $this->lastDueDay && BriefTime::localDay($this->nextRunAt, $timeZone) <= $this->lastDueDay;
     }
 }

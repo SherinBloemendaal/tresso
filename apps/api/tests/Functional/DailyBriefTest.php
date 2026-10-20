@@ -264,20 +264,21 @@ final class DailyBriefTest extends DatabaseTestCase
 
     public function testASecondSweepTheSameDayMakesNoSecondBrief(): void
     {
+        // Both sweeps an hour into the next UTC day, so the test never straddles midnight whenever it runs.
+        $morning = new \DateTimeImmutable('tomorrow 01:00', new \DateTimeZone('UTC'));
         $this->ingestKnowMail();
-        self::assertInstanceOf(DailyBrief::class, $this->sweep());
+        self::assertInstanceOf(DailyBrief::class, $this->sweep($morning));
 
         // A sweep that read the row as due before the first one committed claims it after.
         $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
             $this->message('2', 'Build passed', ['from' => ['address' => 'ci@forge.example'], 'headers' => ['auto-submitted' => 'auto-generated']]),
         ]]);
         $this->runQueued('classify');
-        $this->connection()->executeStatement("UPDATE message SET classified_at = classified_at + INTERVAL '2 seconds' WHERE subject = 'Build passed'");
 
-        self::assertNull($this->sweep(new \DateTimeImmutable('+10 seconds')));
+        self::assertNull($this->sweep($morning->modify('+10 seconds')));
         self::assertSame(1, $this->rowCount('SELECT COUNT(*) FROM daily_brief'));
         $next = $this->connection()->fetchOne('SELECT next_run_at FROM daily_brief_settings WHERE user_id = :user', ['user' => $this->kimsId()]);
-        self::assertGreaterThan(new \DateTimeImmutable('+1 hour'), new \DateTimeImmutable(self::text($next)), 'The next brief is on another day.');
+        self::assertSame($morning->modify('+1 day')->setTime(8, 0)->format('Y-m-d H:i:s'), self::text($next), 'The next brief is the next day.');
     }
 
     public function testAnotherUsersMailToKnowNeverEntersThisUsersBrief(): void
@@ -525,6 +526,7 @@ final class DailyBriefTest extends DatabaseTestCase
         self::assertSame('/brief', $data['path']);
         self::assertSame($brief->getId()->toRfc4122(), $data['id']);
         self::assertSame('Daily brief: 2 to know', $data['title']);
+        self::assertSame($this->kimsId(), $data['userId'], 'The browser worker shows it only for the user signed in there.');
         self::assertSame('mail', $sends[0]['channelId']);
         self::assertEmailCount(0);
     }
