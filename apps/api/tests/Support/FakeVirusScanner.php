@@ -43,6 +43,11 @@ final class FakeVirusScanner implements VirusScanner
         return $this->enabled;
     }
 
+    public function isReachable(): bool
+    {
+        return $this->enabled && !$this->unavailable;
+    }
+
     public function maxSize(): int
     {
         return $this->maxSize;
