@@ -2,16 +2,20 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useFieldArray, useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
-import { MAX_BATCH_TIMES, type BatchSchedule } from '@tresso/core'
+import { MAX_BATCH_TIMES, NO_UNSUBSCRIBE_ON_IMAP, oneClickUnsubscribeAvailable, type BatchSchedule } from '@tresso/core'
 import { ApiError, errorMessage } from '@/api/errors'
 import FieldLabel from '@/forms/FieldLabel.vue'
 import { batchScheduleSchema, browserTimeZone, timeZones, type BatchScheduleValues } from '@/forms/batches'
 import { provideRequiredFields } from '@/forms/required'
 import { useBatchesStore } from '@/stores/batches'
+import { useMailStore } from '@/stores/mail'
 
 provideRequiredFields(batchScheduleSchema)
 
 const batches = useBatchesStore()
+const mail = useMailStore()
+/** Accounts whose batches offer no Unsubscribe button, named so the missing button is explained. */
+const withoutUnsubscribe = computed(() => mail.accounts.filter((account) => !oneClickUnsubscribeAvailable(account)).map((account) => account.displayName || account.emailAddress))
 const saving = ref(false)
 const error = ref<string | null>(null)
 /** The next batch after a save, to confirm it; gone once the form changes again. */
@@ -99,6 +103,10 @@ const save = handleSubmit(async (current) => {
       </p>
     </header>
 
+    <p v-if="withoutUnsubscribe.length > 0" class="note" role="note">
+      {{ NO_UNSUBSCRIBE_ON_IMAP }} This applies to {{ withoutUnsubscribe.join(', ') }}.
+    </p>
+
     <p v-if="batches.schedule === null && batches.error" class="form-error" role="alert">
       {{ batches.error }} <button type="button" class="button button-quiet" @click="batches.reload()">Try again</button>
     </p>
@@ -153,6 +161,11 @@ const save = handleSubmit(async (current) => {
 </template>
 
 <style scoped>
+.note {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13px;
+}
 .batches {
   display: flex;
   flex-direction: column;

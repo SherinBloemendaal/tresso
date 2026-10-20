@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { providerName, signInProvider, type MailAccount } from '@tresso/core'
+import { NO_UNSUBSCRIBE_ON_IMAP, oneClickUnsubscribeAvailable, providerName, signInProvider, type MailAccount } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
 import { fullTime } from '@/mail/format'
 import { useAccountsStore } from '@/stores/accounts'
@@ -85,6 +85,8 @@ function remove(): Promise<void> {
         {{ account.lastSyncedAt ? `Last synced ${fullTime(account.lastSyncedAt)}.` : 'Not synced yet.' }}
       </p>
 
+      <p v-if="!oneClickUnsubscribeAvailable(account)" class="note">{{ NO_UNSUBSCRIBE_ON_IMAP }}</p>
+
       <ProviderAccountForm v-if="provider !== null" :account="account" :provider="provider" />
       <ServerAccountForm v-else-if="servers !== null" :account="account" :servers="servers" />
 
@@ -115,6 +117,11 @@ function remove(): Promise<void> {
 </template>
 
 <style scoped>
+.note {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13px;
+}
 .card {
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
