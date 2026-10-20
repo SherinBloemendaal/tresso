@@ -1777,20 +1777,29 @@ master keys (DATA_KEYS, environment)
   separated) and `DATA_KEY_CURRENT`. They never leave the API: not to the database, not to the sync workers.
 - **User keys.** Each user has one or more 32-byte random keys in `user_key`, numbered from 1, each wrapped by a master
   key as `v1.<master key id>.<base64(nonce + ciphertext)>` with `tresso:user-key:<user id>:<version>` as additional
-  data, so a wrapped key copied to another user or version does not open. The highest version is current: new data
-  is encrypted with it, older versions only decrypt until re-encryption moves their data on. Keys are created with
-  the user, or on first use for users from before this (`INSERT ... ON CONFLICT DO NOTHING`, so concurrent first uses
-  agree on one key). Nothing uses a user key directly: HKDF-SHA256 derives a blob key (`tresso:blob-key:v1`) and a
-  field key (`tresso:field-key:v1`) from it, so the sync worker can be given the blob key without being able to open
-  database fields.
+  data, so a wrapped key copied to another user or version does not open. The highest version is current: new data is
+  encrypted with it, older versions only decrypt until re-encryption moves their data on. Keys are created with the
+  user, or for users from before this the first time something is written for them (under a lock on the user, with
+  `INSERT ... ON CONFLICT DO NOTHING`, so concurrent first uses agree on one key). Reading never creates keys, and keys
+  are never created again once a user's were shredded (`user.keys_shredded_at`): whatever still wants to write for that
+  user fails instead (fail closed). Nothing uses a user key directly: HKDF-SHA256 derives a blob key
+  (`tresso:blob-key:v1`) and a field key (`tresso:field-key:v1`) from it, so the sync worker can be given the blob key
+  without being able to open database fields.
 - **The user index key** is a second per-user random key, wrapped like a user key (`tresso:user-index-key:<user id>`).
   It names content (below) and is never rotated with the user keys: names must stay stable for deduplication and for
-  references in the database. It reveals no content, only which of one user's objects hold the same bytes.
+  references in the database, and rotating it would mean renaming every object and fingerprint a user has. It reveals
+  no content, only which of one user's objects hold the same bytes, and lets its holder test whether that user has a
+  file it already knows. Every worker that leases one of the user's accounts gets it, and it stays valid after the
+  lease ends; a leaked index key is only replaced by deleting and re-adding the user's data.
 - **The scan cache key** is derived from the current master key (HKDF, `tresso:scan-cache:v1`) and identified by the
   master key's id. It is never stored.
 - Credentials from before this (sealed `v1.<base64>` with the earlier per-user data key, `user.wrapped_data_key`)
   keep opening: that key becomes the user's key version 1 when the user's keys are first set up, and the old column is
-  cleared then. The column is dropped in a later release, once `app:crypto:reencrypt --status` reports nothing left.
+  cleared then. Until re-encryption has sealed those credentials again, version 1 is used in two ways: directly, as the
+  AEAD key of the old `v1.` credentials (as before), and through the keys HKDF derives from it. HKDF separates the two,
+  and the direct use ends for a user once their credentials are resealed (the `credentials` count of `--status` is 0),
+  for good once version 1 is retired. The column is dropped in a later release, once `app:crypto:reencrypt --status`
+  reports nothing left.
 
 #### Objects
 
@@ -1808,22 +1817,29 @@ master keys (DATA_KEYS, environment)
   frame key through the salt, so frame nonces can count from zero. The format binds the fingerprint, not the full
   name, because quarantine moves objects between kinds.
 - **Writers.** The sync worker encrypts raw MIME and attachments before upload, with the blob key of the account's
-  owner; the API encrypts uploads, outgoing messages and Drafts folder copies. The worker gets keys from
-  `GET /internal/sync/accounts/{id}/storage-keys?workerId=...` (scope `sync:credentials`, only for accounts it holds an
-  unexpired lease on, `Cache-Control: no-store`): the owner's id, the index key, the current version and the blob key
-  of every version still in use. It keeps them in memory for at most 5 minutes. It never gets a master key, a user key
-  or a field key. Each stored object carries its key version as object metadata. A worker that finds the object
-  already there writes it again only when the stored version is older than its own; it never writes over a newer one,
-  which re-encryption may have moved on while the worker still had older keys cached. The ingest call names the key
-  version, and the API refuses a raw key that is not under the account owner's id or a version the owner does not
-  have. It checks the versions under a shared lock on the owner that lasts until the batch is committed, so a version
-  cannot be retired between the check and the rows that name it.
+  owner; the API encrypts uploads, outgoing messages and Drafts folder copies. The worker gets keys from `GET
+  /internal/sync/accounts/{id}/storage-keys?workerId=...` (scope `sync:credentials`, only for accounts it holds an
+  unexpired lease on, `Cache-Control: no-store`): the owner's id, the index key, the current version and the blob key of
+  every version still in use. It keeps them in memory for at most 5 minutes. It never gets a master key, a user key or a
+  field key. Each stored object carries its key version as object metadata (`x-amz-meta-tresso-key-version`, read
+  without regard to case). A worker that finds the object already there writes it again only when the stored version is
+  older than its own; it never writes over a newer one, which re-encryption may have moved on while the worker still had
+  older keys cached. The writes are conditional (`If-None-Match: *` for a new object, `If-Match` with the ETag it saw
+  for a replacement), so a concurrent writer is never overwritten blindly; the loser looks again. The ingest call names
+  the key version, and the API refuses a raw key that is not under the account owner's id or a version the owner does
+  not have. It checks the versions under a shared lock on the owner that lasts until the batch is committed, so a
+  version cannot be retired between the check and the rows that name it.
 - **Database.** Rows record the key version their object was written with (`message.raw_key_version`,
   `attachment.key_version`, `draft_attachment.key_version`, `outgoing_message.raw_key_version`). Null means content
   from before this: plaintext under the old content-addressed name (`<kind>/<sha256[0:2]>/<sha256>`), which reads keep
   serving until re-encryption has moved it.
 - **Reading** goes through `BlobVault`, which takes the owner the database row belongs to: an object under another
   owner's name, or one that fails authentication, is an error (logged, 500 to the client), never served.
+- **Fingerprints the worker reports** for attachments are checked when the attachment is scanned, which decrypts and
+  hashes it anyway: content that is not what its fingerprint says is not scanned, is marked `failed` (`unscannable`,
+  so not downloadable without confirmation) and logged as an error. The verdict cache is keyed by the content itself,
+  so a wrong name could not borrow another file's verdict; it could only mix up one user's own files. Raw messages are
+  not hashed again: the AEAD binds them to the name they were written under.
 
 #### Database fields
 
@@ -1833,12 +1849,21 @@ master keys (DATA_KEYS, environment)
   and are dropped together with `user.wrapped_data_key`.
 - Credentials and provider tokens use the same format (`tresso:mail-account-credentials:<id>`,
   `tresso:provider-grant-tokens:<id>`); `v1.<base64>` from before still opens with key version 1.
+- What a mail notification says (the subject and the start of the text, or for a summary who it is from) is sealed in
+  `mail_notification.sealed_body` (`tresso:mail-notification-body:<id>`). Its title (the sender's name, or for a summary
+  how many) stays plaintext like the sender columns. Once clients no longer get a notification through the delta (7
+  days after it was delivered or dropped), an hourly job clears its title and body; the row stays, because it is what
+  makes a message notify at most once.
 - **Plaintext on purpose:** subject, sender and recipient addresses and names, dates, flags, sizes, folder and thread
   structure, attachment names and types. The server queries them: threading matches the normalized subject and the
   participants, sender rules and smart inboxes match addresses, recipient suggestions and the meeting brief search
   recipients, and the delta, lists, notifications and the daily brief read them in bulk SQL. Encrypting them needs
-  blind indexes for every one of those queries; that is a follow-up on the roadmap. Draft bodies (`draft.html`,
-  `draft.quote_html`), event notes and todos are also still plaintext and are next on the roadmap.
+  blind indexes for every one of those queries; that is a follow-up on the roadmap. Copies of them stay plaintext too:
+  thread subjects in calendar reminders (a meeting brief names recent conversations) and the subject a hand-over
+  keeps. What users write themselves is also still plaintext and next on the roadmap: draft bodies (`draft.html`,
+  `draft.quote_html`), hand-over notes, event notes and todos. Calendar data is plaintext as a whole (events,
+  attendees, descriptions, and an RSVP's comment while it waits to be sent, `calendar_operation.comment`); only mail is
+  in scope here.
 
 #### Search
 
@@ -1860,32 +1885,47 @@ snippets just before sending them. Deleting a user removes their documents.
   or an attachment, and without the master key a database dump cannot test whether a known file was ever received.
   Rows of another master key id (and rows from before this) are never used and are deleted by key rotation and by
   re-encryption.
+- The cache has a timing side channel: a scan that finds a cached verdict finishes sooner than one that scans. Whoever
+  can watch scan jobs (logs, metrics, the job queue) can tell that some user had the same file before, though not who.
+  That is accepted: those who can watch the jobs run the server.
 
 #### Rotation
 
 - **Master key:** add a key to `DATA_KEYS`, make it current, run `bin/console app:crypto:rotate-data-keys`, then remove
   the old key. It re-wraps every user key and index key and drops scan cache rows of other master keys. No content is
   re-encrypted.
-- **User keys:** `bin/console app:crypto:rotate-user-keys --user=<email>` (or `--all`) adds a new current version;
-  new data uses it at once (workers within 5 minutes). `app:crypto:reencrypt` then moves everything on older versions
-  to the current one and deletes an older version once nothing uses it and its successor is at least 15 minutes old,
-  which outlasts every worker's key cache. "Nothing uses it" is counted again while the owner is locked for update, so
-  an ingest batch in progress (which holds the shared lock) is either counted or refused afterwards; a refused batch is
-  rebuilt by the worker with fresh keys.
+- **User keys:** `bin/console app:crypto:rotate-user-keys --user=<email>` (or `--all`) adds a new current version; new
+  data uses it at once (workers within 5 minutes), and it queues the background re-encryption for those users, which
+  moves everything on older versions to the current one and deletes an older version once nothing uses it and its
+  successor is at least 15 minutes old, which outlasts every worker's key cache. "Nothing uses it" is counted again
+  while the owner is locked for update, so an ingest batch in progress (which holds the shared lock) is either counted
+  or refused afterwards; a refused batch is rebuilt by the worker with fresh keys.
 
 #### Re-encryption and migration
 
-`bin/console app:crypto:reencrypt --all` (or `--user=<email>`, repeatable) brings each user's data to the current key
-version: their keys (version 1 from the old data key), credentials and tokens, raw messages, attachments (live or in
-quarantine), draft files, outgoing messages, body texts and snippets, then retires old versions. Each step selects only
-rows not yet on the current version (`key_version IS DISTINCT FROM current`), in batches of `--batch` (200) in id order,
-and each row is updated in its own short transaction after its new object is written. Attachments are moved under the
-same lock per content as verdicts and quarantine, and draft files under the upload collector's lock, so neither can move
-or remove the new object before the row names it. Running it again, or after a crash, continues where it stopped; a row
-that fails is logged and left for the next run. It prints progress per step; `--status` only counts what is left. When
-nothing anywhere is left on old content, `app:crypto:reencrypt --purge-legacy` deletes the plaintext objects under the
-old content-addressed names (they could be shared between users, so they go only then). There is no data change in any
-Doctrine migration.
+Re-encryption runs in the background on its own. An hourly sweep (`SweepReencryption`) queues a job
+(`ReencryptUserData`, transport `reencrypt`, the lowest priority, consumed by the messenger worker) for every user whose
+data is not all on their current version (`user.data_key_version`, which re-encryption sets when nothing is left) or
+who still has older versions to retire: after a deploy every user from before has one, after a rotation the rotated
+users do. A job works for up to 50 seconds, then queues itself again while work is left, and comes back after the grace
+period to retire an older version; one job per user runs at a time (an advisory lock), so duplicates do nothing. It
+logs progress per step, and `app:crypto:reencrypt --status` counts what is left, per kind of row and in users.
+
+`bin/console app:crypto:reencrypt --all` (or `--user=<email>`, repeatable) does the same work now, in the foreground. It
+brings each user's data to the current key version: their keys (version 1 from the old data key), credentials and
+tokens, raw messages, attachments (live or in quarantine), draft files, outgoing messages, body texts, snippets and
+notification texts, then retires old versions. Each step selects only rows not yet on the current version (`key_version
+IS DISTINCT FROM current`), in batches of `--batch` (200) in id order, and each row is updated in its own short
+transaction after its new object is written. Attachments are moved under the same lock per content as verdicts and
+quarantine, and draft files under the upload collector's lock, so neither can move or remove the new object before the
+row names it. Running it again, or after a crash, continues where it stopped; a row that fails is logged and left for
+the next run. Content goes straight from decryption into encryption: only ciphertext is buffered (and may spill to a
+temporary file), never plaintext. Content from before encryption is named by its SHA-256, which is checked once all of
+it went through and before anything is written. Every old name a row had is recorded in `legacy_object`. When nothing
+anywhere is left on old content, `app:crypto:reencrypt --purge-legacy` deletes those plaintext objects (they could be
+shared between users, so they go only then) and lists only `drafts/`, whose copies no row referred to; `--scan-bucket`
+lists every kind as well, for plaintext no row ever knew of (an upload whose ingest batch never arrived). There is no
+data change in any Doctrine migration.
 
 Deploying this: run the migration and update the API and the sync workers together. The API refuses ingest batches
 that name no key version or a raw key outside the owner's names, so a worker from before keeps retrying its batch (its
@@ -1895,11 +1935,35 @@ differ) and is stored once more; re-encryption gives the old one the new name, s
 
 #### Deleting a user
 
-`bin/console app:users:delete <email>` first deletes the user's keys (user keys, index key, old data key) in its own
-transaction: from that commit on every object, field, credential and token of the user is unreadable, whatever copies
-or backups exist. It then deletes the user (the database cascades to everything they own), their search documents and
-OAuth tokens, and queues `PurgeOwnerObjects`, which deletes everything under the user's id in every kind and retries
-on storage errors. Plaintext from before re-encryption is not covered by this: run the re-encryption first.
+`bin/console app:users:delete <email>` first shreds the user's keys (user keys, index key, old data key) in its own
+transaction and marks the user, so no keys are created for them again. From that commit on, what was encrypted with
+those keys is unreadable wherever copies of it are: objects, sealed fields, credentials and tokens. It then deletes the
+user (the database cascades to everything they own), their OAuth tokens, and queues `PurgeDeletedUser`, which deletes
+their search documents and everything under the user's id in every kind of object, retrying on errors. If the
+deletion stops after the shredding, the user is left without keys: nothing can be read or written for them, and
+running the command again finishes it.
+
+What shredding does not reach, because it was never encrypted with those keys:
+
+- the plaintext columns (subjects, addresses, names, hand-over notes, drafts, todos, event notes): the cascade deletes
+  them from the live database, but they stay in database backups, WAL archives and point-in-time recovery until those
+  expire, and in disk pages until they are overwritten;
+- Meilisearch snapshots and dumps taken before the deletion (the live index loses the documents);
+- content from before re-encryption (plaintext objects, possibly shared with other users, until `--purge-legacy`;
+  plaintext snippets and body texts until re-encryption sealed them);
+- older object versions, when the bucket keeps versions (see Operating it).
+
+#### Operating it
+
+- **After re-encryption,** run `VACUUM` (autovacuum does it eventually) so the plaintext snippets, body texts and
+  notification texts it replaced leave the live tables; older copies stay in backups, WAL archives and PITR until those
+  expire, so let them expire (or rotate them out) before counting on the data being gone.
+- **Object storage versioning:** a bucket that keeps versions keeps the replaced and deleted objects as noncurrent
+  versions, so plaintext from before survives `--purge-legacy`, and a deleted user's ciphertext survives
+  `PurgeDeletedUser` (unreadable, but still there). Turn versioning off for the mail bucket, or add a lifecycle rule
+  that expires noncurrent versions after a short time.
+- **Disk encryption** stays a requirement for the database, Meilisearch and Redis volumes: it covers the plaintext
+  columns, the search index and free pages that still hold old rows.
 
 #### Performance
 
@@ -1920,14 +1984,19 @@ it and encrypts in place.
 - **Not protected:**
   - the operator, and anyone who controls the running API or its environment (`DATA_KEYS`): the server decrypts to do
     its work, by design. This is encryption at rest, not end-to-end encryption.
-  - a compromised sync worker: it holds the blob keys and credentials of the accounts it leases while it leases them.
+  - a compromised sync worker: it holds the blob keys and credentials of the accounts it leases while it leases them,
+    and the index keys stay usable afterwards. Key access follows the lease, and the lease follows the worker's word:
+    any holder of the sync client's credentials (scope `sync:credentials`) can lease accounts under a `workerId` of its
+    choosing and fetch their keys, the same as for mail credentials. That secret is as sensitive as every user's blob
+    keys.
   - the Meilisearch index (plaintext, see Search) and Redis (queued jobs carry ids, not content; realtime and cache
     entries carry no mail content). Both rely on network isolation, access keys and disk encryption.
   - the plaintext metadata columns listed above, and sizes and timing everywhere.
   - mail at the provider and on clients' devices, which have their own protection.
-- **Crypto-shredding** makes a deleted user's data unreadable as soon as the key deletion commits, also in backups
-  taken before, as long as the master keys of those backups are themselves rotated out (a backup of the database
-  includes the wrapped user keys; it opens with the master key that wrapped them).
+- **Crypto-shredding** makes what was encrypted with a deleted user's keys unreadable as soon as the key deletion
+  commits. Backups taken before still hold the wrapped keys, so they stay readable for as long as the master key that
+  wrapped them exists: rotate the master key and let those backups expire. What was never encrypted with the user's
+  keys is listed under "Deleting a user".
 - **Tampering** with an object or a sealed field fails authentication. A sealed field or a whole object read at once is
   refused outright; a download is served frame by frame, each frame only after it is authenticated, and a frame that
   fails cuts the download off with an error. A tampered first frame (which covers any file up to 64 KiB) fails before
