@@ -131,11 +131,13 @@ in with Google or Microsoft to connect a mail account is separate: see Provider 
 
 Gmail and Microsoft 365 accounts connect through the provider's OAuth 2.0 authorization code flow with PKCE (S256),
 as a confidential client (the API holds the client secret). The layer is generic: one **provider grant** per
-signed-in provider account, shared by every feature that uses it. Mail is the first feature; the calendar (Google
-Calendar and Microsoft Graph calendars, with Meet and Teams links) adds its scopes to the same grant.
+signed-in provider account, shared by every feature that uses it: mail, and the calendar (Google Calendar and
+Microsoft Graph calendars, with Meet and Teams meetings), which adds its scopes to the same grant.
 
 - **Start:** `POST /api/v1/provider-authorizations` (scope `settings:write`) with `{"provider": "google" | "microsoft",
-  "features": ["mail"], "mailAccountId": <optional, to sign in again>}`. The API stores a pending request (the
+  "features": ["mail", "calendar"], "mailAccountId": <optional, to sign in again or allow more>}`. Calendars alone
+  are only asked for an existing account (`mailAccountId`); the web client asks for both on a new sign-in, and for
+  `["calendar"]` when the user allows calendars later. The API stores a pending request (the
   SHA-256 of a random 256-bit `state`, the PKCE verifier, the user, the requested scopes; 15 minutes, single use) and
   answers the provider's `authorizationUrl`. `GET /api/v1/oauth-providers` lists the providers this server has an
   OAuth app for.
@@ -144,7 +146,8 @@ Calendar and Microsoft Graph calendars, with Meet and Teams links) adds its scop
   in first and comes back), and the session user must be the user who started: a sign-in link someone else started
   cannot attach your provider account to their Tresso account. The API redeems the code with the verifier, reads who
   signed in (Google: the ID token's `sub` and verified `email`; Microsoft: the ID token's `tid` and `oid`, and the
-  mailbox address from Graph `/me`), checks that the scopes the features need were granted (users can untick them),
+  mailbox address from Graph `/me`), checks that the mail scopes were granted (users can untick them; calendars left
+  unticked are allowed later, and only the calendar status says so),
   creates or updates the grant and creates the mail account (or signs an existing one in again), then redirects to
   the web app: `/settings/accounts/new` (or `/settings/accounts` when signing in again) with `connected=<account id>`
   or `connectError=<code>` (`denied`, `expired`, `different_user`, `scopes_missing`, `wrong_account`,
@@ -160,18 +163,23 @@ Calendar and Microsoft Graph calendars, with Meet and Teams links) adds its scop
   grant (Microsoft replaces the refresh token on every refresh; two concurrent refreshes would lose one). A worker
   whose token the provider refused asks again with `rejected=1` and gets a new one (unless it was issued in the last
   minute). Workers never see refresh tokens. `invalid_grant` marks the grant revoked and its accounts `auth_failed`
-  ("Sign in with Google again") and answers 409; a provider outage answers 503 with `Retry-After`.
+  ("Sign in with Google again") and answers 409; a provider outage answers 503 with `Retry-After`. The calendar
+  syncer asks with `feature=calendar`: a grant without the calendar scopes answers 403 and sets the account's
+  calendar status to `not_granted` (with how to allow it), and leaves mail alone.
 - **Scopes now:** Google `openid email profile https://www.googleapis.com/auth/gmail.modify` with
   `access_type=offline`, `prompt=consent` and `include_granted_scopes=true`. Microsoft `openid email profile
   offline_access Mail.ReadWrite Mail.Send User.Read` (Graph). `gmail.modify` reads, labels, deletes and sends mail;
   it is a restricted scope, so a public Google app needs Google's verification and a security assessment.
-- **Incremental consent (for the calendar):** add a `ProviderFeature` case and its scopes in `ProviderScopes`
-  (Google `https://www.googleapis.com/auth/calendar.events`, plus `calendar.readonly` to list calendars; Microsoft
-  `Calendars.ReadWrite` and, for work accounts, `OnlineMeetings.ReadWrite`). A sign-in for an account that has a grant
-  asks for the scopes of every feature the grant covers plus the new ones, Google keeps earlier scopes through
-  `include_granted_scopes`, and the grant stores the union for Microsoft. Callers ask
-  `ProviderAccessTokens::accessToken($grant, $feature)`, which refuses (409 for workers) when the grant lacks the
-  feature's scopes.
+- **Calendar scopes:** Google `https://www.googleapis.com/auth/calendar.events` (events, Meet meetings included) and
+  `https://www.googleapis.com/auth/calendar.calendarlist.readonly` (the calendar list), nothing broader. Microsoft
+  `Calendars.ReadWrite`; Teams meetings are made through an event's `isOnlineMeeting`, which needs no
+  `OnlineMeetings` permission (and so also works where admins restrict that permission).
+- **Incremental consent:** each feature is a `ProviderFeature` case with its scopes in `ProviderScopes`. A sign-in
+  for an account that has a grant asks for the scopes of every feature the grant covers plus the new ones, Google
+  keeps earlier scopes through `include_granted_scopes`, and the grant stores the union for Microsoft. Callers ask
+  `ProviderAccessTokens::accessToken($grant, $feature)`. A grant without the mail scopes stops the mail accounts
+  (409 for workers); one without the calendar scopes only refuses calendar tokens (`FeatureNotGranted`, 403). A
+  sign-in that adds calendars wakes the worker holding the account, so calendars start syncing right away.
 
 ##### Registering the OAuth apps
 
@@ -181,11 +189,12 @@ production it is the public HTTPS address of the API.
 
 Google (Google Cloud console):
 
-1. Create a project, enable the **Gmail API** (APIs and services, Library).
+1. Create a project, enable the **Gmail API** and the **Google Calendar API** (APIs and services, Library).
 2. OAuth consent screen (Google Auth Platform, Branding and Audience): app name, support address, authorized domain
    of the API; user type External (or Internal for one Workspace organization). While the app is in testing, add the
    addresses that may sign in as test users. Data access: add `openid`, `.../auth/userinfo.email`,
-   `.../auth/userinfo.profile` and `https://www.googleapis.com/auth/gmail.modify`.
+   `.../auth/userinfo.profile`, `https://www.googleapis.com/auth/gmail.modify`,
+   `https://www.googleapis.com/auth/calendar.events` and `https://www.googleapis.com/auth/calendar.calendarlist.readonly`.
 3. Clients, Create client, type **Web application**, authorized redirect URI
    `<API_PUBLIC_URL>/connect/google/callback` (for the Docker stack `http://localhost:8080/connect/google/callback`).
 4. Set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`.
@@ -197,7 +206,7 @@ Microsoft (Microsoft Entra admin center, App registrations):
    **Web**, `<API_PUBLIC_URL>/connect/microsoft/callback`.
 2. Certificates and secrets: new client secret (note its expiry; renew it before then).
 3. API permissions, Microsoft Graph, delegated: `openid`, `email`, `profile`, `offline_access`, `User.Read`,
-   `Mail.ReadWrite`, `Mail.Send`. Organizations whose users may not consent themselves need an admin to grant consent.
+   `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`. Organizations whose users may not consent themselves need an admin to grant consent.
 4. Set `MICROSOFT_OAUTH_CLIENT_ID`, `MICROSOFT_OAUTH_CLIENT_SECRET` and `MICROSOFT_OAUTH_TENANT`.
 
 ### 3.4 Sync workers (`apps/sync`)
@@ -1078,7 +1087,8 @@ provider changes to that resource wait, so a sync never overwrites a change that
 The worker that leases an account runs the calendar syncer next to the mail syncer (`lease.Syncer` for the account
 is a group of both); they share the account's credentials and lease but fail independently: a calendar server that
 refuses the login does not stop mail. The account carries a calendar status of its own (`calendarStatus`:
-`unknown`, `active`, `unsupported`, `auth_failed`, `unconfirmed` or `error`, with a detail the user can act on), reported once per
+`unknown`, `active`, `unsupported`, `auth_failed`, `unconfirmed`, `not_granted` (Google or Microsoft: calendars not
+allowed yet) or `error`, with a detail the user can act on), reported once per
 problem by `POST /internal/sync/accounts/{id}/calendar-status` and set back to `active` by a calendar list the API
 accepted.
 
@@ -1131,13 +1141,53 @@ accepted.
     one got back.
   - Scheduling: servers that implement RFC 6638 (`calendar-auto-schedule` in the `DAV` header) send invitations and
     replies themselves; for others the API sends them as iTIP mail (below).
-- **Google Calendar API** and **Microsoft Graph** for accounts connected through the provider OAuth layer (see
-  1.6): Google `events.list` with `syncToken` and push channels (`events.watch`), Graph `calendarView/delta` per
-  calendar with change notifications. Both report the same normalized events as CalDAV, converted to iCalendar by
-  the worker so the API has one ingest path. Writes go through the provider's own API (`events.patch`,
-  `PATCH /me/events/{id}`), and RSVPs through its response calls (`attendees[].responseStatus` with
-  `sendUpdates`, Graph `accept`/`tentativelyAccept`/`decline`), because both providers then send the reply mail
-  themselves.
+- **Google Calendar API** and **Microsoft Graph** for Gmail and Microsoft 365 accounts (`apps/sync/internal/calsync`
+  with `googlecal` and `graphcal`), next to the mail syncer as for CalDAV, on an access token from
+  `credentials?feature=calendar` and through the guarded dialer. Both convert the provider's events to iCalendar
+  (`internal/ical`, a small content-line reader and writer; sabre stays the one full implementation, in the API), so
+  they go through the same ingest, inventory and write cycle as CalDAV resources. The calendar list says
+  `providerSchedules`, and per calendar which meetings it can make (`conferenceProviders`). Every minute, and right
+  after a write or a sign-in that allowed calendars:
+  - One resource is a single event, or a recurring series with its changed and cancelled occurrences (overrides and
+    `EXDATE`s in one object, as RFC 5545 has it).
+  - **Google:** `calendarList` (calendars the user can only see free/busy of are left out; `writer`/`owner` are
+    writable; Meet when `allowedConferenceSolutionTypes` has `hangoutsMeet`), then `events.list` with
+    `singleEvents=false`, `showDeleted=true` and the stored `nextSyncToken` (a 410 lists the calendar again).
+    Exceptions are events of their own at Google (`recurringEventId`): a changed one makes the worker read its
+    whole series again (the master, then everything with its `iCalUID`), and a cancelled one is an `EXDATE`. The
+    remote id is the master's id; the ETag combines the master's and every exception's, so a change to any of them
+    is a change of the resource. An occurrence the user was invited to alone (no master in the calendar) is an
+    object of overrides only. `useDefault` reminders become the calendar's default reminders as `VALARM`s, and are
+    written back as `useDefault` when they still are those.
+  - **Microsoft:** `GET /me/calendars` (`canEdit`, `isDefaultCalendar`; Teams when `allowedOnlineMeetingProviders`
+    has `teamsForBusiness`). Graph has no change feed of series, so `calendars/{id}/calendarView/delta` over a window
+    (a year back, five ahead) is only the signal: when it reports anything (Graph also reports changes outside its
+    window), and at least daily, the calendar is listed with each event's `changeKey` (single events and series
+    masters only), and the API's inventory names what to fetch. A fetch reads the event in the zone it was made in
+    (`Prefer: outlook.timezone`, Windows zone names mapped to IANA names with the CLDR table) with
+    `exceptionOccurrences` and `cancelledOccurrences`; Graph's recurrence patterns are written as `RRULE`s and back
+    (`UNTIL` is the end date at the series' wall clock). The ETag is the master's `changeKey`, which Exchange changes
+    with any change to the series. Graph gives a new event a UID of its own and lets no one set it, so Tresso keeps
+    its UID in a single-value extended property and reads it back from there.
+  - **Writes** go through the provider's API, never as iCalendar: create (Google `events.insert` with an id derived
+    from the UID and the `iCalUID`; Graph `POST .../events` with a `transactionId` from the UID, so a retried create
+    finds the event), then the changed occurrences (Google patches `<master id>_<recurrence key>`, which makes the
+    occurrence an exception; Graph patches the instance it finds in `instances`) and the cancelled ones (Graph deletes
+    the instance; Google takes the `EXDATE` in the recurrence). Only fields that changed are sent, compared through
+    the same conversion both ways, so an unchanged event costs no write and sends no update mail; writes are
+    conditional (`If-Match` on the event's ETag) and checked against the operation's ETag first, a mismatch being a
+    conflict with the provider's version. Rules Graph has no pattern for (`BYMONTHDAY=-1`, several numbered days,
+    `RDATE`s, more often than daily) are refused with the reason. A write the provider accepted reports the
+    provider's version back as `current`, which replaces the stored object unless a newer change of the user's waits.
+  - **Scheduling:** both providers send invitations, updates, cancellations and replies themselves, so the API sends
+    no iTIP mail for these calendars and puts no incoming invitation into them (the provider does). The calendar
+    operation carries `notify` (false when the user said not to tell anyone; folded writes notify when any of them
+    did) and the reply's `comment`. Google takes `sendUpdates=all|none`; an invitee's answer patches only their
+    `attendees[].responseStatus` (and comment). Graph answers with `accept`, `tentativelyAccept` or `decline`
+    (`sendResponse`, `comment`); it always sends an organizer's updates. An invitee may change only their answer and
+    reminders (and free/busy at Microsoft); any other change is refused and the provider's version shown again.
+  - Push channels (`events.watch`, Graph change notifications) need a public HTTPS endpoint per installation and are
+    a later step; until then the cheap incremental calls run every minute.
 
 #### Invitations in mail
 
@@ -1377,12 +1427,18 @@ after. Everything lives in `apps/api/src/Notification`.
 
 #### Online meetings
 
-A `ConferenceProvider` interface creates the meeting for an event when the user asks for one: Microsoft Teams
-through Graph (`isOnlineMeeting` with `onlineMeetingProvider: teamsForBusiness` on Graph calendars; otherwise
-`POST /me/onlineMeetings`), and Google Meet through `conferenceData.createRequest` on Google calendars. Which
-providers an event can use depends on the calendar's account; clients read them from the calendar
-(`conferenceProviders`). Join links found in descriptions and locations of other events (Zoom, Teams, Meet, Webex)
-are recognized so every event with a meeting gets a join button.
+Calendars list the meetings their provider makes (`conferenceProviders`: `meet` for Google calendars that allow
+Meet, `teams` for Microsoft calendars with Teams for work or school). The editor asks for one with
+`conferenceProvider` on create or update; the API refuses a provider the calendar does not list, and otherwise marks
+the series with `X-TRESSO-CONFERENCE-REQUEST` (nothing when it has a meeting already). The worker turns that into
+Google's `conferenceData.createRequest` (`conferenceDataVersion=1`, `hangoutsMeet`) or Graph's `isOnlineMeeting` with
+`onlineMeetingProvider: teamsForBusiness`, and reports the provider's version, with the join link and without the
+request, as the stored object. The conference is then read like any other: Google's video entry point as RFC 7986
+`CONFERENCE` and `X-GOOGLE-CONFERENCE`, Graph's `onlineMeeting.joinUrl` as `CONFERENCE` and
+`X-MICROSOFT-SKYPETEAMSMEETINGURL` (the toll number as a `tel:` conference). Join links found in descriptions and
+locations of other events (Zoom, Teams, Meet, Webex) are recognized as well, so every event with a meeting has a
+`conference.url` for the join button. Personal Microsoft accounts and CalDAV or Tresso calendars get no meeting from
+their provider; a link pasted into the event (`conferenceUrl`) works everywhere.
 
 #### AI features (open interfaces, Tresso Cloud implementations)
 
