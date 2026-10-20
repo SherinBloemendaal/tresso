@@ -147,11 +147,16 @@ GreenMail has two mailboxes for development, `kim@tresso.test` (password `dev-pa
 (`dev-password-lisa`). Connect them in the app with host `greenmail`, IMAP port 3143 and SMTP port 3025, security
 `none`.
 
-ClamAV needs about 1.5 GB of memory, so it only starts when asked:
+ClamAV needs about 1.5 GB of memory, so it only starts when asked. `CLAMAV_HOST` points the API at it; without it,
+attachments are marked as not scanned and open only after a warning. `ATTACHMENTS_REQUIRE_SCAN=1` removes that
+override (and then needs a scanner: the health check fails without one). Scans run in their own worker, `scanner`.
 
 ```bash
-docker compose --profile scan up -d
+CLAMAV_HOST=clamav docker compose --profile scan up -d
 ```
+
+After a signature update, or once clamd is back after scans failed, scan attachments again with
+`php bin/console app:attachments:rescan --all` (or `--user=<email>`, optionally `--status=failed`).
 
 ## Development
 
