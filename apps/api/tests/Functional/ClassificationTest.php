@@ -12,6 +12,7 @@ use App\Classification\ReclassifyMail;
 use App\Classification\ThreadCorrection;
 use App\Entity\Thread;
 use App\Entity\User;
+use App\Tests\Support\QueryLog;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
@@ -481,25 +482,51 @@ final class ClassificationTest extends DatabaseTestCase
         self::assertSame([$inboxes['spam'], 'none', 'server_spam'], $this->classificationOf($threads['Invoice overdue']));
     }
 
-    public function testCorrectionSaysWhenTheSendersMailFailsAuthentication(): void
+    public function testCorrectionSaysWhenTheServersSpamVerdictKeepsWinning(): void
     {
-        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
-            $this->message('1', 'Statement', ['from' => ['address' => 'news@bank.example'], 'headers' => ['authentication-results' => 'mx.company.example; dmarc=fail (p=REJECT) header.from=bank.example']]),
-            $this->message('2', 'Budget'),
-        ]]);
+        $this->ingest('messages', ['folder' => 'Junk', 'messages' => [$this->message('1', 'Invoice', ['from' => ['address' => 'billing@supplier.example']])]]);
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('2', 'Budget')]]);
         $this->runClassification();
         $first = $this->changes(0);
         $inboxes = $this->builtinIds($first);
         $threads = array_column($first['threads'], null, 'subject');
-        self::assertSame('authentication_failed', $threads['Statement']['classificationReason']);
+        self::assertSame('server_spam', $threads['Invoice']['classificationReason']);
 
-        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threads['Statement']['id'].'/classification', ['smartInboxId' => $inboxes['informational']], $this->kim);
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threads['Invoice']['id'].'/classification', ['smartInboxId' => $inboxes['todo']], $this->kim);
         self::assertResponseIsSuccessful();
-        self::assertSame(['sender' => 'news@bank.example', 'failsAuthentication' => true], array_intersect_key($this->senderRuleOfResponse(), ['sender' => 1, 'failsAuthentication' => 1]));
+        self::assertSame('server_spam', $this->senderRuleOfResponse()['spamOverrules'] ?? null);
 
         $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threads['Budget']['id'].'/classification', ['smartInboxId' => $inboxes['informational']], $this->kim);
         self::assertResponseIsSuccessful();
-        self::assertFalse($this->senderRuleOfResponse()['failsAuthentication'] ?? null);
+        self::assertArrayHasKey('spamOverrules', $this->senderRuleOfResponse());
+        self::assertNull($this->senderRuleOfResponse()['spamOverrules']);
+    }
+
+    public function testCorrectionSaysWhenTheSendersMailFailsAuthentication(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Statement', ['from' => ['address' => 'news@bank.example'], 'headers' => ['authentication-results' => 'mx.google.com; dmarc=fail (p=REJECT) header.from=bank.example']]),
+        ]]);
+        // At Gmail the topmost Authentication-Results header is always Gmail's own, so a failure there counts.
+        $this->connection()->executeStatement("UPDATE mail_account SET provider = 'gmail' WHERE id = :id", ['id' => $this->accountId]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        self::assertSame('authentication_failed', $first['threads'][0]['classificationReason']);
+
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$first['threads'][0]['id'].'/classification', ['smartInboxId' => $this->builtinIds($first)['informational']], $this->kim);
+
+        self::assertResponseIsSuccessful();
+        self::assertSame('authentication_failed', $this->senderRuleOfResponse()['spamOverrules'] ?? null);
+    }
+
+    public function testDmarcFailuresOfAGenericImapServerAreNotTrustedEither(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Statement', ['from' => ['address' => 'news@bank.example'], 'headers' => ['authentication-results' => 'mx.company.example; dmarc=fail (p=REJECT) header.from=bank.example']]),
+        ]]);
+        $this->runClassification();
+
+        self::assertSame('direct', $this->changes(0)['threads'][0]['classificationReason']);
     }
 
     public function testForgettingASenderRuleWaitsForACorrectionOfTheUser(): void
@@ -516,11 +543,24 @@ final class ClassificationTest extends DatabaseTestCase
         $correcting = DriverManager::getConnection($this->separateConnectionParams());
         $correcting->executeStatement('SELECT pg_advisory_lock(hashtextextended(:key, 0))', ['key' => 'classify:'.$this->kimsId()->toRfc4122()]);
         $this->connection()->executeStatement("SET lock_timeout = '300ms'");
+        $log = static::getContainer()->get(QueryLog::class);
         try {
+            $log->clear();
             $this->client->request('DELETE', '/api/v1/sender-rules/'.$ruleId, server: $this->kim);
 
             self::assertResponseStatusCodeSame(500);
             self::assertStringContainsString('55P03', (string) $this->client->getResponse()->getContent(), 'Forgetting the rule waited for the correction holding the lock.');
+            self::assertNotSame([], $log->queries(), 'The request was recorded.');
+            $readsBeforeTheLock = [];
+            foreach ($log->queries() as $sql) {
+                if (str_contains($sql, 'pg_advisory_xact_lock')) {
+                    break;
+                }
+                if (str_contains($sql, 'sender_rule')) {
+                    $readsBeforeTheLock[] = $sql;
+                }
+            }
+            self::assertSame([], $readsBeforeTheLock, 'The rule is looked up only once the lock is held.');
         } finally {
             $this->connection()->executeStatement('RESET lock_timeout');
             $correcting->executeStatement('SELECT pg_advisory_unlock_all()');

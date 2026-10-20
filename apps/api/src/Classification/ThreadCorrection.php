@@ -11,6 +11,7 @@ use App\ApiResource\ThreadClassificationResource;
 use App\Entity\SenderRule;
 use App\Entity\Thread;
 use App\Entity\User;
+use App\Enum\BuiltinCategory;
 use App\Enum\Verdict;
 use App\Repository\CategoryRepository;
 use App\Repository\SenderRuleRepository;
@@ -67,9 +68,10 @@ final readonly class ThreadCorrection
             $this->classification->placeByUser($thread, $message, $smartInbox, $verdict);
 
             $rule = null;
-            $failsAuthentication = false;
+            $spamOverrules = null;
             if (null !== $message) {
-                $failsAuthentication = $this->classification->failsAuthentication($message);
+                $spam = $this->smartInboxes->findOneBy(['owner' => $owner, 'builtin' => BuiltinCategory::Spam]);
+                $spamOverrules = null === $spam || $spam === $smartInbox ? null : $this->classification->spamOverrulingRules($message, $spam);
                 $sender = $message->getFromAddress();
                 $rule = $this->rules->findOneBy(['owner' => $owner, 'sender' => $sender]);
                 if (null === $rule) {
@@ -90,7 +92,7 @@ final readonly class ThreadCorrection
                 $smartInbox->getId()->toRfc4122(),
                 $verdict->value,
                 ClassificationReason::USER,
-                null === $rule ? null : RememberedSender::fromEntity($rule, $failsAuthentication),
+                null === $rule ? null : RememberedSender::fromEntity($rule, $spamOverrules),
             );
         });
     }

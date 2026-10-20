@@ -207,14 +207,14 @@ final readonly class MailClassification
     }
 
     /**
-     * Whether the message failed DMARC with a reject or quarantine policy. Such mail is spam whatever the user
-     * remembered for its sender, because its From address may be forged.
+     * Why mail like this message goes to Spam whatever the user remembers for its sender (see
+     * {@see RuleBasedClassifier::spamOverrulingRules()}): `authentication_failed`, `server_spam`, or null.
      */
-    public function failsAuthentication(Message $message): bool
+    public function spamOverrulingRules(Message $message, Category $spam): ?string
     {
         $mail = $this->mailToClassify([$message->getId()->toRfc4122() => $message])[$message->getId()->toRfc4122()] ?? null;
 
-        return null !== $mail && RuleBasedClassifier::failedAuthentication($mail);
+        return null === $mail ? null : RuleBasedClassifier::spamOverrulingRules($mail, $spam);
     }
 
     /**

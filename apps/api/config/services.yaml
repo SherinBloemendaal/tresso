@@ -41,6 +41,9 @@ when@test:
         mail_autoconfig.http_client: '@http_client'
         App\Tests\Support\StaticMxResolver:
             public: true
+        App\Tests\Support\QueryLog:
+            public: true
+            tags: ['doctrine.middleware']
         App\Mail\Autoconfig\MxResolver: '@App\Tests\Support\StaticMxResolver'
         # Search tests run against a real Meilisearch, outside the mocked HTTP client.
         search.test_http_client:
