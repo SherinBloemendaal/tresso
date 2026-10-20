@@ -238,8 +238,6 @@ final readonly class NotificationDeliverer
             $path,
             $notification->isSilent(),
             $now->modify(self::EXPIRES),
-            // The user it is for: a browser shows a push only for the user who turned notifications on there.
-            ['userId' => $notification->getUser()->getId()->toRfc4122()],
         );
     }
 }

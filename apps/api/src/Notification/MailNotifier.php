@@ -80,6 +80,8 @@ final readonly class MailNotifier
             'SELECT message_id FROM mail_notification WHERE message_id = ANY(CAST(:ids AS UUID[]))',
             ['ids' => '{'.implode(',', array_map(static fn (Message $message): string => $message->getId()->toRfc4122(), $fresh)).'}'],
         );
+        // Without previews no sender, subject or text is kept, also in notifications that wait, are dropped or deduped.
+        $previews = $this->preferences->forUser($user)->isMailPreviews();
         $headers = [];
         foreach ($fresh as $message) {
             // Classification holds the user's lock, so no other run plans the same message meanwhile.
@@ -87,6 +89,9 @@ final readonly class MailNotifier
                 continue;
             }
             $notification = new MailNotification($user, $message, self::title($message), self::body($message), $now);
+            if (!$previews) {
+                $notification->hideContent(self::withoutContent($message));
+            }
             $this->entityManager->persist($notification);
             $header = $message->getMessageIdHeader();
             if (null !== $header && (isset($headers[$header]) || $this->notifiedRecently($user, $header, $now))) {
@@ -250,8 +255,9 @@ final readonly class MailNotifier
         $silent = null !== QuietHours::endOf($preferences, $now)
             || ($preferences->isFocusDuringBusy() && $this->presence->inBusyEvent($user, $now));
 
+        // Turned off since it was planned.
         if (!$preferences->isMailPreviews()) {
-            $notification->hideContent('New mail from '.self::accountName($message));
+            $notification->hideContent(self::withoutContent($message));
         }
         $notification->markDelivered($now, $channels->values(), $silent);
         $this->entityManager->flush();
@@ -283,8 +289,7 @@ final readonly class MailNotifier
     private function pushMessage(MailNotification $notification, \DateTimeImmutable $now): PushMessage
     {
         $threadId = $notification->getThread()?->getId()->toRfc4122();
-        // The user it is for: a browser shows a push only for the user who turned notifications on there.
-        $data = array_filter(['userId' => $notification->getUser()->getId()->toRfc4122(), 'threadId' => $threadId, 'messageId' => $notification->getMessage()?->getId()->toRfc4122()], static fn (?string $value): bool => null !== $value);
+        $data = array_filter(['threadId' => $threadId, 'messageId' => $notification->getMessage()?->getId()->toRfc4122()], static fn (?string $value): bool => null !== $value);
 
         return new PushMessage(
             $notification->getId()->toRfc4122(),
@@ -304,13 +309,13 @@ final readonly class MailNotifier
         return Verdict::Do === $verdict || Verdict::Delegate === $verdict;
     }
 
-    /** The account the mail came to, as the user named it, else its address. */
-    private static function accountName(Message $message): string
+    /** What a notification says without previews: only the account the mail came to, as the user named it. */
+    private static function withoutContent(Message $message): string
     {
         $account = $message->getMailAccount();
         $name = trim($account->getDisplayName());
 
-        return '' === $name ? $account->getEmailAddress() : $name;
+        return 'New mail from '.('' === $name ? $account->getEmailAddress() : $name);
     }
 
     /** Who it is from: their name, else their address. */

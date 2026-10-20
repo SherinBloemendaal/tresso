@@ -80,10 +80,11 @@ final readonly class NotificationDispatcher
     public function deliver(array $claimed, PushMessage $message, string $deliveryKey, \DateTimeImmutable $now): int
     {
         foreach ($claimed as [$target, $device, $address]) {
+            $pushed = null === $device ? $message : $message->forUser($device->getUser()->getId()->toRfc4122());
             $result = match (true) {
                 null !== $address => $this->email->send($address, $message),
-                DeviceKind::WebPush === $device?->getKind() => $this->webPush->send($device, $message, $now),
-                DeviceKind::Expo === $device?->getKind() => $this->expo->send($device, $message, $now),
+                DeviceKind::WebPush === $device?->getKind() => $this->webPush->send($device, $pushed, $now),
+                DeviceKind::Expo === $device?->getKind() => $this->expo->send($device, $pushed, $now),
                 default => PushResult::sent(),
             };
             $this->record($deliveryKey, $target, $device, $result);

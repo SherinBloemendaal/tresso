@@ -299,19 +299,7 @@ final class MailNotificationTest extends DatabaseTestCase
 
     public function testTheSameMailInTwoAccountsNotifiesOnce(): void
     {
-        $this->client->jsonRequest('POST', '/api/v1/mail-accounts', [
-            'emailAddress' => 'kim@home.example',
-            'displayName' => 'Home',
-            'username' => 'kim@home.example',
-            'password' => 'app-password-2',
-            'imap' => ['host' => 'imap.home.example', 'port' => 993, 'security' => 'tls'],
-            'smtp' => ['host' => 'smtp.home.example', 'port' => 465, 'security' => 'tls'],
-        ], $this->kim);
-        $home = $this->responseString('id');
-        $this->client->jsonRequest('POST', '/internal/sync/leases', ['workerId' => 'w1'], $this->worker);
-        self::assertResponseIsSuccessful();
-        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$home.'/folders', ['workerId' => 'w1', 'folders' => [['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1]]], $this->worker);
-        self::assertResponseIsSuccessful();
+        $home = $this->homeAccount();
 
         $both = $this->message('1', 'Budget review', ['messageId' => '<budget@partner.example>', 'to' => [['address' => self::ME], ['address' => 'kim@home.example']]]);
         $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$both]]);
@@ -322,6 +310,35 @@ final class MailNotificationTest extends DatabaseTestCase
         self::assertSame(['do', 'do'], array_column($this->changes()['threads'], 'verdict'));
         self::assertCount(1, $this->expoBodies());
         self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification WHERE dropped_at IS NOT NULL'), 'The copy never notifies later either.');
+    }
+
+    public function testTheSameMailReachingAnotherAccountLaterNotifiesOnce(): void
+    {
+        $home = $this->homeAccount();
+        $both = $this->message('1', 'Budget review', ['messageId' => '<budget@partner.example>', 'to' => [['address' => self::ME], ['address' => 'kim@home.example']]]);
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$both]]);
+        $this->classifyAndSend();
+        self::assertCount(1, $this->expoBodies());
+
+        // The other account syncs a few minutes later: a classification run of its own.
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$home.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [$both]], $this->worker);
+        self::assertResponseIsSuccessful();
+        $this->classifyAndSend();
+
+        self::assertSame(['do', 'do'], array_column($this->changes()['threads'], 'verdict'));
+        self::assertCount(1, $this->expoBodies());
+        self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification WHERE dropped_at IS NOT NULL'));
+    }
+
+    public function testWithoutPreviewsNothingOfTheMailIsKeptWhileItWaits(): void
+    {
+        $this->patchSettings(['mailPreviews' => false]);
+        $this->createEvent($this->minute(-10), ['summary' => 'Budget meeting', 'attendees' => [['address' => 'anna@partner.example', 'name' => 'Anna de Vries']], 'organizerMailAccountId' => $this->accountId]);
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review', ['snippet' => 'The numbers'])]]);
+        $this->classifyAndSend();
+
+        self::assertSame([], $this->expoBodies(), 'Held for the meeting.');
+        self::assertSame(['New mail from Work', '', null], $this->connection()->fetchNumeric('SELECT title, body, delivered_at FROM mail_notification'));
     }
 
     public function testClassifyingAgainNeverNotifies(): void
@@ -414,6 +431,26 @@ final class MailNotificationTest extends DatabaseTestCase
 
         self::assertCount(2, $this->http()->requestsTo(self::PUSH_ENDPOINT));
         self::assertCount(1, $this->expoBodies(), 'What went out is never sent again.');
+    }
+
+    /** A second account of Kim's, leased by the worker, with an inbox; returns its id. */
+    private function homeAccount(): string
+    {
+        $this->client->jsonRequest('POST', '/api/v1/mail-accounts', [
+            'emailAddress' => 'kim@home.example',
+            'displayName' => 'Home',
+            'username' => 'kim@home.example',
+            'password' => 'app-password-2',
+            'imap' => ['host' => 'imap.home.example', 'port' => 993, 'security' => 'tls'],
+            'smtp' => ['host' => 'smtp.home.example', 'port' => 465, 'security' => 'tls'],
+        ], $this->kim);
+        $home = $this->responseString('id');
+        $this->client->jsonRequest('POST', '/internal/sync/leases', ['workerId' => 'w1'], $this->worker);
+        self::assertResponseIsSuccessful();
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$home.'/folders', ['workerId' => 'w1', 'folders' => [['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1]]], $this->worker);
+        self::assertResponseIsSuccessful();
+
+        return $home;
     }
 
     private function builtinId(string $builtin): string
