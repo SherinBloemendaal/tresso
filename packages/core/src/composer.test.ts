@@ -137,6 +137,48 @@ describe('Composer', () => {
     expect(composer.state.draft).toMatchObject({ id, outgoingId: null, pendingSave: true })
   })
 
+  it('asks before sending files that could not be scanned, and sends them once confirmed', async () => {
+    await composer.openReply(original, 'reply')
+    await composer.attach([{ name: 'statement.pdf', type: 'application/pdf', size: 10, body: 'blob' }])
+    const confirm = new ApiFailure(422, { acceptUnscanned: '"statement.pdf" could not be scanned for malware. Confirm that you want to send it anyway.' })
+    sendFails = confirm
+
+    await composer.send()
+
+    expect(sent).toEqual([])
+    expect(composer.state.error).toBeNull()
+    expect(composer.state.unscannedToConfirm).toEqual({ message: confirm.violations.acceptUnscanned, sendAt: null })
+
+    sendFails = null
+    await composer.sendAnyway()
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.acceptUnscanned).toBe(true)
+    expect(composer.state.unscannedToConfirm).toBeNull()
+  })
+
+  it('sends nothing when the user keeps editing instead', async () => {
+    await composer.openReply(original, 'reply')
+    sendFails = new ApiFailure(422, { acceptUnscanned: 'Confirm that you want to send it anyway.' })
+    await composer.send()
+
+    composer.keepEditing()
+
+    expect(composer.state.unscannedToConfirm).toBeNull()
+    expect(sent).toEqual([])
+    expect(composer.state.draft).not.toBeNull()
+  })
+
+  it('gives a file that could not be scanned a link only on request', async () => {
+    api.scanOf.set('statement.pdf', 'failed')
+    composer.openNew()
+    await composer.attach([{ name: 'statement.pdf', type: 'application/pdf', size: 10, body: 'blob' }])
+    const id = composer.state.draft!.attachments[0]!.id
+
+    expect(await composer.attachmentLink(id)).toEqual({ url: null, access: 'confirm' })
+    expect(await composer.unscannedAttachmentLink(id)).toContain('unscanned=1')
+  })
+
   it('lets the undo lapse after the window', async () => {
     await composer.openReply(original, 'reply')
     await composer.send()
@@ -381,7 +423,7 @@ describe('Composer', () => {
     expect(composer.state.draft!.attachments.map((a) => a.filename)).toEqual(['notes.txt', 'plan.pdf'])
     expect(composer.state.attaching).toEqual([])
     expect((await store.draft(id))!.attachments.map((a) => a.filename)).toEqual(['notes.txt', 'plan.pdf'])
-    expect(await composer.attachmentLink(composer.state.draft!.attachments[0]!.id)).toMatch(/^https:/)
+    expect((await composer.attachmentLink(composer.state.draft!.attachments[0]!.id))?.url).toMatch(/^https:/)
   })
 
   it('says a file could not be attached without a connection, keeping the draft', async () => {
@@ -408,7 +450,7 @@ describe('Composer', () => {
   })
 
   it("takes a forwarded message's files along, but not its inline images or malware", async () => {
-    const file = (id: string, extra: Partial<MessageAttachment> = {}): MessageAttachment => ({ id, filename: `${id}.pdf`, contentType: 'application/pdf', size: 100, inline: false, contentId: null, scanStatus: 'clean', url: null, ...extra })
+    const file = (id: string, extra: Partial<MessageAttachment> = {}): MessageAttachment => ({ id, filename: `${id}.pdf`, contentType: 'application/pdf', size: 100, inline: false, contentId: null, scanStatus: 'clean', access: 'allowed', scanSignature: null, scanFailure: null, url: null, ...extra })
     originalFiles = [file('invoice'), file('logo', { inline: true }), file('virus', { scanStatus: 'infected' })]
 
     await composer.openReply(original, 'forward')
@@ -442,7 +484,7 @@ describe('Composer', () => {
     const signed = 'https://api.example.test/content/attachments/logo?expires=1&signature=a'
     // As the body sanitizer writes it.
     originalHtml = '<p>Numbers?</p><img src="https://api.example.test/content/attachments/logo?expires&#61;1&amp;signature&#61;a" alt="Logo" />'
-    originalFiles = [{ id: 'logo', filename: 'logo.png', contentType: 'image/png', size: 100, inline: true, contentId: 'logo@example.test', scanStatus: 'clean', url: signed }]
+    originalFiles = [{ id: 'logo', filename: 'logo.png', contentType: 'image/png', size: 100, inline: true, contentId: 'logo@example.test', scanStatus: 'clean', access: 'allowed', scanSignature: null, scanFailure: null, url: signed }]
     api.received.set('logo', { filename: 'logo.png', contentType: 'image/png', inline: true, contentId: 'logo@example.test' })
 
     await composer.openReply(original, 'reply')

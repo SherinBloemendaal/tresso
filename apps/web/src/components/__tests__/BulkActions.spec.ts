@@ -37,6 +37,7 @@ function message(id: string, threadId: string, account: string, from: string, ag
     receivedAt: new Date(Date.now() - ageDays * DAY).toISOString(),
     flags: { seen: false, flagged: false, answered: false, draft: false },
     hasAttachments: false,
+    attachmentScan: null,
     smartInboxId: null,
     verdict: null,
     summary: null,

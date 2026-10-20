@@ -19,6 +19,8 @@ export interface ConversationSummary {
   unreadCount: number
   flagged: boolean
   hasAttachments: boolean
+  /** Whether an attachment of the thread was blocked because it contains malware. */
+  attachmentsBlocked: boolean
   /** Newest senders first, without duplicates. */
   senders: Address[]
   /**
@@ -70,6 +72,7 @@ export function summarizeConversation(thread: SyncedThread, messages: SyncedMess
     unreadCount: messages.filter((message) => !message.flags.seen).length,
     flagged: messages.some((message) => message.flags.flagged),
     hasAttachments: messages.some((message) => message.hasAttachments),
+    attachmentsBlocked: messages.some((message) => message.attachmentScan === 'infected'),
     senders,
     inbox: inInbox && (smartInboxId === null || smartInboxId !== lists.spamSmartInboxId),
     active: inInbox || inJunk,

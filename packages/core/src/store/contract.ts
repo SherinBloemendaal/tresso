@@ -45,6 +45,7 @@ export function message(id: string, threadId: string, mailAccountId: string, fol
     receivedAt,
     flags: { seen: false, flagged: false, answered: false, draft: false },
     hasAttachments: false,
+    attachmentScan: null,
     smartInboxId: null,
     verdict: null,
     summary: null,
@@ -120,6 +121,16 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
       expect(inbox[0]).toMatchObject({ messageCount: 2, unreadCount: 1, snippet: 'Snippet m1', inbox: true })
       expect(inbox[0]!.senders.map((s) => s.address)).toEqual(['m1@sender.example', 'm2@sender.example'])
       expect(inbox[1]).toMatchObject({ flagged: true, unreadCount: 0, inbox: true })
+    })
+
+    it('marks a thread once an attachment of it is blocked', async () => {
+      expect((await db.inbox(null, 50)).map((c) => c.attachmentsBlocked)).toEqual([false, false])
+
+      await db.apply(
+        page({ cursor: 11, messages: [message('m2', 't1', 'work', ['work-inbox'], '2026-10-19T09:00:00+02:00', { hasAttachments: true, attachmentScan: 'infected' })] }),
+      )
+
+      expect((await db.inbox(null, 50)).find((c) => c.threadId === 't1')).toMatchObject({ hasAttachments: true, attachmentsBlocked: true })
     })
 
     it('lists one account and honors the limit', async () => {

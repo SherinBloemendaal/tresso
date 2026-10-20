@@ -18,7 +18,7 @@ export function fileSize(bytes: number): string {
 
 /** What the virus scan said about a file, in words. */
 export const SCAN_TEXT: Record<ScanStatus, string> = {
-  pending: 'not scanned yet',
+  pending: 'being scanned for malware',
   clean: 'scanned, no threats',
   infected: 'blocked: contains malware',
   failed: 'could not be scanned',

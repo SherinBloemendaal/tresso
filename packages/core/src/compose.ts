@@ -13,6 +13,8 @@ export interface SendMessageRequest {
   sendAt?: string
   /** The draft it was written in; the server removes it once the message is queued. */
   draftId?: string
+  /** The user confirmed sending the draft's files that could not be scanned for malware. */
+  acceptUnscanned?: boolean
 }
 
 /** POST /api/v1/drafts (with `draftId`) and PUT /api/v1/drafts/{id} (with `expectedVersion`). */

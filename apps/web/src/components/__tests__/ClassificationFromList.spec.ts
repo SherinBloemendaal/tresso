@@ -36,6 +36,7 @@ const first: ChangePage = {
       receivedAt: '2026-10-19T08:00:00Z',
       flags: { seen: false, flagged: false, answered: false, draft: false },
       hasAttachments: false,
+      attachmentScan: null,
       smartInboxId: 'spam',
       verdict: 'none',
       summary: null,

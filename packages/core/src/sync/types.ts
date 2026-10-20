@@ -78,6 +78,11 @@ export interface SyncedMessage {
   receivedAt: string
   flags: MessageFlags
   hasAttachments: boolean
+  /**
+   * All attachments together (inline ones included): 'infected' as soon as one is blocked, then 'pending' while any is
+   * still being scanned, then 'failed', else 'clean'. Null without attachments.
+   */
+  attachmentScan: ScanStatus | null
   /** The smart inbox and verdict this message got; the conversation takes those of its newest incoming message. */
   smartInboxId: string | null
   verdict: Verdict | null
@@ -148,8 +153,9 @@ export interface DraftAttachment {
   contentId?: string | null
 }
 
-/** A draft attachment with its download link: signed, valid for an hour, null while quarantined. */
+/** A draft attachment with its download link: signed, valid for an hour, only when `access` is `allowed`. */
 export interface DraftAttachmentLink extends DraftAttachment {
+  access: AttachmentAccess
   url: string | null
   /** The draft's version with this file, in the answer to adding it. */
   draftVersion?: number | null
@@ -206,6 +212,16 @@ export interface RealtimeAccess {
 
 export type ScanStatus = 'pending' | 'clean' | 'infected' | 'failed'
 
+/** Why a scan failed: too large for the scanner, unreadable for it, scanner out of reach, or scanning turned off. */
+export type ScanFailure = 'too_large' | 'unscannable' | 'unavailable' | 'disabled'
+
+/**
+ * What the scan allows: `allowed` (clean, with a link), `scanning`, `confirm` (could not be scanned: a link only after
+ * the user accepts that, from the `unscanned-link` endpoints) or `blocked` (malware, or not scanned on a server that
+ * requires scans).
+ */
+export type AttachmentAccess = 'allowed' | 'scanning' | 'confirm' | 'blocked'
+
 export interface MessageAttachment {
   id: string
   filename: string
@@ -214,7 +230,12 @@ export interface MessageAttachment {
   inline: boolean
   contentId: string | null
   scanStatus: ScanStatus
-  /** Signed, valid for an hour; null when quarantined. */
+  access: AttachmentAccess
+  /** The malware found, when infected. */
+  scanSignature: string | null
+  /** Why the scan failed, when it did. */
+  scanFailure: ScanFailure | null
+  /** Signed, valid for an hour; only for `allowed`. */
   url: string | null
 }
 

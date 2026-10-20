@@ -35,6 +35,7 @@ function message(id: string, from: string, receivedAt: string, extra: Partial<Sy
     receivedAt,
     flags: { seen: true, flagged: false, answered: false, draft: false },
     hasAttachments: false,
+    attachmentScan: null,
     smartInboxId: null,
     verdict: null,
     summary: null,
@@ -65,6 +66,7 @@ describe('summarizeConversation', () => {
       unreadCount: 1,
       flagged: true,
       hasAttachments: true,
+      attachmentsBlocked: false,
       senders: [
         { address: 'kim@example.test', name: null },
         { address: 'ANNA@example.test', name: null },
@@ -104,5 +106,18 @@ describe('summarizeConversation', () => {
   it('has nothing to show for a thread without messages, and knows when it is not in an inbox', () => {
     expect(summarizeConversation(thread, [], lists)).toBeNull()
     expect(summarizeConversation(thread, [message('m1', 'a@example.test', '2026-10-19T07:00:00Z')], lists)?.inbox).toBe(false)
+  })
+
+  it('marks a thread whose attachments were blocked', () => {
+    const summary = summarizeConversation(
+      thread,
+      [
+        message('m1', 'anna@example.test', '2026-10-19T07:00:00Z', { hasAttachments: true, attachmentScan: 'clean' }),
+        message('m2', 'anna@example.test', '2026-10-19T08:00:00Z', { hasAttachments: true, attachmentScan: 'infected' }),
+      ],
+      lists,
+    )
+
+    expect(summary?.attachmentsBlocked).toBe(true)
   })
 })
