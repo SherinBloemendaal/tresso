@@ -92,17 +92,16 @@ function SignedIn({ styles }: { styles: Styles }) {
   const [accounts, setAccounts] = useState(0)
   const [drafts, setDrafts] = useState(0)
   const [openTodos, setOpenTodos] = useState(0)
-  const { mailAccounts, store, todos, version } = mail
+  const [waiting, setWaiting] = useState(0)
+  const { mailAccounts, store, todos, version, handOvers } = mail
 
   useEffect(() => {
     let current = true
     void mailAccounts().then((list) => current && setAccounts(list.length))
     void (store()?.drafts() ?? Promise.resolve([])).then((list) => current && setDrafts(list.filter((draft) => draft.outgoingId === null).length))
-    void todos().then((list) => current && setOpenTodos(list.filter((todo) => todo.completedAt === null).length))
-    return () => {
-      current = false
-    }
-  }, [mailAccounts, store, todos, version])
+  const [openTodos, setOpenTodos] = useState(0)
+  const [waiting, setWaiting] = useState(0)
+  const { mailAccounts, store, todos, version, handOvers } = mail
 
   return (
     <View style={styles.fill}>
@@ -121,6 +120,11 @@ function SignedIn({ styles }: { styles: Styles }) {
             <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => router.push('/todos')} accessibilityRole="button" accessibilityLabel={`Todos, ${openTodos} open`}>
               <Text style={styles.secondaryLabel}>Todos{openTodos > 0 ? ` ${openTodos}` : ''}</Text>
             </Pressable>
+            {waiting > 0 && (
+              <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => router.push('/waiting')} accessibilityRole="button" accessibilityLabel={`Waiting on, ${waiting}`}>
+                <Text style={styles.secondaryLabel}>Waiting {waiting}</Text>
+              </Pressable>
+            )}
             {drafts > 0 && (
               <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => router.push('/drafts')} accessibilityRole="button" accessibilityLabel={`Drafts, ${drafts}`}>
                 <Text style={styles.secondaryLabel}>Drafts {drafts}</Text>

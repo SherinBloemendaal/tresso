@@ -7,6 +7,8 @@ import { useMail } from '@/mail/MailProvider'
 
 interface ComposerContext {
   composer: Composer
+  /** Writes and sends the forward of a hand-over in the background; it never opens the compose screen. */
+  handOverComposer: Composer
   accounts: SyncedMailAccount[]
   signatures: SyncedSignature[]
 }
@@ -91,6 +93,8 @@ export function ComposerProvider({ children }: { children: ReactNode }) {
   useEffect(() => current.update(mail, notices, loaded, pathname === '/compose'))
   const [composer] = useState(() => createComposer(current, mail.drafts))
   useEffect(() => () => composer.dispose(), [composer])
+  const [handOverComposer] = useState(() => createComposer(current, mail.drafts))
+  useEffect(() => () => handOverComposer.dispose(), [handOverComposer])
 
   const { mailAccounts, signatures: loadSignatures, version, ready } = mail
   useEffect(() => {
@@ -112,8 +116,9 @@ export function ComposerProvider({ children }: { children: ReactNode }) {
     if (previousUser.current !== signedIn) {
       previousUser.current = signedIn
       composer.reset()
+      handOverComposer.reset()
     }
-  }, [composer, signedIn])
+  }, [composer, handOverComposer, signedIn])
 
   useEffect(() => {
     let opened = composer.state.revision
@@ -160,7 +165,7 @@ export function ComposerProvider({ children }: { children: ReactNode }) {
     }
   }, [composer, ready, version])
 
-  const value = useMemo(() => ({ composer, accounts: loaded.accounts, signatures: loaded.signatures }), [composer, loaded])
+  const value = useMemo(() => ({ composer, handOverComposer, accounts: loaded.accounts, signatures: loaded.signatures }), [composer, handOverComposer, loaded])
   return <Context.Provider value={value}>{children}</Context.Provider>
 }
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { dueLabel, todoSourceMessage, type SyncedFolder, type SyncedMessage, type SyncedThread, type SyncedTodo } from '@tresso/core'
+import { dueLabel, handOverStatus, openHandOversOf, todoSourceMessage, type SyncedFolder, type SyncedHandOver, type SyncedMessage, type SyncedThread, type SyncedTodo } from '@tresso/core'
 import { MessageBodyView } from '@/components/MessageBodyView'
 import { useComposer } from '@/compose/ComposerProvider'
 import { useMail } from '@/mail/MailProvider'
@@ -10,6 +10,8 @@ import { useNotices } from '@/components/Notices'
 import { useMessageActions } from '@/mail/useMessageActions'
 import { absentConversation } from '@/mail/openedConversation'
 import { initials, senderName, shortTime } from '@/mail/format'
+import { shortDue } from '@/handOver/format'
+import { useHandOvers } from '@/handOver/HandOverProvider'
 import { useTheme, type Theme } from '@/theme'
 
 /** The action bar's height above the safe area. */
@@ -50,6 +52,9 @@ export default function ThreadScreen() {
   const pulledFor = useRef<string | null>(null)
   const notices = useNotices()
   const { composer } = useComposer()
+  const handOvers = useHandOvers()
+  const [waitingOn, setWaitingOn] = useState<SyncedHandOver[]>([])
+  const loadHandOvers = mail.handOvers
 
   useEffect(() => {
     mounted.current = true
@@ -164,6 +169,15 @@ export default function ThreadScreen() {
     }
   }, [load, id, version, after, run, syncNow])
 
+  // Who this conversation is handed over to and still waited on.
+  useEffect(() => {
+    let current = true
+    void loadHandOvers().then((list) => current && setWaitingOn(openHandOversOf(list, id)))
+    return () => {
+      current = false
+    }
+  }, [loadHandOvers, id, version])
+
   const flagged = messages.some((message) => message.flags.flagged)
 
   function relocateAll(action: 'archive' | 'trash') {
@@ -225,6 +239,20 @@ export default function ThreadScreen() {
             <Text style={styles.subject} accessibilityRole="header">
               {thread.subject || '(no subject)'}
             </Text>
+            {waitingOn.map((handOver) => {
+              const late = handOverStatus(handOver) === 'overdue'
+              return (
+                <View key={handOver.id} style={[styles.handed, late && styles.handedLate]}>
+                  <Text style={styles.handedText}>
+                    Handed over to {senderName(handOver.delegate)}, {late ? 'was due' : 'due'} {shortDue(handOver.dueAt)}
+                  </Text>
+                  <View style={styles.replies}>
+                    <ReplyButton label="Nudge" onPress={() => void handOvers.nudge(handOver)} styles={styles} />
+                    <ReplyButton label="Mark done" onPress={() => void handOvers.markDone(handOver)} styles={styles} />
+                  </View>
+                </View>
+              )
+            })}
             {todos.length === 0 ? (
               <Pressable
                 style={({ pressed }) => [styles.todoButton, (pressed || makingTodo) && styles.replyPressed]}
@@ -284,6 +312,7 @@ export default function ThreadScreen() {
           <BarButton label="Trash" busy={busy} styles={styles} onPress={() => relocateAll('trash')} />
           <BarButton label="Unread" busy={busy} styles={styles} onPress={() => markUnread()} />
           <BarButton label="Flag" busy={busy} styles={styles} checked={flagged} onPress={() => toggleFlag()} />
+          <BarButton label="Hand over" busy={busy} styles={styles} onPress={() => router.push({ pathname: '/hand-over', params: { threadId: id } })} />
         </View>
       )}
     </>
@@ -336,6 +365,9 @@ function makeStyles(theme: Theme) {
     muted: { color: theme.ink2, fontSize: 13 },
     retry: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingVertical: 8 },
     on: { color: theme.ink },
+    handed: { gap: 8, padding: 12, borderRadius: 8, backgroundColor: theme.ground },
+    handedLate: { borderLeftWidth: 3, borderLeftColor: theme.danger },
+    handedText: { color: theme.ink, fontSize: 14 },
     bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.line, backgroundColor: theme.surface },
     action: { minWidth: 64, minHeight: 44, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center', borderRadius: 6 },
     actionLabel: { color: theme.accent, fontSize: 15, fontWeight: '600' },
