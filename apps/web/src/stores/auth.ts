@@ -13,6 +13,7 @@ import { ApiError } from '@/api/errors'
 import { config } from '@/config'
 import { isDesktop, openInBrowser } from '@/platform/desktop'
 import { initialTokens, tokenStorage } from '@/platform/tokenStorage'
+import { disableWebPush } from '@/platform/webPush'
 
 const PENDING_KEY = 'auth.pending'
 /** Refresh slightly before expiry so a request never leaves with a token that dies in flight. */
@@ -82,9 +83,25 @@ export const useAuthStore = defineStore('auth', () => {
     await store(await exchangeCode(oauthConfig, code, pending.codeVerifier))
   }
 
-  function signOut(): void {
+  /** The user signs out: this browser stops getting their pushes, telling the server, and the tokens go. */
+  function signOut(): Promise<void> {
+    return endSession(true)
+  }
+
+  /**
+   * Ends the session here. Pushes to this browser stop first, while the tokens can still tell the server; a session
+   * that already expired (tellServer false) only drops the subscription, which makes the server forget the device
+   * at its next push (see disableWebPush).
+   */
+  async function endSession(tellServer: boolean): Promise<void> {
+    try {
+      await disableWebPush(tellServer ? send : null)
+    } catch (error) {
+      // The subscription is gone either way (disableWebPush drops it whatever the server said).
+      console.error('Telling the server this browser signed out failed', error)
+    }
     me.value = null
-    void store(null)
+    await store(null)
   }
 
   async function accessToken(): Promise<string> {
@@ -96,13 +113,13 @@ export const useAuthStore = defineStore('auth', () => {
       return current.accessToken
     }
     if (current.refreshToken === null) {
-      signOut()
+      void endSession(false)
       throw new Error('Session expired.')
     }
     try {
       await store(await refreshTokens(oauthConfig, current.refreshToken))
     } catch (error) {
-      signOut()
+      void endSession(false)
       throw error
     }
     return tokens.value!.accessToken
@@ -115,7 +132,7 @@ export const useAuthStore = defineStore('auth', () => {
 
     const response = await fetch(`${config.apiUrl}${path}`, { ...init, headers })
     if (response.status === 401) {
-      signOut()
+      void endSession(false)
       throw new ApiError(401, 'Your session has expired. Sign in again.')
     }
     if (!response.ok) {

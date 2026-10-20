@@ -53,7 +53,7 @@ watch(
 onBeforeUnmount(() => selection.clear())
 
 function signOut(): void {
-  auth.signOut()
+  void auth.signOut()
 }
 </script>
 

@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import { startTimeZoneSync, storedSentZone } from '@/platform/timeZone'
+import { releaseOtherUsersPush } from '@/platform/webPush'
 import NoticeStack from '@/components/NoticeStack.vue'
 
 const auth = useAuthStore()
@@ -45,6 +46,8 @@ watch(
       await auth.loadMe()
       if (auth.me) {
         stopTimeZone = startTimeZoneSync(auth.api, storedSentZone(auth.me.id), (e) => compose.notify({ text: `Reminders may come at the wrong time: your time zone could not be saved (${errorMessage(e)}).`, tone: 'error' }))
+        // Pushes someone else turned on in this browser stop once another user signs in here.
+        releaseOtherUsersPush(auth.me.id).catch((e) => compose.notify({ text: `Another account's notifications may still show in this browser: ${errorMessage(e)}`, tone: 'error' }))
         await mail.start(auth.me.id)
       }
       error.value = null

@@ -31,6 +31,14 @@ vi.mock('@/platform/desktop', () => ({
   },
 }))
 
+const push = vi.hoisted(() => ({ disabled: [] as ('server' | 'local')[] }))
+
+vi.mock('@/platform/webPush', () => ({
+  disableWebPush: async (send: unknown) => {
+    push.disabled.push(send === null ? 'local' : 'server')
+  },
+}))
+
 const TOKENS: TokenSet = { accessToken: 'access-1', refreshToken: 'refresh-1', expiresAt: Date.now() + 3_600_000 }
 
 /** Loads the store fresh, so its platform (web or desktop) is read again. */
@@ -70,6 +78,28 @@ describe('auth store', () => {
   })
 
   describe('in the browser', () => {
+    it('stops this browser getting the user\'s pushes on sign-out, telling the server while it still can', async () => {
+      push.disabled.length = 0
+      sessionStorage.setItem('auth.tokens', JSON.stringify(TOKENS))
+      const auth = await authStore()
+
+      await auth.signOut()
+
+      expect(push.disabled).toEqual(['server'])
+      expect(auth.isAuthenticated).toBe(false)
+    })
+
+    it('stops the pushes also when the session already expired, without the server', async () => {
+      push.disabled.length = 0
+      sessionStorage.setItem('auth.tokens', JSON.stringify({ ...TOKENS, refreshToken: null, expiresAt: Date.now() - 1000 }))
+      const auth = await authStore()
+
+      await expect(auth.api('/api/v1/me')).rejects.toThrow('Session expired.')
+
+      await vi.waitFor(() => expect(auth.isAuthenticated).toBe(false))
+      expect(push.disabled).toEqual(['local'])
+    })
+
     it('keeps the tokens in sessionStorage and forgets them on sign-out', async () => {
       sessionStorage.setItem('auth.tokens', JSON.stringify(TOKENS))
       const auth = await authStore()

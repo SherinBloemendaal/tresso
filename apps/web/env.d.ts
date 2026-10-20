@@ -10,3 +10,6 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
+
+/** The push worker: a plain script in public/, which its tests load in a fake service worker scope. */
+declare module '*/public/push-worker.js'

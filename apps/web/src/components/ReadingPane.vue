@@ -23,7 +23,15 @@ const thread = ref<SyncedThread | null>(null)
 const messages = ref<SyncedMessage[]>([])
 const folders = computed(() => mail.allFolders)
 const expanded = ref(new Set<string>())
-const missing = ref(false)
+const notFound = ref(false)
+/**
+ * The pulls done when this conversation opened. Until one more is done, a conversation that is not in the copy may
+ * just not have arrived yet (a clicked notification can be quicker than the delta), so it shows as loading.
+ */
+const pullsAtOpen = ref(mail.pulls)
+const missing = computed(() => notFound.value && mail.pulls > pullsAtOpen.value)
+/** The conversation a pull was asked for because it was not in the copy, so it is asked once. */
+let pulledFor: string | null = null
 const actions = useMessageActions()
 const { busy, exclusive } = actions
 const selection = useSelectionStore()
@@ -45,8 +53,14 @@ const moveTargets = computed(() =>
 )
 
 async function load(): Promise<void> {
-  const [result, threadTodos] = await Promise.all([mail.thread(props.threadId), mail.todosOfThread(props.threadId)])
-  missing.value = result === null
+  const threadId = props.threadId
+  const [result, threadTodos] = await Promise.all([mail.thread(threadId), mail.todosOfThread(threadId)])
+  notFound.value = result === null
+  if (result === null && pulledFor !== threadId) {
+    // Not here (yet): pull now, so it either arrives or is known to be gone.
+    pulledFor = threadId
+    void mail.syncNow()
+  }
   thread.value = result?.thread ?? null
   messages.value = result?.messages ?? []
   todos.value = threadTodos
@@ -74,6 +88,7 @@ async function makeTodo(): Promise<void> {
 watch(
   () => props.threadId,
   async (threadId) => {
+    pullsAtOpen.value = mail.pulls
     await load()
     if (unmounted || threadId !== props.threadId) {
       return
@@ -173,6 +188,7 @@ onBeforeUnmount(() => {
 
 <template>
   <article class="pane" aria-label="Conversation">
+    <p v-if="notFound && !missing" class="state" role="status">Loading the conversation…</p>
     <p v-if="missing" class="missing">This conversation no longer exists. <RouterLink :to="backTo">Back to the inbox</RouterLink></p>
     <div v-else-if="thread" class="inner">
       <div class="actions" role="group" aria-label="Conversation actions">
@@ -344,7 +360,8 @@ onBeforeUnmount(() => {
   line-height: 34px;
   font-weight: 600;
 }
-.missing {
+.missing,
+.state {
   padding: 32px 40px;
   color: var(--ink-2);
 }

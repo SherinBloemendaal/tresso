@@ -11,10 +11,11 @@ import App from './App.vue'
 import router from './router'
 import { config } from './config'
 import { isDesktop, onDeepLinks } from './platform/desktop'
-import { onNotificationClick } from './platform/notifier'
+import { startNotificationClicks } from './platform/notifier'
 import { onPushClick } from './platform/webPush'
 import { signInRoute } from './platform/signInLinks'
 import { useAuthStore } from './stores/auth'
+import { useComposeStore } from './stores/compose'
 
 const app = createApp(App)
 
@@ -32,7 +33,10 @@ if (isDesktop) {
     }
   })
   // A click on a mail notification opens its conversation.
-  await onNotificationClick((path) => void router.push(path))
+  startNotificationClicks(
+    (path) => void router.push(path),
+    (error) => useComposeStore().notify({ text: `Clicking a notification will not open it: ${error instanceof Error ? error.message : String(error)}`, tone: 'error' }),
+  )
 } else {
   // A click on a browser notification while Tresso is open opens it here.
   onPushClick((path) => void router.push(path))
