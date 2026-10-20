@@ -573,8 +573,10 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   batch comes, the release plans one push (`MailNotifier::released()`, through the same planning, previews setting
   and dispatcher as new mail) for released `do` and `delegate` mail that is still unread and in an inbox, however
   long ago it arrived; a batch that delivers more than three such messages notifies once with how many ("5 new messages
-  to do", the senders when previews are on, opening no single conversation) and drops the others, so none notifies
-  later. Mail the user's own doing delivers early (a correction, a changed rule or smart inbox, batches
+  to do", the senders when previews are on) and folds the others into it (`mail_notification.summary`,
+  `summarized_by_id`), so none notifies later. At delivery the summary counts again the messages it stands for that
+  still need the user, and goes out with that count unless none is left; a tap on it opens the batches (`/batches`
+  on the web and on the phone, `summary` in the delta for the desktop app). Mail the user's own doing delivers early (a correction, a changed rule or smart inbox, batches
   switched off) is not pushed, as classification that runs again never is. The batches are a list of their own
   (`ListScope` `batch`): conversations a batch delivered that are still in an inbox, newest batch first.
 
