@@ -534,6 +534,25 @@ final class MailNotificationTest extends DatabaseTestCase
         self::assertSame('3 new messages to do', $expo[0]['title']);
     }
 
+    public function testASummaryThatOneMessageStillNeedsOpensThatConversation(): void
+    {
+        $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => array_map(fn (int $n): array => $this->message((string) $n, 'Invoice '.$n, ['snippet' => 'Amount due '.$n]), range(1, 4))]);
+        $this->classifyAndSend();
+        $this->releaseWithoutSending();
+        $this->connection()->executeStatement("UPDATE message SET seen = true WHERE subject <> 'Invoice 2'");
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+
+        $this->sendQueued();
+
+        $expo = $this->expoBodies();
+        self::assertCount(1, $expo);
+        self::assertSame(['Anna de Vries', "Invoice 2\nAmount due 2"], [$expo[0]['title'], $expo[0]['body']], 'What that one message says.');
+        $thread = $this->connection()->fetchOne("SELECT thread_id FROM message WHERE subject = 'Invoice 2'");
+        self::assertSame('/thread/'.self::text($thread), $expo[0]['data']['path'], 'A tap opens its conversation.');
+        self::assertSame(self::text($thread), $this->changes()['mailNotifications'][0]['threadId']);
+    }
+
     public function testASummaryWhoseMailWasAllReadMeanwhileIsDropped(): void
     {
         $this->batchedInvoices();
@@ -853,5 +872,12 @@ final class MailNotificationTest extends DatabaseTestCase
     private function http(): MockHttpRouter
     {
         return static::getContainer()->get(MockHttpRouter::class);
+    }
+
+    private static function text(mixed $value): string
+    {
+        self::assertIsString($value);
+
+        return $value;
     }
 }

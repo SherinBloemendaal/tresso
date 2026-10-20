@@ -150,8 +150,8 @@ class MailNotification implements SyncedOnlyWhenSeen
     }
 
     /**
-     * Stands for several messages at once (a batch that delivered many): it says how many, and opens no single
-     * conversation.
+     * Stands for several messages at once (a batch that delivered many): it says how many, and opens the batches
+     * rather than a single conversation.
      */
     public function summarize(string $title, string $body): void
     {
@@ -159,6 +159,17 @@ class MailNotification implements SyncedOnlyWhenSeen
         $this->title = mb_substr($title, 0, 255);
         $this->body = $body;
         $this->thread = null;
+    }
+
+    /**
+     * A summary that only one message still needs the user for: it says what that one says and opens its
+     * conversation. It stays a summary, so a later delivery (after a focus block) counts again.
+     */
+    public function narrowTo(Thread $thread, string $title, string $body): void
+    {
+        $this->title = mb_substr($title, 0, 255);
+        $this->body = $body;
+        $this->thread = $thread;
     }
 
     /** A focus block or a meeting: it waits for their end. */
