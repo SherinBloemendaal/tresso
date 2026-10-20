@@ -48,29 +48,47 @@ final readonly class SyncChangesProvider implements ProviderInterface
         }
 
         [$until, $hasMore] = $this->boundary($userId, $since, $limit);
+        // Named arguments: a list added to SyncChanges but not here (or the other way round) fails loudly.
         if ($until === $since) {
-            return new SyncChanges($since, false, [], [], [], [], [], [], [], [], [], [], [], [], [], []);
+            return new SyncChanges(
+                cursor: $since,
+                hasMore: false,
+                mailAccounts: [],
+                folders: [],
+                threads: [],
+                messages: [],
+                outgoingMessages: [],
+                signatures: [],
+                drafts: [],
+                smartInboxes: [],
+                calendars: [],
+                calendarEvents: [],
+                notifications: [],
+                eventNotes: [],
+                todos: [],
+                deleted: [],
+            );
         }
 
         $range = ['user' => $userId, 'since' => $since, 'until' => $until];
 
         return new SyncChanges(
-            $until,
-            $hasMore,
-            $this->mailAccounts($range),
-            $this->folders($range),
-            $this->threads($range),
-            $this->messages($range),
-            $this->outgoingMessages($range),
-            $this->signatures($range),
-            $this->drafts($range),
-            $this->smartInboxes($range),
-            $this->calendars($range),
-            $this->calendarEvents($range),
-            $this->notifications($range),
-            $this->eventNotes($range),
-            $this->todos($range),
-            $this->deleted($range),
+            cursor: $until,
+            hasMore: $hasMore,
+            mailAccounts: $this->mailAccounts($range),
+            folders: $this->folders($range),
+            threads: $this->threads($range),
+            messages: $this->messages($range),
+            outgoingMessages: $this->outgoingMessages($range),
+            signatures: $this->signatures($range),
+            drafts: $this->drafts($range),
+            smartInboxes: $this->smartInboxes($range),
+            calendars: $this->calendars($range),
+            calendarEvents: $this->calendarEvents($range),
+            notifications: $this->notifications($range),
+            eventNotes: $this->eventNotes($range),
+            todos: $this->todos($range),
+            deleted: $this->deleted($range),
         );
     }
 
