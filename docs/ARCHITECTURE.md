@@ -425,7 +425,7 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   allocator refuses to run outside one. Different users never wait on each other.
 - `GET /api/v1/sync/changes?since=N&limit=500` (scope `mail:read`) returns mail accounts, folders (with role),
   threads (with their smart inbox, verdict and classification reason), messages (metadata, flags, folder ids, smart
-  inbox and verdict, never bodies), smart inboxes, todos and `deleted` entries above N, plus the new `cursor` and
+  inbox and verdict, never bodies), smart inboxes, todos, hand-overs and `deleted` entries above N, plus the new `cursor` and
   `hasMore`. Threads and messages also carry `heldUntil` and `batchedAt` (batched delivery, 3.7), messages the
   `unsubscribe` method they offer (`oneClick`, `mailto` or null) and the `unsubscribeMailto` address, smart inboxes
   `batchDelivery`, and the page the user's `unsubscriptions` (one per account and sender). A page never splits one
@@ -733,7 +733,8 @@ delivered more than 15 minutes before notifications were switched on (a copy reb
 is shown once, and more than three at once become one summary. A click brings the window to the front and opens the
 conversation (`/thread/{id}`), through the notification plugin's action listener, which the main window may register,
 unminimize and focus for; the window mounts without waiting for that listener, and one that cannot be registered is
-reported. The app plays a system sound only for notifications that did not come silently (quiet hours, busy). It
+reported. The app plays a system sound only for notifications that did not come silently (quiet hours, busy). Hand-overs
+past their due date (3.15) come the same way: the app shows those the server delivered to the desktop channel. It
 never subscribes to Web Push itself, but a browser on the same computer can: the settings page says to leave browser
 notifications off there, or each one comes twice.
 
@@ -829,7 +830,7 @@ Conversations in the Spam smart inbox stay out of the inboxes, also when the ser
 (`restoreThread`), unless the delta changed the conversation since. In the web client the sidebar lists the smart
 inboxes with unread counts, the list and the reading pane show the verdict and change it or move the conversation,
 and Settings > Smart inboxes edits them and lists the remembered senders. The IndexedDB copy moved to version 5 and the
-SQLite copy to schema 3; both sync again from the start.
+SQLite copy to schema 3; both sync again from the start. Todos (3.14) moved them to version 6 and schema 4, hand-overs (3.15) to version 7 and schema 5.
 
 Both stores keep held conversations out of the lists and counts, list the delivered batches through an index on
 inbox, batch time and date, and keep the unsubscribe requests (dropped with their account). The web client has a
@@ -1440,6 +1441,48 @@ planned again. A deadline that has passed, or a duration outside 5 minutes to 24
   add and a detail panel ("Complete and archive email" archives the conversation the todo came from), "Make todo" in
   the reading pane (`T`), which uses the newest email someone else sent, and the auto-create switch in the smart
   inbox settings; the mobile app lists todos by section, checks them off, and makes them from a conversation.
+
+### 3.15 Hand-overs
+
+A conversation judged `delegate` is handed over by forwarding it to one person with a note and a due date, and waited
+on in "Waiting on" until that person replies. Teams and assignments to teammates are Tresso Cloud (3.9); the open
+edition hands over by mail.
+
+- **Handing over** goes through the shared compose flow (`HandOverFlow` in `packages/core/src/handOvers.ts`, on a
+  composer of its own so it never touches what the user is writing): the newest message from someone else is
+  forwarded with its files, the note above the original with "Could you get back to me by {due date}?", and once the
+  forward is queued `POST /api/v1/hand-overs` records it (`messageId`, `delegate`, `note`, `dueAt`, `forwardId`; scope
+  `mail:write`). The API checks that the forward came from the message's account, went to the delegate and was not
+  cancelled or failed, and that the due date lies ahead (at most a year). When recording fails, the forward is
+  cancelled and its draft thrown away. Until the forward leaves (the undo window), Undo cancels it and withdraws the
+  hand-over (`DELETE`); afterwards the hand-over stays.
+- **Entity** `hand_over` (owner-scoped, tracked for the delta, tombstone type `handOver`): account, message handed
+  over (SET NULL when it goes; the subject is kept), delegate address and name, note, due date, state (`open`,
+  `replied`, `done`), forward, `overdueAt`, `nudgedAt`, the latest nudge, the reply that closed it, created, closed
+  and updated times. It points at the message rather than the thread, because conversations merge; the delta gives
+  the thread the message is in, and the client stores resolve it again from their own copy.
+- **Closing:** every newly stored message is checked on ingest: from the delegate's address, in the conversation of
+  the message handed over, and received after it was handed over closes it as `replied` with that message. The user
+  can mark it done or put a closed one back (`PATCH /api/v1/hand-overs/{id}` with `done`).
+- **Due dates:** recording (or a new `dueAt` in a `PATCH`) dispatches `HandOverDue` after the commit with
+  `DelayStamp::delayUntil(dueAt)` on the `async` transport, like the release of scheduled mail. Its handler locks the
+  hand-over and, when it is still open without a reply, sets `overdueAt` once; every worker heartbeat marks overdue
+  hand-overs of the leased accounts too, in case a message got lost. A new due date clears `overdueAt`. Clients tell
+  the user when a hand-over becomes overdue in a page they apply (`takeOverdueHandOvers` of the mail stores, not for
+  the first pull of a copy), offering the nudge.
+- **Nudges:** `POST /api/v1/hand-overs/{id}/nudge` (scope `mail:send`, `html` and an optional `sendAt` a few seconds
+  ahead for undo) queues a reply to the delegate through the outbox, in the same conversation: to the forward's copy
+  in Sent when it was synced, else to the message handed over, with "Re:" and the forward's subject. Clients suggest
+  the text (`nudgeText`) and add the account's default signature; Undo cancels the outgoing message, and a cancelled
+  or failed nudge no longer counts as nudged. "Edit first" opens the follow-up in the compose window instead.
+- **Clients:** both stores keep hand-overs (`handOvers()` in "Waiting on" order: open ones by due date, then closed
+  ones). The web client has Hand over in the reading pane (H) and offers it right after a conversation is judged
+  `delegate`; the dialog (vee-validate) takes the person, the note and a due date (today while an hour of it is left,
+  tomorrow, Friday or next Monday, or a picked day; due at 17:00). Waiting on lists the open hand-overs with the
+  delegate, due date and status (waiting, nudged, overdue) and the closed ones, and drafts a follow-up on Nudge (send,
+  edit first, no longer waiting, move the due date); the reading pane says who a conversation is handed over to. The
+  phone has the same hand-over screen without a picked day, Waiting on with one-tap nudges, and the banner in a
+  conversation.
 
 ## 4. Scale notes
 
