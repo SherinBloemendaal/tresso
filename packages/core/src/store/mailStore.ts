@@ -2,7 +2,7 @@ import type { AppliedAction, MessageAction } from '../actions'
 import type { Verdict } from '../domain'
 import type { ConversationSummary, ListScope } from '../sync/conversation'
 import type { SyncStore } from '../sync/engine'
-import type { Address, DraftAttachment, SyncedFolder, SyncedHandOver, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
+import type { Address, DraftAttachment, SyncedDailyBrief, SyncedFolder, SyncedHandOver, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
 
 /** Someone the user exchanged mail with, for recipient suggestions. */
 export interface Contact {
@@ -85,6 +85,10 @@ export interface MailStore extends SyncStore {
   signatures(): Promise<SyncedSignature[]>
   /** In sidebar order. */
   smartInboxes(): Promise<SyncedSmartInbox[]>
+  /** The daily briefs, newest first (see compareBriefs). */
+  dailyBriefs(): Promise<SyncedDailyBrief[]>
+  /** The summaries of these threads that exist, in the order asked for; each thread once. */
+  conversations(threadIds: string[]): Promise<ConversationSummary[]>
   /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
   inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]>
   /**

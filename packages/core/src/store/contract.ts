@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MissingFolderError } from '../actions'
-import type { ChangePage, SyncedHandOver, SyncedMessage, SyncedOutgoingMessage, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
+import { briefView } from '../brief'
+import type { ChangePage, SyncedDailyBrief, SyncedHandOver, SyncedMessage, SyncedOutgoingMessage, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
 import type { Draft, MailStore } from './mailStore'
 
 /** Test data for the mail stores. */
 export function page(changes: Partial<ChangePage> & { cursor: number }): ChangePage {
-  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], mailNotifications: [], handOvers: [], deleted: [], ...changes }
+  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], mailNotifications: [], handOvers: [], dailyBriefs: [], deleted: [], ...changes }
 }
 
 export const accounts = [
@@ -25,6 +26,10 @@ export function signature(id: string, name: string) {
 
 export function thread(id: string, mailAccountId: string, classification: Partial<Pick<SyncedThread, 'smartInboxId' | 'verdict' | 'classificationReason' | 'heldUntil' | 'batchedAt'>> = {}): SyncedThread {
   return { id, mailAccountId, subject: `Subject ${id}`, messageCount: 1, lastMessageAt: '2026-10-19T08:00:00+00:00', smartInboxId: null, verdict: null, classificationReason: null, ...classification }
+}
+
+export function dailyBrief(id: string, coversUntil: string, threadIds: string[]): SyncedDailyBrief {
+  return { id, coversFrom: new Date(Date.parse(coversUntil) - 86_400_000).toISOString(), coversUntil, threadIds, createdAt: coversUntil }
 }
 
 export function smartInbox(id: string, builtin: SyncedSmartInbox['builtin'], position: number, verdict: SyncedSmartInbox['verdict'] = 'know'): SyncedSmartInbox {
@@ -511,6 +516,48 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
 
     it('finds messages by id in the order asked for, leaving out the ones it does not have', async () => {
       expect((await db.messages(['m3', 'gone', 'm1', 'm3'])).map((m) => m.id)).toEqual(['m3', 'm1', 'm3'])
+    })
+
+    describe('daily briefs', () => {
+      it('keeps them newest first and drops deleted ones', async () => {
+        await db.apply(page({ cursor: 11, dailyBriefs: [dailyBrief('b1', '2026-10-18T08:00:00+00:00', ['t3']), dailyBrief('b2', '2026-10-19T08:00:00+02:00', ['t1'])] }))
+        expect((await db.dailyBriefs()).map((brief) => brief.id)).toEqual(['b2', 'b1'])
+
+        await db.apply(page({ cursor: 12, deleted: [{ type: 'dailyBrief', id: 'b2' }] }))
+        expect(await db.dailyBriefs()).toEqual([dailyBrief('b1', '2026-10-18T08:00:00+00:00', ['t3'])])
+      })
+
+      it('reads a page without briefs from a server made before them', async () => {
+        const { dailyBriefs: _absent, ...older } = page({ cursor: 11 })
+        await db.apply(older)
+        expect(await db.dailyBriefs()).toEqual([])
+      })
+
+      it('gives the conversations of a brief in its order, each once, without the ones that are gone', async () => {
+        const conversations = await db.conversations(['t3', 'gone', 't1', 't3'])
+        expect(conversations.map((conversation) => conversation.threadId)).toEqual(['t3', 't1'])
+      })
+
+      it('counts a conversation of the brief as noted once it left the inbox', async () => {
+        const brief = dailyBrief('b1', '2026-10-19T08:00:00+00:00', ['t1', 't3'])
+        await db.apply(page({ cursor: 11, dailyBriefs: [brief] }))
+        await db.applyAction(['m1', 'm2'], 'markRead')
+        await db.applyAction(['m1', 'm2'], 'archive')
+
+        const view = briefView(brief, await db.conversations(brief.threadIds))
+
+        expect(view.entries.map((entry) => [entry.conversation.threadId, entry.noted])).toEqual([
+          ['t1', true],
+          ['t3', false],
+        ])
+      })
+
+      it('keeps a brief whose conversations went with their account, showing none of them', async () => {
+        await db.apply(page({ cursor: 11, dailyBriefs: [dailyBrief('b1', '2026-10-19T08:00:00+00:00', ['t1'])] }))
+        await db.apply(page({ cursor: 12, deleted: [{ type: 'mailAccount', id: 'work' }] }))
+        expect((await db.conversations(['t1'])).length).toBe(0)
+        expect((await db.dailyBriefs()).map((brief) => brief.id)).toEqual(['b1'])
+      })
     })
 
     it('lists accounts by name', async () => {

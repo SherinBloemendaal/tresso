@@ -1,10 +1,11 @@
 import { actionResult, type AppliedAction, type MessageAction } from '../actions'
+import { compareBriefs } from '../brief'
 import type { Verdict } from '../domain'
 import { compareHandOvers } from '../handOvers'
 import { sortSmartInboxes } from '../smartInboxes'
 import { compareTodos } from '../todos'
 import { inList, summarizeConversation, type ConversationSummary, type ListFolders, type ListScope } from '../sync/conversation'
-import type { ChangePage, SyncedFolder, SyncedHandOver, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
+import type { ChangePage, SyncedDailyBrief, SyncedFolder, SyncedHandOver, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
 import { CopyClosingError, type Contact, type Draft, type MailStore } from './mailStore'
 import { classifiedByUser, contactMatches, deletedDraft, draftOnlyHere, mergeContact, newerUnsubscription, peopleOn, stillAsClassified, storedDraft, syncedDraft } from './rules'
 import type { Sql, SqlValue } from './sql'
@@ -13,7 +14,7 @@ import type { Sql, SqlValue } from './sql'
  * Raised whenever the copy changes shape. A copy made by another version is emptied and synced again from the start,
  * so nothing it skipped stays missing; drafts that exist only on this device are carried over.
  */
-export const SCHEMA_VERSION = 6
+export const SCHEMA_VERSION = 7
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
@@ -54,10 +55,11 @@ CREATE INDEX IF NOT EXISTS todos_by_thread ON todos (thread_id);
 CREATE TABLE IF NOT EXISTS unsubscriptions (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hand_overs (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, message_id TEXT, thread_id TEXT, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS hand_overs_by_account ON hand_overs (mail_account_id);
+CREATE TABLE IF NOT EXISTS daily_briefs (id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL);
 `
 
 /** Every table any version made, so a rebuild leaves none of an old shape behind. */
-const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'todos', 'unsubscriptions', 'hand_overs', 'meta']
+const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'todos', 'unsubscriptions', 'hand_overs', 'daily_briefs', 'meta']
 
 type JsonRow = { json: string }
 
@@ -233,6 +235,9 @@ export class SqliteMailStore implements MailStore {
           case 'handOver':
             await tx.run('DELETE FROM hand_overs WHERE id = ?', [deleted.id])
             break
+          case 'dailyBrief':
+            await tx.run('DELETE FROM daily_briefs WHERE id = ?', [deleted.id])
+            break
           case 'draft': {
             const local = await readDraft(tx, deleted.id)
             if (local !== null) {
@@ -268,6 +273,9 @@ export class SqliteMailStore implements MailStore {
             affected.add(row.thread_id)
           }
         }
+      }
+      for (const brief of page.dailyBriefs ?? []) {
+        await tx.run('INSERT OR REPLACE INTO daily_briefs (id, json) VALUES (?, ?)', [brief.id, JSON.stringify(brief)])
       }
       for (const thread of page.threads) {
         await writeThread(tx, thread)
@@ -384,6 +392,22 @@ export class SqliteMailStore implements MailStore {
 
   async smartInboxes(): Promise<SyncedSmartInbox[]> {
     return sortSmartInboxes((await this.reader.all<JsonRow>('SELECT json FROM smart_inboxes')).map((row) => parse<SyncedSmartInbox>(row)))
+  }
+
+  async dailyBriefs(): Promise<SyncedDailyBrief[]> {
+    return (await this.reader.all<JsonRow>('SELECT json FROM daily_briefs')).map((row) => parse<SyncedDailyBrief>(row)).sort(compareBriefs)
+  }
+
+  async conversations(threadIds: string[]): Promise<ConversationSummary[]> {
+    const found = new Map<string, ConversationSummary>()
+    const unique = [...new Set(threadIds)]
+    for (const chunk of chunks(unique)) {
+      for (const row of await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE thread_id IN (${placeholders(chunk)})`, chunk)) {
+        const conversation = parse<ConversationSummary>(row)
+        found.set(conversation.threadId, conversation)
+      }
+    }
+    return unique.flatMap((threadId) => found.get(threadId) ?? [])
   }
 
   inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]> {
