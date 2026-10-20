@@ -13,6 +13,8 @@ type RemoteCalendar struct {
 	TimeZone  *string `json:"timeZone"`
 	Writable  bool    `json:"writable"`
 	IsDefault bool    `json:"isDefault"`
+	// ConferenceProviders are the online meetings events of this calendar can get ("meet", "teams").
+	ConferenceProviders []string `json:"conferenceProviders,omitempty"`
 }
 
 // CalendarList is the complete calendar list of an account.
@@ -67,10 +69,15 @@ type CalendarOperation struct {
 	IfMatch          *string `json:"ifMatch"`
 	Ical             *string `json:"ical"`
 	Attempt          int     `json:"attempt"`
+	// Notify is false when the user asked not to tell attendees (the provider then sends no updates or replies).
+	Notify bool `json:"notify"`
+	// Comment goes with the user's reply to an invitation.
+	Comment *string `json:"comment"`
 }
 
 // OperationResult reports a calendar write: done, conflict (with the provider's current version, nil when gone),
-// failed or retry.
+// failed or retry. A done write may carry the provider's version too, when the provider changed the event while
+// storing it (a Google Meet or Teams meeting it added).
 type OperationResult struct {
 	WorkerID string        `json:"workerId"`
 	Outcome  string        `json:"outcome"`
@@ -134,6 +141,8 @@ const (
 	CalendarError       = "error"
 	// CalendarUnconfirmed: a server was found that the user has to confirm before it gets the password.
 	CalendarUnconfirmed = "unconfirmed"
+	// CalendarNotGranted: the provider refuses calendar access because the user did not allow it.
+	CalendarNotGranted = "not_granted"
 )
 
 func (c *Client) CalendarStatus(ctx context.Context, accountID, workerID, status, detail string) error {
