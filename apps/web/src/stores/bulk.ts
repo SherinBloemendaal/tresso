@@ -34,7 +34,11 @@ export const useBulkStore = defineStore('bulk', () => {
 
   /** The action (or undo) the server is working through. */
   const running = ref<BulkActionState | null>(null)
-  const progress = computed(() => (running.value === null ? null : bulkProgressText(running.value)))
+  /** Asking the server to start one: a second click meanwhile must not start another. */
+  const starting = ref(false)
+  /** Whether a bulk action is starting or under way; screens disable their buttons meanwhile. */
+  const busy = computed(() => starting.value || running.value !== null)
+  const progress = computed(() => (running.value === null ? (starting.value ? 'Starting…' : null) : bulkProgressText(running.value)))
 
   function count(scope: BulkScope): Promise<BulkSelectionCount> {
     return auth.api<BulkSelectionCount>(`/api/v1/bulk-selection?${bulkSelectionQuery(scope)}`)
@@ -55,10 +59,11 @@ export const useBulkStore = defineStore('bulk', () => {
    * @param folderName the folder a move goes to, for the notice
    */
   async function start(request: BulkActionRequest, folderName?: string): Promise<BulkActionState | null> {
-    if (running.value !== null) {
+    if (busy.value) {
       compose.notify({ text: 'Another bulk action is still under way. Try again once it is done.', tone: 'error' })
       return null
     }
+    starting.value = true
     try {
       const state = await follow(await auth.send<BulkActionState>('POST', '/api/v1/bulk-actions', request))
       compose.notify(
@@ -73,15 +78,18 @@ export const useBulkStore = defineStore('bulk', () => {
     } catch (error) {
       compose.notify({ text: errorMessage(error), tone: 'error' })
       return null
+    } finally {
+      starting.value = false
     }
   }
 
   /** Puts back what the action moved, the way an undo of a single action does. */
   async function undo(id: string): Promise<BulkActionState | null> {
-    if (running.value !== null) {
+    if (busy.value) {
       compose.notify({ text: 'Wait for the action under way to finish, then undo.', tone: 'error' })
       return null
     }
+    starting.value = true
     try {
       const state = await follow(await auth.send<BulkActionState>('POST', `/api/v1/bulk-actions/${encodeURIComponent(id)}/undo`, {}))
       compose.notify({ text: bulkResultText(state), tone: state.status === 'failed' ? 'error' : 'info' })
@@ -89,6 +97,8 @@ export const useBulkStore = defineStore('bulk', () => {
     } catch (error) {
       compose.notify({ text: `Could not undo: ${errorMessage(error)}`, tone: 'error' })
       return null
+    } finally {
+      starting.value = false
     }
   }
 
@@ -96,6 +106,7 @@ export const useBulkStore = defineStore('bulk', () => {
   async function follow(first: BulkActionState): Promise<BulkActionState> {
     let state = first
     running.value = state
+    starting.value = false
     try {
       for (let attempt = 0; bulkActionRunning(state); attempt++) {
         await new Promise((resolve) => setTimeout(resolve, bulkPollDelay(attempt)))
@@ -110,5 +121,5 @@ export const useBulkStore = defineStore('bulk', () => {
     return state
   }
 
-  return { running, progress, count, senders, suggestions, start, undo }
+  return { running, busy, progress, count, senders, suggestions, start, undo }
 })
