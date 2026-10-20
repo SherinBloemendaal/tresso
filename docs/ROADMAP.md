@@ -112,6 +112,9 @@ Delivered in steps, each its own pull request:
   RFC 8058 one-click requests made by the sync worker through a strict guarded dialer, or one fixed mail to an address
   in the sender's own domain through the outbox, recorded per account and sender; the batches view, the unsubscribe
   button and the batch settings in the web client, the data layer on mobile
+- [x] Triage mode: the inboxes' undecided mail one conversation at a time in the web client (D do, H hand over, K
+  know, J skip, Z undo) and on the phone (buttons); do and hand over place only that conversation (do makes its todo),
+  know archives it
 
 Still to come in this phase:
 
@@ -119,7 +122,6 @@ Still to come in this phase:
   over them; choosing a deadline or a time shows how busy each day and hour already is; a todo gets a duration
   ("takes 30 minutes"), and "Plan automatically" picks the best free slot before the deadline with the meeting time
   finder of C6 (working hours, focus blocks and travel time respected), moving it when the calendar changes
-- Triage mode (one email at a time, D / H / K)
 
 Tresso Cloud: AI classification with feedback learning, automatic todo extraction, AI summaries in the daily brief.
 
