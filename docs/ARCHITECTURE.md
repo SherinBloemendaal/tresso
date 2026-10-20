@@ -814,7 +814,8 @@ protocol, so every client syncs the same way:
 Every client keeps a copy of the user's mail behind one interface, `MailStore` in `packages/core`: the browser in
 IndexedDB (`apps/web/src/mail/db.ts`), the desktop app and the phone in SQLite (`SqliteMailStore` in
 `packages/core/src/store/sqlite.ts`, behind a small `Sql` interface each client implements). One database per user,
-deleted on sign-out after it is closed. Next to the synced records each stores a summary per thread (senders,
+deleted on sign-out after it is closed. The browser's copy closes when another connection needs it gone or upgraded
+(a sign-out or a newer version in another tab), so a delete or upgrade never waits on it. Next to the synced records each stores a summary per thread (senders,
 snippet, unread count, whether it is in an inbox), recomputed whenever one of its messages changes, so the inbox lists
 read a few dozen rows through an index however much mail is stored, plus the people the user exchanged mail with and
 the drafts. How contacts and drafts follow the delta is shared (`packages/core/src/store/rules.ts`), and
