@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Alert, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { Stack, useRouter } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { sendLaterOptions, type Address, type AttachmentFile, type Draft, type SendLaterKey } from '@tresso/core'
@@ -109,6 +109,18 @@ export default function ComposeScreen() {
     }
   }, [composer, showQuote, quote])
 
+  // The server sends files that could not be scanned only once the user confirmed them.
+  const unscanned = state.unscannedToConfirm
+  useEffect(() => {
+    if (unscanned === null) {
+      return
+    }
+    Alert.alert('Send files that were not scanned?', `${unscanned.message} Files that were not checked can contain malware.`, [
+      { text: 'Keep editing', style: 'cancel', onPress: () => composer.keepEditing() },
+      { text: 'Send anyway', style: 'destructive', onPress: () => void composer.sendAnyway() },
+    ])
+  }, [unscanned, composer])
+
   if (draft === null) {
     return null
   }
@@ -167,12 +179,29 @@ export default function ComposeScreen() {
 
   async function openAttachment(id: string): Promise<void> {
     try {
-      const url = await composer.attachmentLink(id)
-      if (url === null) {
-        notices.notify({ text: 'This file is blocked: it contains malware.', tone: 'error' })
+      const link = await composer.attachmentLink(id)
+      if (link?.access === 'confirm') {
+        Alert.alert('Not scanned for malware', 'This file could not be checked for malware. Open it only if you trust where it came from.', [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Open anyway',
+            style: 'destructive',
+            onPress: () => {
+              composer
+                .unscannedAttachmentLink(id)
+                .then((url) => Linking.openURL(url))
+                .catch((error: unknown) => notices.notify({ text: `The file could not be opened: ${error instanceof Error ? error.message : String(error)}`, tone: 'error' }))
+            },
+          },
+        ])
         return
       }
-      await Linking.openURL(url)
+      if (link === null || link.url === null) {
+        const reason = link?.access === 'scanning' ? 'It is still being scanned for malware.' : 'It contains malware, or this server only opens scanned files.'
+        notices.notify({ text: `This file cannot be opened. ${reason}`, tone: 'error' })
+        return
+      }
+      await Linking.openURL(link.url)
     } catch (error) {
       notices.notify({ text: `The file could not be opened: ${error instanceof Error ? error.message : String(error)}`, tone: 'error' })
     }

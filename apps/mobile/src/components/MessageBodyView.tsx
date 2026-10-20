@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, View } from 'react-native'
-import type { MessageBody } from '@tresso/core'
+import { ActivityIndicator, Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native'
+import type { MessageAttachment, MessageBody } from '@tresso/core'
 import { AttachmentRow } from '@/components/AttachmentRow'
 import { HtmlFrame } from '@/components/HtmlFrame'
 import { useMail } from '@/mail/MailProvider'
@@ -14,7 +14,31 @@ export function MessageBodyView({ messageId }: { messageId: string }) {
   const [body, setBody] = useState<MessageBody | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [remote, setRemote] = useState(false)
-  const { body: load } = mail
+  const { body: load, unscannedLink } = mail
+
+  /** Clean files open; one that could not be scanned only after the user confirms the warning. */
+  function opener(file: MessageAttachment): (() => void) | null {
+    const url = file.url
+    if (file.access === 'allowed' && url !== null) {
+      return () => void Linking.openURL(url)
+    }
+    if (file.access !== 'confirm') {
+      return null
+    }
+    return () =>
+      Alert.alert('Not scanned for malware', `${file.filename} could not be checked for malware. Open it only if you trust the sender.`, [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Download anyway',
+          style: 'destructive',
+          onPress: () => {
+            unscannedLink(file.id)
+              .then((link) => Linking.openURL(link))
+              .catch((e: unknown) => Alert.alert('The file could not be opened', e instanceof Error ? e.message : String(e)))
+          },
+        },
+      ])
+  }
 
   useEffect(() => {
     let current = true
@@ -62,16 +86,8 @@ export function MessageBodyView({ messageId }: { messageId: string }) {
       {files.length > 0 && (
         <View style={styles.files} accessibilityLabel="Attachments">
           {files.map((file) => {
-            const url = file.url
-            return (
-              <AttachmentRow
-                key={file.id}
-                filename={file.filename}
-                size={file.size}
-                scanStatus={file.scanStatus}
-                {...(url === null ? {} : { onOpen: () => void Linking.openURL(url) })}
-              />
-            )
+            const open = opener(file)
+            return <AttachmentRow key={file.id} filename={file.filename} size={file.size} scanStatus={file.scanStatus} {...(open === null ? {} : { onOpen: open })} />
           })}
         </View>
       )}
