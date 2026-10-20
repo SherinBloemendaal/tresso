@@ -715,11 +715,16 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
         expect((await db.handOvers()).map((h) => h.id)).toEqual(['h2', 'h1', 'h4', 'h3'])
       })
 
-      it('gives the conversation its message is in now, or none when the message is not in the copy', async () => {
-        await db.apply(page({ cursor: 11, handOvers: [handOver('h1', 'm1', 'work', { threadId: 't1' }), handOver('h2', 'gone', 'work', { threadId: 't9' }), handOver('h3', null, 'work')] }))
+      it('gives the conversation its message is in now, else the one it was handed over in when that is in the copy', async () => {
+        await db.apply(
+          page({
+            cursor: 11,
+            handOvers: [handOver('h1', 'm1', 'work', { threadId: 't1' }), handOver('h2', 'gone', 'work', { threadId: 't9' }), handOver('h3', null, 'work'), handOver('h4', null, 'work', { threadId: 't2' })],
+          }),
+        )
         await db.apply(page({ cursor: 12, threads: [thread('t4', 'work')], messages: [message('m1', 't4', 'work', ['work-inbox'], '2026-10-19T08:00:00+00:00')] }))
 
-        expect(Object.fromEntries((await db.handOvers()).map((h) => [h.id, h.threadId]))).toEqual({ h1: 't4', h2: null, h3: null })
+        expect(Object.fromEntries((await db.handOvers()).map((h) => [h.id, h.threadId]))).toEqual({ h1: 't4', h2: null, h3: null, h4: 't2' })
       })
 
       it('keeps them current and drops withdrawn ones', async () => {

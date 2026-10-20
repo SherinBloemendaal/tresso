@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS todos (id TEXT PRIMARY KEY NOT NULL, message_id TEXT,
 CREATE INDEX IF NOT EXISTS todos_by_message ON todos (message_id);
 CREATE INDEX IF NOT EXISTS todos_by_thread ON todos (thread_id);
 CREATE TABLE IF NOT EXISTS unsubscriptions (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS hand_overs (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, message_id TEXT, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS hand_overs (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, message_id TEXT, thread_id TEXT, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS hand_overs_by_account ON hand_overs (mail_account_id);
 `
 
@@ -309,7 +309,7 @@ export class SqliteMailStore implements MailStore {
         if (becameOverdue(row === null ? null : parse<SyncedHandOver>(row), handOver)) {
           overdue.push(handOver)
         }
-        await tx.run('INSERT OR REPLACE INTO hand_overs (id, mail_account_id, message_id, json) VALUES (?, ?, ?, ?)', [handOver.id, handOver.mailAccountId, handOver.messageId, JSON.stringify(handOver)])
+        await tx.run('INSERT OR REPLACE INTO hand_overs (id, mail_account_id, message_id, thread_id, json) VALUES (?, ?, ?, ?, ?)', [handOver.id, handOver.mailAccountId, handOver.messageId, handOver.threadId, JSON.stringify(handOver)])
       }
 
       const lists = await listFoldersOf(tx)
@@ -376,7 +376,10 @@ export class SqliteMailStore implements MailStore {
   }
 
   async handOvers(): Promise<SyncedHandOver[]> {
-    const rows = await this.reader.all<JsonRow & { thread_id: string | null }>('SELECT h.json, m.thread_id FROM hand_overs h LEFT JOIN messages m ON m.id = h.message_id')
+    // The conversation its message is in now; once that message is gone, the one the server keeps, if it is here.
+    const rows = await this.reader.all<JsonRow & { thread_id: string | null }>(
+      'SELECT h.json, COALESCE(m.thread_id, t.id) AS thread_id FROM hand_overs h LEFT JOIN messages m ON m.id = h.message_id LEFT JOIN threads t ON t.id = h.thread_id',
+    )
     return rows.map((row) => ({ ...parse<SyncedHandOver>(row), threadId: row.thread_id })).sort(compareHandOvers)
   }
 

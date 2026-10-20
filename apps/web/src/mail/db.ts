@@ -417,12 +417,14 @@ export class IndexedDbMailStore implements MailStore {
   }
 
   async handOvers(): Promise<SyncedHandOver[]> {
-    const tx = this.db.transaction(['handOvers', 'messages'])
+    const tx = this.db.transaction(['handOvers', 'messages', 'threads'])
     const handOvers = await tx.objectStore('handOvers').getAll()
+    // The conversation its message is in now; once that message is gone, the one the server keeps, if it is here.
     const resolved = await Promise.all(
       handOvers.map(async (handOver) => {
         const message = handOver.messageId === null ? undefined : await tx.objectStore('messages').get(handOver.messageId)
-        return { ...handOver, threadId: message?.threadId ?? null }
+        const kept = message === undefined && handOver.threadId !== null ? await tx.objectStore('threads').get(handOver.threadId) : undefined
+        return { ...handOver, threadId: message?.threadId ?? kept?.id ?? null }
       }),
     )
     return resolved.sort(compareHandOvers)
