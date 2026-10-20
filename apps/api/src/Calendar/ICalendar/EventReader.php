@@ -65,6 +65,8 @@ final class EventReader
         $rdates = '' === $recurrenceKey ? self::keys($event, 'RDATE') : [];
         $exdates = '' === $recurrenceKey ? self::keys($event, 'EXDATE') : [];
         $recurring = null !== $rrule || [] !== $rdates;
+        $recurrenceId = Props::get($event, 'RECURRENCE-ID');
+        $thisAndFuture = null !== $recurrenceId && 'THISANDFUTURE' === strtoupper(Props::param($recurrenceId, 'RANGE') ?? '');
 
         $organizer = self::organizer($event);
         $attendees = self::attendees($event);
@@ -87,7 +89,12 @@ final class EventReader
             $recurring ? $rrule : null,
             $rdates,
             $exdates,
-            $recurring ? self::seriesEnd($event, $endsAt->getTimestamp() - $startsAt->getTimestamp()) : $endsAt,
+            // An override that changes the future reaches as far as its series does, which only the series knows.
+            match (true) {
+                $recurring => self::seriesEnd($event, $endsAt->getTimestamp() - $startsAt->getTimestamp()),
+                $thisAndFuture => null,
+                default => $endsAt,
+            },
             $organizer,
             $attendees,
             self::selfPartstat($organizer, $attendees, $selfAddresses),
@@ -96,6 +103,7 @@ final class EventReader
             self::travelMinutes($event),
             self::usesDefaultReminders($event),
             self::isImportant($event),
+            $thisAndFuture,
         );
     }
 

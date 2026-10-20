@@ -59,6 +59,8 @@ final readonly class EventData
         public bool $defaultReminders = true,
         /** A high priority: reminders reach the user also in quiet and outside working hours. */
         public bool $important = false,
+        /** An override with RANGE=THISANDFUTURE: it changes every later occurrence of the series too. */
+        public bool $thisAndFuture = false,
     ) {
     }
 

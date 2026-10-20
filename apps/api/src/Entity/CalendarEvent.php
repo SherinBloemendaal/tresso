@@ -148,6 +148,10 @@ class CalendarEvent implements TracksChanges
     #[ORM\Column(options: ['default' => false])]
     private bool $important = false;
 
+    /** An override with RANGE=THISANDFUTURE: it changes every later occurrence of the series too. */
+    #[ORM\Column(options: ['default' => false])]
+    private bool $thisAndFuture = false;
+
     /** The invitation this event came from. */
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(onDelete: 'SET NULL')]
@@ -219,6 +223,7 @@ class CalendarEvent implements TracksChanges
         $this->travelMinutes = $data->travelMinutes;
         $this->defaultReminders = $data->defaultReminders;
         $this->important = $data->important;
+        $this->thisAndFuture = $data->thisAndFuture;
         $this->updatedAt = new \DateTimeImmutable();
     }
 
@@ -378,6 +383,11 @@ class CalendarEvent implements TracksChanges
         return $this->important;
     }
 
+    public function changesTheFuture(): bool
+    {
+        return $this->thisAndFuture;
+    }
+
     public function getTravelMinutes(): ?int
     {
         return $this->travelMinutes;
@@ -428,7 +438,7 @@ class CalendarEvent implements TracksChanges
         return [
             'sequence', 'status', 'summary', 'description', 'location', 'url', 'transparency', 'visibility', 'allDay',
             'startValue', 'startTimeZone', 'endValue', 'endTimeZone', 'rrule', 'rdates', 'exdates', 'organizer',
-            'attendees', 'selfPartstat', 'reminders', 'conference', 'message', 'syncError', 'travelMinutes', 'defaultReminders', 'important',
+            'attendees', 'selfPartstat', 'reminders', 'conference', 'message', 'syncError', 'travelMinutes', 'defaultReminders', 'important', 'thisAndFuture',
         ];
     }
 
