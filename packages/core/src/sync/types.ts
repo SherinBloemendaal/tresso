@@ -246,6 +246,20 @@ export interface SyncedTodo {
   updatedAt: string
 }
 
+/**
+ * One edition of the daily brief: the conversations judged `know` in a period that were still in an inbox when it was
+ * made, newest first. Clients show them from their own copy; a conversation is noted once it left the inboxes.
+ */
+export interface SyncedDailyBrief {
+  id: string
+  /** Mail classified after this moment... */
+  coversFrom: string
+  /** ...up to and including this one. */
+  coversUntil: string
+  threadIds: string[]
+  createdAt: string
+}
+
 export type DeletedType =
   | 'mailAccount'
   | 'folder'
@@ -261,6 +275,7 @@ export type DeletedType =
   | 'eventNote'
   | 'todo'
   | 'handOver'
+  | 'dailyBrief'
 
 export type DraftKind = 'new' | 'reply' | 'replyAll' | 'forward'
 
@@ -329,6 +344,8 @@ export interface ChangePage {
   /** May be left out when there are none. */
   unsubscriptions?: SyncedUnsubscription[]
   handOvers: SyncedHandOver[]
+  /** Absent from servers made before daily briefs. */
+  dailyBriefs?: SyncedDailyBrief[]
   deleted: Deleted[]
 }
 
