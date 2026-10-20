@@ -4,8 +4,14 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\Calendar;
 
+use App\Entity\CalendarInvitation;
+use App\Entity\Message;
+use App\Enum\ItipMethod;
 use App\Tests\Functional\AuthenticatesUsers;
 use App\Tests\Functional\DatabaseTestCase;
+use App\Tests\Support\QueryLog;
+use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\Clock\Test\ClockSensitiveTrait;
 
 /**
  * The calendar assistant interfaces of the open edition: scheduling preferences, the meeting time finder, event
@@ -15,10 +21,13 @@ final class CalendarAssistantTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
     use CalendarTestHelpers;
+    use ClockSensitiveTrait;
 
     private const array SCOPES = ['mail:read', 'mail:send', 'calendar:read', 'calendar:write', 'settings:read', 'settings:write'];
     /** Monday 22 March 2027: Amsterdam is at +01:00 until summer time starts on Sunday the 28th. */
     private const string MONDAY = '2027-03-22';
+    /** The tests run on the Saturday before, whatever the real date. */
+    private const string NOW = '2027-03-20T12:00:00+00:00';
 
     /** @var array<string, string> */
     private array $kim;
@@ -30,6 +39,7 @@ final class CalendarAssistantTest extends DatabaseTestCase
     protected function setUp(): void
     {
         parent::setUp();
+        self::mockTime(new \DateTimeImmutable(self::NOW));
         $this->bootstrapOAuthClients();
         $this->createUser('kim@example.test', 'Kim');
         $this->kim = $this->userHeaders('kim@example.test', self::SCOPES);
@@ -61,6 +71,20 @@ final class CalendarAssistantTest extends DatabaseTestCase
         $this->patchPreferences(['travelMinutes' => 25]);
 
         self::assertSame(['bufferMinutes' => 10, 'travelMinutes' => 25, 'minimumNoticeMinutes' => 60], $this->getJson('/api/v1/calendar/scheduling-preferences', $this->kim));
+    }
+
+    public function testTheFirstChangeCreatesThePreferencesOnceAndLocksThem(): void
+    {
+        $log = static::getContainer()->get(QueryLog::class);
+        $log->clear();
+
+        $this->patchPreferences(['bufferMinutes' => 5]);
+
+        $sql = implode("\n", $log->queries());
+        self::assertStringContainsString('ON CONFLICT (user_id) DO NOTHING', $sql, 'Two first changes at once find one row.');
+        self::assertStringContainsString('FOR UPDATE', $sql);
+        $this->patchPreferences(['travelMinutes' => 20]);
+        self::assertSame(['bufferMinutes' => 5, 'travelMinutes' => 20, 'minimumNoticeMinutes' => 0], $this->getJson('/api/v1/calendar/scheduling-preferences', $this->kim));
     }
 
     public function testSchedulingPreferencesStayWithinTheirLimits(): void
@@ -136,6 +160,16 @@ final class CalendarAssistantTest extends DatabaseTestCase
         self::assertSame([], $slots[1]['optionalConflicts']);
     }
 
+    public function testNothingIsProposedBeforeNowOnTheClock(): void
+    {
+        self::mockTime(new \DateTimeImmutable('2027-03-22T08:20:00+00:00'));
+
+        $slot = self::slots($this->findTimes(['durationMinutes' => 30, 'limit' => 1]))[0];
+
+        self::assertSame('2027-03-22T08:30:00+00:00', $slot['start']);
+        self::assertSame(['at' => '2027-03-22T08:20:00+00:00', 'reason' => 'notice', 'label' => ''], $slot['freeFrom']);
+    }
+
     public function testRecurringBusyTimeIsKeptFreeOnEveryOccurrenceAcrossDaylightSaving(): void
     {
         $this->createEvent('Mornings', '2027-03-15T09:00:00', '2027-03-15T12:00:00', ['recurrence' => 'FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR']);
@@ -145,6 +179,55 @@ final class CalendarAssistantTest extends DatabaseTestCase
         // 12:00 in Amsterdam: 11:00 UTC on Friday, 10:00 UTC on Monday in summer time.
         self::assertSame(['2027-03-26T11:00:00+00:00', '2027-03-29T10:00:00+00:00'], self::starts($times));
         self::assertSame(['at' => '2027-03-29T10:00:00+00:00', 'reason' => 'busy', 'label' => 'Mornings'], self::slots($times)[1]['freeFrom']);
+    }
+
+    public function testAMovedOccurrenceAndARemovedOneAreReadAsTheCalendarHasThem(): void
+    {
+        $series = $this->createEvent('Mornings', self::MONDAY.'T09:00:00', self::MONDAY.'T10:00:00', ['recurrence' => 'FREQ=DAILY;COUNT=3']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series.'?scope=this&recurrenceId=20270323T080000Z', self::event($this->calendarId, [
+            'summary' => 'Mornings (moved)',
+            'start' => ['dateTime' => '2027-03-23T14:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2027-03-23T15:00:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+        $this->client->request('DELETE', '/api/v1/calendar-events/'.$series.'?scope=this&recurrenceId=20270324T080000Z', server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+
+        $times = $this->findTimes(['from' => '2027-03-23T00:00:00+01:00', 'to' => '2027-03-25T00:00:00+01:00', 'durationMinutes' => 60, 'perDay' => 1]);
+
+        self::assertSame(['2027-03-23T08:00:00+00:00', '2027-03-24T08:00:00+00:00'], self::starts($times));
+        self::assertSame(['at' => '2027-03-23T13:00:00+00:00', 'reason' => 'busy', 'label' => 'Mornings (moved)'], self::slots($times)[0]['freeUntil']);
+        self::assertSame(['at' => '2027-03-24T16:00:00+00:00', 'reason' => 'working_hours', 'label' => ''], self::slots($times)[1]['freeUntil']);
+    }
+
+    public function testUnansweredAndTentativeInvitationsAreBusyAndDeclinedOnesAreNot(): void
+    {
+        [$accountId, $worker] = $this->connectAccount();
+        $message = $this->deliver($accountId, $worker, 'Invitation: Budget review', 'anna@finance.example', ['kim@company.example'], self::invitation());
+        $eventId = $this->getJson('/api/v1/messages/'.$message.'/invitation', $this->kim)['eventId'];
+        self::assertIsString($eventId);
+        // Wednesday 24 March, 12:00 to 15:00 UTC; the invitation takes 13:00 to 14:00.
+        $window = ['from' => '2027-03-24T12:00:00+00:00', 'to' => '2027-03-24T15:00:00+00:00', 'durationMinutes' => 60];
+
+        self::assertSame(['2027-03-24T12:00:00+00:00', '2027-03-24T14:00:00+00:00'], self::starts($this->findTimes($window)), 'Unanswered.');
+
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events/'.$eventId.'/response', ['response' => 'tentative', 'notify' => false], $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertSame(['2027-03-24T12:00:00+00:00', '2027-03-24T14:00:00+00:00'], self::starts($this->findTimes($window)), 'Tentative.');
+
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events/'.$eventId.'/response', ['response' => 'declined', 'notify' => false], $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertSame(['2027-03-24T12:00:00+00:00', '2027-03-24T13:00:00+00:00', '2027-03-24T14:00:00+00:00'], self::starts($this->findTimes($window)), 'Declined.');
+    }
+
+    public function testATimedEventOverSeveralDaysClosesThemAll(): void
+    {
+        $this->createEvent('Conference', self::MONDAY.'T15:00:00', '2027-03-24T10:00:00');
+
+        $times = $this->findTimes(['to' => '2027-03-25T00:00:00+01:00', 'durationMinutes' => 60, 'perDay' => 1]);
+
+        self::assertSame(['2027-03-22T08:00:00+00:00', '2027-03-24T09:00:00+00:00'], self::starts($times));
+        self::assertSame(['at' => '2027-03-24T09:00:00+00:00', 'reason' => 'busy', 'label' => 'Conference'], self::slots($times)[1]['freeFrom']);
     }
 
     public function testAllDayBusyEventsTakeTheirWholeDays(): void
@@ -245,7 +328,6 @@ final class CalendarAssistantTest extends DatabaseTestCase
         [$accountId, $worker] = $this->connectAccount();
         $invitation = $this->deliver($accountId, $worker, 'Invitation: Budget review', 'anna@finance.example', ['kim@company.example'], self::invitation());
         $plain = $this->deliver($accountId, $worker, 'Lunch?', 'anna@finance.example', ['kim@company.example']);
-        $this->applyQueuedInvitations();
 
         $suggestions = $this->getJson('/api/v1/messages/'.$invitation.'/event-suggestions', $this->kim);
         self::assertSame([], $suggestions['deadlines']);
@@ -255,7 +337,9 @@ final class CalendarAssistantTest extends DatabaseTestCase
         self::assertIsArray($event);
         self::assertSame('calendar_part', $event['source']);
         self::assertSame('budget-review@finance.example', $event['uid']);
-        self::assertSame($this->getJson('/api/v1/messages/'.$invitation.'/invitation', $this->kim)['eventId'], $event['eventId']);
+        $eventId = $this->getJson('/api/v1/messages/'.$invitation.'/invitation', $this->kim)['eventId'];
+        self::assertIsString($eventId);
+        self::assertSame($eventId, $event['eventId']);
         self::assertSame([
             'summary' => 'Budget review',
             'description' => '',
@@ -271,6 +355,21 @@ final class CalendarAssistantTest extends DatabaseTestCase
         ], $event['draft']);
 
         self::assertSame(['id' => $plain, 'events' => [], 'deadlines' => []], $this->getJson('/api/v1/messages/'.$plain.'/event-suggestions', $this->kim));
+    }
+
+    public function testACalendarPartThatCannotBeReadLeavesTheOthers(): void
+    {
+        [$accountId, $worker] = $this->connectAccount();
+        $messageId = $this->deliver($accountId, $worker, 'Invitation: Budget review', 'anna@finance.example', ['kim@company.example'], self::invitation());
+        $entityManager = static::getContainer()->get(EntityManagerInterface::class);
+        $message = $entityManager->find(Message::class, $messageId);
+        self::assertInstanceOf(Message::class, $message);
+        $entityManager->persist(new CalendarInvitation($message, ItipMethod::Request, 'broken@finance.example', 0, '', 'not iCalendar at all'));
+        $entityManager->flush();
+
+        $suggestions = $this->getJson('/api/v1/messages/'.$messageId.'/event-suggestions', $this->kim);
+
+        self::assertSame(['budget-review@finance.example'], array_column(\is_array($suggestions['events']) ? $suggestions['events'] : [], 'uid'));
     }
 
     public function testAnotherUsersMessageHasNoSuggestions(): void
@@ -397,7 +496,7 @@ final class CalendarAssistantTest extends DatabaseTestCase
     }
 
     /**
-     * The worker reports a message in the inbox; returns its id.
+     * The worker reports a message in the inbox and the invitation it carries is applied; returns its id.
      *
      * @param array<string, string> $worker
      * @param list<string>          $to
@@ -410,7 +509,8 @@ final class CalendarAssistantTest extends DatabaseTestCase
             'remoteUid' => (string) $uid,
             'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
             'size' => 100,
-            'receivedAt' => new \DateTimeImmutable('-1 hour')->format(\DATE_ATOM),
+            // After the account was connected, so invitations are applied.
+            'receivedAt' => new \DateTimeImmutable('+1 minute')->format(\DATE_ATOM),
             'messageId' => '<assistant-'.$uid.'@finance.example>',
             'subject' => $subject,
             'from' => ['address' => $from, 'name' => null],
@@ -418,6 +518,8 @@ final class CalendarAssistantTest extends DatabaseTestCase
             'calendarParts' => null === $ical ? [] : [['method' => null, 'ical' => $ical]],
         ]]], $worker);
         self::assertResponseIsSuccessful();
+        // Before the next request, which empties the queue.
+        $this->applyQueuedInvitations();
 
         $delta = $this->getJson('/api/v1/sync/changes?since=0', $this->kim);
         self::assertIsArray($delta['messages']);

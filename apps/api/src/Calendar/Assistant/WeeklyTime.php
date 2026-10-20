@@ -6,7 +6,7 @@ namespace App\Calendar\Assistant;
 
 /**
  * A time of day on some days of the week, in the user's zone: a range of working hours. It ends on the day it starts
- * (24:00 is the end of the day).
+ * (24:00 is the end of the day); hours past midnight are two ranges ({@see self::workingHours()}).
  */
 final readonly class WeeklyTime
 {
@@ -29,14 +29,15 @@ final readonly class WeeklyTime
         if (1 !== preg_match(self::START_PATTERN, $start) || 1 !== preg_match(self::END_PATTERN, $end)) {
             throw new \InvalidArgumentException('start and end must be times such as 09:00 and 17:30.');
         }
-        if (!self::ordered($start, $end)) {
+        if ($end <= $start) {
             throw new \InvalidArgumentException('end must be after start on the same day.');
         }
     }
 
     /**
-     * The working hours of the notification settings (working days, start and end), which the reminders keep to as
-     * well. Hours that end before they start contain no time there, so they give no working hours here either.
+     * The working hours of the notification settings: from the start to the end time on each working day. Hours that
+     * end at or before they start run past midnight: 22:00 to 06:00 on Monday is Monday 22:00 to 24:00 and Tuesday
+     * 00:00 to 06:00, and 09:00 to 00:00 ends at midnight. Hours that start and end at the same time hold none.
      *
      * @param list<int> $days
      *
@@ -44,12 +45,62 @@ final readonly class WeeklyTime
      */
     public static function workingHours(array $days, string $start, string $end): array
     {
-        return [] === $days || !self::ordered($start, $end) ? [] : [new self($days, $start, $end)];
+        if ([] === $days || $start === $end) {
+            return [];
+        }
+        if ($end > $start) {
+            return [new self($days, $start, $end)];
+        }
+        $evenings = [new self($days, $start, '24:00')];
+        if ('00:00' === $end) {
+            return $evenings;
+        }
+        $mornings = array_map(static fn (int $day): int => $day % 7 + 1, $days);
+        sort($mornings);
+
+        return [...$evenings, new self($mornings, '00:00', $end)];
+    }
+
+    /**
+     * The ranges of the weekly times on every local day that touches [$from, $to), in order, overlapping and touching
+     * ranges merged (so night hours are one stretch across midnight), as UTC instants.
+     *
+     * @param list<self> $times
+     *
+     * @return list<array{\DateTimeImmutable, \DateTimeImmutable}>
+     */
+    public static function intervals(array $times, \DateTimeImmutable $from, \DateTimeImmutable $to, \DateTimeZone $zone): array
+    {
+        $utc = new \DateTimeZone('UTC');
+        $ranges = [];
+        $last = $to->setTimezone($zone)->modify('+1 day')->format('Y-m-d');
+        for ($date = $from->setTimezone($zone)->modify('-1 day')->format('Y-m-d'); $date <= $last; $date = new \DateTimeImmutable($date.' 12:00', $zone)->modify('+1 day')->format('Y-m-d')) {
+            foreach ($times as $time) {
+                $range = $time->on($date, $zone);
+                if (null !== $range && $range[1] > $from && $range[0] < $to) {
+                    $ranges[] = [$range[0]->setTimezone($utc), $range[1]->setTimezone($utc)];
+                }
+            }
+        }
+        usort($ranges, static fn (array $a, array $b): int => $a <=> $b);
+
+        $merged = [];
+        foreach ($ranges as $range) {
+            $previous = array_key_last($merged);
+            if (null !== $previous && $range[0] <= $merged[$previous][1]) {
+                $merged[$previous][1] = max($merged[$previous][1], $range[1]);
+                continue;
+            }
+            $merged[] = $range;
+        }
+
+        return $merged;
     }
 
     /**
      * The instants this range covers on one local day, or null when it is not one of its days. A time the clock skips
-     * (a daylight saving gap) is the first moment after the gap.
+     * (in the gap of a change to summer time) is the moment the clock jumps: working hours from 02:30 on that day start
+     * when the clock shows 03:00, not at 03:30 as PHP would read 02:30.
      *
      * @param string $date Y-m-d in $zone
      *
@@ -61,15 +112,24 @@ final readonly class WeeklyTime
         if (!\in_array((int) $day->format('N'), $this->days, true)) {
             return null;
         }
-        $end = '24:00' === $this->end
-            ? new \DateTimeImmutable($day->modify('+1 day')->format('Y-m-d').' 00:00', $zone)
-            : new \DateTimeImmutable($date.' '.$this->end, $zone);
+        $end = '24:00' === $this->end ? self::wallClock($day->modify('+1 day')->format('Y-m-d'), '00:00', $zone) : self::wallClock($date, $this->end, $zone);
 
-        return [new \DateTimeImmutable($date.' '.$this->start, $zone), $end];
+        return [self::wallClock($date, $this->start, $zone), $end];
     }
 
-    private static function ordered(string $start, string $end): bool
+    private static function wallClock(string $date, string $time, \DateTimeZone $zone): \DateTimeImmutable
     {
-        return $end > $start;
+        $moment = new \DateTimeImmutable($date.' '.$time, $zone);
+        if ($moment->format('Y-m-d H:i') === $date.' '.$time) {
+            return $moment;
+        }
+        // PHP moved the time forward by the length of the gap; the gap ends at the last change before that moment.
+        $changes = $zone->getTransitions($moment->getTimestamp() - 86400, $moment->getTimestamp());
+        $change = end($changes);
+        if (false === $change) {
+            return $moment;
+        }
+
+        return new \DateTimeImmutable('@'.$change['ts'])->setTimezone($zone);
     }
 }

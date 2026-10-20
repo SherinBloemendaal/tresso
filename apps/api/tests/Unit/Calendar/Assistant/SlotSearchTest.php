@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace App\Tests\Unit\Calendar\Assistant;
 
+use App\Calendar\Assistant\AttendeeAvailability;
 use App\Calendar\Assistant\BlockKind;
 use App\Calendar\Assistant\BusyTime;
+use App\Calendar\Assistant\InvalidMeetingTimeQuery;
 use App\Calendar\Assistant\MeetingAttendee;
 use App\Calendar\Assistant\MeetingTimeQuery;
 use App\Calendar\Assistant\NoSlotReason;
@@ -327,29 +329,136 @@ final class SlotSearchTest extends TestCase
         self::assertEquals(self::search($query, busy: $busy), self::search($query, busy: array_reverse($busy)));
     }
 
-    public function testQueryLimitsAreChecked(): void
+    public function testQueryLimitsAreCheckedAndNameTheField(): void
     {
         foreach ([
-            static fn () => self::query('2026-10-19T00:00:00Z', '2026-10-19T00:00:00Z', 30),
-            static fn () => self::query('2026-10-19T00:00:00Z', '2027-01-20T00:00:00Z', 30),
-            static fn () => self::query('2026-10-19T00:00:00Z', '2026-10-20T00:00:00Z', 2),
-            static fn () => self::query('2026-10-19T00:00:00Z', '2026-10-20T00:00:00Z', 30, step: 7),
-            static fn () => self::query('2026-10-19T00:00:00Z', '2026-10-20T00:00:00Z', 30, limit: 51),
-        ] as $make) {
+            'to' => static fn () => self::query('2026-10-19T00:00:00Z', '2026-10-19T00:00:00Z', 30),
+            'to ' => static fn () => self::query('2026-10-19T00:00:00Z', '2027-01-20T00:00:00Z', 30),
+            'durationMinutes' => static fn () => self::query('2026-10-19T00:00:00Z', '2026-10-20T00:00:00Z', 2),
+            'durationMinutes ' => static fn () => self::query('2026-10-19T00:00:00Z', '2026-10-20T00:00:00Z', 1441),
+            'stepMinutes' => static fn () => self::query('2026-10-19T00:00:00Z', '2026-10-20T00:00:00Z', 30, step: 7),
+            'limit' => static fn () => self::query('2026-10-19T00:00:00Z', '2026-10-20T00:00:00Z', 30, limit: 51),
+            'perDay' => static fn () => self::query('2026-10-19T00:00:00Z', '2026-10-20T00:00:00Z', 30, perDay: 0),
+        ] as $field => $make) {
             try {
                 $make();
                 self::fail('The query should have been refused.');
-            } catch (\InvalidArgumentException) {
-                self::addToAssertionCount(1);
+            } catch (InvalidMeetingTimeQuery $e) {
+                self::assertSame(trim($field), $e->field);
             }
         }
     }
 
-    public function testWorkingHoursThatEndBeforeTheyStartHaveNoTime(): void
+    public function testATodoIsPlannedInTheFirstFreeTimeBeforeItsDeadline(): void
     {
-        self::assertSame([], WeeklyTime::workingHours([1, 2], '17:00', '09:00'));
+        $query = MeetingTimeQuery::beforeDeadline(new \DateTimeImmutable('2026-10-19T08:10:00Z'), new \DateTimeImmutable('2026-10-23T12:00:00Z'), 45, ['todo-1']);
+
+        self::assertSame(1, $query->limit);
+        self::assertSame(['todo-1'], $query->ignore);
+        $busy = [self::busy('2026-10-19T08:00:00Z', '2026-10-19T09:00:00Z', 'Standup'), self::busy('2026-10-19T09:00:00Z', '2026-10-19T10:00:00Z', 'Old plan', references: ['todo-1'])];
+        self::assertSame(['2026-10-19T09:00:00+00:00'], self::starts(self::search($query, busy: $busy, now: '2026-10-19T08:10:00Z')));
+    }
+
+    public function testATodoDeadlineFarAwayIsLookedForInTheNext92Days(): void
+    {
+        $query = MeetingTimeQuery::beforeDeadline(new \DateTimeImmutable('2026-10-19T08:00:00Z'), new \DateTimeImmutable('2027-06-01T00:00:00Z'), 30);
+
+        self::assertSame('2027-01-19T08:00:00+00:00', $query->to->format(\DATE_ATOM));
+    }
+
+    public function testATodoWhoseDeadlineHasPassedCannotBePlanned(): void
+    {
+        $this->expectException(InvalidMeetingTimeQuery::class);
+        $this->expectExceptionMessage('The deadline has passed.');
+
+        MeetingTimeQuery::beforeDeadline(new \DateTimeImmutable('2026-10-19T08:00:00Z'), new \DateTimeImmutable('2026-10-19T08:00:00Z'), 30);
+    }
+
+    public function testBusyTimesWithTheSameTimesExplainASlotAlikeInAnyOrder(): void
+    {
+        $busy = [self::busy('2026-10-19T08:00:00Z', '2026-10-19T09:00:00Z', 'Review'), self::busy('2026-10-19T08:00:00Z', '2026-10-19T09:00:00Z', 'Call')];
+        $query = self::query('2026-10-19T07:00:00Z', '2026-10-19T11:00:00Z', 60);
+
+        $forward = self::search($query, busy: $busy);
+        $backward = self::search($query, busy: array_reverse($busy));
+
+        self::assertEquals($forward, $backward);
+        self::assertSame('Call', $forward->slots[0]->freeUntil->label);
+        self::assertSame('Call', $forward->slots[1]->freeFrom->label);
+    }
+
+    public function testAttendeeAddressesAreComparedInLowerCase(): void
+    {
+        $attendee = new MeetingAttendee(' Sam@Example.TEST ');
+        $query = self::query('2026-10-19T07:00:00Z', '2026-10-19T09:00:00Z', 60, attendees: [$attendee]);
+
+        $result = self::search($query, attendeeBusy: ['sam@example.test' => [self::busy('2026-10-19T07:00:00Z', '2026-10-19T08:00:00Z')]]);
+
+        self::assertSame('sam@example.test', $attendee->address);
+        self::assertSame(['2026-10-19T08:00:00+00:00'], self::starts($result));
+    }
+
+    public function testAnAttendeesWorkingHoursCloseTheTimeOutsideThem(): void
+    {
+        // Sam works 09:00 to 17:00 in New York (UTC-4 in October): from 13:00 UTC, which is 15:00 in Amsterdam.
+        $sam = new AttendeeAvailability([], [new WeeklyTime([1, 2, 3, 4, 5], '09:00', '17:00')], new \DateTimeZone('America/New_York'));
+        $query = self::query('2026-10-19T00:00:00Z', '2026-10-20T00:00:00Z', 60, attendees: [new MeetingAttendee('sam@example.test')]);
+
+        $result = self::search($query, attendeeBusy: ['sam@example.test' => $sam->busyIn($query->from, $query->to)]);
+
+        self::assertSame(['2026-10-19T13:00:00+00:00', '2026-10-19T14:00:00+00:00'], self::starts($result));
+        self::assertSame(BlockKind::Attendee, $result->slots[0]->freeFrom->kind);
+        self::assertSame('sam@example.test', $result->slots[0]->freeFrom->label);
+    }
+
+    public function testAnAttendeesWorkingHoursNeedTheirZone(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        new AttendeeAvailability([], [new WeeklyTime([1], '09:00', '17:00')]);
+    }
+
+    public function testWorkingHoursPastMidnightRunIntoTheNextDay(): void
+    {
+        self::assertEquals([new WeeklyTime([5, 6], '22:00', '24:00'), new WeeklyTime([6, 7], '00:00', '06:00')], WeeklyTime::workingHours([5, 6], '22:00', '06:00'));
+        self::assertEquals([new WeeklyTime([7], '22:00', '24:00'), new WeeklyTime([1], '00:00', '06:00')], WeeklyTime::workingHours([7], '22:00', '06:00'));
+        self::assertEquals([new WeeklyTime([1, 2], '09:00', '24:00')], WeeklyTime::workingHours([1, 2], '09:00', '00:00'));
+        self::assertSame([], WeeklyTime::workingHours([1, 2], '09:00', '09:00'));
         self::assertSame([], WeeklyTime::workingHours([], '09:00', '17:00'));
-        self::assertEquals([new WeeklyTime([1, 2], '09:00', '17:30')], WeeklyTime::workingHours([1, 2], '09:00', '17:30'));
+    }
+
+    public function testANightShiftIsOneStretchAcrossMidnight(): void
+    {
+        $rules = self::rules(hours: WeeklyTime::workingHours([1, 2, 3, 4, 5], '22:00', '06:00'));
+
+        // Monday 19 October 2026: 22:00 in Amsterdam is 20:00 UTC; the shift ends at 06:00 on Tuesday, 04:00 UTC.
+        $result = self::search(self::query('2026-10-19T00:00:00Z', '2026-10-21T00:00:00Z', 60, limit: 1), $rules);
+
+        self::assertSame(['2026-10-19T20:00:00+00:00'], self::starts($result));
+        self::assertSame(BlockKind::WorkingHours, $result->slots[0]->freeUntil->kind);
+        self::assertSame('2026-10-20T04:00:00+00:00', $result->slots[0]->freeUntil->at->format(\DATE_ATOM));
+    }
+
+    public function testWorkingHoursUntilMidnightEndAtMidnight(): void
+    {
+        $rules = self::rules(hours: WeeklyTime::workingHours([1], '09:00', '00:00'));
+
+        $result = self::search(self::query('2026-10-19T20:00:00Z', '2026-10-21T00:00:00Z', 60, limit: 5), $rules);
+
+        self::assertSame(['2026-10-19T20:00:00+00:00', '2026-10-19T21:00:00+00:00'], self::starts($result));
+        self::assertSame('2026-10-19T22:00:00+00:00', $result->slots[1]->freeUntil->at->format(\DATE_ATOM));
+    }
+
+    public function testWorkingHoursFromATimeTheClockSkipsStartWhenTheClockJumps(): void
+    {
+        // Amsterdam goes from 02:00 to 03:00 on Sunday 29 March 2026 (01:00 UTC): 02:30 does not exist that day.
+        $rules = self::rules(hours: [new WeeklyTime([7], '02:30', '04:00')]);
+
+        $result = self::search(self::query('2026-03-29T00:00:00Z', '2026-03-30T00:00:00Z', 30, step: 30, limit: 5), $rules);
+
+        self::assertSame(['2026-03-29T01:00:00+00:00', '2026-03-29T01:30:00+00:00'], self::starts($result));
+        self::assertSame(BlockKind::WorkingHours, $result->slots[0]->freeFrom->kind);
+        self::assertSame('2026-03-29T01:00:00+00:00', $result->slots[0]->freeFrom->at->format(\DATE_ATOM));
     }
 
     public function testWeeklyTimesAreChecked(): void

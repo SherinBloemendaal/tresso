@@ -13,7 +13,8 @@ use App\Security\CurrentUser;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
- * Changes the user's scheduling preferences, creating them on the first change.
+ * Changes the user's scheduling preferences, creating them on the first change (also when two first changes come at
+ * once).
  *
  * @implements ProcessorInterface<UpdateSchedulingPreferences, SchedulingPreferencesResource>
  */
@@ -28,20 +29,20 @@ final readonly class SchedulingPreferencesProcessor implements ProcessorInterfac
 
     public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): SchedulingPreferencesResource
     {
-        $preferences = $this->preferences->forUser($this->currentUser->get());
-        if (null !== $data->bufferMinutes) {
-            $preferences->setBufferMinutes($data->bufferMinutes);
-        }
-        if (null !== $data->travelMinutes) {
-            $preferences->setTravelMinutes($data->travelMinutes);
-        }
-        if (null !== $data->minimumNoticeMinutes) {
-            $preferences->setMinimumNoticeMinutes($data->minimumNoticeMinutes);
-        }
+        return $this->entityManager->wrapInTransaction(function () use ($data): SchedulingPreferencesResource {
+            $preferences = $this->preferences->lockForUser($this->currentUser->get());
+            if (null !== $data->bufferMinutes) {
+                $preferences->setBufferMinutes($data->bufferMinutes);
+            }
+            if (null !== $data->travelMinutes) {
+                $preferences->setTravelMinutes($data->travelMinutes);
+            }
+            if (null !== $data->minimumNoticeMinutes) {
+                $preferences->setMinimumNoticeMinutes($data->minimumNoticeMinutes);
+            }
+            $this->entityManager->flush();
 
-        $this->entityManager->persist($preferences);
-        $this->entityManager->flush();
-
-        return SchedulingPreferencesResource::fromEntity($preferences);
+            return SchedulingPreferencesResource::fromEntity($preferences);
+        });
     }
 }

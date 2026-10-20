@@ -11,6 +11,7 @@ use App\Calendar\Assistant\AssistantUnavailable;
 use App\Calendar\Assistant\EventDraft;
 use App\Calendar\Assistant\EventDraftInterpreter;
 use App\Security\CurrentUser;
+use Symfony\Component\Clock\ClockInterface;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 
 /**
@@ -21,13 +22,14 @@ final readonly class EventDraftProcessor implements ProcessorInterface
     public function __construct(
         private EventDraftInterpreter $interpreter,
         private CurrentUser $currentUser,
+        private ClockInterface $clock,
     ) {
     }
 
     public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): EventDraft
     {
         try {
-            return $this->interpreter->interpret($this->currentUser->get(), trim($data->text), new \DateTimeZone($data->timeZone), new \DateTimeImmutable());
+            return $this->interpreter->interpret($this->currentUser->get(), trim($data->text), new \DateTimeZone($data->timeZone), $this->clock->now());
         } catch (AssistantUnavailable $e) {
             throw new HttpException(501, $e->getMessage(), $e);
         }

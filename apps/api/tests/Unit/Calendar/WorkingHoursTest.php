@@ -44,6 +44,31 @@ final class WorkingHoursTest extends TestCase
         self::assertNull(WorkingHours::nextStart($preferences, new \DateTimeImmutable('2026-10-23T16:00:00+00:00')));
     }
 
+    public function testWorkingHoursPastMidnightRunIntoTheNextDay(): void
+    {
+        $preferences = self::preferences();
+        // A night shift from Monday to Friday, 22:00 to 06:00 in Amsterdam (UTC+2 in October).
+        $preferences->setWorkingHours([1, 2, 3, 4, 5], '22:00', '06:00');
+
+        self::assertTrue(WorkingHours::contains($preferences, new \DateTimeImmutable('2026-10-20T01:00:00+00:00')), 'Tuesday 03:00 is in Monday\'s shift.');
+        self::assertTrue(WorkingHours::contains($preferences, new \DateTimeImmutable('2026-10-24T01:00:00+00:00')), 'Saturday 03:00 is in Friday\'s shift.');
+        self::assertFalse(WorkingHours::contains($preferences, new \DateTimeImmutable('2026-10-19T01:00:00+00:00')), 'Monday 03:00 follows a free Sunday.');
+        self::assertFalse(WorkingHours::contains($preferences, new \DateTimeImmutable('2026-10-20T10:00:00+00:00')));
+        self::assertSame('Mon 2026-10-19 22:00', WorkingHours::nextStart($preferences, new \DateTimeImmutable('2026-10-19T10:00:00+00:00'))?->format('D Y-m-d H:i'));
+        self::assertSame('Mon 2026-10-26 22:00', WorkingHours::nextStart($preferences, new \DateTimeImmutable('2026-10-24T10:00:00+00:00'))?->format('D Y-m-d H:i'));
+        // A reminder at 21:50 for a 21:55 event moves to the end of the shift that morning.
+        self::assertSame('Wed 2026-10-21 06:00', WorkingHours::shiftEarly($preferences, new \DateTimeImmutable('2026-10-21T19:50:00+00:00'), new \DateTimeImmutable('2026-10-21T19:55:00+00:00'))?->format('D Y-m-d H:i'));
+    }
+
+    public function testWorkingHoursUntilMidnightEndAtMidnight(): void
+    {
+        $preferences = self::preferences();
+        $preferences->setWorkingHours([1, 2, 3, 4, 5], '09:00', '00:00');
+
+        self::assertTrue(WorkingHours::contains($preferences, new \DateTimeImmutable('2026-10-21T21:30:00+00:00')));
+        self::assertFalse(WorkingHours::contains($preferences, new \DateTimeImmutable('2026-10-21T22:30:00+00:00')));
+    }
+
     private static function preferences(): NotificationPreferences
     {
         $preferences = new NotificationPreferences(new User('kim@example.test', 'Kim'));
