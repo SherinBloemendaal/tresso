@@ -90,7 +90,7 @@ describe('bulk management', () => {
     )
     const mail = useMailStore()
     vi.spyOn(mail, 'syncNow').mockResolvedValue()
-    mail.smartInboxes = [{ id: 'news', name: 'Newsletters', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'know', builtin: 'advertise', position: 0 }]
+    mail.smartInboxes = [{ id: 'news', name: 'Newsletters', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'know', builtin: 'advertise', autoCreateTodo: false, position: 0 }]
     mail.accounts = [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown', calendarStatusDetail: null }]
     mail.allFolders = [{ id: 'projects', mailAccountId: 'work', name: 'Projects', displayName: 'Projects', role: 'custom' }]
   })
