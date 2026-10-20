@@ -120,6 +120,10 @@ class Message implements TracksChanges
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $classifiedAt = null;
 
+    /** When the user deleted the automatic todo made from this message: none is made for it again. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $todoDeclinedAt = null;
+
     /**
      * The batch this message waits for: its smart inbox delivers in batches, so clients keep it out of the lists and
      * notifications until then. Null once delivered.
@@ -324,6 +328,17 @@ class Message implements TracksChanges
     public function getClassifiedAt(): ?\DateTimeImmutable
     {
         return $this->classifiedAt;
+    }
+
+    public function getTodoDeclinedAt(): ?\DateTimeImmutable
+    {
+        return $this->todoDeclinedAt;
+    }
+
+    /** The user deleted the automatic todo made from this message. */
+    public function declineTodo(\DateTimeImmutable $at): void
+    {
+        $this->todoDeclinedAt ??= $at;
     }
 
     /** The smart inbox and verdict classification gave this message. The thread takes those of its newest one. */
