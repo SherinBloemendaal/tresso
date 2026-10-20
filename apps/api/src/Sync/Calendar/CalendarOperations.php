@@ -54,8 +54,10 @@ final readonly class CalendarOperations
         $error = trim((string) $result->error);
 
         if (OperationResultInput::RETRY === $result->outcome && null !== $object && null !== $result->remoteId && CalendarOperationKind::Put === $operation->getKind()) {
-            // Part of the write reached the provider (Google and Microsoft write a series step by step): the next
-            // attempt is based on the version that made, instead of conflicting with it.
+            // Part of the write reached the provider: Google and Microsoft write a series step by step (the master,
+            // then each occurrence), and their worker reports the version the steps so far made. The next attempt is
+            // based on it instead of conflicting with it. When no attempt is left, the provider's version that comes
+            // with the result replaces Tresso's (below), so the two do not stay apart.
             $object->stored($result->remoteId, $result->etag);
         }
 
