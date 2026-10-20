@@ -56,6 +56,13 @@ export interface SyncedThread {
   verdict: Verdict | null
   /** Why it is there (see `ClassificationReason`); `user` when the user put it there. */
   classificationReason: string | null
+  /**
+   * The batch the conversation waits for (its smart inbox delivers in batches): until then it is in no list and
+   * raises no notification. Null once delivered.
+   */
+  heldUntil?: string | null
+  /** The batch that delivered it; null when it was delivered as it came. */
+  batchedAt?: string | null
 }
 
 export interface MessageFlags {
@@ -89,6 +96,38 @@ export interface SyncedMessage {
   summary: string | null
   /** The iTIP method of the calendar object the message carries (REQUEST, CANCEL, REPLY, ...), or null. */
   calendarMethod: string | null
+  /** The batch this message waits for; null once delivered (see `SyncedThread.heldUntil`). */
+  heldUntil?: string | null
+  /** The batch that delivered it; null when it was delivered as it came. */
+  batchedAt?: string | null
+  /**
+   * How its sender can be unsubscribed from with one click: an RFC 8058 one-click request, or a mail to the list's
+   * `mailto:` address in the sender's own domain. Null when the message offers neither, or its sender is not
+   * authenticated (other unsubscribe links are never followed).
+   */
+  unsubscribe?: UnsubscribeMethod | null
+  /** For `mailto`: the one address the unsubscribe mail goes to, shown to the user before it is sent. */
+  unsubscribeMailto?: string | null
+}
+
+export type UnsubscribeMethod = 'oneClick' | 'mailto'
+
+export type UnsubscribeStatus = 'pending' | 'done' | 'failed'
+
+/**
+ * The user's request to stop mail from a sender (the lower-cased From address) to one of their accounts. One per
+ * account and sender; the button is offered again only after a failure.
+ */
+export interface SyncedUnsubscription {
+  id: string
+  mailAccountId: string
+  sender: string
+  method: UnsubscribeMethod
+  status: UnsubscribeStatus
+  /** Why it failed, or why the last attempt did not work yet; safe to show. */
+  error: string | null
+  requestedAt: string
+  completedAt: string | null
 }
 
 
@@ -134,6 +173,8 @@ export interface SyncedSmartInbox {
   verdict: Verdict
   /** New unread mail judged `do` here becomes a todo; only with the `do` verdict. */
   autoCreateTodo: boolean
+  /** New mail waits for the user's next batch time instead of arriving as it comes. */
+  batchDelivery?: boolean
   /** Sidebar order. */
   position: number
 }
@@ -244,6 +285,8 @@ export interface ChangePage {
   eventNotes: SyncedEventNote[]
   todos: SyncedTodo[]
   mailNotifications: SyncedMailNotification[]
+  /** May be left out when there are none. */
+  unsubscriptions?: SyncedUnsubscription[]
   deleted: Deleted[]
 }
 

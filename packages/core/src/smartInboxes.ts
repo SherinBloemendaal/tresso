@@ -13,6 +13,8 @@ export interface NewSmartInbox {
   verdict: Verdict
   /** New unread mail judged `do` here becomes a todo; only with the `do` verdict. */
   autoCreateTodo: boolean
+  /** Hold new mail until the user's next batch time; false when left out. */
+  batchDelivery?: boolean
 }
 
 /** JSON merge patch: omitted fields stay as they are; the lists are replaced as a whole. */

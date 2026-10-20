@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MissingFolderError } from '../actions'
-import type { ChangePage, SyncedMessage, SyncedOutgoingMessage, SyncedSmartInbox, SyncedThread, SyncedTodo } from '../sync/types'
+import type { ChangePage, SyncedMessage, SyncedOutgoingMessage, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
 import type { Draft, MailStore } from './mailStore'
 
 /** Test data for the mail stores. */
@@ -23,7 +23,7 @@ export function signature(id: string, name: string) {
   return { id, name, html: `<p>${name}</p>`, updatedAt: '2026-10-19T08:00:00+00:00' }
 }
 
-export function thread(id: string, mailAccountId: string, classification: Partial<Pick<SyncedThread, 'smartInboxId' | 'verdict' | 'classificationReason'>> = {}): SyncedThread {
+export function thread(id: string, mailAccountId: string, classification: Partial<Pick<SyncedThread, 'smartInboxId' | 'verdict' | 'classificationReason' | 'heldUntil' | 'batchedAt'>> = {}): SyncedThread {
   return { id, mailAccountId, subject: `Subject ${id}`, messageCount: 1, lastMessageAt: '2026-10-19T08:00:00+00:00', smartInboxId: null, verdict: null, classificationReason: null, ...classification }
 }
 
@@ -71,6 +71,10 @@ export function message(id: string, threadId: string, mailAccountId: string, fol
     calendarMethod: null,
     ...extra,
   }
+}
+
+export function unsubscription(id: string, mailAccountId: string, sender: string, extra: Partial<SyncedUnsubscription> = {}): SyncedUnsubscription {
+  return { id, mailAccountId, sender, method: 'oneClick', status: 'pending', error: null, requestedAt: '2026-10-19T12:00:00+00:00', completedAt: null, ...extra }
 }
 
 export function draft(id: string, extra: Partial<Draft> = {}): Draft {
@@ -576,6 +580,98 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
 
       it('says when the conversation to classify is gone', async () => {
         expect(await db.classifyThread('gone', 'todo', 'do')).toBeNull()
+      })
+    })
+
+    describe('batched delivery', () => {
+      const held = '2026-10-19T16:00:00+00:00'
+      const heldMessage = { smartInboxId: 'news', verdict: 'know' as const, heldUntil: held }
+
+      beforeEach(async () => {
+        await db.apply(
+          page({
+            cursor: 30,
+            smartInboxes: [{ ...smartInbox('news', 'advertise', 3), batchDelivery: true }],
+            threads: [
+              thread('t7', 'work', { smartInboxId: 'news', verdict: 'know', heldUntil: held }),
+              thread('t8', 'home', { smartInboxId: 'news', verdict: 'know', heldUntil: held }),
+            ],
+            messages: [
+              message('m7', 't7', 'work', ['work-inbox'], '2026-10-19T12:00:00+00:00', heldMessage),
+              message('m8', 't8', 'home', ['home-inbox'], '2026-10-19T13:00:00+00:00', heldMessage),
+            ],
+          }),
+        )
+      })
+
+      it('keeps held conversations out of every list and count until their batch delivers them', async () => {
+        expect((await db.inbox(null, 10)).map((c) => c.threadId)).toEqual(['t1', 't3'])
+        expect((await db.list({ kind: 'smartInbox', smartInboxId: 'news' }, 10)).map((c) => c.threadId)).toEqual([])
+        expect((await db.list({ kind: 'batch' }, 10)).map((c) => c.threadId)).toEqual([])
+        expect(Object.fromEntries(await db.unreadInboxCounts())).toEqual({ work: 1, home: 0 })
+        expect(Object.fromEntries(await db.unreadSmartInboxCounts())).toEqual({ news: 0 })
+        expect((await db.smartInboxes())[0]?.batchDelivery).toBe(true)
+
+        await db.apply(page({ cursor: 31, threads: [thread('t7', 'work', { smartInboxId: 'news', verdict: 'know', heldUntil: null, batchedAt: held })] }))
+
+        expect((await db.inbox(null, 10)).map((c) => c.threadId)).toEqual(['t7', 't1', 't3'])
+        expect((await db.list({ kind: 'batch' }, 10)).map((c) => ({ threadId: c.threadId, batchedAt: c.batchedAt, heldUntil: c.heldUntil }))).toEqual([
+          { threadId: 't7', batchedAt: Date.parse(held), heldUntil: null },
+        ])
+        expect(Object.fromEntries(await db.unreadSmartInboxCounts())).toEqual({ news: 1 })
+      })
+
+      it('lists the batches newest batch first, and leaves out what was archived since', async () => {
+        await db.apply(
+          page({
+            cursor: 31,
+            threads: [
+              thread('t7', 'work', { smartInboxId: 'news', verdict: 'know', batchedAt: '2026-10-19T09:00:00+00:00' }),
+              thread('t8', 'home', { smartInboxId: 'news', verdict: 'know', batchedAt: held }),
+              thread('t1', 'work', { batchedAt: held }),
+            ],
+          }),
+        )
+
+        expect((await db.list({ kind: 'batch' }, 10)).map((c) => c.threadId)).toEqual(['t8', 't1', 't7'])
+        expect(await db.listThreadIds({ kind: 'batch' }, () => true)).toEqual(['t8', 't1', 't7'])
+
+        await db.apply(page({ cursor: 32, messages: [message('m7', 't7', 'work', ['work-archive'], '2026-10-19T12:00:00+00:00', { smartInboxId: 'news', verdict: 'know' })] }))
+        expect((await db.list({ kind: 'batch' }, 10)).map((c) => c.threadId)).not.toContain('t7')
+      })
+    })
+
+    describe('unsubscribe', () => {
+      it('keeps the requests the delta brings and drops those of a deleted account', async () => {
+        await db.apply(page({ cursor: 30, unsubscriptions: [unsubscription('u1', 'work', 'news@shop.example'), unsubscription('u2', 'home', 'digest@club.example', { method: 'mailto' })] }))
+        await db.apply(page({ cursor: 31, unsubscriptions: [unsubscription('u1', 'work', 'news@shop.example', { status: 'done', completedAt: '2026-10-19T12:01:00+00:00' })] }))
+
+        expect(await db.unsubscriptions()).toEqual([
+          unsubscription('u1', 'work', 'news@shop.example', { status: 'done', completedAt: '2026-10-19T12:01:00+00:00' }),
+          unsubscription('u2', 'home', 'digest@club.example', { method: 'mailto' }),
+        ])
+
+        await db.apply(page({ cursor: 32, deleted: [{ type: 'mailAccount', id: 'home' }] }))
+        expect((await db.unsubscriptions()).map((u) => u.id)).toEqual(['u1'])
+      })
+
+      it('stores the answer to a request at once, without undoing what the delta brought since', async () => {
+        await db.noteUnsubscription(unsubscription('u1', 'work', 'news@shop.example'))
+        expect((await db.unsubscriptions()).map((u) => u.status)).toEqual(['pending'])
+
+        await db.apply(page({ cursor: 30, unsubscriptions: [unsubscription('u1', 'work', 'news@shop.example', { status: 'failed', error: 'Refused.' })] }))
+        await db.noteUnsubscription(unsubscription('u1', 'work', 'news@shop.example'))
+        expect((await db.unsubscriptions()).map((u) => u.status)).toEqual(['failed'])
+
+        // Asked again after the failure: a newer request.
+        await db.noteUnsubscription(unsubscription('u1', 'work', 'news@shop.example', { requestedAt: '2026-10-19T13:00:00+00:00' }))
+        expect((await db.unsubscriptions()).map((u) => u.status)).toEqual(['pending'])
+      })
+
+      it('carries how a message can be unsubscribed from', async () => {
+        await db.apply(page({ cursor: 30, messages: [message('m2', 't1', 'work', ['work-inbox'], '2026-10-19T09:00:00+02:00', { unsubscribe: 'oneClick' })] }))
+
+        expect((await db.thread('t1'))?.messages.find((m) => m.id === 'm2')?.unsubscribe).toBe('oneClick')
       })
     })
   })

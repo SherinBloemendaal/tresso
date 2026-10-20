@@ -2,7 +2,7 @@ import type { AppliedAction, MessageAction } from '../actions'
 import type { Verdict } from '../domain'
 import type { ConversationSummary, ListScope } from '../sync/conversation'
 import type { SyncStore } from '../sync/engine'
-import type { Address, DraftAttachment, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo } from '../sync/types'
+import type { Address, DraftAttachment, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedUnsubscription, SyncedTodo } from '../sync/types'
 
 /** Someone the user exchanged mail with, for recipient suggestions. */
 export interface Contact {
@@ -82,7 +82,10 @@ export interface MailStore extends SyncStore {
   smartInboxes(): Promise<SyncedSmartInbox[]>
   /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
   inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]>
-  /** The threads of a list (an inbox or a smart inbox), newest first. */
+  /**
+   * The threads of a list, newest first: an inbox or a smart inbox (neither lists a conversation that waits for a
+   * batch), or the batches (newest batch first, newest conversation first within a batch).
+   */
   list(scope: ListScope, limit: number): Promise<ConversationSummary[]>
   /**
    * Threads of a list matching a test, newest first, however many there are: for selecting beyond the part of the list
@@ -112,6 +115,13 @@ export interface MailStore extends SyncStore {
    * even one with the same placement (the request went through and only its answer was lost).
    */
   restoreThread(previous: SyncedThread, optimistic: { smartInboxId: string; verdict: Verdict }): Promise<void>
+  /** The user's unsubscribe requests, of every account. */
+  unsubscriptions(): Promise<SyncedUnsubscription[]>
+  /**
+   * Stores the server's answer to an unsubscribe request at once, so the button goes before the delta brings it; a
+   * copy the delta brought for the same request is kept (see `newerUnsubscription`).
+   */
+  noteUnsubscription(unsubscription: SyncedUnsubscription): Promise<void>
   /** Outgoing mail that is not settled: scheduled, on its way, or failed. Newest first. */
   outbox(): Promise<SyncedOutgoingMessage[]>
   outgoing(id: string): Promise<SyncedOutgoingMessage | null>

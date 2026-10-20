@@ -73,6 +73,8 @@ describe('summarizeConversation', () => {
       ],
       inbox: true,
       active: true,
+      heldUntil: null,
+      batchedAt: null,
       smartInboxId: 'todo',
       verdict: 'do',
       classificationReason: 'direct',
@@ -101,6 +103,19 @@ describe('summarizeConversation', () => {
     expect(inList(summary, { kind: 'inbox', mailAccountId: 'work' })).toBe(true)
     expect(inList(summary, { kind: 'inbox', mailAccountId: 'home' })).toBe(false)
     expect(inList(summary, { kind: 'smartInbox', smartInboxId: 'other' })).toBe(false)
+  })
+
+  it('lists a held conversation nowhere, and a delivered batch in the batches while it is in an inbox', () => {
+    const inInbox = [message('m1', 'a@example.test', '2026-10-19T07:00:00Z', { folderIds: ['inbox'] })]
+    const held = summarizeConversation({ ...thread, heldUntil: '2026-10-19T16:00:00Z' }, inInbox, lists)!
+
+    expect(held).toMatchObject({ inbox: false, active: false, heldUntil: Date.parse('2026-10-19T16:00:00Z'), batchedAt: null })
+    expect(inList(held, { kind: 'batch' })).toBe(false)
+
+    const delivered = summarizeConversation({ ...thread, batchedAt: '2026-10-19T16:00:00Z' }, inInbox, lists)!
+    expect(delivered).toMatchObject({ inbox: true, active: true, heldUntil: null, batchedAt: Date.parse('2026-10-19T16:00:00Z') })
+    expect(inList(delivered, { kind: 'batch' })).toBe(true)
+    expect(inList({ ...delivered, inbox: false }, { kind: 'batch' })).toBe(false)
   })
 
   it('has nothing to show for a thread without messages, and knows when it is not in an inbox', () => {
