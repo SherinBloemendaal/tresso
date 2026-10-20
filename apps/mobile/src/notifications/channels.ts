@@ -1,11 +1,12 @@
 import { AndroidImportance, setNotificationChannelAsync } from 'expo-notifications'
 
 /**
- * The Android channels the API names in its pushes (PushMessage.php: `reminders`, and `reminders_silent` for
- * reminders delivered in quiet hours or focus). A push naming a channel the phone does not have is shown in Android's
- * fallback channel, so both exist before any push arrives. iOS has no channels.
+ * The Android channels the API names in its pushes (PushMessage.php): `reminders` for calendar notifications and
+ * `mail` for new mail that needs the user, each with a `_silent` twin for deliveries in quiet hours or focus. A push
+ * naming a channel the phone does not have is shown in Android's fallback channel, so all of them exist before any push
+ * arrives. iOS has no channels.
  */
-export async function createReminderChannels(platform: string): Promise<void> {
+export async function createNotificationChannels(platform: string): Promise<void> {
   if (platform !== 'android') {
     return
   }
@@ -18,6 +19,20 @@ export async function createReminderChannels(platform: string): Promise<void> {
   await setNotificationChannelAsync('reminders_silent', {
     name: 'Quiet reminders',
     description: 'Reminders that come during quiet hours or focus: in the list, without sound.',
+    importance: AndroidImportance.LOW,
+    sound: null,
+    enableVibrate: false,
+  })
+  // Mail that needs the user (judged Do or Hand over) comes as a banner with sound, like a reminder.
+  await setNotificationChannelAsync('mail', {
+    name: 'New mail that needs you',
+    description: 'New mail judged Do or Hand over. Other mail never notifies.',
+    importance: AndroidImportance.HIGH,
+    sound: 'default',
+  })
+  await setNotificationChannelAsync('mail_silent', {
+    name: 'Quiet mail',
+    description: 'New mail that needs you, during quiet hours or while you are busy: in the list, without sound.',
     importance: AndroidImportance.LOW,
     sound: null,
     enableVibrate: false,

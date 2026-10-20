@@ -3,6 +3,7 @@ import { useRouter } from 'expo-router'
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useAuth } from '@/auth/AuthProvider'
+import { useNotices } from '@/components/Notices'
 import { Icon } from '@/components/Icon'
 import { InboxList } from '@/components/InboxList'
 import { useComposer } from '@/compose/ComposerProvider'
@@ -78,6 +79,12 @@ function SignIn({ styles }: { styles: Styles }) {
 
 function SignedIn({ styles }: { styles: Styles }) {
   const auth = useAuth()
+  const notices = useNotices()
+  const signOut = () => {
+    auth.signOut().catch((error: unknown) => {
+      notices.notify({ text: `Signed out, but this phone may still get your notifications until someone signs in here: ${error instanceof Error ? error.message : String(error)}`, tone: 'error' })
+    })
+  }
   const mail = useMail()
   const { composer } = useComposer()
   const router = useRouter()
@@ -119,7 +126,7 @@ function SignedIn({ styles }: { styles: Styles }) {
                 <Text style={styles.secondaryLabel}>Drafts {drafts}</Text>
               </Pressable>
             )}
-            <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => void auth.signOut()} accessibilityRole="button">
+            <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={signOut} accessibilityRole="button">
               <Text style={styles.secondaryLabel}>Sign out</Text>
             </Pressable>
           </View>

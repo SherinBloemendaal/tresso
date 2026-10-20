@@ -10,21 +10,23 @@ vi.mock('expo-notifications', () => ({
   },
 }))
 
-const { createReminderChannels } = await import('./channels')
+const { createNotificationChannels } = await import('./channels')
 
-describe('createReminderChannels', () => {
+describe('createNotificationChannels', () => {
   beforeEach(() => created.clear())
 
-  it('creates the channels the API sends reminders on: a banner with sound, and a silent one', async () => {
-    await createReminderChannels('android')
+  it('creates the channels the API sends reminders and mail on: a banner with sound, and a silent twin of each', async () => {
+    await createNotificationChannels('android')
 
-    expect([...created.keys()]).toEqual(['reminders', 'reminders_silent'])
+    expect([...created.keys()]).toEqual(['reminders', 'reminders_silent', 'mail', 'mail_silent'])
     expect(created.get('reminders')).toMatchObject({ importance: 4, sound: 'default' })
     expect(created.get('reminders_silent')).toMatchObject({ importance: 2, sound: null, enableVibrate: false })
+    expect(created.get('mail')).toMatchObject({ importance: 4, sound: 'default' })
+    expect(created.get('mail_silent')).toMatchObject({ importance: 2, sound: null, enableVibrate: false })
   })
 
   it('creates none on iOS', async () => {
-    await createReminderChannels('ios')
+    await createNotificationChannels('ios')
 
     expect(created.size).toBe(0)
   })
