@@ -332,7 +332,13 @@ final readonly class MailNotifier
 
         $user = $notification->getUser();
         $preferences = $this->preferences->forUser($user);
-        if ($notification->isSummary()) {
+        if ($notification->isSummary() && 1 === \count($needed)) {
+            // Only one still needs the user: it says what that one says and opens its conversation.
+            [$only] = $needed;
+            $preferences->isMailPreviews()
+                ? $notification->narrowTo($only->getThread(), self::title($only), self::body($only))
+                : $notification->narrowTo($only->getThread(), self::withoutContent($only), '');
+        } elseif ($notification->isSummary()) {
             // Says how many still need the user now; previews as they are set now.
             usort($needed, static fn (Message $a, Message $b): int => $b->getReceivedAt() <=> $a->getReceivedAt());
             [$title, $body] = self::summaryText($needed, $preferences->isMailPreviews());
@@ -399,7 +405,7 @@ final readonly class MailNotifier
             NotificationKind::Mail->value,
             $notification->getTitle(),
             $notification->getBody(),
-            $notification->isSummary() ? self::BATCHES_PATH : (null === $threadId ? null : '/thread/'.$threadId),
+            null !== $threadId ? '/thread/'.$threadId : ($notification->isSummary() ? self::BATCHES_PATH : null),
             $notification->isSilent(),
             $now->modify(self::EXPIRES),
             $data,
