@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { dueLabel, todoSourceMessage, type SyncedFolder, type SyncedMessage, type SyncedThread, type SyncedTodo } from '@tresso/core'
@@ -22,13 +22,22 @@ export default function ThreadScreen() {
   const styles = useMemo(() => makeStyles(theme), [theme])
   const [thread, setThread] = useState<SyncedThread | null>(null)
   const [messages, setMessages] = useState<SyncedMessage[]>([])
-  const [missing, setMissing] = useState(false)
+  const [notFound, setNotFound] = useState(false)
   const [expanded, setExpanded] = useState<Set<string> | null>(null)
   const [folders, setFolders] = useState<SyncedFolder[]>([])
   const [todos, setTodos] = useState<SyncedTodo[]>([])
   const [ownAddresses, setOwnAddresses] = useState<string[]>([])
   const [makingTodo, setMakingTodo] = useState(false)
-  const { thread: load, folders: loadFolders, todosOfThread, mailAccounts, version } = mail
+  const { thread: load, folders: loadFolders, todosOfThread, mailAccounts, version, pulls, syncNow } = mail
+  /**
+   * The pulls done when this conversation opened. Until one more is done, a conversation that is not in the copy may
+   * just not have arrived yet (a tapped notification can be quicker than the delta), so it shows as loading.
+   */
+  const [opened, setOpened] = useState({ id, pulls })
+  if (opened.id !== id) {
+    setOpened({ id, pulls })
+  }
+  const missing = notFound && pulls > opened.pulls
   const router = useRouter()
   const insets = useSafeAreaInsets()
   const actions = useMessageActions()
@@ -36,6 +45,8 @@ export default function ThreadScreen() {
   /** The conversation that was read on open; another one (the screen reused for a link) is read again. */
   const read = useRef<string | null>(null)
   const mounted = useRef(true)
+  /** The conversation a pull was asked for because it was not in the copy, so it is asked once. */
+  const pulledFor = useRef<string | null>(null)
   const notices = useNotices()
   const { composer } = useComposer()
 
@@ -119,7 +130,12 @@ export default function ThreadScreen() {
       if (!current) {
         return
       }
-      setMissing(result === null)
+      setNotFound(result === null)
+      if (result === null && pulledFor.current !== id) {
+        // Not here (yet): pull now, so it either arrives or is known to be gone.
+        pulledFor.current = id
+        void syncNow()
+      }
       setThread(result?.thread ?? null)
       setMessages(result?.messages ?? [])
       // Opening a conversation reads it, once; actions taken meanwhile wait for that.
@@ -145,7 +161,7 @@ export default function ThreadScreen() {
     return () => {
       current = false
     }
-  }, [load, id, version, after, run])
+  }, [load, id, version, after, run, syncNow])
 
   const flagged = messages.some((message) => message.flags.flagged)
 
@@ -193,6 +209,7 @@ export default function ThreadScreen() {
     <>
       <Stack.Screen options={{ headerShown: true, title: '', headerBackTitle: 'Inbox' }} />
       <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+        {notFound && !missing && <ActivityIndicator accessibilityLabel="Loading the conversation" />}
         {missing && <Text style={styles.muted}>This conversation no longer exists.</Text>}
         {thread !== null && (
           <>

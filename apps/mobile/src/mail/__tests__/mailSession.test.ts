@@ -132,6 +132,20 @@ describe('MailSession', () => {
     expect(disk.files.has(databaseName('kim'))).toBe(false)
   })
 
+  it('counts the pulls that completed, so a screen knows a missing conversation is really gone', async () => {
+    const disk = device()
+    const fetchPage = vi.fn(async (since: number) => page(since === 0 ? 1 : since, since === 0 ? { mailAccounts: [account] } : {}))
+    const { mail, last } = session(disk, fetchPage)
+    await mail.switchTo('kim')
+    await vi.waitFor(() => expect(last().pulls).toBeGreaterThan(0))
+    const before = last().pulls
+
+    await mail.syncNow()
+
+    expect(last().pulls).toBe(before + 1)
+    await mail.switchTo(null)
+  })
+
   it('rests the connection in the background and catches up in front', async () => {
     const disk = device()
     const fetchPage = vi.fn(async (since: number) => page(since === 0 ? 1 : since, since === 0 ? { mailAccounts: [account] } : {}))

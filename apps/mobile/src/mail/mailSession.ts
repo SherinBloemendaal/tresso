@@ -31,6 +31,11 @@ export interface MailState {
   syncError: string | null
   /** The realtime connection is up, so changes arrive as they happen. */
   live: boolean
+  /**
+   * Pulls of the delta that completed: a screen opened from a notification waits for one after it opened before it
+   * says a conversation is not there (it may not have reached the copy yet).
+   */
+  pulls: number
 }
 
 export interface MailSessionDeps {
@@ -66,7 +71,7 @@ export function databaseName(userId: string): string {
  * deleted once it is closed and a sign-out during opening leaves nothing behind.
  */
 export class MailSession {
-  private state: MailState = { userId: null, ready: false, version: 0, syncState: 'idle', syncError: null, live: false }
+  private state: MailState = { userId: null, ready: false, version: 0, syncState: 'idle', syncError: null, live: false, pulls: 0 }
   private queue: Promise<void> = Promise.resolve()
   /** Goes up with every switch asked for: a switch that a newer one replaced stops where it is. */
   private wanted = 0
@@ -285,7 +290,7 @@ export class MailSession {
     try {
       await run()
       if (this.open === open) {
-        this.update({ syncState: 'idle', syncError: null })
+        this.update({ syncState: 'idle', syncError: null, pulls: this.state.pulls + 1 })
       }
     } catch (error) {
       if (this.open === open) {
