@@ -3,16 +3,16 @@ import type { Verdict } from '../domain'
 import { sortSmartInboxes } from '../smartInboxes'
 import { compareTodos } from '../todos'
 import { inList, summarizeConversation, type ConversationSummary, type ListFolders, type ListScope } from '../sync/conversation'
-import type { ChangePage, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo } from '../sync/types'
+import type { ChangePage, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
 import { CopyClosingError, type Contact, type Draft, type MailStore } from './mailStore'
-import { classifiedByUser, contactMatches, deletedDraft, draftOnlyHere, mergeContact, peopleOn, stillAsClassified, storedDraft, syncedDraft } from './rules'
+import { classifiedByUser, contactMatches, deletedDraft, draftOnlyHere, mergeContact, newerUnsubscription, peopleOn, stillAsClassified, storedDraft, syncedDraft } from './rules'
 import type { Sql, SqlValue } from './sql'
 
 /**
  * Raised whenever the copy changes shape. A copy made by another version is emptied and synced again from the start,
  * so nothing it skipped stays missing; drafts that exist only on this device are carried over.
  */
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
@@ -32,11 +32,13 @@ CREATE TABLE IF NOT EXISTS conversations (
   last_message_at INTEGER NOT NULL,
   smart_inbox_id TEXT,
   active INTEGER NOT NULL,
+  batched_at INTEGER,
   json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS conversations_by_inbox ON conversations (inbox, last_message_at);
 CREATE INDEX IF NOT EXISTS conversations_by_account_inbox ON conversations (mail_account_id, inbox, last_message_at);
 CREATE INDEX IF NOT EXISTS conversations_by_smart_inbox ON conversations (smart_inbox_id, active, last_message_at);
+CREATE INDEX IF NOT EXISTS conversations_by_batch ON conversations (inbox, batched_at, last_message_at);
 CREATE TABLE IF NOT EXISTS smart_inboxes (id TEXT PRIMARY KEY NOT NULL, builtin TEXT, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outgoing (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS outgoing_by_account ON outgoing (mail_account_id);
@@ -48,10 +50,11 @@ CREATE TABLE IF NOT EXISTS signatures (id TEXT PRIMARY KEY NOT NULL, json TEXT N
 CREATE TABLE IF NOT EXISTS todos (id TEXT PRIMARY KEY NOT NULL, message_id TEXT, thread_id TEXT, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS todos_by_message ON todos (message_id);
 CREATE INDEX IF NOT EXISTS todos_by_thread ON todos (thread_id);
+CREATE TABLE IF NOT EXISTS unsubscriptions (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, json TEXT NOT NULL);
 `
 
 /** Every table any version made, so a rebuild leaves none of an old shape behind. */
-const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'todos', 'meta']
+const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'todos', 'unsubscriptions', 'meta']
 
 type JsonRow = { json: string }
 
@@ -277,6 +280,9 @@ export class SqliteMailStore implements MailStore {
           await rememberContacts(tx, message)
         }
       }
+      for (const unsubscription of page.unsubscriptions ?? []) {
+        await writeUnsubscription(tx, unsubscription)
+      }
       for (const outgoing of page.outgoingMessages) {
         await tx.run('INSERT OR REPLACE INTO outgoing (id, mail_account_id, json) VALUES (?, ?, ?)', [outgoing.id, outgoing.mailAccountId, JSON.stringify(outgoing)])
       }
@@ -370,13 +376,13 @@ export class SqliteMailStore implements MailStore {
 
   async list(scope: ListScope, limit: number): Promise<ConversationSummary[]> {
     const [where, params] = listWhere(scope)
-    const rows = await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE ${where} ORDER BY last_message_at DESC, thread_id DESC LIMIT ?`, [...params, limit])
+    const rows = await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE ${where} ORDER BY ${listOrder(scope)} LIMIT ?`, [...params, limit])
     return rows.map((row) => parse<ConversationSummary>(row))
   }
 
   async listThreadIds(scope: ListScope, matches: (conversation: ConversationSummary) => boolean): Promise<string[]> {
     const [where, params] = listWhere(scope)
-    const rows = await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE ${where} ORDER BY last_message_at DESC, thread_id DESC`, params)
+    const rows = await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE ${where} ORDER BY ${listOrder(scope)}`, params)
     return rows.map((row) => parse<ConversationSummary>(row)).filter(matches).map((conversation) => conversation.threadId)
   }
 
@@ -462,6 +468,19 @@ export class SqliteMailStore implements MailStore {
         }
       }),
     )
+  }
+
+  async unsubscriptions(): Promise<SyncedUnsubscription[]> {
+    return (await this.reader.all<JsonRow>('SELECT json FROM unsubscriptions ORDER BY id')).map((row) => parse<SyncedUnsubscription>(row))
+  }
+
+  noteUnsubscription(unsubscription: SyncedUnsubscription): Promise<void> {
+    return this.write(async () => {
+      const row = await this.sql.first<JsonRow>('SELECT json FROM unsubscriptions WHERE id = ?', [unsubscription.id])
+      if (newerUnsubscription(row === null ? null : parse<SyncedUnsubscription>(row), unsubscription)) {
+        await writeUnsubscription(this.sql, unsubscription)
+      }
+    })
   }
 
   async outbox(): Promise<SyncedOutgoingMessage[]> {
@@ -599,6 +618,10 @@ async function writeMessage(tx: Sql, message: SyncedMessage): Promise<void> {
   }
 }
 
+async function writeUnsubscription(tx: Sql, unsubscription: SyncedUnsubscription): Promise<void> {
+  await tx.run('INSERT OR REPLACE INTO unsubscriptions (id, mail_account_id, json) VALUES (?, ?, ?)', [unsubscription.id, unsubscription.mailAccountId, JSON.stringify(unsubscription)])
+}
+
 async function writeThread(tx: Sql, thread: SyncedThread): Promise<void> {
   await tx.run('INSERT OR REPLACE INTO threads (id, mail_account_id, json) VALUES (?, ?, ?)', [thread.id, thread.mailAccountId, JSON.stringify(thread)])
 }
@@ -656,7 +679,15 @@ function listWhere(scope: ListScope): [string, SqlValue[]] {
   if (scope.kind === 'smartInbox') {
     return ['smart_inbox_id = ? AND active = 1', [scope.smartInboxId]]
   }
+  if (scope.kind === 'batch') {
+    return ['inbox = 1 AND batched_at IS NOT NULL', []]
+  }
   return scope.mailAccountId === null ? ['inbox = 1', []] : ['mail_account_id = ? AND inbox = 1', [scope.mailAccountId]]
+}
+
+/** Newest first; the batches by batch first. */
+function listOrder(scope: ListScope): string {
+  return scope.kind === 'batch' ? 'batched_at DESC, last_message_at DESC, thread_id DESC' : 'last_message_at DESC, thread_id DESC'
 }
 
 async function deleteAccount(tx: Sql, accountId: string): Promise<void> {
@@ -665,7 +696,7 @@ async function deleteAccount(tx: Sql, accountId: string): Promise<void> {
     await writeDraft(tx, { ...parse<Draft>(row), mailAccountId: null })
   }
   await tx.run('DELETE FROM message_folders WHERE message_id IN (SELECT id FROM messages WHERE mail_account_id = ?)', [accountId])
-  for (const table of ['messages', 'threads', 'folders', 'conversations', 'outgoing']) {
+  for (const table of ['messages', 'threads', 'folders', 'conversations', 'outgoing', 'unsubscriptions']) {
     await tx.run(`DELETE FROM ${table} WHERE mail_account_id = ?`, [accountId])
   }
   await tx.run('DELETE FROM mail_accounts WHERE id = ?', [accountId])
@@ -680,7 +711,7 @@ async function refreshConversation(tx: Sql, threadId: string, lists: ListFolders
     return
   }
   await tx.run(
-    'INSERT OR REPLACE INTO conversations (thread_id, mail_account_id, inbox, unread, last_message_at, smart_inbox_id, active, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [threadId, summary.mailAccountId, summary.inbox ? 1 : 0, summary.unreadCount > 0 ? 1 : 0, summary.lastMessageAt, summary.smartInboxId, summary.active ? 1 : 0, JSON.stringify(summary)],
+    'INSERT OR REPLACE INTO conversations (thread_id, mail_account_id, inbox, unread, last_message_at, smart_inbox_id, active, batched_at, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [threadId, summary.mailAccountId, summary.inbox ? 1 : 0, summary.unreadCount > 0 ? 1 : 0, summary.lastMessageAt, summary.smartInboxId, summary.active ? 1 : 0, summary.batchedAt, JSON.stringify(summary)],
   )
 }

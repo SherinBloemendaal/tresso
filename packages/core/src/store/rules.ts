@@ -1,5 +1,5 @@
 import type { Verdict } from '../domain'
-import type { SyncedDraft, SyncedMessage, SyncedThread } from '../sync/types'
+import type { SyncedDraft, SyncedMessage, SyncedThread, SyncedUnsubscription } from '../sync/types'
 import type { Contact, Draft } from './mailStore'
 
 /** Everyone on a new message is a suggestion, under a lower-cased address; addresses without an @ are left out. */
@@ -83,4 +83,12 @@ export function classifiedByUser(thread: SyncedThread, smartInboxId: string, ver
 /** Whether a thread still shows the user's unconfirmed choice, so putting it back undoes nothing the delta brought. */
 export function stillAsClassified(current: SyncedThread | null | undefined, optimistic: { smartInboxId: string; verdict: Verdict }): boolean {
   return current?.smartInboxId === optimistic.smartInboxId && current.verdict === optimistic.verdict && current.classificationReason === 'user'
+}
+
+/**
+ * Whether the answer to an unsubscribe request should replace what the store has: only when it is a newer request
+ * (asked again after a failure). For the same request the stored copy came with the delta, which is at least as new.
+ */
+export function newerUnsubscription(stored: SyncedUnsubscription | null | undefined, answer: SyncedUnsubscription): boolean {
+  return !stored || Date.parse(answer.requestedAt) > Date.parse(stored.requestedAt)
 }

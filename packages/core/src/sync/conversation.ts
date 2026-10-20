@@ -24,12 +24,16 @@ export interface ConversationSummary {
   /** Newest senders first, without duplicates. */
   senders: Address[]
   /**
-   * Whether the inboxes list it: a message of the thread is in an inbox folder, and the thread is not in the Spam smart
-   * inbox (spam stays out of the inboxes, also when the server left it there).
+   * Whether the inboxes list it: a message of the thread is in an inbox folder, the thread is not in the Spam smart
+   * inbox (spam stays out of the inboxes, also when the server left it there), and it does not wait for a batch.
    */
   inbox: boolean
-  /** Whether its smart inbox lists it: a message of the thread is in an inbox or junk folder. */
+  /** Whether its smart inbox lists it: a message of the thread is in an inbox or junk folder, and it is not held. */
   active: boolean
+  /** Epoch ms of the batch it waits for; null when it is delivered. A held conversation is in no list. */
+  heldUntil: number | null
+  /** Epoch ms of the batch that delivered it; null when it arrived as it came. */
+  batchedAt: number | null
   smartInboxId: string | null
   verdict: Verdict | null
   classificationReason: string | null
@@ -61,6 +65,8 @@ export function summarizeConversation(thread: SyncedThread, messages: SyncedMess
   const inJunk = messages.some((message) => message.folderIds.some((id) => lists.spamFolderIds.has(id)))
   // Threads stored before classification reached clients have no such fields yet.
   const smartInboxId = thread.smartInboxId ?? null
+  const heldUntil = thread.heldUntil ? Date.parse(thread.heldUntil) : null
+  const held = heldUntil !== null
 
   return {
     threadId: thread.id,
@@ -74,8 +80,10 @@ export function summarizeConversation(thread: SyncedThread, messages: SyncedMess
     hasAttachments: messages.some((message) => message.hasAttachments),
     attachmentsBlocked: messages.some((message) => message.attachmentScan === 'infected'),
     senders,
-    inbox: inInbox && (smartInboxId === null || smartInboxId !== lists.spamSmartInboxId),
-    active: inInbox || inJunk,
+    inbox: inInbox && (smartInboxId === null || smartInboxId !== lists.spamSmartInboxId) && !held,
+    active: (inInbox || inJunk) && !held,
+    heldUntil,
+    batchedAt: thread.batchedAt ? Date.parse(thread.batchedAt) : null,
     smartInboxId,
     verdict: thread.verdict ?? null,
     classificationReason: thread.classificationReason ?? null,
@@ -83,15 +91,18 @@ export function summarizeConversation(thread: SyncedThread, messages: SyncedMess
 }
 
 /**
- * A list of conversations: the inbox of one account or of every account (`mailAccountId` null), or a smart inbox,
- * which spans every account.
+ * A list of conversations: the inbox of one account or of every account (`mailAccountId` null), a smart inbox, which
+ * spans every account, or the batches: conversations a batch delivered that are still in an inbox, newest batch first.
  */
-export type ListScope = { kind: 'inbox'; mailAccountId: string | null } | { kind: 'smartInbox'; smartInboxId: string }
+export type ListScope = { kind: 'inbox'; mailAccountId: string | null } | { kind: 'smartInbox'; smartInboxId: string } | { kind: 'batch' }
 
 /** Whether a list shows a conversation. */
 export function inList(conversation: ConversationSummary, scope: ListScope): boolean {
   if (scope.kind === 'smartInbox') {
     return conversation.smartInboxId === scope.smartInboxId && conversation.active
+  }
+  if (scope.kind === 'batch') {
+    return conversation.batchedAt !== null && conversation.inbox
   }
 
   return conversation.inbox && (scope.mailAccountId === null || conversation.mailAccountId === scope.mailAccountId)
