@@ -822,20 +822,47 @@ func TestUnsubscribesGoOutAlsoWhenTheAccountCannotSend(t *testing.T) {
 	}
 }
 
-func TestUnsubscribesWaitUntilTheMailUsersWaitForWentOut(t *testing.T) {
+func TestASlowUnsubscribeNeverHoldsUpMail(t *testing.T) {
 	h := newHarness(message("m1", 1))
-	h.api.unsubscribes = []api.UnsubscribeRequest{{ID: "u1", URL: "https://news.example/u1"}}
-	reportsBefore := -1
+	h.api.unsubscribes = []api.UnsubscribeRequest{{ID: "u1", URL: "https://slow.example/u1"}}
+	posting := make(chan struct{})
+	release := make(chan struct{})
 	h.unsub.before = func() {
-		h.api.mu.Lock()
-		defer h.api.mu.Unlock()
-		reportsBefore = len(h.api.reports)
+		close(posting)
+		<-release // the sender's server takes its time
+	}
+	sent := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			h.api.mu.Lock()
+			reports := len(h.api.reports)
+			h.api.mu.Unlock()
+			if reports == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				close(release)
+				t.Fatalf("%d messages sent while the unsubscribe request waited, want %d", reports, want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
 
-	h.run()
+	h.d.Trigger(context.Background(), "a1")
+	<-posting
+	sent(1)
+	// Mail queued while the request still waits goes out now, not after it.
+	h.api.mu.Lock()
+	h.api.queue = append(h.api.queue, []api.OutgoingMessage{message("m2", 1)})
+	h.api.mu.Unlock()
+	h.d.Trigger(context.Background(), "a1")
+	sent(2)
+	close(release)
+	h.d.Wait()
 
-	if reportsBefore != 1 {
-		t.Errorf("the outgoing message was reported %d times before the unsubscribe request, want 1", reportsBefore)
+	if len(h.api.unsubscribed) != 1 {
+		t.Errorf("unsubscribe reports = %+v", h.api.unsubscribed)
 	}
 }
 
