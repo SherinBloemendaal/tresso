@@ -364,7 +364,7 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   allocator refuses to run outside one. Different users never wait on each other.
 - `GET /api/v1/sync/changes?since=N&limit=500` (scope `mail:read`) returns mail accounts, folders (with role),
   threads (with their smart inbox, verdict and classification reason), messages (metadata, flags, folder ids, smart
-  inbox and verdict, never bodies), smart inboxes and `deleted` entries above N, plus the new `cursor` and
+  inbox and verdict, never bodies), smart inboxes, todos and `deleted` entries above N, plus the new `cursor` and
   `hasMore`. A page never splits one change number. A deleted mail account implies its folders,
   threads and messages are gone.
 - Clients store data in a local cache (desktop via Rust/Tauri SQLite, mobile via expo-sqlite, web via IndexedDB),
@@ -417,7 +417,8 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
 ### 3.7 Classification
 
 - A smart inbox (the `category` table) = name + instructions + include list + exclude list (addresses or `@domain`,
-  which covers subdomains) + verdict + flags (auto-create todo, batch delivery, notify; used by later steps). Every
+  which covers subdomains) + verdict + flags (auto-create todo, see 3.14; batch delivery and notify are used by later
+  steps). Every
   user has five built-in ones (`todo`, `informational`, `notification`, `advertise`, `spam`), created with the user;
   they can be changed but not deleted. Mail lands in exactly one smart inbox.
 - `/api/v1/smart-inboxes` (scopes `settings:read`, `settings:write`) lists, creates, updates (JSON merge patch) and
@@ -1134,6 +1135,38 @@ Tresso Cloud (`packages/api-bundle` in its repository) replaces them with AI ver
 
 Drafts from these features are never saved by themselves: the client shows them in the event editor or as
 suggestions, and the user saves. Content sent to an AI provider follows Tresso Cloud's data processing terms.
+
+### 3.14 Todos
+
+- A todo (`todo` table) belongs to one user: title, notes, an optional due date with an optional time, an optional
+  duration in minutes, a done moment (`completedAt`), a place among the open todos (`position`), where it came from
+  (`source`: `manual`, `suggested` for an accepted AI suggestion, `automatic` from a smart inbox) and optionally the
+  email it came from. The due date and time are wall-clock values in the user's own time zone, like a paper diary:
+  "Friday 17:00" stays Friday 17:00 when the user travels. The duration and due date are what "Todos in the
+  calendar" (busy time, automatic planning) builds on.
+- One email has at most one todo: a unique index on `todo.message_id`, and every path that makes one from an email
+  takes the user's todos lock first (lock order: smart inboxes, classification, todos). Deleting the email clears the
+  link and keeps the todo.
+- `/api/v1/todos` (scopes `todos:read`, `todos:write`) lists (open ones in order, then done ones, most recently done
+  first), creates, updates (JSON merge patch: fields left out stay, `null` clears the due date, time or duration; a
+  cleared date takes its time with it; `done: true` or `false` completes or reopens, keeping the first completion
+  moment) and deletes the user's own todos; other users' todos are a 404.
+  `POST /api/v1/messages/{id}/todo` makes a todo from one of the user's emails, titled after its subject (or "Email
+  from" the sender when it has none), or returns the one it has (always 200).
+- Todos are in the delta (`todos`, tombstone type `todo`) with `messageId` and `threadId`. A todo whose email is gone
+  keeps its link until it changes again; clients treat a link to an email they do not have as none, and the thread of
+  the message on the device wins over `threadId`, since a message can move to another thread.
+- Automatic todos: a smart inbox with `autoCreateTodo` (only with the `do` verdict; another verdict switches it off;
+  the built-in To do smart inbox has it on) gives new mail a todo when it is first classified there, if the message is
+  judged `do`, unread, and received in the last 7 days (a first sync brings years of old mail). Classifying again
+  (after a rule change or a correction) makes none, and a todo the user deleted does not come back.
+- Clients: the shared stores keep todos (`todos()`, `todo(id)`, `todosOfThread(threadId)`), and `@tresso/core`
+  groups them into Overdue, Today, This week (to Sunday), Later (also those without a date) and Done, labels due dates
+  ("Today 17:00", "Fri 23 Oct") and reads a day and time from a quick-add line ("Call Anna friday", "tomorrow 9:00",
+  "27 oct"; full weekday names only, so "sun" in a title stays a word). The web client has a Todos page with quick
+  add and a detail panel ("Complete and archive email" archives the conversation the todo came from), "Make todo" in
+  the reading pane (`T`), which uses the newest email someone else sent, and the auto-create switch in the smart
+  inbox settings; the mobile app lists todos by section, checks them off, and makes them from a conversation.
 
 ## 4. Scale notes
 

@@ -82,10 +82,12 @@ Delivered in steps, each its own pull request:
   informational) and custom ones (name, instructions, include/exclude lists, verdict mapping), a classifier interface
   with a rule-based implementation run after ingest, the smart inbox and verdict per conversation in the delta,
   corrections remembered as sender rules, smart inboxes in the web client's sidebar, lists and settings
+- [x] 2.2 Todos: synced todos with a due date, time and duration, "Make todo" from an email (one todo per email),
+  automatic todos per smart inbox (only with the Do verdict), a Todos page with quick add and sections on the web,
+  and a todo list on mobile
 
 Still to come in this phase:
 
-- Todos (synced), "make todo" in the single-email view, automatic todo creation per smart inbox
 - Todos in the calendar: a setting puts todos with a deadline in the calendar as busy time, so nobody books a meeting
   over them; choosing a deadline or a time shows how busy each day and hour already is; a todo gets a duration
   ("takes 30 minutes"), and "Plan automatically" picks the best free slot before the deadline with the meeting time
