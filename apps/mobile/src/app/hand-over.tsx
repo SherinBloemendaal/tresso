@@ -33,6 +33,10 @@ export default function HandOverScreen() {
   const [problem, setProblem] = useState<string | null>(null)
   const { thread, mailAccounts } = mail
 
+  // Closing the screen any way but by handing over settles a wait for it (triage) with nothing handed over.
+  const { closed } = handOvers
+  useEffect(() => () => closed(threadId), [closed, threadId])
+
   // The conversation's newest message from someone else, or its newest at all.
   useEffect(() => {
     let current = true

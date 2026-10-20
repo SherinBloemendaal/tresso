@@ -59,21 +59,24 @@ export function useMessageActions() {
     }
   }, [])
 
+  /** Puts back what an undo plan moves; says what could not be. Returns the moves that failed, to try again. */
   const undo = useCallback(
-    async (moves: UndoMove[]) => {
-      let failed = 0
+    async (moves: UndoMove[]): Promise<UndoMove[]> => {
+      const failed: UndoMove[] = []
       let reason = ''
       for (const move of moves) {
         try {
           await act(move.messageIds, 'move', { folderId: move.folderId, fromFolderId: move.fromFolderId })
         } catch (error) {
-          failed += move.messageIds.length
+          failed.push(move)
           reason = errorText(error)
         }
       }
-      if (failed > 0) {
-        notify({ text: `${failed === 1 ? 'One message' : `${failed} messages`} could not be put back: ${reason}`, tone: 'error' })
+      const count = failed.reduce((sum, move) => sum + move.messageIds.length, 0)
+      if (count > 0) {
+        notify({ text: `${count === 1 ? 'One message' : `${count} messages`} could not be put back: ${reason}`, tone: 'error' })
       }
+      return failed
     },
     [act, notify],
   )
@@ -96,5 +99,5 @@ export function useMessageActions() {
     [run, undo, notify],
   )
 
-  return { busy, after, run, exclusive, relocate }
+  return { busy, after, run, exclusive, relocate, undo }
 }
