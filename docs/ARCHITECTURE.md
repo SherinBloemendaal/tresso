@@ -105,14 +105,12 @@ in with Google or Microsoft to connect a mail account is separate: see Provider 
 ### 3.3 Mail account credentials
 
 - OAuth (Gmail, Microsoft 365) wherever possible; IMAP/SMTP passwords as fallback.
-- Envelope encryption with XChaCha20-Poly1305 (libsodium):
-  - Each user has a random data key (DEK), stored on the user wrapped by a master key (KEK):
-    `v1.<key id>.<base64(nonce + ciphertext)>`, with the user id as additional data.
-  - Credentials are sealed with the owner's DEK as `v1.<base64(nonce + ciphertext)>`, with the account id as
-    additional data, so a ciphertext copied to another user or account does not decrypt.
+- Envelope encryption with XChaCha20-Poly1305 (libsodium), with the per-user keys of "3.16 Encryption at rest":
+  - Credentials and provider tokens are sealed with the owner's field key as `f1.<key version>.<base64(nonce +
+    ciphertext)>`, with the account (or grant) id as additional data, so a ciphertext copied to another user or
+    account does not decrypt. `v1.<base64>` values from before user keys still open with key version 1.
   - Master keys come from the environment: `DATA_KEYS` (`id:base64`, comma separated) and `DATA_KEY_CURRENT`.
-    Rotation: add a key, make it current, run `bin/console app:crypto:rotate-data-keys`, remove the old key. Only the
-    DEKs are re-wrapped; credentials stay as they are.
+    Rotation of master keys and user keys is described in 3.16.
 - The API never returns credentials. Sync workers fetch them over TLS from
   `GET /internal/sync/accounts/{id}/credentials?workerId=...` (scope `sync:credentials`), only for accounts they hold
   an unexpired lease on (anything else is a 404), with `Cache-Control: no-store`. Workers keep them in memory only.
@@ -254,8 +252,11 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
 - **Failures:** sessions reconnect with exponential backoff (2 s to 5 min). A refused login reports `auth_failed` and
   stops until the user changes the credentials; three failed sessions in a row report `error` with a user-safe
   detail.
-- **Ingest:** raw MIME goes directly to object storage (`raw/<sha256[0:2]>/<sha256>`, content-addressed, so
-  duplicates are stored once); attachments too (`attachments/<sha256[0:2]>/<sha256>`). Parsed metadata goes to the
+- **Ingest:** raw MIME goes directly to object storage, encrypted with the account owner's blob key
+  (`raw/<owner id>/<fp[0:2]>/<fp>`, named by the owner's content fingerprint, so duplicates within one user are
+  stored once); attachments too (`attachments/<owner id>/<fp[0:2]>/<fp>`). The worker fetches the keys from
+  `GET /internal/sync/accounts/{id}/storage-keys` (see "3.16 Encryption at rest"), and each message names the key
+  version it was encrypted with (`keyVersion`); attachments are reported by `fingerprint`. Parsed metadata goes to the
   ingest protocol (scope `sync:ingest`, only for the leasing worker, every call safe to repeat):
 
   | Call | Purpose |
@@ -708,9 +709,9 @@ files attached to drafts (uploads, and files a forward or reply takes along).
   `unavailable` otherwise. Only clamd's own size limit is final at once (`too_large`), as is content larger than
   `CLAMAV_MAX_SIZE`, which is not sent. `messenger:failed:retry` scans a failed attachment again. An empty
   `CLAMAV_HOST` turns scanning off: attachments become `failed` (`disabled`).
-- **Recording a verdict.** A verdict applies to every attachment with that content (by SHA-256), for every user,
-  received or in a draft. It is written in bulk SQL under a lock per content, and only to rows it changes: a first scan
-  or a cached verdict only settles attachments still `pending` or `failed`, a rescan changes only rows whose verdict
+- **Recording a verdict.** A verdict applies to every attachment with that content (by the owner's content
+  fingerprint, see 3.16, so per user), received or in a draft. It is written in bulk SQL under a lock per content, and
+  only to rows it changes: a first scan or a cached verdict only settles attachments still `pending` or `failed`, a rescan changes only rows whose verdict
   differs, and a failure never replaces `clean` or `infected`. Only messages and drafts with a changed file become a
   change in the delta sync (and ping their owner's realtime channel); messages also get their summary updated. Locks
   are taken in the order every other writer uses: the drafts and messages (by id), then their attachment rows, then
@@ -718,13 +719,15 @@ files attached to drafts (uploads, and files a forward or reply takes along).
   circle. Only the attachments of the drafts and messages locked that way are written: the same file stored in the
   meantime stays pending for its own scan job, which records it and updates its message. A deadlock or other database error makes Messenger retry the job; a rescan that gives up stays in the
   `failed` transport for `messenger:failed:retry` rather than being dropped.
-- **Cache.** Clean and infected verdicts are stored per SHA-256 in `scan_result` with the clamd engine and signature
+- **Cache.** Clean and infected verdicts are stored in `scan_result`, shared by all users but keyed with an HMAC of the
+  content's SHA-256 so it links no users (see "Virus scanning" in 3.16), with the clamd engine and signature
   version (`ClamAV 1.5.4/28158/...`). A cached verdict is only reused while clamd reports that same version, so new
   signatures scan content again the first time it shows up, and mailing a file early cannot keep it clean later.
 - **Quarantine.** The verdict is committed first; moving content follows in its own job (`PlaceContent`), which retries
   on storage errors while downloads already follow the committed verdict. It holds the same lock per content as
   recording a verdict while it decides and moves, so a quarantine and a release of the same file never interleave. Infected content moves from every live key
-  (`attachments/<ab>/<sha256>`, `uploads/<ab>/<sha256>`) to `quarantine/<ab>/<sha256>` in the same bucket: out of
+  (`attachments/<owner>/<ab>/<fp>`, `uploads/<owner>/<ab>/<fp>`) to `quarantine/<owner>/<ab>/<fp>` in the same bucket, still
+  encrypted (the format binds the content, not the place): out of
   reach but kept, so it can be reviewed or released. When a rescan clears it, it is copied back to every key an
   attachment still refers to. The upload collector only ever removes `uploads/` keys. The raw MIME stays under `raw/`
   because the body needs it, but it is only ever parsed, never served.
@@ -1030,8 +1033,8 @@ picks files (device or cloud drive) and photos (HEIC as JPEG), and shows the fil
 - One Meilisearch index holds every user's messages (`MEILISEARCH_INDEX`), one document per message: subject,
   sender, recipients, snippet, body text and attachment names to search, plus owner, account, folder ids, address
   tokens, attachment flag and received time to filter on. The worker sends the body text with each message
-  (`bodyText`, quoted replies dropped, at most 32768 characters); the API keeps it in `message_text`, so the index can
-  be rebuilt without reading object storage.
+  (`bodyText`, quoted replies dropped, at most 32768 characters); the API keeps it sealed in `message_text` (see
+  3.16), so the index can be rebuilt without reading object storage.
 - Indexing follows the client sync change numbers. `ChangeSequencer` queues an index run for the user after commit
   (`AfterCommitDispatcher`, Messenger transport `search`); the run sends the messages changed since the user's search
   cursor (`search_cursor`) and deletes tombstoned messages and removed accounts. Runs for one user take turns on the
@@ -1747,6 +1750,182 @@ edition hands over by mail.
   edit first, no longer waiting, move the due date); the reading pane says who a conversation is handed over to. The
   phone has the same hand-over screen without a picked day, Waiting on with one-tap nudges, and the banner in a
   conversation.
+
+### 3.16 Encryption at rest
+
+Stored mail is encrypted with a key per user. The server keeps its role: it syncs, parses, classifies, scans,
+indexes and pushes, so it holds the keys while it works. What this protects against, and what it does not, is in
+"Threat model" at the end of this section.
+
+#### Keys
+
+```
+master keys (DATA_KEYS, environment)
+  └─ wrap ─ user key, version n (user_key row)     ─ HKDF ─ blob key   (objects; also handed to sync workers)
+  │                                                 ─ HKDF ─ field key  (database fields, credentials)
+  └─ wrap ─ user index key (user.wrapped_index_key) ─ HMAC ─ content fingerprints and object names
+  └─ HKDF ─ scan cache key (no copy stored)          ─ HMAC ─ virus scan verdict cache
+```
+
+- **Master keys** (key encryption keys) come from the environment as before: `DATA_KEYS` (`id:base64`, comma
+  separated) and `DATA_KEY_CURRENT`. They never leave the API: not to the database, not to the sync workers.
+- **User keys.** Each user has one or more 32-byte random keys in `user_key`, numbered from 1, each wrapped by a master
+  key as `v1.<master key id>.<base64(nonce + ciphertext)>` with `tresso:user-key:<user id>:<version>` as additional
+  data, so a wrapped key copied to another user or version does not open. The highest version is current: new data
+  is encrypted with it, older versions only decrypt until re-encryption moves their data on. Keys are created with
+  the user, or on first use for users from before this (`INSERT ... ON CONFLICT DO NOTHING`, so concurrent first uses
+  agree on one key). Nothing uses a user key directly: HKDF-SHA256 derives a blob key (`tresso:blob-key:v1`) and a
+  field key (`tresso:field-key:v1`) from it, so the sync worker can be given the blob key without being able to open
+  database fields.
+- **The user index key** is a second per-user random key, wrapped like a user key (`tresso:user-index-key:<user id>`).
+  It names content (below) and is never rotated with the user keys: names must stay stable for deduplication and for
+  references in the database. It reveals no content, only which of one user's objects hold the same bytes.
+- **The scan cache key** is derived from the current master key (HKDF, `tresso:scan-cache:v1`) and identified by the
+  master key's id. It is never stored.
+- Credentials from before this (sealed `v1.<base64>` with the earlier per-user data key, `user.wrapped_data_key`)
+  keep opening: that key becomes the user's key version 1 when the user's keys are first set up, and the old column is
+  cleared then. The column is dropped in a later release, once `app:crypto:reencrypt --status` reports nothing left.
+
+#### Objects
+
+- **Names.** Every object is stored under its owner: `<kind>/<owner user id>/<fp[0:2]>/<fp>`, with kind one of
+  `raw`, `attachments`, `uploads`, `outgoing`, `drafts` and `quarantine`. `fp`, the content fingerprint, is
+  `hex(HMAC-SHA256(user index key, SHA-256(content)))`. The same file stored twice by one user is still stored once,
+  but the same file at two users gets unrelated names and unrelated ciphertexts, so object storage (or a database dump)
+  cannot show that two users have the same file. Attachment rows keep the fingerprint where they kept the SHA-256.
+- **Format.** An object is a 40-byte header, `"TRB1"`, the key version (uint32, big endian) and a random 32-byte salt,
+  followed by the content in frames of 64 KiB. Each frame is XChaCha20-Poly1305 with key `HKDF-SHA256(blob key,
+  salt, "tresso:blob-frame:v1")`, nonce `15 zero bytes || frame number (uint64, big endian) || 1 on the last frame,
+  else 0`, and as additional data the header, the owner's id (16 bytes) and the fingerprint (32 bytes). Frames cannot
+  be dropped, reordered, cut off or moved to another object, owner or key version without failing authentication, and
+  content is decrypted and served frame by frame, so memory stays flat whatever the size. Each object gets its own
+  frame key through the salt, so frame nonces can count from zero. The format binds the fingerprint, not the full
+  name, because quarantine moves objects between kinds.
+- **Writers.** The sync worker encrypts raw MIME and attachments before upload, with the blob key of the account's
+  owner; the API encrypts uploads, outgoing messages and Drafts folder copies. The worker gets keys from
+  `GET /internal/sync/accounts/{id}/storage-keys?workerId=...` (scope `sync:credentials`, only for accounts it holds an
+  unexpired lease on, `Cache-Control: no-store`): the owner's id, the index key, the current version and the blob key
+  of every version still in use. It keeps them in memory for at most 5 minutes. It never gets a master key, a user key
+  or a field key. Each stored object carries its key version as object metadata. A worker that finds the object
+  already there writes it again only when the stored version is older than its own; it never writes over a newer one,
+  which re-encryption may have moved on while the worker still had older keys cached. The ingest call names the key
+  version, and the API refuses a raw key that is not under the account owner's id or a version the owner does not
+  have. It checks the versions under a shared lock on the owner that lasts until the batch is committed, so a version
+  cannot be retired between the check and the rows that name it.
+- **Database.** Rows record the key version their object was written with (`message.raw_key_version`,
+  `attachment.key_version`, `draft_attachment.key_version`, `outgoing_message.raw_key_version`). Null means content
+  from before this: plaintext under the old content-addressed name (`<kind>/<sha256[0:2]>/<sha256>`), which reads keep
+  serving until re-encryption has moved it.
+- **Reading** goes through `BlobVault`, which takes the owner the database row belongs to: an object under another
+  owner's name, or one that fails authentication, is an error (logged, 500 to the client), never served.
+
+#### Database fields
+
+- `message_text` (the body text kept for search) and `message.snippet` are sealed with the owner's field key as
+  `f1.<version>.<base64(nonce + ciphertext)>` (XChaCha20-Poly1305) in `message_text.sealed_text` and
+  `message.sealed_snippet`, with the field and row id as additional data. The plaintext columns are empty for new rows
+  and are dropped together with `user.wrapped_data_key`.
+- Credentials and provider tokens use the same format (`tresso:mail-account-credentials:<id>`,
+  `tresso:provider-grant-tokens:<id>`); `v1.<base64>` from before still opens with key version 1.
+- **Plaintext on purpose:** subject, sender and recipient addresses and names, dates, flags, sizes, folder and thread
+  structure, attachment names and types. The server queries them: threading matches the normalized subject and the
+  participants, sender rules and smart inboxes match addresses, recipient suggestions and the meeting brief search
+  recipients, and the delta, lists, notifications and the daily brief read them in bulk SQL. Encrypting them needs
+  blind indexes for every one of those queries; that is a follow-up on the roadmap. Draft bodies (`draft.html`,
+  `draft.quote_html`), event notes and todos are also still plaintext and are next on the roadmap.
+
+#### Search
+
+The Meilisearch index keeps plaintext: subject, addresses, snippet, body text and attachment names. A search engine
+needs the words to match prefixes, typos and phrases with ranking and highlights. Indexing hashed tokens would keep
+exact words only (no prefixes, typos or highlights) and still leak which messages share words, and searching metadata
+only would drop the body. Full search stays, and the index is protected the way the database is not: Meilisearch is
+only reachable on the internal network with a master key only the API has, it keeps no copy of raw content or
+attachments, and its volume must be on encrypted disk (production requirement). The indexer decrypts body text and
+snippets just before sending them. Deleting a user removes their documents.
+
+#### Virus scanning
+
+- Verdicts apply per content within one user (by fingerprint): the lock per content, the bulk verdict, quarantine and
+  release all work as in "3.8 Virus scanning", now per user.
+- The verdict cache (`scan_result`) is shared by all users, keyed by `HMAC-SHA256(scan cache key, SHA-256(content))`
+  with the master key id beside it. The scan job decrypts the content once to compute that key and, without a cached
+  verdict for the current signatures, a second time while streaming it to clamd. Nothing ties a cache row to a user
+  or an attachment, and without the master key a database dump cannot test whether a known file was ever received.
+  Rows of another master key id (and rows from before this) are never used and are deleted by key rotation and by
+  re-encryption.
+
+#### Rotation
+
+- **Master key:** add a key to `DATA_KEYS`, make it current, run `bin/console app:crypto:rotate-data-keys`, then remove
+  the old key. It re-wraps every user key and index key and drops scan cache rows of other master keys. No content is
+  re-encrypted.
+- **User keys:** `bin/console app:crypto:rotate-user-keys --user=<email>` (or `--all`) adds a new current version;
+  new data uses it at once (workers within 5 minutes). `app:crypto:reencrypt` then moves everything on older versions
+  to the current one and deletes an older version once nothing uses it and its successor is at least 15 minutes old,
+  which outlasts every worker's key cache. "Nothing uses it" is counted again while the owner is locked for update, so
+  an ingest batch in progress (which holds the shared lock) is either counted or refused afterwards; a refused batch is
+  rebuilt by the worker with fresh keys.
+
+#### Re-encryption and migration
+
+`bin/console app:crypto:reencrypt --all` (or `--user=<email>`, repeatable) brings each user's data to the current key
+version: their keys (version 1 from the old data key), credentials and tokens, raw messages, attachments (live or in
+quarantine), draft files, outgoing messages, body texts and snippets, then retires old versions. Each step selects only
+rows not yet on the current version (`key_version IS DISTINCT FROM current`), in batches of `--batch` (200) in id order,
+and each row is updated in its own short transaction after its new object is written. Attachments are moved under the
+same lock per content as verdicts and quarantine, and draft files under the upload collector's lock, so neither can move
+or remove the new object before the row names it. Running it again, or after a crash, continues where it stopped; a row
+that fails is logged and left for the next run. It prints progress per step; `--status` only counts what is left. When
+nothing anywhere is left on old content, `app:crypto:reencrypt --purge-legacy` deletes the plaintext objects under the
+old content-addressed names (they could be shared between users, so they go only then). There is no data change in any
+Doctrine migration.
+
+Deploying this: run the migration and update the API and the sync workers together. The API refuses ingest batches
+that name no key version or a raw key outside the owner's names, so a worker from before keeps retrying its batch (its
+folder cursor does not move) until it is updated; nothing is lost. Until re-encryption has run, a message without a
+Message-ID that was stored before and shows up in another folder is not recognised by its raw content (the names
+differ) and is stored once more; re-encryption gives the old one the new name, so it does not happen afterwards.
+
+#### Deleting a user
+
+`bin/console app:users:delete <email>` first deletes the user's keys (user keys, index key, old data key) in its own
+transaction: from that commit on every object, field, credential and token of the user is unreadable, whatever copies
+or backups exist. It then deletes the user (the database cascades to everything they own), their search documents and
+OAuth tokens, and queues `PurgeOwnerObjects`, which deletes everything under the user's id in every kind and retries
+on storage errors. Plaintext from before re-encryption is not covered by this: run the re-encryption first.
+
+#### Performance
+
+Measured on an Apple M-series laptop in the dev containers, one core: the API (PHP, libsodium) encrypts a 50 MiB file
+read in 1 MiB chunks at about 370 MB/s and decrypts it at about 420 MB/s, with peak memory 4 MiB and 0.3 MiB above the
+baseline; computing its SHA-256 alone runs at about 130 MB/s, so for uploads the hashing every upload already did
+costs more than the encryption. The worker (Go, `go test -bench . ./internal/blobcrypt`) encrypts 10 MiB at about
+640 MB/s and decrypts at about 800 MB/s. Frames add 16 bytes per 64 KiB (0.02 %) plus the 40-byte
+header. The API streams uploads through a temporary stream that spills to disk above 2 MiB and streams downloads frame
+by frame, so neither direction holds a whole file in memory; the worker already holds each message in memory to parse
+it and encrypts in place.
+
+#### Threat model
+
+- **Protected:** copies of object storage, database dumps, backups and replicas, lost or reused disks, and anyone with
+  read access to the bucket or the database but not to the API's environment. They see ciphertext, owner ids, sizes,
+  timestamps and the plaintext metadata listed above, and cannot tell which users share a file.
+- **Not protected:**
+  - the operator, and anyone who controls the running API or its environment (`DATA_KEYS`): the server decrypts to do
+    its work, by design. This is encryption at rest, not end-to-end encryption.
+  - a compromised sync worker: it holds the blob keys and credentials of the accounts it leases while it leases them.
+  - the Meilisearch index (plaintext, see Search) and Redis (queued jobs carry ids, not content; realtime and cache
+    entries carry no mail content). Both rely on network isolation, access keys and disk encryption.
+  - the plaintext metadata columns listed above, and sizes and timing everywhere.
+  - mail at the provider and on clients' devices, which have their own protection.
+- **Crypto-shredding** makes a deleted user's data unreadable as soon as the key deletion commits, also in backups
+  taken before, as long as the master keys of those backups are themselves rotated out (a backup of the database
+  includes the wrapped user keys; it opens with the master key that wrapped them).
+- **Tampering** with an object or a sealed field fails authentication. A sealed field or a whole object read at once is
+  refused outright; a download is served frame by frame, each frame only after it is authenticated, and a frame that
+  fails cuts the download off with an error. A tampered first frame (which covers any file up to 64 KiB) fails before
+  anything is sent.
 
 ## 4. Scale notes
 

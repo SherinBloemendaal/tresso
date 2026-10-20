@@ -152,5 +152,13 @@ Tresso Cloud: teams, shared inboxes, assignments, internal comments, delegation 
 - [x] 4.3 Bulk management by smart inbox, cleanup suggestions (after 2.1): act on everything a smart inbox lists, one
   of its senders or what is older than an age, in batches on the server with the exact undo; suggestions from fixed
   rules (newsletters and senders never opened, old notifications, large old mail) with one click each
+- [x] 4.4 Encryption at rest per user: versioned user keys and an index key wrapped by the master keys, raw MIME,
+  attachments, uploads, outgoing messages and Drafts folder copies encrypted per user in a streamed AEAD format under
+  owner-scoped names (the sync worker encrypts with keys it gets per leased account), body texts and snippets sealed
+  in the database, a virus scan cache that links no users, master and user key rotation, resumable re-encryption of
+  existing data, user deletion with crypto-shredding
+- [ ] 4.5 Encryption at rest, next: blind indexes so subjects, addresses and names can be sealed too, draft bodies,
+  event notes and todos sealed, dropping `user.wrapped_data_key`, `message.snippet` and `message_text.text` once
+  `app:crypto:reencrypt --status` reports nothing left everywhere
 
 Tresso Cloud: API keys and third-party apps, webhooks, MCP endpoint, developer tools, statistics, Year in mail.
