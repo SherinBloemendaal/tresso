@@ -331,6 +331,30 @@ body
 	}
 }
 
+func TestKeepsTheAutoReplyMarkers(t *testing.T) {
+	raw := crlf(`From: Lisa <lisa@company.example>
+Auto-Submitted: auto-replied
+X-Autoreply: yes
+X-Autorespond: Out of office
+Subject: Out of office
+
+body
+`)
+	msg, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"auto-submitted": "auto-replied", "x-autoreply": "yes", "x-autorespond": "Out of office"}
+	if len(msg.Signals) != len(want) {
+		t.Fatalf("signals = %v", msg.Signals)
+	}
+	for name, value := range want {
+		if msg.Signals[name] != value {
+			t.Errorf("%s = %q, want %q", name, msg.Signals[name], value)
+		}
+	}
+}
+
 func TestMessageWithoutSignalsHasNone(t *testing.T) {
 	msg, _ := Parse(crlf("From: anna@example.test\nSubject: Hi\n\nbody\n"))
 	if msg.Signals != nil {

@@ -37,10 +37,11 @@ const (
 	maxCalendarPart = 256 << 10
 )
 
-// signalHeaders tell automated, bulk and junk mail apart; the API classifies mail with them.
+// signalHeaders tell automated, bulk and junk mail apart; the API classifies mail with them, and does not take an
+// automatic reply (X-Autoreply and X-Autorespond besides Auto-Submitted) for the answer to a hand-over.
 var signalHeaders = []string{
 	"List-Unsubscribe", "List-Unsubscribe-Post", "List-Id", "Precedence", "Auto-Submitted", "Feedback-Id",
-	"X-Spam-Flag", "X-Spam-Status", "Authentication-Results",
+	"X-Spam-Flag", "X-Spam-Status", "Authentication-Results", "X-Autoreply", "X-Autorespond",
 }
 
 type Address struct {
