@@ -8,7 +8,7 @@ import { deleteMailDatabase } from '@/mail/db'
 import { useMailStore } from '@/stores/mail'
 import ReadingPane from '../ReadingPane.vue'
 
-const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }
+const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }
 
 function message(id: string, from: string, receivedAt: string): SyncedMessage {
   return {
@@ -27,11 +27,13 @@ function message(id: string, from: string, receivedAt: string): SyncedMessage {
     smartInboxId: null,
     verdict: null,
     summary: null,
+    calendarMethod: null,
+    attachmentScan: null,
   }
 }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], todos: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], deleted: [], ...extra }
 }
 
 const made: Todo = {
