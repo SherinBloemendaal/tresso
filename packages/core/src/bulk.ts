@@ -101,6 +101,8 @@ export interface CleanupSuggestion {
   smartInboxId: string | null
   /** The days the rule looked back to see whether any of the sender's mail was opened. */
   windowDays: number | null
+  /** How many messages the sender sent in those days, none of which was opened. */
+  windowReceived: number | null
   olderThanDays: number | null
   largerThan: number | null
   action: BulkAction
@@ -218,19 +220,21 @@ export function cleanupSuggestionText(suggestion: CleanupSuggestion, smartInboxN
   const sender = suggestion.senderName ?? suggestion.sender ?? 'this sender'
   const unread = suggestion.unread ?? 0
   const window = suggestion.windowDays ?? 0
+  const sent = suggestion.windowReceived ?? 0
+  const unopened = `${unread.toLocaleString('en')} unread in your inbox, and you opened none of the ${sent === 1 ? 'one message' : `${sent.toLocaleString('en')} messages`} they sent in the last ${window} days.`
   const age = BULK_AGES.find((choice) => choice.days === suggestion.olderThanDays)?.label ?? `${suggestion.olderThanDays ?? 0} days`
   const button = suggestion.action === 'trash' ? 'Move to Trash' : 'Archive'
   switch (suggestion.kind) {
     case 'newsletter':
       return {
         title: `Newsletters from ${sender}`,
-        detail: `${unread.toLocaleString('en')} unread in your inbox, and you opened none of their mail in the last ${window} days.`,
+        detail: unopened,
         button: `Archive ${conversationCount(suggestion.conversations)}`,
       }
     case 'unopenedSender':
       return {
         title: `Mail from ${sender}`,
-        detail: `${unread.toLocaleString('en')} unread in your inbox, and you opened none of their mail in the last ${window} days.`,
+        detail: unopened,
         button: `Archive ${conversationCount(suggestion.conversations)}`,
       }
     case 'oldInSmartInbox':

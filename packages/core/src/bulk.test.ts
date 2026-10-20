@@ -34,6 +34,7 @@ function suggestion(override: Partial<CleanupSuggestion>): CleanupSuggestion {
     senderName: 'Shop',
     smartInboxId: null,
     windowDays: 90,
+    windowReceived: 12,
     olderThanDays: null,
     largerThan: null,
     action: 'archive',
@@ -104,10 +105,11 @@ describe('cleanup suggestions', () => {
   it('explain the rule behind a sender suggestion', () => {
     expect(cleanupSuggestionText(suggestion({}))).toEqual({
       title: 'Newsletters from Shop',
-      detail: '4 unread in your inbox, and you opened none of their mail in the last 90 days.',
+      detail: '4 unread in your inbox, and you opened none of the 12 messages they sent in the last 90 days.',
       button: 'Archive 3 conversations',
     })
     expect(cleanupSuggestionText(suggestion({ kind: 'unopenedSender', senderName: null })).title).toBe('Mail from news@shop.example')
+    expect(cleanupSuggestionText(suggestion({ windowReceived: 1 })).detail).toBe('4 unread in your inbox, and you opened none of the one message they sent in the last 90 days.')
   })
 
   it('explain old mail in a smart inbox', () => {
