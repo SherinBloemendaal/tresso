@@ -15,6 +15,8 @@ function conversation(threadId: string, extra: Partial<ConversationSummary> = {}
     flagged: false,
     hasAttachments: false,
     attachmentsBlocked: false,
+    heldUntil: null,
+    batchedAt: null,
     senders: [{ address: `${threadId}@sender.example`, name: null }],
     inbox: true,
     active: true,
