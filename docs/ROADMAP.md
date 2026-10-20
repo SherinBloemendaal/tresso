@@ -89,6 +89,12 @@ Delivered in steps, each its own pull request:
 - [x] 2.2 Todos: synced todos with a due date, time and duration, "Make todo" from an email (one todo per email),
   automatic todos per smart inbox (only with the Do verdict), a Todos page with quick add and sections on the web,
   and a todo list on mobile
+- [x] 2.7 Batched delivery and one-click unsubscribe: mail of smart inboxes that deliver in batches (notification and
+  advertise by default) held until the user's batch times in their zone and kept out of lists and notifications
+  until then, released by a delayed message with a sweep every minute as safety net; for authenticated senders only,
+  RFC 8058 one-click requests made by the sync worker through a strict guarded dialer, or one fixed mail to an address
+  in the sender's own domain through the outbox, recorded per account and sender; the batches view, the unsubscribe
+  button and the batch settings in the web client, the data layer on mobile
 
 Still to come in this phase:
 
@@ -99,7 +105,6 @@ Still to come in this phase:
 - Hand over by forwarding with a note and due date, tracked in "Waiting on" with nudges
 - Triage mode (one email at a time, D / H / K)
 - Daily brief for `know` mail, one-click "Noted"
-- Batched delivery for advertise and notification mail, one-click unsubscribe
 
 Tresso Cloud: AI classification with feedback learning, automatic todo extraction, AI summaries in the daily brief.
 
