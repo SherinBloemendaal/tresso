@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { MAX_MESSAGES_PER_ACTION, PartialActionError, type ChangePage, type MessageActionRequest, type SyncedHandOver, type SyncedMessage, type SyncedUnsubscription, type UnsubscribeRequest } from '@tresso/core'
-import { databaseName, MailSession, type MailState } from '../mailSession'
+import { MAX_MESSAGES_PER_ACTION, PartialActionError, type ChangePage, type MessageActionRequest, type SyncedHandOver, type SyncedMessage, type SyncedUnsubscription, type ThreadClassificationRequest, type UnsubscribeRequest } from '@tresso/core'
+import { databaseName, MailSession, type MailSessionDeps, type MailState } from '../mailSession'
 import type { Sql } from '../sql'
 import { memorySql } from '@tresso/core/testing/sql'
 
@@ -52,6 +52,10 @@ function session(
   postAction: (request: MessageActionRequest) => Promise<void> = async () => {},
   postUnsubscribe: (request: UnsubscribeRequest) => Promise<SyncedUnsubscription> = () => Promise.reject(new Error('no unsubscribe in this test')),
   onOverdue?: (handOvers: SyncedHandOver[]) => void,
+  classification: Pick<MailSessionDeps, 'classify' | 'release'> = {
+    classify: () => Promise.reject(new Error('no classification in this test')),
+    release: () => Promise.reject(new Error('no classification in this test')),
+  },
 ) {
   const states: MailState[] = []
   const mail = new MailSession({
@@ -61,6 +65,7 @@ function session(
     fetchAccess: () => Promise.reject(new Error('no realtime in this test')),
     postAction,
     postUnsubscribe,
+    ...classification,
     drafts: {
       create: () => Promise.reject(new Error('no drafts in this test')),
       update: () => Promise.reject(new Error('no drafts in this test')),
@@ -399,5 +404,121 @@ describe('MailSession', () => {
     const conversations = await database.conversations(brief.threadIds)
     expect(conversations.map((conversation) => [conversation.subject, conversation.snippet, conversation.inbox])).toEqual([['Release notes', 'Version 2 is out', true]])
     await mail.switchTo(null)
+  })
+
+  describe('triage placements', () => {
+    const inbox = { id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' as const }
+    const thread = { id: 't1', mailAccountId: 'work', subject: 'Budget', messageCount: 1, lastMessageAt: '2026-10-19T08:00:00Z', smartInboxId: 'info', verdict: 'know' as const, classificationReason: 'copied' }
+    const message: SyncedMessage = {
+      id: 'm1',
+      mailAccountId: 'work',
+      threadId: 't1',
+      folderIds: ['inbox'],
+      subject: 'Budget',
+      from: { address: 'anna@partner.example', name: null },
+      recipients: { to: [], cc: [], bcc: [], replyTo: [] },
+      snippet: '',
+      sentAt: null,
+      receivedAt: '2026-10-19T08:00:00Z',
+      flags: { seen: false, flagged: false, answered: false, draft: false },
+      hasAttachments: false,
+      smartInboxId: 'info',
+      verdict: 'know',
+      summary: null,
+      calendarMethod: null,
+      attachmentScan: null,
+    }
+    const smartInboxes = ['todo', 'info'].map((id, position) => ({ id, builtin: null, name: id, instructions: '', includeSenders: [], excludeSenders: [], verdict: 'know' as const, autoCreateTodo: false, position }))
+
+    function triageSession(server: { refuse?: boolean; released?: ChangePage }) {
+      const requests: { threadId: string; request?: ThreadClassificationRequest; placementId?: string }[] = []
+      let released: ChangePage | null = null
+      const { mail } = session(
+        device(),
+        async (since) => {
+          if (since === 0) {
+            return page(1, { mailAccounts: [account], folders: [inbox], smartInboxes, threads: [thread], messages: [message] })
+          }
+          return released !== null && since < released.cursor ? released : page(since)
+        },
+        undefined,
+        undefined,
+        undefined,
+        {
+          classify: async (threadId, request) => {
+            requests.push({ threadId, request })
+            if (server.refuse === true) {
+              throw new Error('Try again later.')
+            }
+            return { threadId, smartInboxId: request.smartInboxId, verdict: request.verdict ?? 'know', reason: 'user', senderRule: null, placementId: 'p1' }
+          },
+          release: async (threadId, placementId) => {
+            requests.push({ threadId, placementId })
+            released = server.released ?? null
+            return 'released'
+          },
+        },
+      )
+      return { mail, requests }
+    }
+
+    async function placement(mail: MailSession) {
+      const stored = await mail.database?.thread('t1')
+      return [stored?.thread.smartInboxId, stored?.thread.verdict, stored?.thread.classificationReason]
+    }
+
+    it('says when the first pull is over, also when it failed', async () => {
+      const disk = device()
+      let fail = true
+      const { mail, last } = session(disk, async (since) => {
+        if (fail) {
+          throw new Error('offline')
+        }
+        return page(since === 0 ? 1 : since)
+      })
+
+      await mail.switchTo('kim')
+      expect(last()).toMatchObject({ ready: true })
+      await vi.waitFor(() => expect(last()).toMatchObject({ synced: true, syncState: 'error' }))
+      fail = false
+      await mail.switchTo(null)
+      expect(last()).toMatchObject({ ready: false, synced: false })
+    })
+
+    it('shows a placement for this conversation only at once', async () => {
+      const { mail, requests } = triageSession({})
+      await mail.switchTo('kim')
+      await vi.waitFor(async () => expect(await mail.database?.cursor()).toBe(1))
+
+      await mail.classifyThread('t1', 'info', 'do', false)
+
+      expect(requests).toEqual([{ threadId: 't1', request: { smartInboxId: 'info', verdict: 'do', remember: false } }])
+      expect(await placement(mail)).toEqual(['info', 'do', 'user'])
+      await mail.switchTo(null)
+    })
+
+    it('puts a refused placement back', async () => {
+      const { mail } = triageSession({ refuse: true })
+      await mail.switchTo('kim')
+      await vi.waitFor(async () => expect(await mail.database?.cursor()).toBe(1))
+
+      await expect(mail.classifyThread('t1', 'todo', 'delegate', false)).rejects.toThrow('Try again later.')
+
+      expect(await placement(mail)).toEqual(['info', 'know', 'copied'])
+      await mail.switchTo(null)
+    })
+
+    it('takes a placement back and shows where the rules put it once pulled', async () => {
+      const { mail, requests } = triageSession({ released: page(2, { threads: [thread] }) })
+      await mail.switchTo('kim')
+      await vi.waitFor(async () => expect(await mail.database?.cursor()).toBe(1))
+      await mail.classifyThread('t1', 'info', 'do', false)
+
+      expect(await mail.releaseThread('t1', 'p1')).toBe('released')
+
+      expect(requests[1]).toEqual({ threadId: 't1', placementId: 'p1' })
+      expect(await placement(mail)).toEqual(['info', 'know', 'copied'])
+      await mail.switchTo(null)
+    })
   })
 })

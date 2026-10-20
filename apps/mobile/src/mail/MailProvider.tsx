@@ -22,18 +22,25 @@ import {
   type SyncedFolder,
   type SyncedMailAccount,
   type SyncedMessage,
+  type SyncedSmartInbox,
   type SyncedThread,
   type SyncedTodo,
-  type Todo,
   type SyncedUnsubscription,
+  type MadeTodo,
+  type MakeTodoRequest,
+  type ThreadClassification,
+  type Verdict,
+  needsTriage,
 } from '@tresso/core'
 import { useAuth } from '@/auth/AuthProvider'
+import { ApiError } from '@/auth/session'
 import { LAST_USER } from '@/auth/secureTokenStore'
 import { MailSession, type MailState } from '@/mail/mailSession'
 import { deleteSql, openSql } from '@/mail/sql'
 import { todoApi } from '@/mail/todoApi'
 
 const LIST_LIMIT = 200
+const UNIFIED_INBOX = { kind: 'inbox', mailAccountId: null } as const
 /** Wait before asking again who is signed in, after that failed (offline at start, server down). */
 const ME_RETRY_MS = 10_000
 
@@ -46,6 +53,17 @@ interface Mail extends MailState {
    */
   act(messageIds: string[], action: MessageAction, target?: { folderId?: string; fromFolderId?: string }): Promise<AppliedAction>
   inbox(mailAccountId: string | null): Promise<ConversationSummary[]>
+  /** Up to `limit` conversations of the inboxes waiting for triage, newest first. */
+  triageWaiting(limit: number): Promise<string[]>
+  /** The newest `limit` conversations of the inboxes. */
+  newestInInbox(limit: number): Promise<ConversationSummary[]>
+  /** The stored summaries of these conversations. */
+  summaries(threadIds: string[]): Promise<ConversationSummary[]>
+  smartInboxes(): Promise<SyncedSmartInbox[]>
+  /** Puts a conversation in a smart inbox with a verdict; see {@link MailSession.classifyThread}. */
+  classifyThread(threadId: string, smartInboxId: string, verdict: Verdict, remember: boolean): Promise<ThreadClassification>
+  /** Takes back the user's placement of a conversation; see {@link MailSession.releaseThread}. */
+  releaseThread(threadId: string, placementId: string): Promise<'released' | 'moved'>
   thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null>
   body(messageId: string, allowRemoteContent: boolean): Promise<MessageBody>
   /** A link to a received file that could not be scanned, once the user confirmed they accept that. */
@@ -69,8 +87,10 @@ interface Mail extends MailState {
   todosOfThread(threadId: string): Promise<SyncedTodo[]>
   /** The messages with these ids the phone has, e.g. the emails todos link to. */
   messages(ids: string[]): Promise<SyncedMessage[]>
-  /** Makes a todo from an email, or returns the one it has; the copy is pulled right after. */
-  makeTodo(messageId: string): Promise<Todo>
+  /** Makes a todo from an email, or returns the one it has (`made` says which); the copy is pulled right after. */
+  makeTodo(messageId: string, request?: MakeTodoRequest): Promise<MadeTodo>
+  /** Removes a todo; one that is gone already counts as removed. The copy is pulled right after. */
+  removeTodo(id: string): Promise<void>
   /** Checks a todo off or opens it again; the copy is pulled right after. */
   setTodoDone(id: string, done: boolean): Promise<void>
   /** Every hand-over, in "Waiting on" order. */
@@ -98,7 +118,7 @@ const MailContext = createContext<Mail | null>(null)
  */
 export function MailProvider({ children }: { children: ReactNode }) {
   const auth = useAuth()
-  const [state, setState] = useState<MailState>({ userId: null, ready: false, version: 0, syncState: 'idle', syncError: null, live: false, pulls: 0 })
+  const [state, setState] = useState<MailState>({ userId: null, ready: false, synced: false, version: 0, syncState: 'idle', syncError: null, live: false, pulls: 0 })
   const [lookupError, setLookupError] = useState<string | null>(null)
   const [overdue, setOverdue] = useState<SyncedHandOver[]>([])
   const session = useMemo(
@@ -112,6 +132,18 @@ export function MailProvider({ children }: { children: ReactNode }) {
           await auth.session.api('/api/v1/message-actions', json('POST', request))
         },
         postUnsubscribe: (request) => auth.session.api<SyncedUnsubscription>('/api/v1/unsubscriptions', json('POST', request)),
+        classify: (threadId, request) => auth.session.api<ThreadClassification>(`/api/v1/threads/${encodeURIComponent(threadId)}/classification`, json('PUT', request)),
+        release: async (threadId, placementId) => {
+          try {
+            await auth.session.api(`/api/v1/threads/${encodeURIComponent(threadId)}/classification?${new URLSearchParams({ placementId }).toString()}`, json('DELETE'))
+            return 'released'
+          } catch (error) {
+            if (error instanceof ApiError && error.status === 409) {
+              return 'moved'
+            }
+            throw error
+          }
+        },
         drafts: {
           create: (id, request) => auth.session.api<SyncedDraft>('/api/v1/drafts', json('POST', { ...request, draftId: id })),
           update: (id, request, expectedVersion) => auth.session.api<SyncedDraft>(`/api/v1/drafts/${encodeURIComponent(id)}`, json('PUT', { ...request, expectedVersion })),
@@ -200,6 +232,15 @@ export function MailProvider({ children }: { children: ReactNode }) {
   )
   const inbox = useCallback(async (mailAccountId: string | null) => (await session.database?.inbox(mailAccountId, LIST_LIMIT)) ?? [], [session])
   const thread = useCallback(async (threadId: string) => (await session.database?.thread(threadId)) ?? null, [session])
+  const triageWaiting = useCallback(async (limit: number) => (await session.database?.listThreadIds(UNIFIED_INBOX, needsTriage, limit)) ?? [], [session])
+  const newestInInbox = useCallback(async (limit: number) => (await session.database?.list(UNIFIED_INBOX, limit)) ?? [], [session])
+  const summaries = useCallback(async (threadIds: string[]) => (await session.database?.summaries(threadIds)) ?? [], [session])
+  const smartInboxes = useCallback(async () => (await session.database?.smartInboxes()) ?? [], [session])
+  const classifyThread = useCallback(
+    (threadId: string, smartInboxId: string, verdict: Verdict, remember: boolean) => session.classifyThread(threadId, smartInboxId, verdict, remember),
+    [session],
+  )
+  const releaseThread = useCallback((threadId: string, placementId: string) => session.releaseThread(threadId, placementId), [session])
   const body = useCallback(
     (messageId: string, allowRemoteContent: boolean) =>
       auth.session.api<MessageBody>(`/api/v1/messages/${encodeURIComponent(messageId)}/body${allowRemoteContent ? '?remoteContent=allow' : ''}`),
@@ -225,10 +266,23 @@ export function MailProvider({ children }: { children: ReactNode }) {
   const todosOfThread = useCallback(async (threadId: string) => (await session.database?.todosOfThread(threadId)) ?? [], [session])
   const messages = useCallback(async (ids: string[]) => (ids.length === 0 ? [] : ((await session.database?.messages(ids)) ?? [])), [session])
   const makeTodo = useCallback(
-    async (messageId: string) => {
-      const todo = await todosApi.makeFromMessage(messageId)
+    async (messageId: string, request: MakeTodoRequest = {}) => {
+      const todo = await todosApi.makeFromMessage(messageId, request)
       await session.syncNow()
       return todo
+    },
+    [todosApi, session],
+  )
+  const removeTodo = useCallback(
+    async (id: string) => {
+      try {
+        await todosApi.remove(id)
+      } catch (error) {
+        if (!(error instanceof ApiError && error.status === 404)) {
+          throw error
+        }
+      }
+      await session.syncNow()
     },
     [todosApi, session],
   )
@@ -260,11 +314,12 @@ export function MailProvider({ children }: { children: ReactNode }) {
     },
     [auth.session, session],
   )
-  const { userId, ready, version, syncState, syncError, live, pulls } = state
+  const { userId, ready, synced, version, syncState, syncError, live, pulls } = state
   const mail = useMemo<Mail>(
     () => ({
       userId,
       ready,
+      synced,
       version,
       syncState,
       syncError: syncError ?? lookupError,
@@ -274,6 +329,12 @@ export function MailProvider({ children }: { children: ReactNode }) {
       folders,
       act,
       inbox,
+      triageWaiting,
+      newestInInbox,
+      summaries,
+      smartInboxes,
+      classifyThread,
+      releaseThread,
       thread,
       body,
       unscannedLink,
@@ -289,6 +350,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
       todosOfThread,
       messages,
       makeTodo,
+      removeTodo,
       setTodoDone,
       handOvers,
       outgoing,
@@ -297,7 +359,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
       clearOverdue,
       respond,
     }),
-    [userId, touch, ready, version, syncState, syncError, lookupError, live, pulls, mailAccounts, folders, act, inbox, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, setTodoDone, handOvers, outgoing, handOverApi, overdue, clearOverdue, respond],
+    [userId, touch, ready, synced, version, syncState, syncError, lookupError, live, pulls, mailAccounts, folders, act, inbox, triageWaiting, newestInInbox, summaries, smartInboxes, classifyThread, releaseThread, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, removeTodo, setTodoDone, handOvers, outgoing, handOverApi, overdue, clearOverdue, respond],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>

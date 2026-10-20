@@ -13,6 +13,9 @@ import {
   type SyncedHandOver,
   deliveredNotices,
   noticeKey,
+  type ThreadClassification,
+  type ThreadClassificationRequest,
+  type Verdict,
   CopyClosingError,
   DraftSync,
   SqliteMailStore,
@@ -32,6 +35,11 @@ export type SyncState = 'idle' | 'syncing' | 'error'
 export interface MailState {
   userId: string | null
   ready: boolean
+  /**
+   * The first pull after opening the copy is over (done, or failed while offline): the copy holds what the server had,
+   * not only what was stored before. Screens that decide over all mail (triage) wait for it.
+   */
+  synced: boolean
   /** Goes up whenever the local copy changed, so screens read it again. */
   version: number
   syncState: SyncState
@@ -54,6 +62,13 @@ export interface MailSessionDeps {
   postAction(request: MessageActionRequest): Promise<void>
   /** POST /api/v1/unsubscriptions */
   postUnsubscribe(request: UnsubscribeRequest): Promise<SyncedUnsubscription>
+  /** PUT /api/v1/threads/{id}/classification */
+  classify(threadId: string, request: ThreadClassificationRequest): Promise<ThreadClassification>
+  /**
+   * DELETE /api/v1/threads/{id}/classification?placementId=: 'moved' when the server refuses because the conversation
+   * was placed again since (409).
+   */
+  release(threadId: string, placementId: string): Promise<'released' | 'moved'>
   /** /api/v1/drafts */
   drafts: DraftApi
   fetch?: typeof fetch
@@ -89,7 +104,7 @@ export function databaseName(userId: string): string {
  * deleted once it is closed and a sign-out during opening leaves nothing behind.
  */
 export class MailSession {
-  private state: MailState = { userId: null, ready: false, version: 0, syncState: 'idle', syncError: null, live: false, pulls: 0 }
+  private state: MailState = { userId: null, ready: false, synced: false, version: 0, syncState: 'idle', syncError: null, live: false, pulls: 0 }
   private queue: Promise<void> = Promise.resolve()
   /** Goes up with every switch asked for: a switch that a newer one replaced stops where it is. */
   private wanted = 0
@@ -214,6 +229,43 @@ export class MailSession {
     return unsubscription
   }
 
+  /**
+   * Puts a conversation where the user says, with this verdict: shown at once, put back when the server refuses (unless
+   * the delta brought its version since). With `remember` false only this conversation moves (triage).
+   */
+  async classifyThread(threadId: string, smartInboxId: string, verdict: Verdict, remember: boolean): Promise<ThreadClassification> {
+    const database = this.database
+    if (database === null) {
+      throw new Error('Your mail is not open on this phone yet.')
+    }
+    const previous = await database.classifyThread(threadId, smartInboxId, verdict)
+    this.changed()
+    try {
+      const result = await this.deps.classify(threadId, remember ? { smartInboxId, verdict } : { smartInboxId, verdict, remember: false })
+      void this.syncNow()
+      return result
+    } catch (error) {
+      if (previous !== null) {
+        await database.restoreThread(previous, { smartInboxId, verdict })
+        this.changed()
+      }
+      void this.syncNow()
+      throw error
+    }
+  }
+
+  /**
+   * Takes back the user's placement `placementId` of a conversation; the server's rules place it again, which the pull
+   * right after brings. 'moved' when it was placed again since, and that choice stays.
+   */
+  async releaseThread(threadId: string, placementId: string): Promise<'released' | 'moved'> {
+    const outcome = await this.deps.release(threadId, placementId)
+    if (outcome === 'released') {
+      await this.syncNow()
+    }
+    return outcome
+  }
+
   /** The copy changed outside a pull (an action shown before the server confirms it): screens read it again. */
   changed(): void {
     this.update({ version: this.state.version + 1 })
@@ -298,9 +350,13 @@ export class MailSession {
     open = { userId, sql, database, engine, realtime, tellingSince: null, told: new Set() }
     const opened = open
     this.open = opened
-    this.update({ userId, ready: true, version: this.state.version + 1, syncError: null })
+    this.update({ userId, ready: true, synced: false, version: this.state.version + 1, syncError: null })
     // Not awaited: the copy on the device shows right away, and a switch (a sign-out) does not wait for the pull.
-    void this.pull(opened, () => engine.sync())
+    void this.pull(opened, () => engine.sync()).then(() => {
+      if (this.open === opened) {
+        this.update({ synced: true })
+      }
+    })
     // Drafts written while offline (or before the app was closed) go up now.
     void this.drafts.uploadPending()
     if (this.foreground) {
@@ -314,7 +370,7 @@ export class MailSession {
     if (open === null) {
       return
     }
-    this.update({ userId: null, ready: false, live: false, syncState: 'idle' })
+    this.update({ userId: null, ready: false, synced: false, live: false, syncState: 'idle' })
     await open.realtime.stop()
     // Waits for a page being stored, not for one on its way over the network: that one is refused when it arrives.
     await open.database.close()

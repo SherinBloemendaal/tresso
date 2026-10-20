@@ -12,8 +12,15 @@ const light = {
   danger: '#b42318',
   accent: '#2341d6',
   onAccent: '#ffffff',
+  /** The "do" verdict's color. */
+  do: '#2341d6',
+  doSoft: '#e8ecfc',
+  /** The "hand over" verdict's color. */
+  delegate: '#a44a06',
+  delegateSoft: '#fceee2',
   /** The "know" verdict's color, also used for good news such as "no threats". */
   know: '#256b5d',
+  knowSoft: '#e3f2ee',
 }
 
 const dark: typeof light = {
@@ -26,7 +33,12 @@ const dark: typeof light = {
   danger: '#f97066',
   accent: '#8fa2ff',
   onAccent: '#0f1115',
+  do: '#8fa2ff',
+  doSoft: '#1f2645',
+  delegate: '#f29a55',
+  delegateSoft: '#3a2616',
   know: '#6cc7b2',
+  knowSoft: '#16302b',
 }
 
 export type Theme = typeof light

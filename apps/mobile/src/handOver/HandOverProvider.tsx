@@ -1,14 +1,27 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useRouter } from 'expo-router'
-import { HandOverFlow, nudgeText, type Composer, type HandOverInput, type SyncedHandOver, type SyncedMailAccount, type SyncedMessage, type SyncedSignature } from '@tresso/core'
+import { HandOverFlow, nudgeText, type Composer, type HandedOver, type HandOverInput, type SyncedHandOver, type SyncedMailAccount, type SyncedMessage, type SyncedSignature } from '@tresso/core'
 import { useComposer } from '@/compose/ComposerProvider'
 import { useNotices } from '@/components/Notices'
 import { dueLabel } from '@/handOver/format'
 import { useMail } from '@/mail/MailProvider'
+import { HandOverWaiters } from '@/handOver/waiters'
 
 interface HandOvers {
-  /** Forwards the message and records the hand-over; a notice offers Undo until the forward leaves. */
+  /**
+   * Forwards the message and records the hand-over; a notice offers Undo until the forward leaves. When someone waits
+   * for the conversation (see `handOverAndWait`), they get the hand-over and give the notice instead.
+   */
   handOver(message: SyncedMessage, input: HandOverInput): Promise<void>
+  /**
+   * Opens the hand-over screen for a conversation and settles once it closes: with the hand-over, or null when the
+   * user closed it without handing over (triage).
+   */
+  handOverAndWait(threadId: string): Promise<HandedOver | null>
+  /** The hand-over screen of a conversation closed. */
+  closed(threadId: string): void
+  /** Takes a hand-over back as far as it still can (see HandOverFlow.takeBack). */
+  takeBack(handed: HandedOver): Promise<'undone' | 'withdrawn'>
   /** Sends the suggested follow-up right away (after the undo window). */
   nudge(handOver: SyncedHandOver): Promise<void>
   markDone(handOver: SyncedHandOver): Promise<void>
@@ -69,6 +82,7 @@ export function HandOverProvider({ children }: { children: ReactNode }) {
   const [latest] = useState(() => new Latest(mail, accounts, signatures))
   useEffect(() => latest.update(mail, accounts, signatures))
   const [flow] = useState(() => createFlow(latest, handOverComposer))
+  const [waiters] = useState(() => new HandOverWaiters())
 
   const { overdue, clearOverdue } = mail
   useEffect(() => {
@@ -86,6 +100,10 @@ export function HandOverProvider({ children }: { children: ReactNode }) {
     () => ({
       async handOver(original, input) {
         const handed = await flow.handOver(original, input)
+        if (waiters.has(original.threadId)) {
+          waiters.settle(original.threadId, handed)
+          return
+        }
         const who = input.delegate.name?.trim() || input.delegate.address
         notices.notify(
           {
@@ -103,6 +121,17 @@ export function HandOverProvider({ children }: { children: ReactNode }) {
           },
           Math.max(1000, handed.until - Date.now()),
         )
+      },
+      handOverAndWait(threadId) {
+        const waiting = waiters.wait(threadId)
+        router.push({ pathname: '/hand-over', params: { threadId } })
+        return waiting
+      },
+      closed(threadId) {
+        waiters.settle(threadId, null)
+      },
+      takeBack(handed) {
+        return flow.takeBack(handed)
       },
       async nudge(handOver) {
         try {
@@ -144,7 +173,7 @@ export function HandOverProvider({ children }: { children: ReactNode }) {
         }
       },
     }),
-    [flow, notices],
+    [flow, notices, waiters, router],
   )
 
   return <Context.Provider value={value}>{children}</Context.Provider>
