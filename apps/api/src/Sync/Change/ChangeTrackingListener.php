@@ -14,8 +14,8 @@ use Doctrine\ORM\Events;
  * Gives every flushed change to a synced entity its owner's next change number, and leaves tombstones for deletes.
  * A message also counts as changed when it gained or lost a folder (a MessageLocation), because clients show folder
  * membership; a draft counts as changed when its attachments change. An entity that became hidden from clients (see
- * HidesFromClients) leaves a tombstone, though it is kept. Changes made in bulk SQL bypass this listener and use
- * ChangeSequencer directly.
+ * HidesFromClients) leaves a tombstone, though it is kept, and one clients do not see yet (SyncedOnlyWhenSeen) is no
+ * change at all. Changes made in bulk SQL bypass this listener and use ChangeSequencer directly.
  */
 #[AsDoctrineListener(event: Events::onFlush)]
 final readonly class ChangeTrackingListener
@@ -32,12 +32,12 @@ final readonly class ChangeTrackingListener
         /** @var array<int, TracksChanges> $changed */
         $changed = [];
         foreach ($unitOfWork->getScheduledEntityInsertions() as $entity) {
-            if ($entity instanceof TracksChanges) {
+            if ($entity instanceof TracksChanges && self::seen($entity)) {
                 $changed[spl_object_id($entity)] = $entity;
             }
         }
         foreach ($unitOfWork->getScheduledEntityUpdates() as $entity) {
-            if ($entity instanceof TracksChanges && self::touchesClientFields($entity, array_keys($unitOfWork->getEntityChangeSet($entity)))) {
+            if ($entity instanceof TracksChanges && self::seen($entity) && self::touchesClientFields($entity, array_keys($unitOfWork->getEntityChangeSet($entity)))) {
                 $changed[spl_object_id($entity)] = $entity;
             }
         }
@@ -53,7 +53,7 @@ final readonly class ChangeTrackingListener
         }
 
         /** @var list<TracksChanges> $deleted */
-        $deleted = array_values(array_filter($unitOfWork->getScheduledEntityDeletions(), static fn (object $e): bool => $e instanceof TracksChanges));
+        $deleted = array_values(array_filter($unitOfWork->getScheduledEntityDeletions(), static fn (object $e): bool => $e instanceof TracksChanges && self::seen($e)));
 
         if ([] === $changed && [] === $deleted) {
             return;
@@ -95,6 +95,11 @@ final readonly class ChangeTrackingListener
         foreach ($deleted as $entity) {
             $this->sequencer->tombstones($entity->getChangeOwner()->getId(), $entity::changeType(), [$entity->getId()->toRfc4122()], $seqFor($entity));
         }
+    }
+
+    private static function seen(TracksChanges $entity): bool
+    {
+        return !$entity instanceof SyncedOnlyWhenSeen || $entity->isSeenByClients();
     }
 
     /**
