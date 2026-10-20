@@ -360,9 +360,11 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   non-public addresses are refused at connect time, also after DNS changes), with TLS 1.2+ verified, no proxy, no
   cookies, no credentials (an address with a user name is refused), no keep-alive and no redirect followed, within 5
   seconds, reading at most 64 KB of the answer. 2xx and 3xx count as done, 429, 5xx and no answer as retry (six
-  attempts, one minute to three hours apart), other 4xx and refused addresses as failed. The step runs last in the
-  run, after the mail users wait for, and also when the account cannot send; it starts no request later than four
-  minutes after its claim, so every report reaches the API within the five-minute claim.
+  attempts, one minute to three hours apart), other 4xx and refused addresses as failed. The requests run in a lane of
+  their own per account, next to the mail users wait for (sending, drafts, changes to messages), so a slow sender's
+  server never holds up mail queued meanwhile, and they also run when the account cannot send; each lane never runs
+  twice at once for an account. The lane starts no request later than four minutes after its claim, so every report
+  reaches the API within the five-minute claim.
 
 ### 3.5 Client sync protocol
 
@@ -523,7 +525,9 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   it, so classification plans nothing for it and a push planned before it was held is dropped at delivery. When its
   batch comes, the release plans one push (`MailNotifier::released()`, through the same planning, previews setting
   and dispatcher as new mail) for released `do` and `delegate` mail that is still unread and in an inbox, however
-  long ago it arrived. Mail the user's own doing delivers early (a correction, a changed rule or smart inbox, batches
+  long ago it arrived; a batch that delivers more than three such messages notifies once with how many ("5 new messages
+  to do", the senders when previews are on, opening no single conversation) and drops the others, so none notifies
+  later. Mail the user's own doing delivers early (a correction, a changed rule or smart inbox, batches
   switched off) is not pushed, as classification that runs again never is. The batches are a list of their own
   (`ListScope` `batch`): conversations a batch delivered that are still in an inbox, newest batch first.
 
@@ -540,7 +544,10 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   a `mailto:` address with exactly one recipient in the sender's own domain (the From domain, or a parent or
   subdomain of it) gets one fixed mail through the outbox, from the account, with "unsubscribe" as subject and text
   whatever the header asks for, and is done once that mail is sent, failed when it fails or is cancelled. Clients
-  show that recipient and ask before it is sent (`unsubscribeMailto` in the delta). Other links are never followed:
+  show that recipient and ask before it is sent (`unsubscribeMailto` in the delta). Since an IMAP account's
+  authentication results are never trusted, its mail offers no button; the web client says so on the account in
+  Settings > Accounts and in Settings > Batched delivery (`oneClickUnsubscribeAvailable` in `packages/core`) instead
+  of leaving the button out unexplained. Other links are never followed:
   opening one is a GET of a page that may ask for more or track the reader. Mail in Spam is refused (422), since
   answering spam confirms the address is read; a message without either way, or from a sender DMARC did not confirm,
   is refused too and offers no button.
