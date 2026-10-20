@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional;
 
+use App\Tests\Support\QueryLog;
+use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Messenger\Stamp\ReceivedStamp;
 use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
@@ -274,6 +277,113 @@ final class TodoApiTest extends DatabaseTestCase
         self::assertFalse($smartInboxes[$id]['autoCreateTodo'] ?? null);
     }
 
+    public function testAConversationGetsOneOpenTodoHoweverManyRepliesArrive(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review', ['messageId' => '<budget@x>'])]]);
+        $this->runClassification();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('2', 'Re: Budget review', ['messageId' => '<reply-1@x>', 'inReplyTo' => '<budget@x>', 'from' => ['address' => 'lisa@partner.example']]),
+            $this->message('3', 'Re: Budget review', ['messageId' => '<reply-2@x>', 'inReplyTo' => '<reply-1@x>']),
+        ]]);
+        $this->runClassification();
+
+        $todos = $this->changes(0)['todos'];
+        self::assertSame(['Budget review'], array_column($todos, 'title'), 'The replies, one batch of two, make no second todo.');
+
+        // Once that todo is done, the next reply is something new to do.
+        $this->patch($todos[0]['id'], ['done' => true]);
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('4', 'Re: Budget review', ['messageId' => '<reply-3@x>', 'inReplyTo' => '<reply-2@x>']),
+        ]]);
+        $this->runClassification();
+
+        self::assertEquals(2, $this->connection()->fetchOne('SELECT COUNT(*) FROM todo'));
+        self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM todo WHERE completed_at IS NULL'));
+    }
+
+    public function testATodoMadeByHandBeforeClassificationLeavesClassificationWorking(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review')]]);
+        // Taken now: the test client empties the in-memory queue before every request.
+        $queued = $this->takeQueued();
+        self::assertCount(1, $queued);
+        $message = $this->messageBySubject('Budget review');
+        $this->client->jsonRequest('POST', '/api/v1/messages/'.$message['id'].'/todo', [], $this->kim);
+        self::assertResponseStatusCodeSame(200);
+        // Done already, so only the email's own todo (not an open one in the conversation) keeps a second one away.
+        $this->patch($this->responseString('id'), ['done' => true]);
+
+        $this->runClassification($queued);
+
+        self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM todo'));
+        self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM message WHERE classified_at IS NULL'), 'Classification finished.');
+        self::assertSame('manual', $this->changes(0)['todos'][0]['source']);
+    }
+
+    public function testDoneTodosComeMostRecentlyDoneFirst(): void
+    {
+        $first = $this->create(['title' => 'Done first']);
+        $second = $this->create(['title' => 'Done last']);
+        $this->patch($first['id'], ['done' => true]);
+        $this->patch($second['id'], ['done' => true]);
+        $this->connection()->executeStatement("UPDATE todo SET completed_at = '2026-10-20 09:00:00' WHERE id = :id", ['id' => $first['id']]);
+        $this->connection()->executeStatement("UPDATE todo SET completed_at = '2026-10-20 10:00:00' WHERE id = :id", ['id' => $second['id']]);
+
+        $this->client->request('GET', '/api/v1/todos', server: $this->kim);
+
+        self::assertSame(['Done last', 'Done first'], array_column($this->decodedResponse(), 'title'));
+    }
+
+    public function testListingTodosLoadsTheirEmailsInTheSameQuery(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Budget review', ['flags' => ['seen' => true]]),
+            $this->message('2', 'Offsite', ['flags' => ['seen' => true]]),
+            $this->message('3', 'Slides', ['flags' => ['seen' => true]]),
+        ]]);
+        foreach (['Budget review', 'Offsite', 'Slides'] as $subject) {
+            $this->client->jsonRequest('POST', '/api/v1/messages/'.$this->messageBySubject($subject)['id'].'/todo', [], $this->kim);
+        }
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+        $log = static::getContainer()->get(QueryLog::class);
+        $log->clear();
+
+        $this->client->request('GET', '/api/v1/todos', server: $this->kim);
+
+        self::assertResponseIsSuccessful();
+        self::assertCount(3, array_filter(array_column($this->decodedResponse(), 'threadId')));
+        $lazy = array_filter($log->queries(), static fn (string $sql): bool => (bool) preg_match('/^SELECT .* FROM (message|thread) /s', $sql));
+        self::assertSame([], array_values($lazy), 'No email or conversation is loaded one by one.');
+    }
+
+    public function testATodoLosesItsLinkVisiblyWhenItsEmailIsGone(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review', ['flags' => ['seen' => true]])]]);
+        $message = $this->messageBySubject('Budget review');
+        $this->client->jsonRequest('POST', '/api/v1/messages/'.$message['id'].'/todo', [], $this->kim);
+        $cursor = $this->changes(0)['cursor'];
+
+        $this->ingest('changes', ['folder' => 'INBOX', 'vanished' => ['1'], 'cursor' => 'modseq=2']);
+
+        $page = $this->changes($cursor);
+        self::assertSame([[null, null]], array_map(static fn (array $todo): array => [$todo['messageId'], $todo['threadId']], $page['todos']));
+        self::assertContains(['type' => 'message', 'id' => $message['id']], $page['deleted']);
+    }
+
+    public function testATodoLosesItsLinkVisiblyWhenItsAccountIsRemoved(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review', ['flags' => ['seen' => true]])]]);
+        $message = $this->messageBySubject('Budget review');
+        $this->client->jsonRequest('POST', '/api/v1/messages/'.$message['id'].'/todo', [], $this->kim);
+        $cursor = $this->changes(0)['cursor'];
+
+        $this->client->request('DELETE', '/api/v1/mail-accounts/'.$this->accountId, server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+
+        $page = $this->changes($cursor);
+        self::assertSame([['Budget review', null, null]], array_map(static fn (array $todo): array => [$todo['title'], $todo['messageId'], $todo['threadId']], $page['todos']));
+    }
+
     /**
      * @param array<string, mixed> $input
      *
@@ -351,19 +461,35 @@ final class TodoApiTest extends DatabaseTestCase
     }
 
     /**
-     * Runs queued classification jobs the way the messenger worker does, until none are left.
+     * Runs queued classification jobs the way the messenger worker does, these first when given, until none are left.
+     *
+     * @param list<Envelope>|null $envelopes
      */
-    private function runClassification(): void
+    private function runClassification(?array $envelopes = null): void
     {
         $bus = static::getContainer()->get(MessageBusInterface::class);
-        $transport = static::getContainer()->get('messenger.transport.classify');
-        self::assertInstanceOf(InMemoryTransport::class, $transport);
-        while ([] !== ($envelopes = array_values([...$transport->get()]))) {
-            $transport->reset();
+        $envelopes ??= $this->takeQueued();
+        while ([] !== $envelopes) {
             foreach ($envelopes as $envelope) {
                 $bus->dispatch($envelope->with(new ReceivedStamp('classify')));
             }
+            $envelopes = $this->takeQueued();
         }
+    }
+
+    /**
+     * @phpstan-impure
+     *
+     * @return list<Envelope>
+     */
+    private function takeQueued(): array
+    {
+        $transport = static::getContainer()->get('messenger.transport.classify');
+        self::assertInstanceOf(InMemoryTransport::class, $transport);
+        $envelopes = array_values([...$transport->get()]);
+        $transport->reset();
+
+        return $envelopes;
     }
 
     /**

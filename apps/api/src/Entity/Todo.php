@@ -185,6 +185,13 @@ class Todo implements TracksChanges
         return $this->message;
     }
 
+    /** The email goes away (its account is removed); the todo stays, without the link. */
+    public function detachFromMessage(): void
+    {
+        $this->message = null;
+        $this->touch();
+    }
+
     public function getSource(): TodoSource
     {
         return $this->source;

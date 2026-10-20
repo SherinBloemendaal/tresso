@@ -55,8 +55,9 @@ final readonly class EmailTodos
 
     /**
      * Makes todos for new mail that was just classified into a smart inbox that asks for them: unread, recent (see
-     * {@see AUTOMATIC_WINDOW}), judged `do`, and without a todo yet. Runs inside the classification's transaction,
-     * after its lock; the new todos are persisted, not flushed.
+     * {@see AUTOMATIC_WINDOW}), judged `do`, and without a todo yet. A conversation gets one open todo: a reply in a
+     * conversation that has one already (or a second email of it in the same batch) makes none. Runs inside the
+     * classification's transaction, after its lock; the new todos are persisted, not flushed.
      *
      * @param list<Message> $messages
      */
@@ -73,11 +74,14 @@ final readonly class EmailTodos
 
         $this->locks->todos($owner->getId());
         $taken = $this->todos->messagesWithTodo(array_map(static fn (Message $message): string => $message->getId()->toRfc4122(), $wanted));
+        $busyThreads = $this->todos->threadsWithOpenTodo(array_values(array_unique(array_map(static fn (Message $message): string => $message->getThread()->getId()->toRfc4122(), $wanted))));
         $position = $this->todos->nextPosition($owner);
         foreach ($wanted as $message) {
-            if (isset($taken[$message->getId()->toRfc4122()])) {
+            $threadId = $message->getThread()->getId()->toRfc4122();
+            if (isset($taken[$message->getId()->toRfc4122()]) || isset($busyThreads[$threadId])) {
                 continue;
             }
+            $busyThreads[$threadId] = true;
             $todo = new Todo($owner, self::titleOf($message), TodoSource::Automatic, $message);
             $todo->setPosition($position++);
             $this->entityManager->persist($todo);
