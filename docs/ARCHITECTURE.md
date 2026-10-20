@@ -515,7 +515,8 @@ files attached to drafts (uploads, and files a forward or reply takes along).
   change in the delta sync (and ping their owner's realtime channel); messages also get their summary updated. Locks
   are taken in the order every other writer uses: the drafts and messages (by id), then their attachment rows, then
   each owner's change counter (owners by id, drafts before messages), so verdicts and edits cannot deadlock in a
-  circle. A deadlock or other database error makes Messenger retry the job; a rescan that gives up stays in the
+  circle. Only the attachments of the drafts and messages locked that way are written: the same file stored in the
+  meantime stays pending for its own scan job, which records it and updates its message. A deadlock or other database error makes Messenger retry the job; a rescan that gives up stays in the
   `failed` transport for `messenger:failed:retry` rather than being dropped.
 - **Cache.** Clean and infected verdicts are stored per SHA-256 in `scan_result` with the clamd engine and signature
   version (`ClamAV 1.5.4/28158/...`). A cached verdict is only reused while clamd reports that same version, so new
@@ -542,7 +543,8 @@ files attached to drafts (uploads, and files a forward or reply takes along).
   with `{"confirmed": true}`) issues a signed link, which carries the confirmation (`unscanned=1`, covered by the
   signature); the plain link answers 403. `ATTACHMENTS_REQUIRE_SCAN` decides whether this override exists at all: 0,
   the default, allows it; 1 makes such files `blocked` everywhere, for deployments that accept no unchecked file.
-- **Fail fast.** `/health` reports `scanner`: `ok`, `off` (no `CLAMAV_HOST`), `unreachable`, or `unconfigured`:
+- **Fail fast.** `/health` reports `scanner`, from a clamd `PING` that waits a second at most so the unauthenticated
+  check never ties up a worker: `ok`, `off` (no `CLAMAV_HOST`), `unreachable`, or `unconfigured`:
   `ATTACHMENTS_REQUIRE_SCAN=1` without a scanner, where no attachment could ever be opened. That last one answers 503,
   so a misconfigured deployment fails its health check instead of quietly marking every file as not scanned.
 - **Drafts and sending.** A forward may take along a file that is still being scanned (the copy takes the verdict when
