@@ -37,7 +37,9 @@ final readonly class WeeklyTime
     /**
      * The working hours of the notification settings: from the start to the end time on each working day. Hours that
      * end at or before they start run past midnight: 22:00 to 06:00 on Monday is Monday 22:00 to 24:00 and Tuesday
-     * 00:00 to 06:00, and 09:00 to 00:00 ends at midnight. Hours that start and end at the same time hold none.
+     * 00:00 to 06:00, and 09:00 to 00:00 ends at midnight. Hours that end when they start last a whole day: 00:00 to
+     * 00:00 is the whole working day (every day of the week is around the clock), 09:00 to 09:00 ends at 09:00 the
+     * next day.
      *
      * @param list<int> $days
      *
@@ -45,7 +47,7 @@ final readonly class WeeklyTime
      */
     public static function workingHours(array $days, string $start, string $end): array
     {
-        if ([] === $days || $start === $end) {
+        if ([] === $days) {
             return [];
         }
         if ($end > $start) {

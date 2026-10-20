@@ -423,7 +423,8 @@ final class SlotSearchTest extends TestCase
         self::assertEquals([new WeeklyTime([5, 6], '22:00', '24:00'), new WeeklyTime([6, 7], '00:00', '06:00')], WeeklyTime::workingHours([5, 6], '22:00', '06:00'));
         self::assertEquals([new WeeklyTime([7], '22:00', '24:00'), new WeeklyTime([1], '00:00', '06:00')], WeeklyTime::workingHours([7], '22:00', '06:00'));
         self::assertEquals([new WeeklyTime([1, 2], '09:00', '24:00')], WeeklyTime::workingHours([1, 2], '09:00', '00:00'));
-        self::assertSame([], WeeklyTime::workingHours([1, 2], '09:00', '09:00'));
+        self::assertEquals([new WeeklyTime([1, 2], '09:00', '24:00'), new WeeklyTime([2, 3], '00:00', '09:00')], WeeklyTime::workingHours([1, 2], '09:00', '09:00'));
+        self::assertEquals([new WeeklyTime([1, 2, 3, 4, 5, 6, 7], '00:00', '24:00')], WeeklyTime::workingHours([1, 2, 3, 4, 5, 6, 7], '00:00', '00:00'));
         self::assertSame([], WeeklyTime::workingHours([], '09:00', '17:00'));
     }
 
@@ -437,6 +438,18 @@ final class SlotSearchTest extends TestCase
         self::assertSame(['2026-10-19T20:00:00+00:00'], self::starts($result));
         self::assertSame(BlockKind::WorkingHours, $result->slots[0]->freeUntil->kind);
         self::assertSame('2026-10-20T04:00:00+00:00', $result->slots[0]->freeUntil->at->format(\DATE_ATOM));
+    }
+
+    public function testWorkingHoursAroundTheClockLeaveOnlyTheWindow(): void
+    {
+        $rules = self::rules(hours: WeeklyTime::workingHours([1, 2, 3, 4, 5, 6, 7], '00:00', '00:00'));
+
+        // Saturday night: no working day, no end of the day closes anything.
+        $result = self::search(self::query('2026-10-24T21:40:00Z', '2026-10-25T03:00:00Z', 60, limit: 1), $rules);
+
+        self::assertSame(['2026-10-24T21:45:00+00:00'], self::starts($result));
+        self::assertSame(BlockKind::Window, $result->slots[0]->freeFrom->kind);
+        self::assertSame(BlockKind::Window, $result->slots[0]->freeUntil->kind);
     }
 
     public function testWorkingHoursUntilMidnightEndAtMidnight(): void
