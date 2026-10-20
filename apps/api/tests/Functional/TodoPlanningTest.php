@@ -286,6 +286,23 @@ final class TodoPlanningTest extends DatabaseTestCase
         self::assertSame('2027-03-22T08:00:00+00:00', $this->patchTodo($todo['id'], ['done' => false])['plannedStart'], 'Reopened, it is planned again.');
     }
 
+    public function testWithPlanningOnARemovedPlanStaysRemovedWhenAnEditKeepsTheDueDateAndDuration(): void
+    {
+        $this->setPlanTodos(true);
+        $this->runReplans();
+        $todo = $this->createTodo(['dueDate' => self::TUESDAY, 'dueTime' => '17:00', 'durationMinutes' => 30]);
+        $this->client->request('DELETE', '/api/v1/todos/'.self::string($todo['id']).'/plan', server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+
+        // A client that sends the whole form back: the same due date, time and duration, with a new title.
+        $this->patchTodo($todo['id'], ['title' => 'Renamed', 'dueDate' => self::TUESDAY, 'dueTime' => '17:00', 'durationMinutes' => 30]);
+        $this->createEvent('Standup', self::MONDAY.'T13:00:00', self::MONDAY.'T13:15:00');
+        $this->runReplans();
+
+        self::assertNull($this->todo($todo['id'])['plannedStart'], 'Nothing it is planned by changed.');
+        self::assertSame('2027-03-22T08:00:00+00:00', $this->patchTodo($todo['id'], ['durationMinutes' => 45])['plannedStart'], 'A new duration is a change.');
+    }
+
     public function testTheDeltaCarriesThePlannedTime(): void
     {
         $todo = $this->createTodo(['dueDate' => self::TUESDAY, 'durationMinutes' => 60]);

@@ -157,9 +157,12 @@ class Todo implements TracksChanges
         if (null === $date && null !== $time) {
             throw new \InvalidArgumentException('A due time needs a due date.');
         }
+        // Only a new due date or time is a change of the todo that ends the user's "leave it out of my calendar".
+        if ($date?->format('Y-m-d') !== $this->dueDate?->format('Y-m-d') || $time?->format('H:i') !== $this->dueTime?->format('H:i')) {
+            $this->planDeclinedAt = null;
+        }
         $this->dueDate = $date;
         $this->dueTime = $time;
-        $this->planDeclinedAt = null;
         if (null === $date) {
             $this->unplan();
         }
@@ -174,8 +177,10 @@ class Todo implements TracksChanges
     /** Without a duration there is no time to hold in the calendar. */
     public function setDurationMinutes(?int $durationMinutes): void
     {
+        if ($durationMinutes !== $this->durationMinutes) {
+            $this->planDeclinedAt = null;
+        }
         $this->durationMinutes = $durationMinutes;
-        $this->planDeclinedAt = null;
         if (null === $durationMinutes) {
             $this->unplan();
         }
