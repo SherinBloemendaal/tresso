@@ -352,6 +352,18 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   Microsoft 365 accounts PATCH `isRead` and `flag` and move with `/move`; immutable ids keep the message's id, so the
   worker always reports the uid in the target.
 
+- **One-click unsubscribe:** the outbox run also makes the user's RFC 8058 unsubscribe requests for the accounts it
+  leases (`/internal/sync/accounts/{id}/unsubscribes/claim` and `.../{request}/report`, a 5 minute claim, announced
+  and hinted like the outbox, ten at a time). The worker POSTs `List-Unsubscribe=One-Click`
+  (`application/x-www-form-urlencoded`) to the message's `https` address on port 443 only, through a guarded dialer of
+  its own that never allows private addresses, whatever `MAIL_ALLOW_UNSAFE_SERVERS` says (private, loopback and other
+  non-public addresses are refused at connect time, also after DNS changes), with TLS 1.2+ verified, no proxy, no
+  cookies, no credentials (an address with a user name is refused), no keep-alive and no redirect followed, within 5
+  seconds, reading at most 64 KB of the answer. 2xx and 3xx count as done, 429, 5xx and no answer as retry (six
+  attempts, one minute to three hours apart), other 4xx and refused addresses as failed. The step runs last in the
+  run, after the mail users wait for, and also when the account cannot send; it starts no request later than four
+  minutes after its claim, so every report reaches the API within the five-minute claim.
+
 ### 3.5 Client sync protocol
 
 - Synced entities (mail accounts, folders, threads, messages; todos and settings follow the same pattern) carry a
@@ -365,7 +377,10 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
 - `GET /api/v1/sync/changes?since=N&limit=500` (scope `mail:read`) returns mail accounts, folders (with role),
   threads (with their smart inbox, verdict and classification reason), messages (metadata, flags, folder ids, smart
   inbox and verdict, never bodies), smart inboxes, todos and `deleted` entries above N, plus the new `cursor` and
-  `hasMore`. A page never splits one change number. A deleted mail account implies its folders,
+  `hasMore`. Threads and messages also carry `heldUntil` and `batchedAt` (batched delivery, 3.7), messages the
+  `unsubscribe` method they offer (`oneClick`, `mailto` or null) and the `unsubscribeMailto` address, smart inboxes
+  `batchDelivery`, and the page the user's `unsubscriptions` (one per account and sender). A page never splits one
+  change number. A deleted mail account implies its folders,
   threads and messages are gone.
 - Clients store data in a local cache (desktop via Rust/Tauri SQLite, mobile via expo-sqlite, web via IndexedDB),
   start with `since=0`, keep the cursor, and fetch message bodies lazily.
@@ -478,6 +493,64 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
 - Each conversation carries why it is where it is (`classificationReason`: `user`, `sender_rule`, `include_list`,
   `server_spam`, `authentication_failed`, `automated`, `marketing_sender`, `bulk`, `notification_sender`,
   `unsubscribe_link`, `mailing_list`, `direct`, `copied`, or a reason of an add-on), which clients explain.
+
+#### Batched delivery
+
+- A smart inbox can deliver in batches (`batchDelivery`, on for the built-in `notification` and `advertise`): its new
+  mail waits for the user's next batch time instead of arriving as it comes. The times are the user's
+  (`/api/v1/batch-delivery`, scopes `settings:read` and `settings:write`: one to eight `HH:MM` times and an IANA time
+  zone, 09:00 and 16:00 UTC until the user chooses, `configured` false until then, `nextBatchAt` with every answer).
+  They are wall clock times in that zone, so a batch at 09:00 stays at 09:00 across daylight saving changes
+  (`App\Batch\BatchTimes`).
+- When classification looks at a message for the first time and puts it in such a smart inbox, the message is held
+  (`held_until` = the next batch time) when it is unread and was received after the last batch went out; older mail
+  belongs to a batch that is gone and arrives as it comes, and so does an older message synced late into a
+  conversation that is already in sight. A conversation the user placed themselves is never held.
+  The conversation is delivered the way its newest incoming message is: held, from a batch (`batched_at`), or as it
+  came. Held mail stays where the server has it; only Tresso's clients wait.
+- Release: a delayed Messenger message (`ReleaseBatch`, transport `async`) for the batch time, dispatched after the
+  commit, sets `batched_at` to the batch time and clears `held_until` on the user's due messages and conversations
+  (500 of each per transaction, under the user's classification lock, so a run never holds what a release
+  delivers). A Symfony Scheduler sweep every minute (`scheduler_batches`) releases what is due for every user, whether
+  or not a worker leases their accounts, so a lost message only delays a batch.
+- Delivered at once instead: a correction by the user (every held message of the conversation, so none arrives later
+  with its batch), a smart inbox whose batch delivery is switched off (its held mail), a smart inbox that is deleted,
+  and a reclassification that moves a held message to a smart inbox without batches. A new schedule moves all held
+  mail to its next batch. Time zones are IANA names, the backward-compatible aliases browsers still report
+  (`Asia/Calcutta`) included.
+- Clients keep a held conversation out of every list and unread count (`summarizeConversation`: `inbox` and `active`
+  are false while held). Held mail is not pushed: `MailNotifier`'s rule that a message needs the user now excludes
+  it, so classification plans nothing for it and a push planned before it was held is dropped at delivery. When its
+  batch comes, the release plans one push (`MailNotifier::released()`, through the same planning, previews setting
+  and dispatcher as new mail) for released `do` and `delegate` mail that is still unread and in an inbox, however
+  long ago it arrived. Mail the user's own doing delivers early (a correction, a changed rule or smart inbox, batches
+  switched off) is not pushed, as classification that runs again never is. The batches are a list of their own
+  (`ListScope` `batch`): conversations a batch delivered that are still in an inbox, newest batch first.
+
+#### One-click unsubscribe
+
+- `POST /api/v1/unsubscriptions` with a `messageId` (scope `mail:send`) unsubscribes the account that received the
+  message from its sender (the lower-cased From address). `App\Unsubscribe\UnsubscribeLink` reads the message's
+  `List-Unsubscribe` and `List-Unsubscribe-Post` headers from `message_signals`, and only for an authenticated
+  sender: the receiving server must vouch that DMARC passed (`SenderAuthentication`, the trust model above: a pass
+  counts only in an Authentication-Results header the receiving server surely wrote, so never on a generic IMAP
+  account). Anyone can write these headers; without that, a forged message could make the worker POST anywhere,
+  have the user's account mail anyone, or mark the real sender as unsubscribed. An `https` address on port 443
+  together with `List-Unsubscribe=One-Click` is a one-click request (RFC 8058), made by the worker (3.4); otherwise
+  a `mailto:` address with exactly one recipient in the sender's own domain (the From domain, or a parent or
+  subdomain of it) gets one fixed mail through the outbox, from the account, with "unsubscribe" as subject and text
+  whatever the header asks for, and is done once that mail is sent, failed when it fails or is cancelled. Clients
+  show that recipient and ask before it is sent (`unsubscribeMailto` in the delta). Other links are never followed:
+  opening one is a GET of a page that may ask for more or track the reader. Mail in Spam is refused (422), since
+  answering spam confirms the address is read; a message without either way, or from a sender DMARC did not confirm,
+  is refused too and offers no button.
+- Each request is an `unsubscription` (one per account and sender, `pending`, `done` or `failed` with a user-safe
+  `error`), synced in the delta. Asking again while one is pending or done answers that one; after a failure it tries
+  again, with the address of the newer message. Since only authenticated mail is answered, a forged message never
+  creates the record that would hide the button for the real sender. Clients show the button on the conversation and in the batches
+  (`unsubscribeOffer` in `packages/core`) and drop it while a request is pending or once it is done; the answer to
+  the request is stored in the local copy at once (`noteUnsubscription`), unless the delta already brought that
+  request.
 
 ### 3.8 Virus scanning
 
@@ -703,6 +776,13 @@ Conversations in the Spam smart inbox stay out of the inboxes, also when the ser
 inboxes with unread counts, the list and the reading pane show the verdict and change it or move the conversation,
 and Settings > Smart inboxes edits them and lists the remembered senders. The IndexedDB copy moved to version 5 and the
 SQLite copy to schema 3; both sync again from the start.
+
+Both stores keep held conversations out of the lists and counts, list the delivered batches through an index on
+inbox, batch time and date, and keep the unsubscribe requests (dropped with their account). The web client has a
+Batches view (with the next batch time), an Unsubscribe button on the conversation and on each conversation in the
+batches, a "Deliver in batches" choice per smart inbox and Settings > Batched delivery for the times and the zone;
+the phone's `MailSession` unsubscribes and says what a conversation offers. The IndexedDB copy moved to version 7
+and the SQLite copy to schema 5; both sync again from the start.
 
 Drafts in the web client are saved on the device first and uploaded right after (one upload at a time per
 draft). Edits made here are never overwritten by the delta: when another device saved a newer version, the compose
