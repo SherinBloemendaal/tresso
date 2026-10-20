@@ -9,9 +9,10 @@ export async function createReminderChannels(platform: string): Promise<void> {
   if (platform !== 'android') {
     return
   }
+  // High: a reminder shows as a banner on top of what the user is doing, with sound.
   await setNotificationChannelAsync('reminders', {
     name: 'Reminders',
-    importance: AndroidImportance.DEFAULT,
+    importance: AndroidImportance.HIGH,
     sound: 'default',
   })
   await setNotificationChannelAsync('reminders_silent', {
