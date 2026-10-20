@@ -20,6 +20,11 @@ const ComposeWindow = defineAsyncComponent(() => import('@/components/ComposeWin
 const HandOverDialog = defineAsyncComponent(() => import('@/components/HandOverDialog.vue'))
 const error = ref<string | null>(null)
 
+/** After another tab moved to a newer Tresso, only a reload brings this tab the code that opens the new copy. */
+function reload(): void {
+  window.location.reload()
+}
+
 // "C" writes a new message, unless the user is typing somewhere.
 function shortcut(event: KeyboardEvent): void {
   const target = event.target as HTMLElement | null
@@ -70,7 +75,11 @@ watch(
     <HandOverDialog v-if="handOvers.handingOver" :key="handOvers.handingOver.id" :message="handOvers.handingOver" />
     <NoticeStack />
   </template>
-  <p v-if="error || mail.syncState === 'error'" class="problem" role="alert">
+  <p v-if="mail.updatedElsewhere" class="problem" role="alert">
+    {{ mail.updatedElsewhere }}
+    <button type="button" class="reload" @click="reload">Reload</button>
+  </p>
+  <p v-else-if="error || mail.syncState === 'error'" class="problem" role="alert">
     {{ error ?? `Sync stopped: ${mail.syncError}` }}
   </p>
 </template>
@@ -87,5 +96,16 @@ watch(
   background: var(--ink);
   color: var(--surface);
   box-shadow: var(--raised);
+}
+.reload {
+  margin-left: 12px;
+  padding: 4px 10px;
+  border: 1px solid currentcolor;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
 }
 </style>

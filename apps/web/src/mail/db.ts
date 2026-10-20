@@ -1,6 +1,7 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb'
 import {
   actionResult,
+  CopyClosingError,
   classifiedByUser,
   compareTodos,
   compareHandOvers,
@@ -134,20 +135,48 @@ export function deleteMailDatabase(userId: string): Promise<void> {
   return deleteDB(databaseName(userId))
 }
 
+/** Why the copy closed under a tab: upgraded by a newer Tresso, deleted by a sign-out, or closed by the browser. */
+export type ClosedElsewhere = 'upgraded' | 'deleted' | 'terminated'
+
 /** The signed-in user's mail in the browser's IndexedDB. The desktop app keeps it in SQLite instead (SqliteMailStore). */
 export class IndexedDbMailStore implements MailStore {
   /** Threads classified on this device whose server version has not arrived yet; see {@link restoreThread}. */
   private readonly unconfirmed = new Set<string>()
 
-  private constructor(private readonly db: IDBPDatabase<MailSchema>) {}
+  /** Why the connection closed under this tab, if it did; every call then says the copy is closing. */
+  private closedElsewhere: ClosedElsewhere | null = null
 
-  static async open(userId: string): Promise<IndexedDbMailStore> {
+  private constructor(private readonly connection: IDBPDatabase<MailSchema>) {}
+
+  private get db(): IDBPDatabase<MailSchema> {
+    if (this.closedElsewhere !== null) {
+      throw new CopyClosingError()
+    }
+    return this.connection
+  }
+
+  /**
+   * Opens the user's copy. `onClosedElsewhere` hears when the copy closes under this tab: another tab upgraded it (a
+   * newer Tresso), deleted it (a sign-out there), or the browser closed it (site data cleared).
+   */
+  static async open(userId: string, onClosedElsewhere: (reason: ClosedElsewhere) => void = () => {}): Promise<IndexedDbMailStore> {
+    let store: IndexedDbMailStore | null = null
+    const closed = (reason: ClosedElsewhere) => {
+      if (store !== null) {
+        store.closedElsewhere = reason
+      }
+      onClosedElsewhere(reason)
+    }
     const db = await openDB<MailSchema>(databaseName(userId), VERSION, {
       // Another connection wants the copy gone or upgraded (a sign-out or a newer version in another tab, or a
       // copy that was never closed here): this one closes, or the delete or upgrade would wait for it forever.
-      blocking(_currentVersion, _blockedVersion, event) {
+      blocking(_currentVersion, blockedVersion, event) {
         const connection = event.target as IDBDatabase
         connection.close()
+        closed(blockedVersion === null ? 'deleted' : 'upgraded')
+      },
+      terminated() {
+        closed('terminated')
       },
       async upgrade(database, oldVersion, _newVersion, transaction) {
         if (oldVersion < 1) {
@@ -221,11 +250,12 @@ export class IndexedDbMailStore implements MailStore {
       },
     })
 
-    return new IndexedDbMailStore(db)
+    store = new IndexedDbMailStore(db)
+    return store
   }
 
   async close(): Promise<void> {
-    this.db.close()
+    this.connection.close()
   }
 
   async cursor(): Promise<number> {
