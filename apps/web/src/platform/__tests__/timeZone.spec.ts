@@ -1,40 +1,77 @@
-import { describe, expect, it } from 'vitest'
-import { startTimeZoneSync } from '../timeZone'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { startTimeZoneSync, storedSentZone } from '../timeZone'
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-function fakeApi(timeZone: string) {
-  const calls: { path: string; method: string; body: unknown }[] = []
+function fakeApi() {
+  const patches: unknown[] = []
   const api = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
-    const method = init.method ?? 'GET'
-    const body = typeof init.body === 'string' ? JSON.parse(init.body) : undefined
-    calls.push({ path, method, body })
-    if (method === 'PATCH') {
-      timeZone = (body as { timeZone: string }).timeZone
-    }
-    return { timeZone } as T
+    expect(path).toBe('/api/v1/notification-settings')
+    expect(init.method).toBe('PATCH')
+    patches.push(JSON.parse(String(init.body)))
+    return {} as T
   }
-  return { api, calls }
+  return { api, patches }
 }
 
+// The browser's local storage, kept in memory.
+function memoryStorage(): Storage {
+  const items = new Map<string, string>()
+  return {
+    get length() {
+      return items.size
+    },
+    clear: () => items.clear(),
+    getItem: (key) => items.get(key) ?? null,
+    key: (index) => [...items.keys()][index] ?? null,
+    removeItem: (key) => void items.delete(key),
+    setItem: (key, value) => void items.set(key, value),
+  }
+}
+
+let storage: Storage
+
 describe('startTimeZoneSync', () => {
-  it('sends the device zone once signed in and again when the window comes back in another zone', async () => {
-    const { api, calls } = fakeApi('UTC')
+  beforeEach(() => {
+    storage = memoryStorage()
+  })
+
+  it('sends the zone once, not again after a reload, and again when the window comes back in another zone', async () => {
+    const first = fakeApi()
     let zone = 'Europe/Amsterdam'
-    const stop = startTimeZoneSync(api, (error) => { throw error }, window, () => zone)
+    const stop = startTimeZoneSync(first.api, storedSentZone('kim', storage), (error) => { throw error }, window, () => zone)
     await settle()
-    expect(calls.filter((call) => call.method === 'PATCH').map((call) => call.body)).toEqual([{ timeZone: 'Europe/Amsterdam' }])
+    expect(first.patches).toEqual([{ timeZone: 'Europe/Amsterdam' }])
+    stop()
+
+    // A reload: the zone this browser sent is remembered.
+    const reloaded = fakeApi()
+    const stopAgain = startTimeZoneSync(reloaded.api, storedSentZone('kim', storage), (error) => { throw error }, window, () => zone)
+    await settle()
+    expect(reloaded.patches).toEqual([])
 
     zone = 'America/New_York'
     window.dispatchEvent(new Event('focus'))
     await settle()
-    expect(calls.filter((call) => call.method === 'PATCH').map((call) => call.body)).toEqual([{ timeZone: 'Europe/Amsterdam' }, { timeZone: 'America/New_York' }])
-    expect(calls.every((call) => call.path === '/api/v1/notification-settings')).toBe(true)
+    expect(reloaded.patches).toEqual([{ timeZone: 'America/New_York' }])
 
-    stop()
+    stopAgain()
     zone = 'Asia/Tokyo'
     window.dispatchEvent(new Event('focus'))
     await settle()
-    expect(calls.filter((call) => call.method === 'PATCH')).toHaveLength(2)
+    expect(reloaded.patches).toHaveLength(1)
+  })
+
+  it('remembers the zone per user', async () => {
+    const kim = fakeApi()
+    const stopKim = startTimeZoneSync(kim.api, storedSentZone('kim', storage), (error) => { throw error }, window, () => 'Europe/Amsterdam')
+    await settle()
+    stopKim()
+    const lisa = fakeApi()
+    const stopLisa = startTimeZoneSync(lisa.api, storedSentZone('lisa', storage), (error) => { throw error }, window, () => 'Europe/Amsterdam')
+    await settle()
+    stopLisa()
+
+    expect(lisa.patches).toEqual([{ timeZone: 'Europe/Amsterdam' }])
   })
 })

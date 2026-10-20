@@ -5,7 +5,7 @@ import { errorMessage } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
-import { startTimeZoneSync } from '@/platform/timeZone'
+import { startTimeZoneSync, storedSentZone } from '@/platform/timeZone'
 import NoticeStack from '@/components/NoticeStack.vue'
 
 const auth = useAuthStore()
@@ -27,7 +27,8 @@ function shortcut(event: KeyboardEvent): void {
 onMounted(() => window.addEventListener('keydown', shortcut))
 onBeforeUnmount(() => window.removeEventListener('keydown', shortcut))
 
-// Reminders are planned in the zone of the device the user last brought to the front.
+// Reminders are planned in the zone a device of the user last sent. This one sends its zone the first time and when
+// it changes, not on every reload, so it does not take the zone back from a device the user moved on to.
 let stopTimeZone: (() => void) | null = null
 onBeforeUnmount(() => stopTimeZone?.())
 
@@ -40,10 +41,10 @@ watch(
     if (!authenticated) {
       return
     }
-    stopTimeZone = startTimeZoneSync(auth.api, (e) => compose.notify({ text: `Reminders may come at the wrong time: your time zone could not be saved (${errorMessage(e)}).`, tone: 'error' }))
     try {
       await auth.loadMe()
       if (auth.me) {
+        stopTimeZone = startTimeZoneSync(auth.api, storedSentZone(auth.me.id), (e) => compose.notify({ text: `Reminders may come at the wrong time: your time zone could not be saved (${errorMessage(e)}).`, tone: 'error' }))
         await mail.start(auth.me.id)
       }
       error.value = null
