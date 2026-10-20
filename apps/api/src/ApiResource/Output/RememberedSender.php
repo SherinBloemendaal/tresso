@@ -18,16 +18,17 @@ final readonly class RememberedSender
         /** null: the smart inbox's verdict. */
         public ?string $verdict,
         /**
-         * The sender's mail fails authentication (DMARC with a reject or quarantine policy), so the rule does not apply
-         * to it: such mail goes to Spam, because anyone could have written that From address. The corrected
-         * conversation stays where the user put it.
+         * Why new mail like this keeps going to Spam despite the rule, or null when the rule applies:
+         * `authentication_failed` (it fails DMARC with a reject or quarantine policy, so anyone could have written that
+         * From address) or `server_spam` (the mail server marks it as spam and its sender is not authenticated in a
+         * header Tresso can trust). The corrected conversation stays where the user put it either way.
          */
-        public bool $failsAuthentication,
+        public ?string $spamOverrules,
     ) {
     }
 
-    public static function fromEntity(SenderRule $rule, bool $failsAuthentication): self
+    public static function fromEntity(SenderRule $rule, ?string $spamOverrules): self
     {
-        return new self($rule->getId()->toRfc4122(), $rule->getSender(), $rule->getVerdict()?->value, $failsAuthentication);
+        return new self($rule->getId()->toRfc4122(), $rule->getSender(), $rule->getVerdict()?->value, $spamOverrules);
     }
 }

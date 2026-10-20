@@ -30,6 +30,7 @@ use App\State\ThreadClassificationProcessor;
             read: false,
             processor: ThreadClassificationProcessor::class,
             allowCreate: true,
+            normalizationContext: ['skip_null_values' => false],
         ),
     ],
 )]

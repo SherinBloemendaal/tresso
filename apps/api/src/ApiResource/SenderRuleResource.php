@@ -31,7 +31,8 @@ use App\State\SenderRuleProvider;
         new Delete(
             uriTemplate: '/sender-rules/{id}',
             security: "is_granted('".Scope::ROLE_SETTINGS_WRITE."')",
-            provider: SenderRuleProvider::class,
+            // The processor looks the rule up itself, after taking the user's classification lock.
+            read: false,
             processor: SenderRuleProcessor::class,
         ),
     ],

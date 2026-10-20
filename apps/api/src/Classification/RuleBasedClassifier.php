@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Classification;
 
+use App\Entity\Category;
 use App\Enum\BuiltinCategory;
 use App\Enum\FolderRole;
 
@@ -38,12 +39,9 @@ final readonly class RuleBasedClassifier implements Classifier
         // its sender being authenticated, is spam whatever rules exist for that address.
         $spam = $context->builtin(BuiltinCategory::Spam);
         $spamReason = self::spamReason($mail);
-        // The exclude list is From-based too, so it cannot rescue mail that failed authentication.
-        if (null !== $spam && ClassificationReason::AUTHENTICATION_FAILED === $spamReason) {
-            return new Classification($spam, $spam->getVerdict(), $spamReason);
-        }
-        if (null !== $spam && null !== $spamReason && !$spam->excludes($sender) && !self::authenticated($mail)) {
-            return new Classification($spam, $spam->getVerdict(), $spamReason);
+        $overruling = null === $spam ? null : self::spamOverrulingRules($mail, $spam);
+        if (null !== $spam && null !== $overruling) {
+            return new Classification($spam, $spam->getVerdict(), $overruling);
         }
 
         $rule = $context->senderRule($sender);
@@ -172,11 +170,35 @@ final readonly class RuleBasedClassifier implements Classifier
      * DMARC failed and the sender's domain asks receivers to reject or quarantine such mail. Failing DMARC alone is
      * not enough: forwarded mail and mailing lists fail it too.
      */
+    /**
+     * Why the message is spam whatever the user remembered for its sender, or null. Failed authentication always wins
+     * (the exclude list is From-based too, so it cannot rescue it either); the server's spam verdict wins unless the
+     * sender is authenticated or the Spam smart inbox excludes them. Both lean on the From address, which is easy to
+     * forge.
+     */
+    public static function spamOverrulingRules(MailToClassify $mail, Category $spam): ?string
+    {
+        $reason = self::spamReason($mail);
+        if (ClassificationReason::AUTHENTICATION_FAILED === $reason) {
+            return $reason;
+        }
+        if (ClassificationReason::SERVER_SPAM === $reason && !$spam->excludes($mail->fromAddress) && !self::authenticated($mail)) {
+            return $reason;
+        }
+
+        return null;
+    }
+
+    /**
+     * DMARC failed with a reject or quarantine policy, according to an Authentication-Results header the receiving
+     * server surely wrote (see {@see ReceivingServers}): an untrusted header proves nothing either way.
+     */
     public static function failedAuthentication(MailToClassify $mail): bool
     {
         $results = strtolower($mail->header('authentication-results') ?? '');
 
-        return 1 === preg_match('/\bdmarc=fail\b/', $results)
+        return $mail->authenticationResultsTrusted
+            && 1 === preg_match('/\bdmarc=fail\b/', $results)
             && 1 === preg_match('/\b(p|policy\.dmarc|policy\.published-domain-policy)=(reject|quarantine)\b/', $results);
     }
 
