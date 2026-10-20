@@ -1277,6 +1277,33 @@ accepted.
   work offline and switching weeks costs no request. The local copy is limited to events whose series touches the
   last 2 years or the future, which the API filters with `series_ends_at`; older history is read through the range
   endpoint. An event changed to end before that window comes as a deletion, so copies drop it.
+- Expansion runs in each series' own zone, on the clock: `ical.js` iterates the rule in wall time (an `UNTIL` in
+  UTC is read as the clock in the series' zone), and every occurrence is turned into an instant through the
+  platform's `Intl` zone data, so a 09:00 meeting stays at 09:00 across DST in its zone and moves for readers in
+  another zone. A time that happens twice is the first one; one that never happens is read with the offset from
+  before the change (RFC 5545). The start always counts as the first occurrence, also when the rule would not
+  give it. Recurrence ids, `EXDATE`s and `RDATE`s compare as the same keys the API uses. All-day occurrences begin
+  and end at midnight in the reader's zone and last as many dates as their event. The rows a range needs are every
+  row of each series that may touch it (an override moved out of the range still takes its occurrence away),
+  found by indexed first starts and series ends (`eventSpan`). The API's range endpoint is the reference: an end
+  to end check against a real API compares both, after creating, moving one, renaming all from a moved
+  occurrence, splitting and deleting, in four zones.
+- Views (`packages/core/src/calendar`, shared by web and mobile): the time grid places timed events at their clock
+  minutes (a DST day has 23 or 25 hours, blocks still sit at the hour their times say) and lets overlapping ones
+  cascade, each taking the first free column of its group; events of a day or longer and all-day events go to
+  lanes in the all-day row and the month weeks; a month cell shows three items, then "+N more". Times are written
+  "10:00 to 11:00" and zones city first ("Amsterdam, CEST (UTC+2)").
+- Editing: the editor saves the complete event with the occurrence's own times in the event's zone, through the
+  series with the scope and the occurrence's `recurrenceId`. It offers "This event", "This and following" and "All
+  events", without "This and following" on the first occurrence (it is all of them), without "This event" when the
+  rule changes, and only "All events" for a move to another calendar. A moved occurrence is edited with the
+  series' rule, so "All events" from it never drops the rule. Invitations are answered, not edited.
+- Web client: day, week, month and agenda views, the event editor (vee-validate), the invitation card in the
+  reading pane (RSVP, conflicts, "Add to calendar" for `canApply`), and a mini agenda next to mail. Keys: T, J and
+  K, 1 to 4, N, E, Shift J (join), Esc; Y, M and N answer while the invitation card has focus. The grids follow the
+  ARIA grid pattern: one block or day is in the tab order, the arrow keys move between them, and every block reads
+  out title, time, calendar, place and answer. Mobile: an agenda of the next 30 days, a day view with the week
+  strip, and the event detail with RSVP.
 - Reminders are scheduled and sent by the server (next section), so they reach every device, also when no app is
   open.
 
