@@ -2,6 +2,9 @@ import { actionResult, type AppliedAction, type MessageAction } from '../actions
 import { compareBriefs } from '../brief'
 import type { Verdict } from '../domain'
 import { compareHandOvers } from '../handOvers'
+import { sortCalendars } from '../calendar/calendars'
+import { eventSpan } from '../calendar/occurrences'
+import type { SyncedCalendar, SyncedCalendarEvent } from '../calendar/types'
 import { sortSmartInboxes } from '../smartInboxes'
 import { compareTodos } from '../todos'
 import { inList, summarizeConversation, type ConversationSummary, type ListFolders, type ListScope } from '../sync/conversation'
@@ -14,7 +17,7 @@ import type { Sql, SqlValue } from './sql'
  * Raised whenever the copy changes shape. A copy made by another version is emptied and synced again from the start,
  * so nothing it skipped stays missing; drafts that exist only on this device are carried over.
  */
-export const SCHEMA_VERSION = 7
+export const SCHEMA_VERSION = 8
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
@@ -56,10 +59,14 @@ CREATE TABLE IF NOT EXISTS unsubscriptions (id TEXT PRIMARY KEY NOT NULL, mail_a
 CREATE TABLE IF NOT EXISTS hand_overs (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, message_id TEXT, thread_id TEXT, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS hand_overs_by_account ON hand_overs (mail_account_id);
 CREATE TABLE IF NOT EXISTS daily_briefs (id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS calendars (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS calendar_events (id TEXT PRIMARY KEY NOT NULL, calendar_id TEXT NOT NULL, uid TEXT NOT NULL, starts_at INTEGER NOT NULL, ends_at INTEGER, json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS calendar_events_by_series ON calendar_events (calendar_id, uid);
+CREATE INDEX IF NOT EXISTS calendar_events_by_start ON calendar_events (starts_at);
 `
 
 /** Every table any version made, so a rebuild leaves none of an old shape behind. */
-const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'todos', 'unsubscriptions', 'hand_overs', 'daily_briefs', 'meta']
+const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'todos', 'unsubscriptions', 'hand_overs', 'daily_briefs', 'calendars', 'calendar_events', 'meta']
 
 type JsonRow = { json: string }
 
@@ -238,6 +245,12 @@ export class SqliteMailStore implements MailStore {
           case 'dailyBrief':
             await tx.run('DELETE FROM daily_briefs WHERE id = ?', [deleted.id])
             break
+          case 'calendar':
+            await deleteCalendar(tx, deleted.id)
+            break
+          case 'calendarEvent':
+            await tx.run('DELETE FROM calendar_events WHERE id = ?', [deleted.id])
+            break
           case 'draft': {
             const local = await readDraft(tx, deleted.id)
             if (local !== null) {
@@ -276,6 +289,13 @@ export class SqliteMailStore implements MailStore {
       }
       for (const brief of page.dailyBriefs ?? []) {
         await tx.run('INSERT OR REPLACE INTO daily_briefs (id, json) VALUES (?, ?)', [brief.id, JSON.stringify(brief)])
+      }
+      for (const calendar of page.calendars) {
+        await tx.run('INSERT OR REPLACE INTO calendars (id, mail_account_id, json) VALUES (?, ?, ?)', [calendar.id, calendar.mailAccountId, JSON.stringify(calendar)])
+      }
+      for (const event of page.calendarEvents) {
+        const span = eventSpan(event)
+        await tx.run('INSERT OR REPLACE INTO calendar_events (id, calendar_id, uid, starts_at, ends_at, json) VALUES (?, ?, ?, ?, ?, ?)', [event.id, event.calendarId, event.uid, span.startsAt, span.endsAt, JSON.stringify(event)])
       }
       for (const thread of page.threads) {
         await writeThread(tx, thread)
@@ -388,6 +408,27 @@ export class SqliteMailStore implements MailStore {
   async signatures(): Promise<SyncedSignature[]> {
     const signatures = (await this.reader.all<JsonRow>('SELECT json FROM signatures')).map((row) => parse<SyncedSignature>(row))
     return signatures.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+  }
+
+  async calendars(): Promise<SyncedCalendar[]> {
+    return sortCalendars((await this.reader.all<JsonRow>('SELECT json FROM calendars')).map((row) => parse<SyncedCalendar>(row)))
+  }
+
+  async calendarEvents(from: number, to: number): Promise<SyncedCalendarEvent[]> {
+    const touching = await this.reader.all<{ calendar_id: string; uid: string }>('SELECT DISTINCT calendar_id, uid FROM calendar_events WHERE starts_at < ? AND (ends_at IS NULL OR ends_at > ?)', [to, from])
+    const events: SyncedCalendarEvent[] = []
+    // Every row of a series that touches the range: an override moved out of it still takes its occurrence away.
+    for (const { calendar_id: calendarId, uid } of touching) {
+      for (const row of await this.reader.all<JsonRow>('SELECT json FROM calendar_events WHERE calendar_id = ? AND uid = ?', [calendarId, uid])) {
+        events.push(parse<SyncedCalendarEvent>(row))
+      }
+    }
+    return events
+  }
+
+  async calendarEvent(id: string): Promise<SyncedCalendarEvent | null> {
+    const row = await this.reader.first<JsonRow>('SELECT json FROM calendar_events WHERE id = ?', [id])
+    return row === null ? null : parse<SyncedCalendarEvent>(row)
   }
 
   async smartInboxes(): Promise<SyncedSmartInbox[]> {
@@ -739,7 +780,16 @@ async function deleteAccount(tx: Sql, accountId: string): Promise<void> {
   for (const table of ['messages', 'threads', 'folders', 'conversations', 'outgoing', 'unsubscriptions', 'hand_overs']) {
     await tx.run(`DELETE FROM ${table} WHERE mail_account_id = ?`, [accountId])
   }
+  // The account's calendars go with it.
+  for (const row of await tx.all<{ id: string }>('SELECT id FROM calendars WHERE mail_account_id = ?', [accountId])) {
+    await deleteCalendar(tx, row.id)
+  }
   await tx.run('DELETE FROM mail_accounts WHERE id = ?', [accountId])
+}
+
+async function deleteCalendar(tx: Sql, calendarId: string): Promise<void> {
+  await tx.run('DELETE FROM calendar_events WHERE calendar_id = ?', [calendarId])
+  await tx.run('DELETE FROM calendars WHERE id = ?', [calendarId])
 }
 
 async function refreshConversation(tx: Sql, threadId: string, lists: ListFolders): Promise<void> {

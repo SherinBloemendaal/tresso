@@ -1,4 +1,5 @@
 import type { AppliedAction, MessageAction } from '../actions'
+import type { SyncedCalendar, SyncedCalendarEvent } from '../calendar/types'
 import type { Verdict } from '../domain'
 import type { ConversationSummary, ListScope } from '../sync/conversation'
 import type { SyncStore } from '../sync/engine'
@@ -89,6 +90,14 @@ export interface MailStore extends SyncStore {
   dailyBriefs(): Promise<SyncedDailyBrief[]>
   /** The summaries of these threads that exist, in the order asked for; each thread once. */
   conversations(threadIds: string[]): Promise<ConversationSummary[]>
+  /** In the user's order (see sortCalendars). */
+  calendars(): Promise<SyncedCalendar[]>
+  /**
+   * The stored rows a range of instants needs for expanding its occurrences: every row of each series that may touch
+   * the range (the series, its overrides and exceptions), and single events in it. May return more; never less.
+   */
+  calendarEvents(from: number, to: number): Promise<SyncedCalendarEvent[]>
+  calendarEvent(id: string): Promise<SyncedCalendarEvent | null>
   /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
   inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]>
   /**
