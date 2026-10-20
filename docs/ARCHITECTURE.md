@@ -1044,7 +1044,8 @@ after. Everything lives in `apps/api/src/Notification`.
     shown in the list).
   - Working hours (`workDays`, `workStart`, `workEnd`) apply to calendars the user marks as work (`work` on the
     calendar). Hours that end at or before they start run past midnight: 22:00 to 06:00 on Monday lasts until Tuesday
-    06:00, and 09:00 to 00:00 ends at midnight; the meeting time finder reads them the same way. Their notifications wait for the next working hours when the event starts after that, and are
+    06:00, and 09:00 to 00:00 ends at midnight. Hours that end when they start last a whole day (00:00 to 00:00 on
+    every day is around the clock). The meeting time finder reads them the same way. Their notifications wait for the next working hours when the event starts after that, and are
     silent otherwise (`workCalendarsQuiet`); leave-now comes through. A reminder that would come before the working
     day, for an event that also starts before it, comes at the end of the working day before instead
     (`shiftEarlyReminders`: a reminder for a 08:00 meeting at 17:30 the evening before).
@@ -1163,7 +1164,8 @@ planned again. A deadline that has passed, or a duration outside 5 minutes to 24
   `timeZone`), the same ones the reminders keep to, including hours past midnight (a night shift is one stretch from
   its start to its end the next morning). A search may name another zone (`timeZone`).
 - **Scheduling preferences** (`scheduling_preferences`, one row per user, created on the first change with an upsert
-  and changed under a row lock, so two first changes at once do not collide):
+  and changed under a row lock, read again once locked, so two changes at once neither collide nor work from an
+  older read):
   `bufferMinutes` (0 to 120) on both sides of busy time, `travelMinutes` (0 to 240) to and from busy time at a place
   that does not name its own travel time, and `minimumNoticeMinutes` (up to 14 days). All are 0 without a row.
 - **Busy time** comes from every `BusyTimeSource`: the open edition's reads the user's visible calendars (or the
