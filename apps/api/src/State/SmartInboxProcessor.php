@@ -174,8 +174,9 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
 
     /**
      * Takes the smart inbox's conversations and messages out of it before it goes, so clients see them change (the
-     * foreign keys would clear them silently). Held mail is delivered at once. The reclassification queued after the commit gives the conversations
-     * a new smart inbox, including those the user had put there.
+     * foreign keys would clear them silently). Held mail is delivered at once, without a push (see
+     * {@see BatchDelivery}). The reclassification queued after the commit gives the conversations a new smart inbox,
+     * including those the user had put there.
      */
     private function release(User $owner, Category $smartInbox): void
     {

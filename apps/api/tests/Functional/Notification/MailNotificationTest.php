@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional\Notification;
 
+use App\Batch\ReleaseBatchHandler;
+use App\Batch\SweepBatches;
 use App\Classification\MailClassification;
 use App\Entity\Category;
 use App\Entity\Message;
@@ -269,6 +271,8 @@ final class MailNotificationTest extends DatabaseTestCase
         self::assertInstanceOf(Category::class, $category);
         // As an AI classifier (Tresso Cloud) judges it: to hand over.
         $entityManager->wrapInTransaction(function () use ($message, $category): void {
+            // Advertising waits for a batch; this one's has come.
+            $message->release(new \DateTimeImmutable());
             $message->classify($category, Verdict::Delegate, new \DateTimeImmutable());
             $this->notifier()->consider($this->kim(), [$message], new \DateTimeImmutable());
         });
@@ -451,6 +455,128 @@ final class MailNotificationTest extends DatabaseTestCase
         self::assertResponseIsSuccessful();
 
         return $home;
+    }
+
+    public function testHeldMailNotifiesOnceWhenItsBatchDeliversIt(): void
+    {
+        $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Invoice 42')]]);
+        $this->classifyAndSend();
+
+        self::assertSame([], $this->expoBodies(), 'Held mail waits for its batch.');
+        self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification'));
+
+        $this->batchComes();
+        $this->batchComes();
+
+        $expo = $this->expoBodies();
+        self::assertCount(1, $expo, 'Once, however often the release runs.');
+        self::assertSame($this->kimsId()->toRfc4122(), $expo[0]['data']['userId']);
+        self::assertCount(1, $this->http()->requestsTo(self::PUSH_ENDPOINT));
+    }
+
+    public function testWithoutPreviewsHeldMailSaysOnlyTheAccountWhenItsBatchComes(): void
+    {
+        $this->patchSettings(['mailPreviews' => false]);
+        $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Invoice 42', ['snippet' => 'Amount due'])]]);
+        $this->classifyAndSend();
+
+        $this->batchComes();
+
+        $expo = $this->expoBodies();
+        self::assertCount(1, $expo);
+        self::assertSame(['New mail from Work', ''], [$expo[0]['title'], $expo[0]['body']]);
+        self::assertStringNotContainsString('Invoice', json_encode($expo[0], \JSON_THROW_ON_ERROR));
+        self::assertSame(['New mail from Work', ''], $this->connection()->fetchNumeric('SELECT title, body FROM mail_notification'));
+    }
+
+    public function testHeldMailReadOrArchivedBeforeItsBatchDoesNotNotify(): void
+    {
+        $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Invoice 42'), $this->message('2', 'Invoice 43')]]);
+        $this->classifyAndSend();
+        $this->connection()->executeStatement("UPDATE message SET seen = true WHERE subject = 'Invoice 42'");
+        $this->connection()->executeStatement(
+            "UPDATE message_location SET folder_id = (SELECT id FROM folder WHERE remote_name = 'Archive')
+             WHERE message_id = (SELECT id FROM message WHERE subject = 'Invoice 43')",
+        );
+
+        $this->batchComes();
+
+        self::assertSame([], $this->expoBodies());
+        self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification'));
+    }
+
+    public function testANotificationForMailThatIsHeldMeanwhileIsNeverDelivered(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review')]]);
+        $this->runClassification();
+        $this->connection()->executeStatement("UPDATE message SET held_until = now() + interval '6 hours'");
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+
+        $this->sendQueued();
+
+        self::assertSame([], $this->expoBodies());
+        self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification WHERE dropped_at IS NOT NULL'));
+    }
+
+    public function testSwitchingBatchesOffDeliversHeldMailWithoutABurstOfPushes(): void
+    {
+        $smartInboxId = $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Invoice 42'), $this->message('2', 'Invoice 43')]]);
+        $this->classifyAndSend();
+
+        $this->client->request('PATCH', '/api/v1/smart-inboxes/'.$smartInboxId, server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: '{"batchDelivery": false}');
+        self::assertResponseIsSuccessful();
+        $this->runClassification();
+        $this->sendQueued();
+        $this->batchComes();
+
+        self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM message WHERE held_until IS NOT NULL'), 'Delivered at once.');
+        self::assertSame([], $this->expoBodies(), 'A settings change, like classifying again, pushes nothing.');
+    }
+
+    public function testAHeldConversationTheUserMovesDoesNotNotify(): void
+    {
+        $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Invoice 42')]]);
+        $this->classifyAndSend();
+
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$this->changes()['threads'][0]['id'].'/classification', ['smartInboxId' => $this->builtinId('todo')], $this->kim);
+        self::assertResponseIsSuccessful();
+        $this->sendQueued();
+        $this->batchComes();
+
+        self::assertSame([], $this->expoBodies(), 'The user is looking at it: delivered, without a push.');
+    }
+
+    /**
+     * A smart inbox for mail from Anna that is to do and delivers in batches, with one batch a day six hours from now:
+     * mail received now waits for it.
+     */
+    private function batchedInvoices(): string
+    {
+        $this->client->jsonRequest('POST', '/api/v1/smart-inboxes', ['name' => 'Invoices', 'includeSenders' => ['anna@partner.example'], 'verdict' => 'do', 'batchDelivery' => true], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+        $id = $this->responseString('id');
+        $this->client->jsonRequest('PUT', '/api/v1/batch-delivery', ['times' => [new \DateTimeImmutable('+6 hours', new \DateTimeZone('UTC'))->format('H:i')], 'timeZone' => 'UTC'], $this->kim);
+        self::assertResponseIsSuccessful();
+        // The reclassification the new smart inbox queued has nothing to do yet.
+        $this->runClassification();
+
+        return $id;
+    }
+
+    /** The batch time comes: the sweep releases what waits and its notifications go out. */
+    private function batchComes(): void
+    {
+        foreach (['message', 'thread'] as $table) {
+            $this->connection()->executeStatement("UPDATE {$table} SET held_until = now() - interval '1 minute' WHERE held_until IS NOT NULL");
+        }
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+        static::getContainer()->get(ReleaseBatchHandler::class)->sweep(new SweepBatches());
+        $this->sendQueued();
     }
 
     private function builtinId(string $builtin): string
