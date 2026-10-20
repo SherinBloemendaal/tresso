@@ -107,6 +107,19 @@ describe('bulk store', () => {
     expect(last(useComposeStore().notices)?.action).toBeUndefined()
   })
 
+  it('starts once however quickly it is asked twice', async () => {
+    replies['POST /api/v1/bulk-actions'] = [state({ status: 'done' })]
+    const bulk = useBulkStore()
+
+    const first = bulk.start({ in: 'inbox', action: 'archive' })
+    expect(bulk.busy).toBe(true)
+    expect(await bulk.start({ in: 'inbox', action: 'archive' })).toBeNull()
+    await first
+
+    expect(requests.filter((request) => request.method === 'POST')).toHaveLength(1)
+    expect(bulk.busy).toBe(false)
+  })
+
   it('runs one at a time', async () => {
     replies['POST /api/v1/bulk-actions'] = [state({})]
     replies['GET /api/v1/bulk-actions/b1'] = [state({ status: 'done' })]

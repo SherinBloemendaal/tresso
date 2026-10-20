@@ -42,7 +42,7 @@ const olderThanDays = ref<number | null>(null)
 const pending = ref<{ request: BulkActionRequest; label: string; folderName?: string; question: string } | null>(null)
 const counting = ref(false)
 
-const busy = computed(() => bulk.running !== null || counting.value)
+const busy = computed(() => bulk.busy || counting.value)
 const subtitle = computed(() => {
   if (stats.value === null) {
     return ''

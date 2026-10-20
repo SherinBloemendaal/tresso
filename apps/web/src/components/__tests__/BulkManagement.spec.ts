@@ -28,6 +28,7 @@ const oldNews: CleanupSuggestion = {
   senderName: null,
   smartInboxId: 'news',
   windowDays: null,
+  windowReceived: null,
   olderThanDays: 30,
   largerThan: null,
   action: 'archive',

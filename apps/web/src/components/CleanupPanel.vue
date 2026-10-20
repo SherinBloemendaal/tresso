@@ -62,7 +62,7 @@ async function clean(suggestion: CleanupSuggestion): Promise<void> {
               See its senders
             </RouterLink>
           </div>
-          <button type="button" class="button outlined" :class="{ danger: suggestion.action === 'trash' }" :disabled="bulk.running !== null" @click="clean(suggestion)">
+          <button type="button" class="button outlined" :class="{ danger: suggestion.action === 'trash' }" :disabled="bulk.busy" @click="clean(suggestion)">
             {{ text.button }}
           </button>
         </li>
