@@ -24,6 +24,7 @@ import (
 	"tresso/sync/internal/outbox"
 	"tresso/sync/internal/realtime"
 	"tresso/sync/internal/storage"
+	"tresso/sync/internal/unsubscribe"
 )
 
 func main() {
@@ -80,14 +81,17 @@ func run(logger *slog.Logger) error {
 
 	manager := lease.NewManager(client, syncerFor, cfg.WorkerID, cfg.Capacity, cfg.HeartbeatInterval, workerLogger)
 
-	// Outgoing mail, drafts, changes to messages and calendar changes: the hub says which account has work right away;
-	// every heartbeat repeats it.
+	// Outgoing mail, drafts, changes to messages, calendar changes and unsubscribe requests: the hub says which account
+	// has work right away; every heartbeat repeats it.
 	transports := map[string]outbox.Transport{
 		"imap":      outbox.IMAPTransport(dialer),
 		"gmail":     outbox.GmailTransport(client, cfg.WorkerID, gmailsync.DefaultClientOptions()),
 		"microsoft": outbox.GraphTransport(client, cfg.WorkerID, graphOutboxOptions(workerLogger)),
 	}
-	dispatcher := outbox.NewDispatcher(client, store, transports, cfg.WorkerID, workerLogger)
+	// Unsubscribe addresses come from whoever sent a message, so their dialer never allows private addresses, whatever
+	// MAIL_ALLOW_UNSAFE_SERVERS says for the user's own mail servers.
+	unsubscriber := unsubscribe.New(netguard.New(false), unsubscribe.DefaultOptions())
+	dispatcher := outbox.NewDispatcher(client, store, transports, unsubscriber, cfg.WorkerID, workerLogger)
 	manager.OnOutbox(func(ctx context.Context, accountIDs []string) {
 		for _, id := range accountIDs {
 			dispatcher.Trigger(ctx, id)

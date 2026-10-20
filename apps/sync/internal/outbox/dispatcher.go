@@ -1,7 +1,8 @@
 // Package outbox does the account work users wait for: for each account this worker leases, it sends the mail that is
 // due through the account's provider (SMTP for IMAP accounts, the Gmail API, Microsoft Graph), files a copy in Sent
 // when the provider does not do so itself, reports the outcome, keeps the Drafts folder in step with the user's
-// drafts, and makes the user's changes to messages (read, flagged, moved) on the server.
+// drafts, makes the user's changes to messages (read, flagged, moved) on the server, and sends the one-click
+// unsubscribe requests (RFC 8058) the user asked for.
 package outbox
 
 import (
@@ -37,6 +38,15 @@ type API interface {
 	ReportDraftRemoved(ctx context.Context, accountID, removalID, workerID string) error
 	ClaimMailbox(ctx context.Context, accountID, workerID string) ([]api.MailboxChange, error)
 	ReportMailbox(ctx context.Context, accountID, changeID, workerID, outcome, errorText, remoteUID string) error
+	ClaimUnsubscribes(ctx context.Context, accountID, workerID string) ([]api.UnsubscribeRequest, error)
+	ReportUnsubscribe(ctx context.Context, accountID, requestID, workerID, outcome, errorText string) error
+}
+
+// Unsubscriber sends one one-click unsubscribe request (see package unsubscribe). It is the same HTTP POST for every
+// provider, so it needs no Sender. outcome is api.UnsubscribeDone, api.OutcomeRetry or api.OutcomeFailed; text is
+// safe to show the user.
+type Unsubscriber interface {
+	Post(ctx context.Context, url string) (outcome, text string)
 }
 
 // SentStore is the account's Sent folder.
@@ -146,11 +156,14 @@ type Transport interface {
 }
 
 type Dispatcher struct {
-	api        API
-	store      storage.Reader
-	transports map[string]Transport // by account provider
-	workerID   string
-	logger     *slog.Logger
+	api         API
+	store       storage.Reader
+	transports  map[string]Transport // by account provider
+	unsubscribe Unsubscriber
+	workerID    string
+	logger      *slog.Logger
+	// now is the clock; tests replace it.
+	now func() time.Time
 
 	mu      sync.Mutex
 	running map[string]*run
@@ -159,8 +172,8 @@ type Dispatcher struct {
 
 type run struct{ again bool }
 
-func NewDispatcher(client API, store storage.Reader, transports map[string]Transport, workerID string, logger *slog.Logger) *Dispatcher {
-	return &Dispatcher{api: client, store: store, transports: transports, workerID: workerID, logger: logger, running: map[string]*run{}}
+func NewDispatcher(client API, store storage.Reader, transports map[string]Transport, unsubscriber Unsubscriber, workerID string, logger *slog.Logger) *Dispatcher {
+	return &Dispatcher{api: client, store: store, transports: transports, unsubscribe: unsubscriber, workerID: workerID, logger: logger, now: time.Now, running: map[string]*run{}}
 }
 
 // Trigger makes the account's due mail go out. Runs for one account never overlap: a trigger during a run makes that
@@ -198,6 +211,9 @@ func (d *Dispatcher) Wait() {
 
 func (d *Dispatcher) process(ctx context.Context, accountID string) {
 	logger := d.logger.With("account", accountID)
+	// Unsubscribing comes last, so slow senders' servers never hold up mail the user waits for. It is an HTTP POST
+	// that needs nothing of the account, so it also runs when the account cannot send.
+	defer d.unsubscribes(ctx, logger, accountID)
 	// Credentials first: a message is only claimed once this worker can actually send it.
 	credentials, err := d.api.Credentials(ctx, accountID, d.workerID)
 	if err != nil {
@@ -335,6 +351,44 @@ func (d *Dispatcher) changeMailbox(ctx context.Context, logger *slog.Logger, sen
 		if err := d.api.ReportMailbox(ctx, credentials.AccountID, change.ID, d.workerID, result.outcome, result.text, result.remoteUID); err != nil {
 			changeLogger.Warn("reporting a change to a message failed", "error", err)
 			waiting[change.MessageID] = true
+		}
+	}
+}
+
+// UnsubscribeClaimBudget is how long after claiming the worker still starts an unsubscribe request: the API's claim
+// lasts five minutes, and each request takes at most unsubscribe's timeout.
+const UnsubscribeClaimBudget = 4 * time.Minute
+
+// unsubscribes sends the user's one-click unsubscribe requests and reports each outcome. A report that fails (the claim
+// was lost, or the API is unreachable) is only logged: the request comes back once the claim expires. Without an
+// Unsubscriber nothing is claimed.
+func (d *Dispatcher) unsubscribes(ctx context.Context, logger *slog.Logger, accountID string) {
+	if d.unsubscribe == nil {
+		return
+	}
+	requests, err := d.api.ClaimUnsubscribes(ctx, accountID, d.workerID)
+	if err != nil {
+		logger.Warn("claiming unsubscribe requests failed", "error", err)
+		return
+	}
+	deadline := d.now().Add(UnsubscribeClaimBudget)
+	for _, request := range requests {
+		if ctx.Err() != nil {
+			return // the worker stops; the rest comes back once the claim expires
+		}
+		if !d.now().Before(deadline) {
+			// Close to the end of the claim: a report after it would be refused, and another worker may take the
+			// request meanwhile. The rest comes back once the claim expires.
+			logger.Warn("leaving unsubscribe requests for later; their claim is about to expire")
+			return
+		}
+		requestLogger := logger.With("unsubscribe", request.ID)
+		outcome, text := d.unsubscribe.Post(ctx, request.URL)
+		if outcome != api.UnsubscribeDone {
+			requestLogger.Warn("unsubscribing did not succeed", "outcome", outcome, "reason", text)
+		}
+		if err := d.api.ReportUnsubscribe(ctx, accountID, request.ID, d.workerID, outcome, text); err != nil {
+			requestLogger.Warn("reporting an unsubscribe request failed", "error", err)
 		}
 	}
 }

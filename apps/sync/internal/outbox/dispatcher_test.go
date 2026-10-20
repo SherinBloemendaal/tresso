@@ -32,6 +32,10 @@ type mailboxReport struct {
 	id, outcome, text, remoteUID string
 }
 
+type unsubscribeReport struct {
+	id, outcome, text string
+}
+
 type fakeAPI struct {
 	mu       sync.Mutex
 	provider string // "imap" unless a test says otherwise
@@ -47,6 +51,44 @@ type fakeAPI struct {
 	removed  []string
 	changes  []api.MailboxChange
 	changed  []mailboxReport
+	// unsubscribes are claimed once; reportErr answers every unsubscribe report.
+	unsubscribes []api.UnsubscribeRequest
+	unsubscribed []unsubscribeReport
+	reportErr    error
+}
+
+func (f *fakeAPI) ClaimUnsubscribes(context.Context, string, string) ([]api.UnsubscribeRequest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	claimed := f.unsubscribes
+	f.unsubscribes = nil
+	return claimed, nil
+}
+
+func (f *fakeAPI) ReportUnsubscribe(_ context.Context, _, requestID, _, outcome, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unsubscribed = append(f.unsubscribed, unsubscribeReport{requestID, outcome, text})
+	return f.reportErr
+}
+
+// fakeUnsubscriber records the addresses it posts to and answers with the outcome queued for each.
+type fakeUnsubscriber struct {
+	posted   []string
+	outcomes map[string][2]string
+	// before runs at the start of every post: a test looks at what happened first, or lets time pass.
+	before func()
+}
+
+func (u *fakeUnsubscriber) Post(_ context.Context, url string) (outcome, text string) {
+	if u.before != nil {
+		u.before()
+	}
+	u.posted = append(u.posted, url)
+	if answer, ok := u.outcomes[url]; ok {
+		return answer[0], answer[1]
+	}
+	return api.UnsubscribeDone, ""
 }
 
 func (f *fakeAPI) ClaimMailbox(context.Context, string, string) ([]api.MailboxChange, error) {
@@ -196,6 +238,7 @@ type harness struct {
 	sent    *fakeSent
 	drafts  *fakeDrafts
 	mailbox *fakeMailbox
+	unsub   *fakeUnsubscriber
 	finder  *fakeFinder
 	store   *storage.Memory
 	sends   []smtpsend.Envelope
@@ -208,12 +251,12 @@ type harness struct {
 }
 
 func newHarness(messages ...api.OutgoingMessage) *harness {
-	h := &harness{api: &fakeAPI{provider: "imap", smtpHost: "smtp.company.example", queue: [][]api.OutgoingMessage{messages}}, sent: &fakeSent{contains: map[string]bool{}}, drafts: &fakeDrafts{}, mailbox: &fakeMailbox{errors: map[string]error{}}, store: storage.NewMemory()}
+	h := &harness{api: &fakeAPI{provider: "imap", smtpHost: "smtp.company.example", queue: [][]api.OutgoingMessage{messages}}, sent: &fakeSent{contains: map[string]bool{}}, drafts: &fakeDrafts{}, mailbox: &fakeMailbox{errors: map[string]error{}}, unsub: &fakeUnsubscriber{outcomes: map[string][2]string{}}, store: storage.NewMemory()}
 	_ = h.store.PutIfAbsent(context.Background(), "outgoing/ab/raw1", []byte("Subject: Hi\r\n\r\nHello\r\n"), "message/rfc822")
 	password := func(c api.Credentials) error { _, err := c.Password(); return err }
 	token := func(c api.Credentials) error { _, _, err := c.AccessToken(); return err }
 	transports := map[string]Transport{"imap": &fakeTransport{h, "imap", password}, "gmail": &fakeTransport{h, "gmail", token}, "microsoft": &fakeTransport{h, "microsoft", token}}
-	h.d = NewDispatcher(h.api, h.store, transports, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h.d = NewDispatcher(h.api, h.store, transports, h.unsub, "w1", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return h
 }
 
@@ -642,6 +685,49 @@ func TestAFlagChangeIsDoneWhenAnyCopyTookIt(t *testing.T) {
 
 // Fails without the fix: the duplicate check only asked for the Message-ID, which Gmail and Graph may replace, and
 // took a failed check as "not sent", so a retry could send twice.
+func TestPostsClaimedUnsubscribesAndReportsTheOutcome(t *testing.T) {
+	h := newHarness()
+	h.api.unsubscribes = []api.UnsubscribeRequest{{ID: "u1", URL: "https://news.example/u1"}, {ID: "u2", URL: "https://shop.example/u2"}, {ID: "u3", URL: "https://busy.example/u3"}}
+	h.unsub.outcomes["https://shop.example/u2"] = [2]string{api.OutcomeFailed, "The sender's server refused the request (HTTP 404)."}
+	h.unsub.outcomes["https://busy.example/u3"] = [2]string{api.OutcomeRetry, "The sender's server is busy (HTTP 503); Tresso will try again."}
+
+	h.run()
+
+	if !slices.Equal(h.unsub.posted, []string{"https://news.example/u1", "https://shop.example/u2", "https://busy.example/u3"}) {
+		t.Errorf("posted = %v", h.unsub.posted)
+	}
+	want := []unsubscribeReport{
+		{"u1", api.UnsubscribeDone, ""},
+		{"u2", api.OutcomeFailed, "The sender's server refused the request (HTTP 404)."},
+		{"u3", api.OutcomeRetry, "The sender's server is busy (HTTP 503); Tresso will try again."},
+	}
+	if !slices.Equal(h.api.unsubscribed, want) {
+		t.Errorf("reports = %+v", h.api.unsubscribed)
+	}
+}
+
+func TestAFailedUnsubscribeReportDoesNotStopTheRest(t *testing.T) {
+	h := newHarness()
+	h.api.unsubscribes = []api.UnsubscribeRequest{{ID: "u1", URL: "https://news.example/u1"}, {ID: "u2", URL: "https://shop.example/u2"}}
+	h.api.reportErr = errors.Join(api.ErrClaimLost, errors.New("409"))
+
+	h.run()
+
+	if len(h.unsub.posted) != 2 || len(h.api.unsubscribed) != 2 {
+		t.Errorf("posted %v, reported %+v", h.unsub.posted, h.api.unsubscribed)
+	}
+}
+
+func TestNoUnsubscribeClaimedPostsNothing(t *testing.T) {
+	h := newHarness(message("m1", 1))
+
+	h.run()
+
+	if len(h.unsub.posted) != 0 || len(h.api.unsubscribed) != 0 {
+		t.Errorf("posted %v, reported %+v", h.unsub.posted, h.api.unsubscribed)
+	}
+}
+
 func TestProviderRetryFindsAnEarlierSendByItsOutboxID(t *testing.T) {
 	h := newHarness(message("m1", 2))
 	h.api.provider = "gmail"
@@ -721,5 +807,52 @@ func TestEarliestAttemptStartsWhenTheMessageWasWritten(t *testing.T) {
 	}
 	if got := earliestAttempt(api.OutgoingMessage{ID: "m1"}, now); !got.Equal(now.Add(-retrySpan)) {
 		t.Errorf("earliestAttempt without a UUIDv7 = %v", got)
+	}
+}
+
+func TestUnsubscribesGoOutAlsoWhenTheAccountCannotSend(t *testing.T) {
+	h := newHarness()
+	h.api.provider = "unknown" // no transport: nothing else of the run happens
+	h.api.unsubscribes = []api.UnsubscribeRequest{{ID: "u1", URL: "https://news.example/u1"}}
+
+	h.run()
+
+	if !slices.Equal(h.unsub.posted, []string{"https://news.example/u1"}) || len(h.api.unsubscribed) != 1 {
+		t.Errorf("posted %v, reported %+v", h.unsub.posted, h.api.unsubscribed)
+	}
+}
+
+func TestUnsubscribesWaitUntilTheMailUsersWaitForWentOut(t *testing.T) {
+	h := newHarness(message("m1", 1))
+	h.api.unsubscribes = []api.UnsubscribeRequest{{ID: "u1", URL: "https://news.example/u1"}}
+	reportsBefore := -1
+	h.unsub.before = func() {
+		h.api.mu.Lock()
+		defer h.api.mu.Unlock()
+		reportsBefore = len(h.api.reports)
+	}
+
+	h.run()
+
+	if reportsBefore != 1 {
+		t.Errorf("the outgoing message was reported %d times before the unsubscribe request, want 1", reportsBefore)
+	}
+}
+
+func TestSlowUnsubscribesStopBeforeTheirClaimRunsOut(t *testing.T) {
+	h := newHarness()
+	h.api.unsubscribes = []api.UnsubscribeRequest{{ID: "u1", URL: "https://a.example/u"}, {ID: "u2", URL: "https://b.example/u"}, {ID: "u3", URL: "https://c.example/u"}, {ID: "u4", URL: "https://d.example/u"}}
+	clock := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	h.d.now = func() time.Time { return clock }
+	// Every sender's server takes 90 seconds: after three the four-minute budget is spent.
+	h.unsub.before = func() { clock = clock.Add(90 * time.Second) }
+
+	h.run()
+
+	if !slices.Equal(h.unsub.posted, []string{"https://a.example/u", "https://b.example/u", "https://c.example/u"}) {
+		t.Errorf("posted = %v", h.unsub.posted)
+	}
+	if len(h.api.unsubscribed) != 3 {
+		t.Errorf("reported %+v; the fourth is left for the next claim", h.api.unsubscribed)
 	}
 }

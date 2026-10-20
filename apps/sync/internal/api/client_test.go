@@ -285,6 +285,47 @@ func TestMailboxChangesAreClaimedAndReported(t *testing.T) {
 	}
 }
 
+func TestUnsubscribesAreClaimedAndReported(t *testing.T) {
+	var claimed, reported map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/internal/sync/accounts/acc-1/unsubscribes/claim":
+			_ = json.NewDecoder(r.Body).Decode(&claimed)
+			_, _ = w.Write([]byte(`{"requests":[{"id":"u1","url":"https://news.example/unsub?u=1"}]}`))
+		case "/internal/sync/accounts/acc-1/unsubscribes/u1/report":
+			_ = json.NewDecoder(r.Body).Decode(&reported)
+			_, _ = w.Write([]byte(`{"accepted":true}`))
+		case "/internal/sync/accounts/acc-1/unsubscribes/u2/report":
+			http.Error(w, `{"detail":"claim lost"}`, http.StatusConflict)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	client := NewWithHTTPClient(srv.URL, srv.Client())
+
+	requests, err := client.ClaimUnsubscribes(context.Background(), "acc-1", "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(claimed) != "map[workerId:w1]" {
+		t.Errorf("claim body = %v", claimed)
+	}
+	if len(requests) != 1 || requests[0].ID != "u1" || requests[0].URL != "https://news.example/unsub?u=1" {
+		t.Fatalf("requests = %+v", requests)
+	}
+
+	if err := client.ReportUnsubscribe(context.Background(), "acc-1", "u1", "w1", OutcomeFailed, "Refused (HTTP 404)."); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(reported) != "map[error:Refused (HTTP 404). outcome:failed workerId:w1]" {
+		t.Errorf("report body = %v", reported)
+	}
+	if err := client.ReportUnsubscribe(context.Background(), "acc-1", "u2", "w1", UnsubscribeDone, ""); !errors.Is(err, ErrClaimLost) {
+		t.Errorf("a lost claim is reported as such, got %v", err)
+	}
+}
+
 // Fails without the LastAttempt field: the API's lastAttempt flag decides which text ends an undecided message.
 func TestClaimedOutgoingMessagesSayWhetherItIsTheLastAttempt(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
