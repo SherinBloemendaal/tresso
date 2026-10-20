@@ -32,6 +32,8 @@ const todosStore = useTodosStore()
 /** The todos made from this conversation's emails. */
 const todos = ref<Todo[]>([])
 const makingTodo = ref(false)
+/** The conversation has no todo yet and nothing else is under way: the button shows, and T works, only then. */
+const canMakeTodo = computed(() => todos.value.length === 0 && !busy.value && !makingTodo.value)
 let unmounted = false
 
 const flagged = computed(() => messages.value.some((message) => message.flags.flagged))
@@ -53,7 +55,7 @@ async function load(): Promise<void> {
 /** Makes a todo of the conversation, titled after its subject; the email keeps one todo however often this runs. */
 async function makeTodo(): Promise<void> {
   const source = todoSourceMessage(messages.value, mail.accounts.map((account) => account.emailAddress))
-  if (source === null || makingTodo.value) {
+  if (source === null || !canMakeTodo.value) {
     return
   }
   makingTodo.value = true
@@ -184,7 +186,7 @@ onBeforeUnmount(() => {
           v-if="todos.length === 0"
           type="button"
           class="tool make-todo"
-          :disabled="busy || makingTodo"
+          :disabled="!canMakeTodo"
           aria-keyshortcuts="T"
           title="Make todo (T)"
           @click="makeTodo"
