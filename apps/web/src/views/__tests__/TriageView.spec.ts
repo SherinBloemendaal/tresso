@@ -300,6 +300,8 @@ describe('TriageView', () => {
     const answer = hold()
 
     press('d')
+    // Keys wait for the email they are for; Z while both still save.
+    await until(() => expect(subject(wrapper)).toBe('Lunch'))
     press('k')
     press('z')
     await until(() => expect(wrapper.find('.saving').exists()).toBe(true))
@@ -329,7 +331,7 @@ describe('TriageView', () => {
     )
 
     await wrapper.get('button.decision.delegate').trigger('click')
-    await until(() => expect(opened).toHaveBeenCalledWith('t1'))
+    await until(() => expect(opened.mock.calls[0]?.[0].map((message: SyncedMessage) => message.id)).toEqual(['m1']))
     await until(() => expect(subject(wrapper)).toBe('Lunch'))
     expect(requests).toEqual([])
 
@@ -370,6 +372,34 @@ describe('TriageView', () => {
       'TAKE BACK h1',
       'DELETE /api/v1/threads/t1/classification?placementId=p1',
     ])
+  })
+
+  it('says when undo could only withdraw the hand-over because the forward had left', async () => {
+    await mountView()
+    const handOvers = useHandOversStore()
+    vi.spyOn(handOvers, 'handOverAndWait').mockResolvedValue(handed)
+    vi.spyOn(handOvers, 'takeBack').mockResolvedValue('withdrawn')
+    press('h')
+    await until(() => expect(requests).toHaveLength(2))
+
+    press('z')
+
+    await until(() => expect(useComposeStore().notices.map((notice) => notice.text)).toContain('Lisa has the forward already; the hand-over is withdrawn, so nothing waits on them any more.'))
+  })
+
+  it('keeps the placement when the hand-over cannot be taken back', async () => {
+    const wrapper = await mountView()
+    const handOvers = useHandOversStore()
+    vi.spyOn(handOvers, 'handOverAndWait').mockResolvedValue(handed)
+    vi.spyOn(handOvers, 'takeBack').mockRejectedValue(new Error('The hand-over could not be taken back, so it still stands: You are offline.'))
+    press('h')
+    await until(() => expect(requests).toHaveLength(2))
+
+    press('z')
+    await until(() => expect(useComposeStore().notices.map((notice) => notice.text)).toContain('This could not be undone: The hand-over could not be taken back, so it still stands: You are offline.'))
+
+    expect(requests.filter((request) => request.method === 'DELETE')).toEqual([])
+    expect(wrapper.get('.count.delegate').text()).toBe('1')
   })
 
   it('keeps going when the hand-over cannot be opened', async () => {

@@ -95,10 +95,9 @@ describe('hand-overs store', () => {
     const input = { delegate: { address: 'lisa@company.example', name: 'Lisa Bakker' }, note: '', dueAt: new Date('2026-10-23T15:00:00Z'), dueLabel: 'Friday' }
 
     it('settles with nothing when the dialog closes without a hand-over', async () => {
-      vi.spyOn(mail, 'thread').mockResolvedValue(conversation)
       const handOvers = useHandOversStore()
 
-      const waiting = handOvers.handOverAndWait('t1')
+      const waiting = handOvers.handOverAndWait(conversation.messages)
       await vi.waitFor(() => expect(handOvers.handingOver?.id).toBe('m1'))
       handOvers.close()
 
@@ -106,12 +105,11 @@ describe('hand-overs store', () => {
     })
 
     it('settles with the hand-over and leaves the notice to triage', async () => {
-      vi.spyOn(mail, 'thread').mockResolvedValue(conversation)
       const handed = { handOver: late, forwardId: 'f1', draftId: 'd1', until: Date.now() + 5000 } satisfies HandedOver
       vi.spyOn(HandOverFlow.prototype, 'handOver').mockResolvedValue(handed)
       const handOvers = useHandOversStore()
 
-      const waiting = handOvers.handOverAndWait('t1')
+      const waiting = handOvers.handOverAndWait(conversation.messages)
       await vi.waitFor(() => expect(handOvers.handingOver).not.toBeNull())
       await handOvers.handOver(handOvers.handingOver!, input)
 
