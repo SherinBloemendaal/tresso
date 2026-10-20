@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { HandOverError, type HandOverInput, type SyncedMessage } from '@tresso/core'
+import { HandOverError, UnscannedFilesError, type HandOverInput, type SyncedMessage } from '@tresso/core'
 import { useHandOversStore } from '@/stores/handOvers'
 import HandOverDialog from '../HandOverDialog.vue'
 
@@ -22,6 +22,7 @@ const message: SyncedMessage = {
   verdict: 'delegate',
   summary: null,
   calendarMethod: null,
+  attachmentScan: null,
 }
 
 /** Form validation runs asynchronously; let it finish. */
@@ -152,6 +153,24 @@ describe('HandOverDialog', () => {
       expect(wrapper.get('input[type="date"]').attributes('min')).toBe('2026-10-20')
       wrapper.unmount()
     })
+  })
+
+  it('asks before handing over files that could not be scanned, and hands them over once confirmed', async () => {
+    handOver.mockRejectedValueOnce(new UnscannedFilesError('invoice.pdf could not be scanned. Send it anyway?'))
+    const wrapper = mountDialog()
+    await chooseLisa(wrapper)
+
+    await wrapper.get('form').trigger('submit')
+    await settle()
+    expect(wrapper.get('.unscanned').text()).toContain('invoice.pdf could not be scanned.')
+    expect(handOver.mock.calls[0]![1].acceptUnscanned).toBe(false)
+
+    await wrapper.get('.unscanned button').trigger('click')
+    await settle()
+
+    expect(handOver).toHaveBeenCalledTimes(2)
+    expect(handOver.mock.calls[1]![1].acceptUnscanned).toBe(true)
+    wrapper.unmount()
   })
 
   it('closes on Escape', async () => {

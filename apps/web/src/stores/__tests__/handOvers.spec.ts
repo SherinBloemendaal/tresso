@@ -25,6 +25,7 @@ function message(id: string, from: string): SyncedMessage {
     verdict: null,
     summary: null,
     calendarMethod: null,
+    attachmentScan: null,
   }
 }
 
