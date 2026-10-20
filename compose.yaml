@@ -11,7 +11,9 @@ x-api-env: &api-env
   S3_SECRET_KEY: devsecretkey
   MEILISEARCH_URL: http://meilisearch:7700
   MEILISEARCH_KEY: dev-master-key-change-me
-  CLAMAV_HOST: clamav
+  # Empty unless the scan profile runs ClamAV (see README): attachments are then marked as not scanned, and open
+  # after a warning.
+  CLAMAV_HOST: ${CLAMAV_HOST:-}
   CLAMAV_PORT: "3310"
   MAILER_DSN: smtp://mailpit:1025
   SYNC_WORKER_CLIENT_SECRET: dev-sync-worker-secret
@@ -59,7 +61,7 @@ services:
       context: .
       dockerfile: docker/api/Dockerfile
       target: dev
-    command: ["php", "bin/console", "messenger:consume", "async", "search", "push", "scheduler_notifications", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    command: ["php", "bin/console", "messenger:consume", "async", "search", "push", "scheduler_notifications", "scheduler_default", "--time-limit=3600", "--memory-limit=256M", "-vv"]
     environment: *api-env
     volumes:
       - ./apps/api:/app
@@ -79,6 +81,24 @@ services:
       dockerfile: docker/api/Dockerfile
       target: dev
     command: ["php", "bin/console", "messenger:consume", "classify", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    environment: *api-env
+    volumes:
+      - ./apps/api:/app
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+  # Scans wait on clamd, so they have their own worker: outgoing mail never waits behind them. First scans go before
+  # rescans.
+  scanner:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+      target: dev
+    command: ["php", "bin/console", "messenger:consume", "scan", "scan_rescan", "--time-limit=3600", "--memory-limit=256M", "-vv"]
     environment: *api-env
     volumes:
       - ./apps/api:/app
@@ -191,12 +211,13 @@ services:
       - "3465:3465"
       - "18080:8080"
 
-  # ClamAV needs about 1.5 GB of RAM, so it only starts with: docker compose --profile scan up
+  # ClamAV needs about 1.5 GB of RAM, so it only starts with: CLAMAV_HOST=clamav docker compose --profile scan up
   clamav:
     image: clamav/clamav:1.5-debian13-slim
     profiles: ["scan"]
     volumes:
       - clamav_data:/var/lib/clamav
+      - ./docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
 
 volumes:
   postgres_data:
