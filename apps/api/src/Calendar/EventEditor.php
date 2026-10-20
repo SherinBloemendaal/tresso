@@ -18,6 +18,7 @@ use App\Entity\Calendar;
 use App\Entity\CalendarEvent;
 use App\Entity\CalendarObject;
 use App\Entity\MailAccount;
+use App\Enum\CalendarSource;
 use App\Enum\EditScope;
 use App\Enum\ParticipationStatus;
 use App\Repository\CalendarObjectRepository;
@@ -393,6 +394,22 @@ final readonly class EventEditor
     }
 
     /**
+     * Google moves an event to another calendar of the account with events.move, which makes that calendar the
+     * organizer: guests would see a meeting organized by someone else. A meeting with guests is not moved there.
+     */
+    private static function refuseOrganizerChange(Calendar $source, Calendar $target, VCalendar $vcalendar): void
+    {
+        if (CalendarSource::Google !== $source->getSource() || CalendarSource::Google !== $target->getSource() || $source->getMailAccount() !== $target->getMailAccount()) {
+            return;
+        }
+        foreach (CalendarDocument::events($vcalendar) as $event) {
+            if ([] !== Props::all($event, 'ATTENDEE')) {
+                throw new EditRejected('Google would make the other calendar the organizer of this meeting, and its guests would see that. Keep it in this calendar, or create it again in the other one.');
+            }
+        }
+    }
+
+    /**
      * Asks the calendar's provider for an online meeting: the worker makes it when it writes the event, and the
      * provider's version, with the join link and without this request, then replaces the stored one.
      */
@@ -600,6 +617,7 @@ final readonly class EventEditor
         if (null !== $this->objects->findOneByUid($target, $object->getUid())) {
             throw new EditRejected('The other calendar already has this event.');
         }
+        self::refuseOrganizerChange($object->getCalendar(), $target, $vcalendar);
         self::withOrganizer($vcalendar, $target, $organizer);
         self::requestConference($vcalendar, $target, $changes->conferenceProvider);
         $source = $object->getCalendar();

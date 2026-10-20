@@ -247,6 +247,51 @@ final class ProviderCalendarTest extends DatabaseTestCase
         self::assertSame('"1"', $this->claim()[0]['ifMatch'], 'The next write stays conditional.');
     }
 
+    public function testAMeetingWithGuestsStaysWithItsOrganizerWithinAGoogleAccount(): void
+    {
+        $this->client->jsonRequest('POST', $this->base().'/calendars', ['workerId' => 'w1', 'source' => 'google', 'providerSchedules' => true, 'calendars' => [
+            ['remoteId' => self::PRIMARY, 'name' => 'Kim', 'isDefault' => true],
+            ['remoteId' => 'team@group.calendar.google.com', 'name' => 'Team'],
+        ]], $this->worker);
+        self::assertResponseIsSuccessful();
+        $calendars = $this->decodedResponse()['calendars'] ?? null;
+        self::assertIsArray($calendars);
+        [$primary, $team] = array_map(static fn (mixed $calendar): string => \is_array($calendar) ? self::string($calendar['id']) : '', $calendars);
+
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events', self::event($primary, ['attendees' => [['address' => 'lisa@example.org']]]), $this->user);
+        self::assertResponseStatusCodeSame(201);
+        $meeting = $this->responseString('id');
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$meeting, self::event($team, ['attendees' => [['address' => 'lisa@example.org']]]), $this->user);
+        self::assertResponseStatusCodeSame(422);
+        self::assertStringContainsString('Google would make the other calendar the organizer of this meeting', (string) $this->client->getResponse()->getContent());
+
+        $this->client->jsonRequest('POST', '/api/v1/calendar-events', self::event($primary, ['summary' => 'Focus']), $this->user);
+        $focus = $this->responseString('id');
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$focus, self::event($team, ['summary' => 'Focus']), $this->user);
+        self::assertResponseIsSuccessful('An event without guests moves.');
+    }
+
+    public function testAPartlyWrittenChangeWithoutRetriesLeftTakesTheProvidersVersion(): void
+    {
+        $primary = $this->reportCalendars()[0]['id'];
+        $this->storeObject($primary, 'lunch', '"1"', self::object('lunch@google.com', 'Lunch'));
+        $eventId = self::string($this->occurrences($this->user, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($primary, ['summary' => 'Lunch, later']), $this->user);
+        $operations = $this->claim();
+        $this->connection()->executeStatement('UPDATE calendar_operation SET attempts = 6');
+
+        $this->report($operations[0]['id'], ['outcome' => 'retry', 'error' => 'Google had a problem (HTTP 503).', 'remoteId' => 'lunch', 'etag' => '"2"',
+            'current' => ['remoteId' => 'lunch', 'etag' => '"2"', 'ical' => self::object('lunch@google.com', 'Lunch, half written')]]);
+        self::assertSame(['status' => 'failed'], $this->decodedResponse());
+
+        $event = $this->getJson('/api/v1/calendar-events/'.$eventId, $this->user);
+        self::assertSame('Lunch, half written', $event['summary'], 'Tresso shows what the provider has, not the change it could not finish.');
+        self::assertSame('Google had a problem (HTTP 503).', $event['syncError']);
+        self::assertSame([], $this->claim());
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$primary.'/inventory', ['workerId' => 'w1', 'objects' => [['remoteId' => 'lunch', 'etag' => '"2"']]], $this->worker);
+        self::assertSame([], $this->decodedResponse()['fetch']);
+    }
+
     public function testCalendarProblemsThePolicyNamesAreReported(): void
     {
         $this->client->jsonRequest('POST', $this->base().'/calendar-status', ['workerId' => 'w1', 'status' => 'not_granted', 'detail' => 'Tresso is not allowed to use the calendars of this account.'], $this->worker);
