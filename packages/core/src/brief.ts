@@ -24,6 +24,11 @@ export interface BriefEntry {
   conversation: ConversationSummary
   /** Noted: read and archived, so it left the inboxes since the brief was made. */
   noted: boolean
+  /**
+   * No longer mail to know: it was moved to another verdict since (Needs me, a correction, a sender rule). It stays in
+   * the list, but is neither noted nor left to note.
+   */
+  moved: boolean
 }
 
 /** A brief with the conversations of it this device still has, newest first. */
@@ -42,14 +47,17 @@ export interface BriefGroup {
   entries: BriefEntry[]
 }
 
-/** The brief's conversations that still exist, in the brief's order; one is noted when the inboxes no longer list it. */
+/**
+ * The brief's conversations that still exist, in the brief's order. One is noted when the inboxes no longer list it,
+ * and moved when its verdict is no longer `know`.
+ */
 export function briefView(brief: SyncedDailyBrief, conversations: ConversationSummary[]): BriefView {
   const byId = new Map(conversations.map((conversation) => [conversation.threadId, conversation]))
   const entries: BriefEntry[] = []
   for (const threadId of new Set(brief.threadIds)) {
     const conversation = byId.get(threadId)
     if (conversation !== undefined) {
-      entries.push({ conversation, noted: !conversation.inbox })
+      entries.push({ conversation, noted: !conversation.inbox, moved: conversation.verdict !== 'know' })
     }
   }
   return { brief, entries }
@@ -90,14 +98,15 @@ export function groupBrief(entries: BriefEntry[], grouping: BriefGrouping, smart
   return list.sort((a, b) => b.entries.length - a.entries.length || a.label.localeCompare(b.label))
 }
 
-/** How far the user is: noted entries out of all of them. */
+/** How far the user is: noted entries out of those still to know (moved ones count for neither). */
 export function briefProgress(entries: BriefEntry[]): { noted: number; total: number } {
-  return { noted: entries.filter((entry) => entry.noted).length, total: entries.length }
+  const counted = entries.filter((entry) => !entry.moved)
+  return { noted: counted.filter((entry) => entry.noted).length, total: counted.length }
 }
 
-/** The threads still to note, for "Mark all noted". */
+/** The threads still to note, for "Mark all noted": never one that was moved to another verdict. */
 export function threadsToNote(entries: BriefEntry[]): string[] {
-  return entries.filter((entry) => !entry.noted).map((entry) => entry.conversation.threadId)
+  return entries.filter((entry) => !entry.noted && !entry.moved).map((entry) => entry.conversation.threadId)
 }
 
 const OTHER = ''
