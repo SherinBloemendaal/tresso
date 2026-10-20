@@ -7,6 +7,8 @@ namespace App\Repository;
 use App\Entity\SchedulingPreferences;
 use App\Entity\User;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
+use Doctrine\DBAL\LockMode;
+use Doctrine\DBAL\Types\Types;
 use Doctrine\Persistence\ManagerRegistry;
 
 /**
@@ -25,5 +27,34 @@ class SchedulingPreferencesRepository extends ServiceEntityRepository
     public function forUser(User $user): SchedulingPreferences
     {
         return $this->findOneBy(['user' => $user]) ?? new SchedulingPreferences($user);
+    }
+
+    /**
+     * The user's preferences to change, locked until the transaction ends. The row is created with the defaults when
+     * missing, and two first changes at the same moment both find the one row instead of both creating it.
+     */
+    public function lockForUser(User $user): SchedulingPreferences
+    {
+        $defaults = new SchedulingPreferences($user);
+        $this->getEntityManager()->getConnection()->executeStatement(
+            'INSERT INTO scheduling_preferences (user_id, buffer_minutes, travel_minutes, minimum_notice_minutes, updated_at)
+             VALUES (:user, :buffer, :travel, :notice, :updated) ON CONFLICT (user_id) DO NOTHING',
+            [
+                'user' => $user->getId()->toRfc4122(),
+                'buffer' => $defaults->getBufferMinutes(),
+                'travel' => $defaults->getTravelMinutes(),
+                'notice' => $defaults->getMinimumNoticeMinutes(),
+                'updated' => $defaults->getUpdatedAt(),
+            ],
+            ['updated' => Types::DATETIME_IMMUTABLE],
+        );
+
+        /** @var SchedulingPreferences */
+        return $this->createQueryBuilder('p')
+            ->where('p.user = :user')
+            ->setParameter('user', $user->getId(), 'uuid')
+            ->getQuery()
+            ->setLockMode(LockMode::PESSIMISTIC_WRITE)
+            ->getSingleResult();
     }
 }

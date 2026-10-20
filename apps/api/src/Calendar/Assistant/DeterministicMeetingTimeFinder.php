@@ -64,9 +64,9 @@ final readonly class DeterministicMeetingTimeFinder implements MeetingTimeFinder
         $attendeeBusy = [];
         if ([] !== $others) {
             foreach ($this->attendeeSources as $source) {
-                foreach ($source->busyTimes($user, $others, $query->from, $query->to) as $address => $times) {
+                foreach ($source->busyTimes($user, $others, $query->from, $query->to) as $address => $availability) {
                     if (\in_array($address, $others, true)) {
-                        $attendeeBusy[$address] = [...$attendeeBusy[$address] ?? [], ...$times];
+                        $attendeeBusy[$address] = [...$attendeeBusy[$address] ?? [], ...$availability->busyIn($query->from, $query->to)];
                     }
                 }
             }

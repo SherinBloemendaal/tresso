@@ -48,12 +48,13 @@ final readonly class CalendarPartEventExtractor implements EventExtractor
             if (!\in_array($invitation->getMethod(), self::DESCRIBING, true)) {
                 continue;
             }
-            $calendar = CalendarDocument::parse($invitation->getIcal());
-            $vevent = CalendarDocument::master($calendar) ?? CalendarDocument::events($calendar)[0] ?? null;
-            if (null === $vevent) {
-                continue;
-            }
+            // One part that cannot be read leaves out that part, not the other events of the message.
             try {
+                $calendar = CalendarDocument::parse($invitation->getIcal());
+                $vevent = CalendarDocument::master($calendar) ?? CalendarDocument::events($calendar)[0] ?? null;
+                if (null === $vevent) {
+                    continue;
+                }
                 $data = EventReader::read($vevent, $calendar, $self);
             } catch (InvalidCalendarData) {
                 continue;

@@ -10,6 +10,7 @@ use ApiPlatform\Validator\Exception\ValidationException;
 use App\ApiResource\Input\Calendar\MeetingTimesInput;
 use App\ApiResource\MeetingTimesResource;
 use App\ApiResource\Output\ProposedSlot;
+use App\Calendar\Assistant\InvalidMeetingTimeQuery;
 use App\Calendar\Assistant\MeetingAttendee;
 use App\Calendar\Assistant\MeetingTimeFinder;
 use App\Calendar\Assistant\MeetingTimeQuery;
@@ -17,6 +18,7 @@ use App\Calendar\TooManyOccurrences;
 use App\Entity\Calendar;
 use App\Repository\CalendarRepository;
 use App\Security\CurrentUser;
+use Symfony\Component\Clock\ClockInterface;
 use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 use Symfony\Component\Validator\ConstraintViolation;
 use Symfony\Component\Validator\ConstraintViolationList;
@@ -30,6 +32,7 @@ final readonly class MeetingTimesProcessor implements ProcessorInterface
         private MeetingTimeFinder $finder,
         private CalendarRepository $calendars,
         private CurrentUser $currentUser,
+        private ClockInterface $clock,
     ) {
     }
 
@@ -51,10 +54,10 @@ final readonly class MeetingTimesProcessor implements ProcessorInterface
             throw new \LogicException('from and to were validated as date-times.');
         }
         $attendees = [];
-        foreach ($data->attendees as $attendee) {
-            $address = mb_strtolower(trim($attendee->address));
+        foreach ($data->attendees as $input) {
+            $attendee = new MeetingAttendee($input->address, $input->optional);
             // Named twice: required wins over optional.
-            $attendees[$address] = new MeetingAttendee($address, $attendee->optional && ($attendees[$address]->optional ?? true));
+            $attendees[$attendee->address] = new MeetingAttendee($attendee->address, $attendee->optional && ($attendees[$attendee->address]->optional ?? true));
         }
 
         try {
@@ -72,12 +75,12 @@ final readonly class MeetingTimesProcessor implements ProcessorInterface
                 $data->ignore,
                 null === $data->timeZone ? null : new \DateTimeZone($data->timeZone),
             );
-        } catch (\InvalidArgumentException $e) {
-            throw self::invalid($data, 'to', $e->getMessage(), $data->to);
+        } catch (InvalidMeetingTimeQuery $e) {
+            throw self::invalid($data, $e->field, $e->getMessage(), null);
         }
 
         try {
-            $times = $this->finder->find($user, $query, new \DateTimeImmutable());
+            $times = $this->finder->find($user, $query, $this->clock->now());
         } catch (TooManyOccurrences $e) {
             throw new UnprocessableEntityHttpException($e->getMessage(), $e);
         }

@@ -93,7 +93,9 @@ final class SlotSearch
                 }
             }
         }
-        usort($blocks, static fn (array $a, array $b): int => [$a[0]->at, $a[1]->at] <=> [$b[0]->at, $b[1]->at]);
+        // Kind and label settle ties, so busy times with the same start and end explain a slot the same whatever order
+        // their sources gave them in.
+        usort($blocks, static fn (array $a, array $b): int => [$a[0]->at, $a[1]->at, $a[0]->kind->value, $a[0]->label] <=> [$b[0]->at, $b[1]->at, $b[0]->kind->value, $b[0]->label]);
 
         return $blocks;
     }
@@ -114,9 +116,17 @@ final class SlotSearch
     private static function subtract(array $open, array $closed): array
     {
         $free = [];
+        // Blocks are in order of start and stretches in order: the leading blocks that end before a stretch starts end
+        // before every later stretch too, so each walk starts after them.
+        $first = 0;
+        $count = \count($closed);
         foreach ($open as [$start, $end]) {
+            while ($first < $count && $closed[$first][1]->at <= $start->at) {
+                ++$first;
+            }
             $cursor = $start;
-            foreach ($closed as [$blockStart, $blockEnd]) {
+            for ($i = $first; $i < $count; ++$i) {
+                [$blockStart, $blockEnd] = $closed[$i];
                 if ($blockStart->at >= $end->at) {
                     break;
                 }
@@ -152,9 +162,15 @@ final class SlotSearch
         $candidates = [];
         $duration = \sprintf('+%d minutes', $query->durationMinutes);
         $step = \sprintf('+%d minutes', $query->stepMinutes);
+        // Without optional attendees slots rank by start alone, so a search for one slot (planning a todo) is done at
+        // the first that fits.
+        $firstWins = 1 === $query->limit && [] === array_filter($query->attendees, static fn (MeetingAttendee $attendee): bool => $attendee->optional);
         foreach ($free as [$from, $until]) {
             for ($start = self::align($from->at, $query->stepMinutes, $zone); ($end = $start->modify($duration)) <= $until->at; $start = self::align($start->modify($step), $query->stepMinutes, $zone)) {
                 $candidates[] = new Slot($start, $end, $from, $until, self::optionalConflicts($start, $end, $query, $attendeeBusy));
+                if ($firstWins) {
+                    return $candidates;
+                }
             }
         }
 
@@ -225,32 +241,10 @@ final class SlotSearch
      */
     private static function weekly(array $times, \DateTimeImmutable $from, \DateTimeImmutable $to, \DateTimeZone $zone): array
     {
-        $ranges = [];
-        $last = $to->setTimezone($zone)->modify('+1 day')->format('Y-m-d');
-        for ($date = $from->setTimezone($zone)->modify('-1 day')->format('Y-m-d'); $date <= $last; $date = new \DateTimeImmutable($date.' 12:00', $zone)->modify('+1 day')->format('Y-m-d')) {
-            foreach ($times as $time) {
-                $range = $time->on($date, $zone);
-                if (null === $range || $range[1] <= $from || $range[0] >= $to) {
-                    continue;
-                }
-                $ranges[] = [new Boundary(self::utc($range[0]), BlockKind::WorkingHours), new Boundary(self::utc($range[1]), BlockKind::WorkingHours)];
-            }
-        }
-        usort($ranges, static fn (array $a, array $b): int => [$a[0]->at, $a[1]->at] <=> [$b[0]->at, $b[1]->at]);
-
-        $merged = [];
-        foreach ($ranges as $range) {
-            $previous = array_key_last($merged);
-            if (null !== $previous && $range[0]->at <= $merged[$previous][1]->at) {
-                if ($range[1]->at > $merged[$previous][1]->at) {
-                    $merged[$previous][1] = $range[1];
-                }
-                continue;
-            }
-            $merged[] = $range;
-        }
-
-        return $merged;
+        return array_map(
+            static fn (array $range): array => [new Boundary($range[0], BlockKind::WorkingHours), new Boundary($range[1], BlockKind::WorkingHours)],
+            WeeklyTime::intervals($times, $from, $to, $zone),
+        );
     }
 
     /**
