@@ -170,6 +170,67 @@ final class TodoApiTest extends DatabaseTestCase
         self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM todo'));
     }
 
+    public function testMakingATodoFromAnEmailSaysWhetherItMadeIt(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review', ['flags' => ['seen' => true]])]]);
+        $message = $this->messageBySubject('Budget review');
+
+        $this->client->jsonRequest('POST', '/api/v1/messages/'.$message['id'].'/todo', [], $this->kim);
+        $first = $this->decodedResponse();
+        $this->client->jsonRequest('POST', '/api/v1/messages/'.$message['id'].'/todo', [], $this->kim);
+        $again = $this->decodedResponse();
+        $this->client->request('GET', '/api/v1/todos', server: $this->kim);
+        $listed = $this->decodedResponse()[0] ?? null;
+
+        self::assertTrue($first['made'] ?? null);
+        self::assertFalse($again['made'] ?? null, 'The one it had: an undo must leave it.');
+        self::assertIsArray($listed);
+        self::assertArrayHasKey('made', $listed);
+        self::assertNull($listed['made'], 'Only making one says it.');
+    }
+
+    public function testMakingOnePerConversationAnswersWithTheConversationsOpenTodo(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Budget review', ['messageId' => '<budget@x>', 'flags' => ['seen' => true]]),
+            $this->message('2', 'Re: Budget review', ['messageId' => '<reply@x>', 'inReplyTo' => '<budget@x>', 'receivedAt' => '2026-10-19T09:00:00+00:00', 'flags' => ['seen' => true]]),
+        ]]);
+        $first = $this->messageBySubject('Budget review');
+        $reply = $this->messageBySubject('Re: Budget review');
+        $this->client->jsonRequest('POST', '/api/v1/messages/'.$first['id'].'/todo', [], $this->kim);
+        $open = $this->responseString('id');
+
+        $this->client->jsonRequest('POST', '/api/v1/messages/'.$reply['id'].'/todo', ['perConversation' => true], $this->kim);
+
+        self::assertSame([$open, false], [$this->decodedResponse()['id'] ?? null, $this->decodedResponse()['made'] ?? null]);
+        self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM todo'));
+
+        $this->patch($open, ['done' => true]);
+        $this->client->jsonRequest('POST', '/api/v1/messages/'.$reply['id'].'/todo', ['perConversation' => true], $this->kim);
+        self::assertTrue($this->decodedResponse()['made'] ?? null, 'A done todo leaves room for a new one.');
+    }
+
+    public function testTakingBackAPlacementGivesTheMailTheTodoItWouldHaveGot(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review')]]);
+        // Placed by the user before classification ran: classification leaves it alone, so it got no automatic todo.
+        $queued = $this->takeQueued();
+        $message = $this->messageBySubject('Budget review');
+        $this->client->request('GET', '/api/v1/smart-inboxes', server: $this->kim);
+        $informational = array_column($this->decodedResponse(), 'id', 'builtin')['informational'] ?? null;
+        self::assertIsString($informational);
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$message['threadId'].'/classification', ['smartInboxId' => $informational, 'remember' => false], $this->kim);
+        $placementId = $this->responseString('placementId');
+        $this->runClassification($queued);
+        self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM todo'));
+
+        $this->client->request('DELETE', '/api/v1/threads/'.$message['threadId'].'/classification?placementId='.$placementId, server: $this->kim);
+
+        self::assertResponseStatusCodeSame(204);
+        $todos = $this->changes(0)['todos'];
+        self::assertSame([['Budget review', 'automatic', $message['id']]], array_map(static fn (array $todo): array => [$todo['title'], $todo['source'], $todo['messageId']], $todos));
+    }
+
     public function testATodoMadeFromAnEmailWithoutSubjectIsNamedAfterTheSender(): void
     {
         $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', '', ['flags' => ['seen' => true]])]]);

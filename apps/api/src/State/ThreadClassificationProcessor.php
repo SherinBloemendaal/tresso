@@ -12,7 +12,8 @@ use App\Classification\ThreadCorrection;
 use App\Security\CurrentUser;
 
 /**
- * Puts a conversation where the user says it belongs and remembers that for its sender (see {@see ThreadCorrection}).
+ * Puts a conversation where the user says it belongs and, unless told not to, remembers that for its sender (see
+ * {@see ThreadCorrection}).
  *
  * @implements ProcessorInterface<ThreadClassificationInput, ThreadClassificationResource>
  */

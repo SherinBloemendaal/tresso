@@ -99,7 +99,7 @@ final readonly class TodoProcessor implements ProcessorInterface
         $message = (\is_string($messageId) ? $this->messages->findOneOwnedBy($owner, $messageId) : null)
             ?? throw new NotFoundHttpException('Message not found.');
 
-        [$todo, $made] = $this->emailTodos->make($owner, $message, null === $data->title ? null : trim($data->title), TodoSource::Manual);
+        [$todo, $made] = $this->emailTodos->make($owner, $message, null === $data->title ? null : trim($data->title), TodoSource::Manual, $data->perConversation);
         if ($made) {
             $todo->setNotes($data->notes);
             $todo->setDue(self::date($data->dueDate), self::time($data->dueTime));
@@ -107,7 +107,7 @@ final readonly class TodoProcessor implements ProcessorInterface
             $this->entityManager->flush();
         }
 
-        return TodoResource::fromEntity($todo);
+        return TodoResource::fromEntity($todo, $made);
     }
 
     private function update(Todo $todo, UpdateTodo $data): void

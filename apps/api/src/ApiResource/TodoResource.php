@@ -94,10 +94,15 @@ final readonly class TodoResource
         public ?string $threadId,
         public \DateTimeImmutable $createdAt,
         public \DateTimeImmutable $updatedAt,
+        /**
+         * Only when making a todo from an email: whether this request made it (false: the one there was); null
+         * otherwise. A client that undoes its own action removes only a todo it made.
+         */
+        public ?bool $made = null,
     ) {
     }
 
-    public static function fromEntity(Todo $todo): self
+    public static function fromEntity(Todo $todo, ?bool $made = null): self
     {
         return new self(
             $todo->getId()->toRfc4122(),
@@ -113,6 +118,7 @@ final readonly class TodoResource
             $todo->getMessage()?->getThread()->getId()->toRfc4122(),
             $todo->getCreatedAt(),
             $todo->getUpdatedAt(),
+            $made,
         );
     }
 }

@@ -31,6 +31,9 @@ final class MakeTodo
     #[Assert\Range(min: 1, max: Todo::DURATION_MAX_MINUTES)]
     public ?int $durationMinutes = null;
 
+    /** Make none when another email of the conversation has an open todo, and answer with that one (triage's do). */
+    public bool $perConversation = false;
+
     #[Assert\Callback]
     public function validateDue(ExecutionContextInterface $context): void
     {

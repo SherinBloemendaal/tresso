@@ -241,16 +241,52 @@ final readonly class MailClassification
 
     /**
      * Applies the user's choice to a conversation: it moves to the smart inbox with the verdict, now and for good, and
-     * so does its newest incoming message (see {@see newestIncoming()}). The caller holds the user's locks (see
-     * {@see UserLocks}) and loaded the thread and the smart inbox after taking them.
+     * so does its newest incoming message (see {@see newestIncoming()}). Returns the placement's id. The caller holds
+     * the user's locks (see {@see UserLocks}) and loaded the thread and the smart inbox after taking them.
      */
-    public function placeByUser(Thread $thread, ?Message $newestIncoming, Category $smartInbox, Verdict $verdict): void
+    public function placeByUser(Thread $thread, ?Message $newestIncoming, Category $smartInbox, Verdict $verdict): Uuid
     {
         $now = new \DateTimeImmutable();
-        $thread->classify($smartInbox, $verdict, ClassificationReason::USER, $now);
+        $placementId = $thread->placeByUser($smartInbox, $verdict, $now);
         $newestIncoming?->classify($smartInbox, $verdict, $now);
         // The user is looking at it: whatever batch its mail waited for, all of it is delivered now.
         $this->batches->releaseThread($thread);
+
+        return $placementId;
+    }
+
+    /**
+     * Lets the rules place a conversation the user placed themselves again, as if they never had: the conversation and
+     * its newest incoming message go where the classifier puts that message now, and a conversation with only the
+     * user's own mail is no longer in any smart inbox. The caller holds the user's locks (see {@see UserLocks}) and
+     * loaded the thread after taking them.
+     *
+     * @return Message|null the message placed, or null when the conversation has only the user's own mail
+     */
+    public function placeByRules(Thread $thread): ?Message
+    {
+        $context = $this->context($thread->getMailAccount()->getOwner());
+        $threadId = $thread->getId()->toRfc4122();
+        $messageId = $this->newestIncomingIds([$threadId], $context)[$threadId] ?? null;
+        if (null === $messageId) {
+            $thread->unclassify();
+
+            return null;
+        }
+        $messages = $this->incomingMessages([$messageId], $context);
+        $mail = $this->mailToClassify($messages)[$messageId] ?? null;
+        if (null === $mail) {
+            $thread->unclassify();
+
+            return null;
+        }
+
+        $classification = $this->classifier->classify($mail, $context);
+        $now = new \DateTimeImmutable();
+        $messages[$messageId]->classify($classification->smartInbox, $classification->verdict, $now);
+        $thread->classify($classification->smartInbox, $classification->verdict, $classification->reason, $now);
+
+        return $messages[$messageId];
     }
 
     /**
