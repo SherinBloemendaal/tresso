@@ -14,6 +14,7 @@ use App\Entity\Draft;
 use App\Entity\MailAccount;
 use App\Entity\Message;
 use App\Entity\OutgoingMessage;
+use App\Enum\DraftKind;
 use App\Enum\OutgoingStatus;
 use App\HandOver\HandOvers;
 use App\Outbox\AttachmentLimits;
@@ -111,8 +112,8 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
                 if (null !== $draft) {
                     $this->filing->sending($draft, $queued);
                 }
-                // A reply to someone a conversation was handed over to follows that hand-over up.
-                $this->handOvers->messageQueued($queued, $now);
+                // A reply to someone a conversation was handed over to follows that hand-over up; a forward does not.
+                $this->handOvers->messageQueued($queued, self::isForward($draft, $composition->subject), $now);
 
                 return $queued;
             }));
@@ -186,5 +187,15 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
     private static function recipients(array $recipients): array
     {
         return array_map(static fn (RecipientInput $recipient): array => $recipient->toArray(), $recipients);
+    }
+
+    /** Written as a forward: its draft says so, or, sent without a draft on the server, its subject does. */
+    private static function isForward(?Draft $draft, string $subject): bool
+    {
+        if (null !== $draft) {
+            return DraftKind::Forward === $draft->getKind();
+        }
+
+        return 1 === preg_match('/^\s*(fwd?|fw)\s*:/i', $subject);
     }
 }

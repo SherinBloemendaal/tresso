@@ -40,10 +40,9 @@ enum NotificationKind: string
     public function defaultChannels(): NotificationChannelChoice
     {
         return match ($this) {
-            self::Reminder, self::Mail => new NotificationChannelChoice(NotificationChannel::Phone, NotificationChannel::Desktop),
+            self::Reminder, self::Mail, self::HandOver => new NotificationChannelChoice(NotificationChannel::Phone, NotificationChannel::Desktop),
             self::LeaveNow => new NotificationChannelChoice(NotificationChannel::Phone),
             self::Brief, self::FollowUp => new NotificationChannelChoice(NotificationChannel::Desktop),
-            self::HandOver => new NotificationChannelChoice(NotificationChannel::Phone, NotificationChannel::Desktop),
         };
     }
 }

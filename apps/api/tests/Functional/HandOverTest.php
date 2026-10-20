@@ -573,6 +573,52 @@ final class HandOverTest extends DatabaseTestCase
         self::assertNotNull($handOver['nudgedAt']);
     }
 
+    public function testAnotherForwardToTheDelegateIsNoNudge(): void
+    {
+        $id = $this->handOverId();
+
+        $this->forward();
+
+        self::assertNull($this->get($id)['nudgedAt']);
+    }
+
+    public function testAReplySentLaterIsNoNudgeAndLeavesTheNudgeFree(): void
+    {
+        $id = $this->handOverId();
+        $this->client->jsonRequest('POST', '/api/v1/outgoing-messages', ['mailAccountId' => $this->accountId, 'to' => [['address' => 'lisa@company.example']], 'subject' => 'Re: Fwd: Invoice question', 'html' => '<p>Tomorrow then.</p>', 'inReplyToMessageId' => $this->originalId, 'sendAt' => new \DateTimeImmutable('+1 day')->format(\DATE_ATOM)], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+        self::assertNull($this->get($id)['nudgedAt']);
+
+        $this->client->jsonRequest('POST', '/api/v1/hand-overs/'.$id.'/nudge', ['html' => '<p>Any news?</p>'], $this->kim);
+
+        self::assertResponseIsSuccessful();
+    }
+
+    public function testClosesWhenTheirAnswerIsMovedFromSpamIntoTheInbox(): void
+    {
+        $id = $this->handOverId();
+        $receivedAt = new \DateTimeImmutable('+1 minute')->format(\DATE_ATOM);
+        $this->ingest('2', '<reply-1@company.example>', '<invoice-1@duinzicht.example>', 'Re: Fwd: Invoice question', 'lisa@company.example', $receivedAt, [], 'Junk');
+        self::assertSame('open', $this->get($id)['state']);
+
+        $this->ingest('3', '<reply-1@company.example>', '<invoice-1@duinzicht.example>', 'Re: Fwd: Invoice question', 'lisa@company.example', $receivedAt);
+
+        self::assertSame('replied', $this->get($id)['state']);
+    }
+
+    public function testClosesByTheForwardsMessageIdOnceTheConversationIsGone(): void
+    {
+        $id = $this->handOverId();
+        $this->connection()->executeStatement('DELETE FROM message_location WHERE message_id = :id', ['id' => $this->originalId]);
+        $janitor = static::getContainer()->get(MessageJanitor::class);
+        $this->connection()->transactional(fn () => $janitor->removeOrphans($this->account()));
+        self::assertNull($this->connection()->fetchOne('SELECT thread_id FROM hand_over WHERE id = :id', ['id' => $id]), 'The conversation is gone with its only message.');
+
+        $this->ingest('2', '<reply-1@company.example>', '<'.$this->forwardMessageId().'>', 'Credit note sent', 'lisa@company.example', new \DateTimeImmutable('+1 minute')->format(\DATE_ATOM));
+
+        self::assertSame('replied', $this->get($id)['state']);
+    }
+
     public function testAReplyToSomeoneElseIsNoNudge(): void
     {
         $id = $this->handOverId();

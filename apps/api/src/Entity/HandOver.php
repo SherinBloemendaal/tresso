@@ -86,6 +86,10 @@ class HandOver implements TracksChanges
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $overdueAt = null;
 
+    /** Counts the times it became overdue: each round is told once, a new due date that passes starts the next. */
+    #[ORM\Column(options: ['default' => 0])]
+    private int $noticeRound = 0;
+
     /** When the overdue notice is due: the moment it became overdue, later while a focus block holds it. */
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $notifyAt = null;
@@ -283,9 +287,15 @@ class HandOver implements TracksChanges
         }
         $this->overdueAt = $now;
         $this->notifyAt = $now;
+        ++$this->noticeRound;
         $this->updatedAt = $now;
 
         return true;
+    }
+
+    public function getNoticeRound(): int
+    {
+        return $this->noticeRound;
     }
 
     public function getNotifyAt(): ?\DateTimeImmutable
