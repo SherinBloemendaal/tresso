@@ -15,14 +15,16 @@ use App\Enum\BuiltinCategory;
 use App\Enum\Verdict;
 use App\Repository\CategoryRepository;
 use App\Repository\SenderRuleRepository;
+use App\Todo\EmailTodos;
 use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Uid\Uuid;
 use Symfony\Component\Validator\ConstraintViolation;
 use Symfony\Component\Validator\ConstraintViolationList;
 
 /**
- * Puts a conversation where the user says it belongs and remembers that for its sender.
+ * Puts a conversation where the user says it belongs and, unless told not to, remembers that for its sender.
  *
  * It takes the user's smart inbox lock (it may edit an exclude list) and classification lock first, and only then
  * reads the conversation and the smart inbox, refreshed from the database: a classification run or another device
@@ -37,6 +39,7 @@ final readonly class ThreadCorrection
         private MailClassification $classification,
         private ClassificationScheduler $scheduler,
         private UserLocks $locks,
+        private EmailTodos $emailTodos,
     ) {
     }
 
@@ -59,20 +62,21 @@ final readonly class ThreadCorrection
             if (null !== $message) {
                 $this->entityManager->refresh($message);
             }
-            $blocking = null === $message ? null : $smartInbox->exclusionOtherThan($message->getFromAddress());
+            $remembered = $input->remember ? $message : null;
+            $blocking = null === $remembered ? null : $smartInbox->exclusionOtherThan($remembered->getFromAddress());
             if (null !== $blocking) {
                 // A rule for the sender would never apply: the classifier skips smart inboxes that exclude the sender.
                 throw self::invalid($input, \sprintf('Mail from %s is on the Never include list of %s. Take it off that list first.', $blocking, $smartInbox->getName()));
             }
 
-            $this->classification->placeByUser($thread, $message, $smartInbox, $verdict);
+            $placementId = $this->classification->placeByUser($thread, $message, $smartInbox, $verdict);
 
             $rule = null;
             $spamOverrules = null;
-            if (null !== $message) {
+            if (null !== $remembered) {
                 $spam = $this->smartInboxes->findOneBy(['owner' => $owner, 'builtin' => BuiltinCategory::Spam]);
-                $spamOverrules = null === $spam || $spam === $smartInbox ? null : $this->classification->spamOverrulingRules($message, $spam);
-                $sender = $message->getFromAddress();
+                $spamOverrules = null === $spam || $spam === $smartInbox ? null : $this->classification->spamOverrulingRules($remembered, $spam);
+                $sender = $remembered->getFromAddress();
                 $rule = $this->rules->findOneBy(['owner' => $owner, 'sender' => $sender]);
                 if (null === $rule) {
                     $rule = new SenderRule($owner, $sender, $smartInbox, $explicitVerdict);
@@ -93,7 +97,41 @@ final readonly class ThreadCorrection
                 $verdict->value,
                 ClassificationReason::USER,
                 null === $rule ? null : RememberedSender::fromEntity($rule, $spamOverrules),
+                $placementId->toRfc4122(),
             );
+        });
+    }
+
+    /**
+     * Undoes the user's placement of a conversation (for example a triage decision taken back): the rules place it
+     * again (see {@see MailClassification::placeByRules()}). Only while that placement ($placementId) is the latest: a
+     * later choice, made on another device say, is not undone with it, even one to the same place. Sender rules stay as
+     * they are; a conversation the user did not place is left alone. New mail gets the automatic todo it would have got
+     * (the client marks it unread again first, and removes a todo the placement made).
+     */
+    public function release(User $owner, string $threadId, string $placementId): void
+    {
+        $this->entityManager->wrapInTransaction(function () use ($owner, $threadId, $placementId): void {
+            // The classifier reads the smart inboxes and rules: the same locks, in the same order, as a correction.
+            $this->locks->smartInboxes($owner->getId());
+            $this->locks->classification($owner->getId());
+
+            $thread = $this->ownedThread($owner, $threadId);
+            $this->entityManager->refresh($thread);
+            if (!$thread->isClassifiedByUser()) {
+                return;
+            }
+            if ($thread->getPlacementId()?->toRfc4122() !== $placementId) {
+                throw new ConflictHttpException('This conversation was moved again since; that choice stays.');
+            }
+            $message = $this->classification->placeByRules($thread);
+            $this->entityManager->flush();
+            if (null !== $message) {
+                // As classification would have when the mail came in: a smart inbox that asks for todos gives it one,
+                // unless the conversation has an open todo already (see EmailTodos::makeAutomatically()).
+                $this->emailTodos->makeAutomatically($owner, [$message], new \DateTimeImmutable());
+                $this->entityManager->flush();
+            }
         });
     }
 

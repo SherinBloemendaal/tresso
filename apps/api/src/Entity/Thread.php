@@ -70,6 +70,10 @@ class Thread implements TracksChanges
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $batchedAt = null;
 
+    /** New with every placement by the user, so taking one back never takes back a later one; null otherwise. */
+    #[ORM\Column(type: UuidType::NAME, nullable: true)]
+    private ?Uuid $placementId = null;
+
     public function __construct(MailAccount $mailAccount, string $subject, \DateTimeImmutable $lastMessageAt)
     {
         $this->id = Uuid::v7();
@@ -163,6 +167,33 @@ class Thread implements TracksChanges
         $this->verdict = $verdict;
         $this->classificationReason = $reason;
         $this->classifiedAt = $at;
+        if (ClassificationReason::USER !== $reason) {
+            $this->placementId = null;
+        }
+    }
+
+    /** Back to not classified, as before its first incoming message was looked at. */
+    public function unclassify(): void
+    {
+        $this->category = null;
+        $this->verdict = null;
+        $this->classificationReason = null;
+        $this->classifiedAt = null;
+        $this->placementId = null;
+    }
+
+    /** The user puts the conversation here; every placement gets a new id, also one identical to the last. */
+    public function placeByUser(Category $category, Verdict $verdict, \DateTimeImmutable $at): Uuid
+    {
+        $this->classify($category, $verdict, ClassificationReason::USER, $at);
+        $this->placementId = Uuid::v7();
+
+        return $this->placementId;
+    }
+
+    public function getPlacementId(): ?Uuid
+    {
+        return $this->placementId;
     }
 
     public function getHeldUntil(): ?\DateTimeImmutable

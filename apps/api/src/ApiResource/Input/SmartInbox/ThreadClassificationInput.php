@@ -19,4 +19,9 @@ final class ThreadClassificationInput
     /** null: the smart inbox's verdict. */
     #[Assert\Choice(callback: [Verdict::class, 'values'])]
     public ?string $verdict = null;
+
+    /**
+     * false: only this conversation moves, nothing is remembered for its sender (triage decides one email at a time).
+     */
+    public bool $remember = true;
 }

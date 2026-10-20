@@ -6,6 +6,7 @@ namespace App\Repository;
 
 use App\Entity\MailAccount;
 use App\Entity\Message;
+use App\Entity\Thread;
 use App\Entity\Todo;
 use App\Entity\User;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
@@ -85,6 +86,21 @@ class TodoRepository extends ServiceEntityRepository
         );
 
         return array_fill_keys($ids, true);
+    }
+
+    /** An open todo made from one of the conversation's emails, or null; the oldest when there are several. */
+    public function findOpenOfThread(Thread $thread): ?Todo
+    {
+        /** @var Todo|null */
+        return $this->createQueryBuilder('t')
+            ->join('t.message', 'm')
+            ->where('m.thread = :thread')
+            ->andWhere('t.completedAt IS NULL')
+            ->setParameter('thread', $thread->getId(), 'uuid')
+            ->orderBy('t.createdAt', 'ASC')
+            ->setMaxResults(1)
+            ->getQuery()
+            ->getOneOrNullResult();
     }
 
     /**

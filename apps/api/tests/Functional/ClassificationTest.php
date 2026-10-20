@@ -170,6 +170,164 @@ final class ClassificationTest extends DatabaseTestCase
         self::assertSame([$inboxes['informational'], 'know', 'user'], $this->classificationOf($thread));
     }
 
+    public function testACorrectionThatIsNotRememberedMovesOnlyThatConversation(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Invoice October', ['from' => ['address' => 'billing@hosting.example']]),
+            $this->message('2', 'Invoice September', ['from' => ['address' => 'billing@hosting.example']]),
+        ]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $threads = array_column($first['threads'], 'id', 'subject');
+        $this->client->request('PATCH', '/api/v1/smart-inboxes/'.$inboxes['informational'], server: $this->kim + ['CONTENT_TYPE' => 'application/merge-patch+json'], content: '{"excludeSenders":["billing@hosting.example"]}');
+        self::assertResponseIsSuccessful();
+        $this->runClassification();
+
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threads['Invoice October'].'/classification', ['smartInboxId' => $inboxes['informational'], 'verdict' => 'delegate', 'remember' => false], $this->kim);
+
+        self::assertResponseIsSuccessful();
+        $body = $this->decodedResponse();
+        self::assertArrayHasKey('senderRule', $body);
+        self::assertNull($body['senderRule']);
+        $this->runClassification();
+        $page = array_column($this->changes(0)['threads'], null, 'subject');
+        self::assertSame([$inboxes['informational'], 'delegate', 'user'], $this->classificationOf($page['Invoice October']));
+        self::assertSame([$inboxes['todo'], 'do', 'direct'], $this->classificationOf($page['Invoice September']), 'Other mail from the sender stays.');
+        $this->client->request('GET', '/api/v1/sender-rules', server: $this->kim);
+        self::assertSame([], $this->decodedResponse());
+        $this->client->request('GET', '/api/v1/smart-inboxes/'.$inboxes['informational'], server: $this->kim);
+        self::assertSame(['billing@hosting.example'], $this->decodedResponse()['excludeSenders'] ?? null, 'The exclude list stays.');
+    }
+
+    public function testTakingACorrectionBackLetsTheRulesPlaceTheConversationAgain(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $threadId = $first['threads'][0]['id'];
+        $placementId = $this->place($threadId, ['smartInboxId' => $inboxes['informational'], 'remember' => false]);
+        $placed = $this->changes(0)['cursor'];
+
+        $this->client->request('DELETE', $this->releaseUrl($threadId, $placementId), server: $this->userHeaders('kim@example.test', ['mail:read', 'mail:write']));
+
+        self::assertResponseStatusCodeSame(204);
+        $page = $this->changes($placed);
+        self::assertSame([$inboxes['todo'], 'do', 'direct'], $this->classificationOf($page['threads'][0]), 'Clients see it move back.');
+        self::assertSame([$inboxes['todo'], 'do'], [$page['messages'][0]['smartInboxId'], $page['messages'][0]['verdict']]);
+    }
+
+    public function testTakingACorrectionBackKeepsTheSenderRule(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $threadId = $first['threads'][0]['id'];
+        $placementId = $this->place($threadId, ['smartInboxId' => $inboxes['informational']]);
+        $this->runClassification();
+
+        $this->client->request('DELETE', $this->releaseUrl($threadId, $placementId), server: $this->kim);
+
+        self::assertResponseStatusCodeSame(204);
+        self::assertSame([$inboxes['informational'], 'know', 'sender_rule'], $this->classificationOf($this->changes(0)['threads'][0]));
+        $this->client->request('GET', '/api/v1/sender-rules', server: $this->kim);
+        self::assertCount(1, $this->decodedResponse());
+    }
+
+    public function testTakingBackLeavesAConversationTheUserDidNotPlaceAlone(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+
+        $this->client->request('DELETE', $this->releaseUrl($first['threads'][0]['id'], Uuid::v7()->toRfc4122()), server: $this->kim);
+
+        self::assertResponseStatusCodeSame(204);
+        self::assertSame([], $this->changes($first['cursor'])['threads'], 'Nothing changed.');
+    }
+
+    public function testTakingBackAConversationOfOnlyTheUsersOwnMailTakesItOutOfTheSmartInbox(): void
+    {
+        $this->ingest('messages', ['folder' => 'Sent', 'messages' => [$this->message('1', 'Lunch?', ['from' => ['address' => self::ME], 'to' => [['address' => 'anna@partner.example']]])]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $threadId = $first['threads'][0]['id'];
+        $placementId = $this->place($threadId, ['smartInboxId' => $this->builtinIds($first)['todo'], 'remember' => false]);
+
+        $this->client->request('DELETE', $this->releaseUrl($threadId, $placementId), server: $this->kim);
+
+        self::assertResponseStatusCodeSame(204);
+        self::assertSame([null, null, null], $this->classificationOf($this->changes(0)['threads'][0]));
+    }
+
+    public function testTakingBackLeavesALaterChoiceAlone(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $threadId = $first['threads'][0]['id'];
+        $placementId = $this->place($threadId, ['smartInboxId' => $inboxes['todo'], 'verdict' => 'do', 'remember' => false]);
+        // Another device moves it again before the undo of the first choice arrives.
+        $this->place($threadId, ['smartInboxId' => $inboxes['informational'], 'remember' => false]);
+
+        $this->client->request('DELETE', $this->releaseUrl($threadId, $placementId), server: $this->kim);
+
+        self::assertResponseStatusCodeSame(409);
+        self::assertSame([$inboxes['informational'], 'know', 'user'], $this->classificationOf($this->changes(0)['threads'][0]));
+    }
+
+    public function testTakingBackLeavesALaterIdenticalChoiceAlone(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $threadId = $first['threads'][0]['id'];
+        $placement = ['smartInboxId' => $inboxes['todo'], 'verdict' => 'delegate', 'remember' => false];
+        $placementId = $this->place($threadId, $placement);
+        // Another device makes the same choice: it is a choice of its own, and stays.
+        $later = $this->place($threadId, $placement);
+        self::assertNotSame($placementId, $later);
+
+        $this->client->request('DELETE', $this->releaseUrl($threadId, $placementId), server: $this->kim);
+
+        self::assertResponseStatusCodeSame(409);
+        self::assertSame([$inboxes['todo'], 'delegate', 'user'], $this->classificationOf($this->changes(0)['threads'][0]));
+    }
+
+    public function testTakingBackNamesThePlacement(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $threadId = $first['threads'][0]['id'];
+
+        $this->client->request('DELETE', '/api/v1/threads/'.$threadId.'/classification', server: $this->kim);
+        self::assertResponseStatusCodeSame(400);
+        $this->client->request('DELETE', $this->releaseUrl($threadId, 'not-an-id'), server: $this->kim);
+        self::assertResponseStatusCodeSame(400);
+    }
+
+    public function testOnlyTheOwnerCanTakeACorrectionBack(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
+        $this->runClassification();
+        $first = $this->changes(0);
+        $inboxes = $this->builtinIds($first);
+        $threadId = $first['threads'][0]['id'];
+        $placementId = $this->place($threadId, ['smartInboxId' => $inboxes['informational'], 'remember' => false]);
+
+        $this->client->request('DELETE', $this->releaseUrl($threadId, $placementId), server: $this->userHeaders('lisa@example.test', ['mail:read', 'mail:write']));
+        self::assertResponseStatusCodeSame(404);
+        $this->client->request('DELETE', $this->releaseUrl($threadId, $placementId), server: $this->userHeaders('kim@example.test', ['mail:read']));
+        self::assertResponseStatusCodeSame(403);
+
+        self::assertSame([$inboxes['informational'], 'know', 'user'], $this->classificationOf($this->changes(0)['threads'][0]));
+    }
+
     public function testCorrectionTakesTheSenderOffTheExcludeList(): void
     {
         $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget')]]);
@@ -628,6 +786,26 @@ final class ClassificationTest extends DatabaseTestCase
         self::assertEquals(2, $this->connection()->fetchOne('SELECT COUNT(*) FROM message WHERE classified_at IS NULL'));
         self::assertFalse($classification->classifyNew(Uuid::fromString($userId), 1));
         self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM message WHERE classified_at IS NULL'));
+    }
+
+    private function releaseUrl(string $threadId, string $placementId): string
+    {
+        return '/api/v1/threads/'.$threadId.'/classification?'.http_build_query(['placementId' => $placementId]);
+    }
+
+    /**
+     * Places the conversation as the user and returns the placement's id.
+     *
+     * @param array<string, mixed> $placement
+     */
+    private function place(string $threadId, array $placement): string
+    {
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threadId.'/classification', $placement, $this->kim);
+        self::assertResponseIsSuccessful();
+        $placementId = $this->decodedResponse()['placementId'] ?? null;
+        self::assertIsString($placementId);
+
+        return $placementId;
     }
 
     /** @return array<mixed> */

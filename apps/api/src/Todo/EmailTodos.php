@@ -33,15 +33,16 @@ final readonly class EmailTodos
     }
 
     /**
-     * The email's todo: the one it has, or a new one with this title (the subject when null). Runs inside the caller's
-     * transaction; the new todo is persisted, not flushed.
+     * The email's todo: the one it has, or a new one with this title (the subject when null). With $perConversation an
+     * open todo of another email of the conversation counts too (triage's do makes one per conversation). Runs inside
+     * the caller's transaction; the new todo is persisted, not flushed.
      *
      * @return array{Todo, bool} the todo, and whether it was made now
      */
-    public function make(User $owner, Message $message, ?string $title, TodoSource $source): array
+    public function make(User $owner, Message $message, ?string $title, TodoSource $source, bool $perConversation = false): array
     {
         $this->locks->todos($owner->getId());
-        $existing = $this->todos->findOneByMessage($message);
+        $existing = $this->todos->findOneByMessage($message) ?? ($perConversation ? $this->todos->findOpenOfThread($message->getThread()) : null);
         if (null !== $existing) {
             return [$existing, false];
         }
