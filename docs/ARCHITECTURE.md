@@ -1043,7 +1043,8 @@ after. Everything lives in `apps/api/src/Notification`.
     event that starts after them is moved to their end; otherwise it is delivered silently (no sound, low urgency,
     shown in the list).
   - Working hours (`workDays`, `workStart`, `workEnd`) apply to calendars the user marks as work (`work` on the
-    calendar). Their notifications wait for the next working hours when the event starts after that, and are
+    calendar). Hours that end at or before they start run past midnight: 22:00 to 06:00 on Monday lasts until Tuesday
+    06:00, and 09:00 to 00:00 ends at midnight; the meeting time finder reads them the same way. Their notifications wait for the next working hours when the event starts after that, and are
     silent otherwise (`workCalendarsQuiet`); leave-now comes through. A reminder that would come before the working
     day, for an event that also starts before it, comes at the end of the working day before instead
     (`shiftEarlyReminders`: a reminder for a 08:00 meeting at 17:30 the evening before).
@@ -1151,14 +1152,18 @@ the alias another edition decorates:
 ##### Meeting time finder
 
 The finder is deterministic and explainable: the same calendars, preferences and moment give the same slots in the
-same order, and every slot says what closes its free time on each side. Planning a todo ("Plan automatically") uses
-the same `MeetingTimeFinder::find` with no attendees, a window up to the deadline and `limit: 1`, and `ignore` holding
-the todo's own planned time when it is planned again.
+same order, and every slot says what closes its free time on each side. "Now" comes from the Symfony clock, so tests
+fix it. Planning a todo ("Plan automatically") uses the same `MeetingTimeFinder::find` with
+`MeetingTimeQuery::beforeDeadline($now, $deadline, $minutes, $ignore)`: one slot, no attendees, from now to the
+deadline (only the next 92 days of a later deadline), with `ignore` holding the todo's own planned time when it is
+planned again. A deadline that has passed, or a duration outside 5 minutes to 24 hours, is an
+`InvalidMeetingTimeQuery` naming the field; a calendar too full to look through is `TooManyOccurrences`.
 
 - **Working hours and zone** are those of the notification settings (`workDays`, `workStart`, `workEnd`,
-  `timeZone`), the same ones the reminders keep to; working hours that end before they start hold no time there, so
-  they give none here either. A search may name another zone (`timeZone`).
-- **Scheduling preferences** (`scheduling_preferences`, one row per user, created on the first change):
+  `timeZone`), the same ones the reminders keep to, including hours past midnight (a night shift is one stretch from
+  its start to its end the next morning). A search may name another zone (`timeZone`).
+- **Scheduling preferences** (`scheduling_preferences`, one row per user, created on the first change with an upsert
+  and changed under a row lock, so two first changes at once do not collide):
   `bufferMinutes` (0 to 120) on both sides of busy time, `travelMinutes` (0 to 240) to and from busy time at a place
   that does not name its own travel time, and `minimumNoticeMinutes` (up to 14 days). All are 0 without a row.
 - **Busy time** comes from every `BusyTimeSource`: the open edition's reads the user's visible calendars (or the
@@ -1171,17 +1176,20 @@ the todo's own planned time when it is planned again.
   another source.
 - **Attendees' busy time** comes from every `AttendeeAvailabilitySource`; the open edition has none, so an attendee's
   availability is `unknown` and closes nothing, except for the user's own addresses, which are known. A provider's
-  free/busy (Google, Microsoft Graph, CalDAV scheduling) can be added as a source.
+  free/busy (Google, Microsoft Graph, CalDAV scheduling) can be added as a source. A source may also give an
+  attendee's working hours with their zone; the time outside them is then busy for that attendee.
 - **The search** (`SlotSearch`, framework-free):
   1. The window starts at the later of `from` and now plus the notice, and ends at `to` (at most 92 days later).
   2. Open time is the working hours in the window (or the whole window with `workingHoursOnly: false`), read on each
      local day in the zone: a day with a daylight saving change keeps its clock times and is an hour shorter or
-     longer, and a time the clock skips is the first moment after the gap. Overlapping ranges are merged.
+     longer, and a time the clock skips starts when the clock jumps (working hours from 02:30 on the day summer time
+     starts at 02:00 begin at 03:00). Overlapping and touching ranges are merged.
   3. Closed time is taken out: busy time, with the buffer on both sides, or the travel time when the busy time is at
      a place or names its own travel time (or the new meeting is in person, `inPerson`) and travel takes longer; focus
      blocks as they are, without buffer; and the busy time of required attendees whose availability is known. Busy
-     time that takes no time closes nothing. `ignore` leaves out events (by id) or single occurrences (by occurrence
-     id), such as the meeting being moved.
+     time that takes no time closes nothing. Closed time with the same start and end is ordered by kind and label, so
+     a slot is explained the same whatever order the sources gave it in. `ignore` leaves out events (by id) or single
+     occurrences (by occurrence id), such as the meeting being moved.
   4. Slots start on multiples of `stepMinutes` (5, 10, 15, 20, 30 or 60) past the hour on the user's clock, also in
      zones with a half-hour offset, and fit in what is left.
   5. Slots are ranked by how many optional attendees are busy then (`optionalConflicts`), then by start; slots that
