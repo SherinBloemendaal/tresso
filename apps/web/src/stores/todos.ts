@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { compareTodos, type MadeTodo, type MakeTodoRequest, type NewTodo, type Todo, type TodoUpdate } from '@tresso/core'
+import { compareTodos, planPath, type MadeTodo, type MakeTodoRequest, type NewTodo, type Todo, type TodoUpdate } from '@tresso/core'
 import { useAuthStore } from '@/stores/auth'
 import { useMailStore } from '@/stores/mail'
 
@@ -87,10 +87,27 @@ export const useTodosStore = defineStore('todos', () => {
     return message?.threadId ?? null
   }
 
+  /**
+   * Plans the todo at the earliest free time before it is due (again, when it was planned). The API refuses with the
+   * reason when there is none; that error is the caller's to show.
+   */
+  async function plan(id: string): Promise<Todo> {
+    const planned = await auth.send<Todo>('POST', planPath(id))
+    await mail.syncNow()
+
+    return planned
+  }
+
+  /** Gives the time the todo holds in the calendar back. */
+  async function unplan(id: string): Promise<void> {
+    await auth.send<void>('DELETE', planPath(id))
+    await mail.syncNow()
+  }
+
   async function remove(id: string): Promise<void> {
     await auth.send<void>('DELETE', `/api/v1/todos/${encodeURIComponent(id)}`)
     await mail.syncNow()
   }
 
-  return { todos, openCount, create, makeFromMessage, update, setDone, completeAndArchive, threadOf, remove }
+  return { todos, openCount, create, makeFromMessage, update, setDone, completeAndArchive, threadOf, plan, unplan, remove }
 })

@@ -3,7 +3,19 @@ import { computed, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
-import { TODO_NOTES_MAX_LENGTH, TODO_TITLE_MAX_LENGTH, type SyncedMessage, type Todo, type TodoUpdate } from '@tresso/core'
+import {
+  canPlan,
+  formatDate,
+  plannedLabel,
+  readerTimeZone,
+  startOfWallDay,
+  TODO_NOTES_MAX_LENGTH,
+  TODO_TITLE_MAX_LENGTH,
+  toWall,
+  type SyncedMessage,
+  type Todo,
+  type TodoUpdate,
+} from '@tresso/core'
 import { ApiError, errorMessage } from '@/api/errors'
 import FieldLabel from '@/forms/FieldLabel.vue'
 import { provideRequiredFields } from '@/forms/required'
@@ -25,6 +37,11 @@ const confirmingRemoval = ref(false)
 const SOURCE_LABELS: Record<Todo['source'], string> = { manual: 'Manual', suggested: 'Suggested', automatic: 'Automatic' }
 
 const done = computed(() => props.todo.completedAt !== null)
+
+// The time the todo holds in the calendar, on this device's clock.
+const zone = readerTimeZone()
+const planned = computed(() => plannedLabel(props.todo, zone, startOfWallDay(toWall(Date.now(), zone))))
+const plannedDay = computed(() => (props.todo.plannedStart === null ? null : formatDate(startOfWallDay(toWall(Date.parse(props.todo.plannedStart), zone)))))
 
 const { defineField, handleSubmit, errors, meta, resetForm, setErrors } = useForm<TodoValues>({
   validationSchema: toTypedSchema(todoSchema),
@@ -110,6 +127,16 @@ function completeAndArchive(): Promise<void> {
   return run(() => store.completeAndArchive(props.todo))
 }
 
+function plan(): Promise<void> {
+  return run(async () => {
+    await store.plan(props.todo.id)
+  })
+}
+
+function unplan(): Promise<void> {
+  return run(() => store.unplan(props.todo.id))
+}
+
 function remove(): Promise<void> {
   return run(async () => {
     await store.remove(props.todo.id)
@@ -151,6 +178,22 @@ function remove(): Promise<void> {
         <small v-if="errors.durationMinutes" class="error">{{ errors.durationMinutes }}</small>
       </label>
     </div>
+
+    <section v-if="!done" class="plan" aria-label="In the calendar">
+      <p class="plan-line" :class="{ conflict: todo.planState === 'conflict' }">
+        <AppIcon name="calendar" :size="15" />
+        <span v-if="planned">{{ planned }}</span>
+        <span v-else-if="canPlan(todo)">Not in the calendar yet.</span>
+        <span v-else>Give it a due date and say how long it takes to plan it in the calendar.</span>
+      </p>
+      <div v-if="canPlan(todo)" class="plan-actions">
+        <button type="button" class="button button-quiet" :disabled="saving || meta.dirty" :title="meta.dirty ? 'Save your changes first' : undefined" @click="plan">
+          {{ todo.plannedStart === null ? 'Plan automatically' : 'Plan again' }}
+        </button>
+        <button v-if="todo.plannedStart !== null" type="button" class="button button-quiet" :disabled="saving" @click="unplan">Remove from calendar</button>
+        <RouterLink v-if="plannedDay" :to="{ name: 'calendar', params: { view: 'day', date: plannedDay } }" class="button button-quiet">Show in calendar</RouterLink>
+      </div>
+    </section>
 
     <label class="field">
       <FieldLabel name="notes">Notes</FieldLabel>
@@ -257,6 +300,27 @@ textarea[aria-invalid='true'] {
 }
 .error {
   font-size: 12px;
+}
+.plan {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.plan-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.plan-line.conflict {
+  color: var(--danger);
+}
+.plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .email {
   display: flex;

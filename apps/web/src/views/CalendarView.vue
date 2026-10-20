@@ -15,6 +15,7 @@ import {
   wallParts,
   type EditScope,
   type Occurrence,
+  type TodoBlock,
 } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
 import AppIcon from '@/components/AppIcon.vue'
@@ -26,11 +27,14 @@ import MonthGrid from '@/components/calendar/MonthGrid.vue'
 import ResponseButtons from '@/components/calendar/ResponseButtons.vue'
 import ScopeDialog from '@/components/calendar/ScopeDialog.vue'
 import TimeGrid from '@/components/calendar/TimeGrid.vue'
+import TodoBlockDetail from '@/components/calendar/TodoBlockDetail.vue'
 import { useCalendarStore, type CalendarViewKind, type Response } from '@/stores/calendar'
 import { useMailStore } from '@/stores/mail'
+import { useTodosStore } from '@/stores/todos'
 
 const calendar = useCalendarStore()
 const mail = useMailStore()
+const todos = useTodosStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -119,9 +123,36 @@ const busy = ref(false)
 const actionError = ref<string | null>(null)
 const status = ref('')
 
-function open(occurrence: Occurrence): void {
+function open(occurrence: Occurrence | TodoBlock): void {
   selectedKey.value = occurrence.key
   actionError.value = null
+}
+
+// The time planned for a todo: plan it again, give it back, or check the todo off.
+const selectedTodo = computed(() => calendar.todoBlocks.find((block) => block.key === selectedKey.value) ?? null)
+async function onTodo(action: 'plan' | 'unplan' | 'done'): Promise<void> {
+  const block = selectedTodo.value
+  if (block === null) return
+  busy.value = true
+  actionError.value = null
+  try {
+    if (action === 'plan') {
+      await todos.plan(block.todo.id)
+      status.value = 'Planned again.'
+    } else if (action === 'unplan') {
+      await todos.unplan(block.todo.id)
+      status.value = 'Removed from the calendar.'
+      selectedKey.value = null
+    } else {
+      await todos.setDone(block.todo.id, true)
+      status.value = 'Todo done.'
+      selectedKey.value = null
+    }
+  } catch (e) {
+    actionError.value = errorMessage(e)
+  } finally {
+    busy.value = false
+  }
 }
 function closeDetail(): void {
   const key = selectedKey.value
@@ -232,7 +263,7 @@ function onShortcut(event: KeyboardEvent): void {
     newEvent()
   } else if (key === 'e' && selected.value !== null) {
     void edit()
-  } else if (key === 'escape' && selected.value !== null) {
+  } else if (key === 'escape' && (selected.value !== null || selectedTodo.value !== null)) {
     closeDetail()
   } else {
     return
@@ -249,7 +280,7 @@ function pickDay(day: number): void {
 </script>
 
 <template>
-  <div class="calendar-shell" :class="{ detail: selected !== null }">
+  <div class="calendar-shell" :class="{ detail: selected !== null || selectedTodo !== null }">
     <CalendarRail
       class="rail"
       :anchor="calendar.anchor"
@@ -289,12 +320,14 @@ function pickDay(day: number): void {
         class="view"
         :days="calendar.days"
         :occurrences="calendar.occurrences"
+        :todo-blocks="calendar.todoBlocks"
         :zone="calendar.zone"
         :now="calendar.now"
         :today="calendar.today"
         :calendars="calendar.calendar"
         :selected-key="selectedKey"
         @open="open"
+        @open-todo="open"
         @create="newEvent"
       />
       <MonthGrid
@@ -303,12 +336,14 @@ function pickDay(day: number): void {
         :days="calendar.days"
         :month="calendar.anchor"
         :occurrences="calendar.occurrences"
+        :todo-blocks="calendar.todoBlocks"
         :zone="calendar.zone"
         :now="calendar.now"
         :today="calendar.today"
         :calendars="calendar.calendar"
         :selected-key="selectedKey"
         @open="open"
+        @open-todo="open"
         @show-day="showDay"
         @create="newEvent"
       />
@@ -316,12 +351,14 @@ function pickDay(day: number): void {
         <AgendaList
           :days="calendar.days"
           :occurrences="calendar.occurrences"
+          :todo-blocks="calendar.todoBlocks"
           :zone="calendar.zone"
           :now="calendar.now"
           :today="calendar.today"
           :calendars="calendar.calendar"
           :selected-key="selectedKey"
           @open="open"
+          @open-todo="open"
         />
         <aside v-if="calendar.unanswered.length > 0" class="pending" aria-labelledby="pending-title">
           <h2 id="pending-title">Needs your response <span class="count">{{ calendar.unanswered.length }}</span></h2>
@@ -352,6 +389,20 @@ function pickDay(day: number): void {
       @edit="edit"
       @delete="deleteSelected"
       @respond="(response, onlyThis) => respond(selected!, response, onlyThis)"
+    />
+
+    <TodoBlockDetail
+      v-else-if="selectedTodo"
+      class="detail-panel"
+      :block="selectedTodo"
+      :zone="calendar.zone"
+      :now="calendar.now"
+      :busy="busy"
+      :error="actionError"
+      @close="closeDetail"
+      @plan="onTodo('plan')"
+      @unplan="onTodo('unplan')"
+      @done="onTodo('done')"
     />
 
     <EventEditor v-if="editor" :target="editor" @close="editor = null" @saved="saved" />

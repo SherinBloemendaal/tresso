@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
-
   HOUR,
+  isTodoBlock,
   layoutDay,
   layoutSpans,
   inAllDayRow,
   occurrenceTimes,
   shortDate,
+  todoBlockTimes,
   toInstant,
   toWall,
   WEEKDAYS_SHORT,
@@ -16,36 +17,70 @@ import {
   type CalendarDay,
   type Occurrence,
   type SyncedCalendar,
+  type TimedBlock,
+  type TodoBlock,
 } from '@tresso/core'
-import { blockState, calendarColor, moveFocus, occurrenceLabel } from '@/calendar/look'
+import AppIcon from '@/components/AppIcon.vue'
+import { blockState, calendarColor, moveFocus, occurrenceLabel, TODO_COLOR, todoBlockLabel } from '@/calendar/look'
 
-const props = defineProps<{
-  days: CalendarDay[]
-  occurrences: Occurrence[]
-  zone: string
-  now: number
-  today: number
-  calendars: (id: string) => SyncedCalendar | undefined
-  selectedKey: string | null
-}>()
-const emit = defineEmits<{ open: [occurrence: Occurrence]; create: [start: number, allDay: boolean] }>()
+const props = withDefaults(
+  defineProps<{
+    days: CalendarDay[]
+    occurrences: Occurrence[]
+    /** Time planned for todos, placed among the events. */
+    todoBlocks?: TodoBlock[]
+    zone: string
+    now: number
+    today: number
+    calendars: (id: string) => SyncedCalendar | undefined
+    selectedKey: string | null
+  }>(),
+  { todoBlocks: () => [] },
+)
+const emit = defineEmits<{ open: [occurrence: Occurrence]; openTodo: [block: TodoBlock]; create: [start: number, allDay: boolean] }>()
 
 /** 60 px per hour, as the design's grid has it. */
 const HOUR_HEIGHT = 60
 const hours = Array.from({ length: 24 }, (_, hour) => hour)
 
-const columns = computed(() => props.days.map((day) => ({ day, blocks: layoutDay(props.occurrences, day, props.zone) })))
+const columns = computed(() =>
+  props.days.map((day) => {
+    const blocks = layoutDay<Occurrence | TodoBlock>([...props.occurrences, ...props.todoBlocks], day, props.zone)
+    return {
+      day,
+      blocks: blocks.filter((block): block is TimedBlock<Occurrence> => !isTodoBlock(block.occurrence)),
+      todos: blocks.filter((block): block is TimedBlock<TodoBlock> => isTodoBlock(block.occurrence)),
+    }
+  }),
+)
 /** The day each timed occurrence first shows on: an event crossing midnight has one tab stop, on its first piece. */
 const firstColumn = computed(() => {
   const first = new Map<string, number>()
   columns.value.forEach((column, index) => {
-    for (const block of column.blocks) {
+    for (const block of [...column.blocks, ...column.todos]) {
       if (!first.has(block.occurrence.key)) first.set(block.occurrence.key, index)
     }
   })
   return first
 })
-const spans = computed(() => layoutSpans(props.occurrences.filter(inAllDayRow), props.days))
+const spans = computed(() => layoutSpans<Occurrence | TodoBlock>([...props.occurrences, ...props.todoBlocks].filter(inAllDayRow), props.days))
+
+/** An item of the all-day row: an event, or a todo planned for a day or longer. */
+function spanLook(item: Occurrence | TodoBlock): { state: Record<string, boolean>; color: Record<string, string>; label: string; title: string } {
+  if (isTodoBlock(item)) {
+    return { state: { todo: true, conflict: item.conflict, past: item.end <= props.now }, color: TODO_COLOR, label: todoBlockLabel(item, props.zone, props.now), title: item.todo.title }
+  }
+  const calendar = props.calendars(item.event.calendarId)
+  return { state: blockState(item, props.now), color: calendarColor(calendar), label: occurrenceLabel(item, props.zone, calendar, props.now), title: item.event.summary || 'Untitled event' }
+}
+
+function openItem(item: Occurrence | TodoBlock): void {
+  if (isTodoBlock(item)) {
+    emit('openTodo', item)
+  } else {
+    emit('open', item)
+  }
+}
 const lanes = computed(() => Math.max(0, ...spans.value.map((item) => item.lane + 1)))
 
 const nowWall = computed(() => toWall(props.now, props.zone))
@@ -69,10 +104,10 @@ onMounted(() => {
 // Exactly one block can be reached with Tab; the arrow keys move from there.
 const focusKey = ref<string | null>(null)
 watch(
-  () => props.occurrences,
+  () => [...props.occurrences, ...props.todoBlocks],
   (list) => {
-    if (focusKey.value === null || !list.some((occurrence) => occurrence.key === focusKey.value)) {
-      focusKey.value = props.selectedKey ?? list.find((occurrence) => !inAllDayRow(occurrence) && occurrence.end > props.now)?.key ?? list[0]?.key ?? null
+    if (focusKey.value === null || !list.some((item) => item.key === focusKey.value)) {
+      focusKey.value = props.selectedKey ?? list.find((item) => !inAllDayRow(item) && item.end > props.now)?.key ?? list[0]?.key ?? null
     }
   },
   { immediate: true },
@@ -86,12 +121,12 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-function blockStyle(block: { top: number; height: number; column: number; columns: number }, calendar: SyncedCalendar | undefined): Record<string, string> {
+function blockStyle(block: { top: number; height: number; column: number; columns: number }, color: Record<string, string>): Record<string, string> {
   // Overlaps cascade at 65% width; later blocks sit to the right, on top.
   const width = block.columns === 1 ? 100 : 65
   const left = block.columns === 1 ? 0 : (block.column * 35) / (block.columns - 1)
   return {
-    ...calendarColor(calendar),
+    ...color,
     top: `${(block.top / 60) * HOUR_HEIGHT}px`,
     height: `${Math.max((block.height / 60) * HOUR_HEIGHT - 2, 18)}px`,
     left: `calc(${left}% + 2px)`,
@@ -141,17 +176,17 @@ const dayLength = (day: CalendarDay): number => Math.round((day.end - day.start)
           :key="item.occurrence.key"
           type="button"
           class="span"
-          :class="{ ...blockState(item.occurrence, now), selected: item.occurrence.key === selectedKey, 'cut-before': item.continuesBefore, 'cut-after': item.continuesAfter }"
-          :style="{ ...calendarColor(calendars(item.occurrence.event.calendarId)), gridColumn: `${item.first + 1} / ${item.last + 2}`, gridRow: String(item.lane + 1) }"
+          :class="{ ...spanLook(item.occurrence).state, selected: item.occurrence.key === selectedKey, 'cut-before': item.continuesBefore, 'cut-after': item.continuesAfter }"
+          :style="{ ...spanLook(item.occurrence).color, gridColumn: `${item.first + 1} / ${item.last + 2}`, gridRow: String(item.lane + 1) }"
           :data-occurrence="''"
           :data-key="item.occurrence.key"
           :data-column="item.first"
           :data-top="-1"
           :tabindex="focusKey === item.occurrence.key ? 0 : -1"
-          :aria-label="occurrenceLabel(item.occurrence, zone, calendars(item.occurrence.event.calendarId), now)"
-          @click="emit('open', item.occurrence)"
+          :aria-label="spanLook(item.occurrence).label"
+          @click="openItem(item.occurrence)"
         >
-          {{ item.occurrence.event.summary || 'Untitled event' }}
+          {{ spanLook(item.occurrence).title }}
         </button>
       </div>
     </div>
@@ -178,7 +213,7 @@ const dayLength = (day: CalendarDay): number => Math.round((day.end - day.start)
             type="button"
             class="block"
             :class="{ ...blockState(block.occurrence, now), selected: block.occurrence.key === selectedKey, short: block.height < 45 }"
-            :style="blockStyle(block, calendars(block.occurrence.event.calendarId))"
+            :style="blockStyle(block, calendarColor(calendars(block.occurrence.event.calendarId)))"
             :data-occurrence="''"
             :data-key="block.occurrence.key"
             :data-column="columns.indexOf(column)"
@@ -189,6 +224,24 @@ const dayLength = (day: CalendarDay): number => Math.round((day.end - day.start)
           >
             <span class="title">{{ block.occurrence.event.summary || 'Untitled event' }}</span>
             <span class="meta">{{ occurrenceTimes(block.occurrence, zone) }}<template v-if="block.occurrence.event.location">, {{ block.occurrence.event.location }}</template></span>
+          </button>
+          <button
+            v-for="block in column.todos"
+            :key="block.occurrence.key"
+            type="button"
+            class="block todo"
+            :class="{ conflict: block.occurrence.conflict, past: block.occurrence.end <= now, selected: block.occurrence.key === selectedKey, short: block.height < 45 }"
+            :style="blockStyle(block, TODO_COLOR)"
+            :data-occurrence="''"
+            :data-key="block.occurrence.key"
+            :data-column="columns.indexOf(column)"
+            :data-top="block.top"
+            :tabindex="focusKey === block.occurrence.key && firstColumn.get(block.occurrence.key) === columns.indexOf(column) ? 0 : -1"
+            :aria-label="todoBlockLabel(block.occurrence, zone, now)"
+            @click="emit('openTodo', block.occurrence)"
+          >
+            <span class="title"><AppIcon name="todo" :size="12" /> {{ block.occurrence.todo.title }}</span>
+            <span class="meta">{{ block.occurrence.conflict ? 'Time taken, ' : '' }}{{ todoBlockTimes(block.occurrence, zone) }}</span>
           </button>
         </div>
       </div>
@@ -363,6 +416,18 @@ const dayLength = (day: CalendarDay): number => Math.round((day.end - day.start)
 }
 .block.pending,
 .span.pending {
+  background: var(--surface);
+  border: 1px dashed var(--cal);
+  border-left: 3px solid var(--cal);
+}
+.block.todo .title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* Planned time whose time was taken: dashed, like an event that still needs an answer. */
+.block.todo.conflict,
+.span.todo.conflict {
   background: var(--surface);
   border: 1px dashed var(--cal);
   border-left: 3px solid var(--cal);

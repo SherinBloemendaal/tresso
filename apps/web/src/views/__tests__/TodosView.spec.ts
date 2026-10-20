@@ -20,6 +20,9 @@ function todo(id: string, extra: Partial<Todo> = {}): Todo {
     source: 'manual',
     messageId: null,
     threadId: null,
+    plannedStart: null,
+    plannedEnd: null,
+    planState: null,
     createdAt: '2026-10-19T08:00:00Z',
     updatedAt: '2026-10-19T08:00:00Z',
     ...extra,
@@ -63,6 +66,7 @@ describe('TodosView', () => {
   /** While set, PATCH requests wait for it before the server answers. */
   let holdPatch: Promise<void> | null
   let refusePatch: boolean
+  let refusePlan: boolean
 
   beforeEach(() => {
     // Tuesday 20 October 2026, 10:00 on this device; only the clock is fake, so promises and timers run as usual.
@@ -73,6 +77,7 @@ describe('TodosView', () => {
     afterSync = () => {}
     holdPatch = null
     refusePatch = false
+    refusePlan = false
     mail = useMailStore()
     mail.ready = true
     mail.todos = [
@@ -96,6 +101,9 @@ describe('TodosView', () => {
         if (method === 'PATCH' && refusePatch) {
           return new Response(JSON.stringify({ detail: 'Not now.' }), { status: 503 })
         }
+        if (method === 'POST' && url.pathname.endsWith('/plan') && refusePlan) {
+          return new Response(JSON.stringify({ detail: 'There is no free time that long before the due date.' }), { status: 422 })
+        }
         if (method === 'DELETE') {
           return new Response(null, { status: 204 })
         }
@@ -109,6 +117,7 @@ describe('TodosView', () => {
         { path: '/inbox/:threadId', name: 'unified-thread', component: { template: '<div />' } },
         { path: '/todos', name: 'todos', component: TodosView },
         { path: '/todos/:todoId', name: 'todo', component: TodosView },
+        { path: '/calendar/:view?/:date?', name: 'calendar', component: { template: '<div />' } },
       ],
     })
   })
@@ -226,5 +235,52 @@ describe('TodosView', () => {
 
     expect(requests).toEqual([{ method: 'DELETE', path: '/api/v1/todos/later', body: undefined }])
     expect(router.currentRoute.value.name).toBe('todos')
+  })
+
+  it('plans a todo in the calendar and shows where it went', async () => {
+    mail.todos = [todo('report', { title: 'Write the report', dueDate: '2026-10-23', durationMinutes: 60 })]
+    afterSync = () => {
+      mail.todos = [todo('report', { title: 'Write the report', dueDate: '2026-10-23', durationMinutes: 60, plannedStart: '2026-10-21T08:00:00Z', plannedEnd: '2026-10-21T09:00:00Z', planState: 'planned' })]
+    }
+    const wrapper = await mountAt('/todos/report')
+    expect(wrapper.get('.plan-line').text()).toBe('Not in the calendar yet.')
+
+    await wrapper.findAll('.detail button').find((button) => button.text() === 'Plan automatically')!.trigger('click')
+    await settle()
+
+    expect(requests).toEqual([{ method: 'POST', path: '/api/v1/todos/report/plan', body: undefined }])
+    expect(wrapper.get('.plan-line').text()).toMatch(/^Planned Wednesday 21 October, \d\d:00 to \d\d:00$/)
+    expect(wrapper.findAll('.plan-actions button').map((button) => button.text())).toEqual(['Plan again', 'Remove from calendar'])
+    expect(wrapper.get('.plan-actions a').attributes('href')).toBe('/calendar/day/2026-10-21')
+  })
+
+  it('shows why a todo could not be planned', async () => {
+    refusePlan = true
+    mail.todos = [todo('report', { dueDate: '2026-10-20', durationMinutes: 600 })]
+    const wrapper = await mountAt('/todos/report')
+
+    await wrapper.findAll('.detail button').find((button) => button.text() === 'Plan automatically')!.trigger('click')
+    await settle()
+
+    expect(wrapper.get('.form-error').text()).toBe('There is no free time that long before the due date.')
+  })
+
+  it('removes the planned time and flags a conflict', async () => {
+    mail.todos = [todo('report', { dueDate: '2026-10-23', durationMinutes: 60, plannedStart: '2026-10-21T08:00:00Z', plannedEnd: '2026-10-21T09:00:00Z', planState: 'conflict' })]
+    const wrapper = await mountAt('/todos/report')
+    expect(wrapper.get('.plan-line').classes()).toContain('conflict')
+    expect(wrapper.get('.plan-line').text()).toContain('but that time is taken and nothing else is free before the due date')
+
+    await wrapper.findAll('.detail button').find((button) => button.text() === 'Remove from calendar')!.trigger('click')
+    await settle()
+
+    expect(requests).toEqual([{ method: 'DELETE', path: '/api/v1/todos/report/plan', body: undefined }])
+  })
+
+  it('asks for a due date and a duration before planning', async () => {
+    const wrapper = await mountAt('/todos/later')
+
+    expect(wrapper.get('.plan-line').text()).toBe('Give it a due date and say how long it takes to plan it in the calendar.')
+    expect(wrapper.findAll('.detail button').some((button) => button.text() === 'Plan automatically')).toBe(false)
   })
 })

@@ -5,6 +5,7 @@ import {
   cellOverflow,
   inAllDayRow,
   isoWeek,
+  isTodoBlock,
   layoutSpans,
   longDate,
   MONTH_NAMES,
@@ -15,21 +16,27 @@ import {
   type CalendarDay,
   type Occurrence,
   type SyncedCalendar,
+  type TodoBlock,
 } from '@tresso/core'
-import { blockState, calendarColor, occurrenceLabel } from '@/calendar/look'
+import { blockState, calendarColor, occurrenceLabel, TODO_COLOR, todoBlockLabel } from '@/calendar/look'
 
-const props = defineProps<{
-  days: CalendarDay[]
-  /** Any day of the month on screen. */
-  month: number
-  occurrences: Occurrence[]
-  zone: string
-  now: number
-  today: number
-  calendars: (id: string) => SyncedCalendar | undefined
-  selectedKey: string | null
-}>()
-const emit = defineEmits<{ open: [occurrence: Occurrence]; showDay: [day: number]; create: [start: number, allDay: boolean] }>()
+const props = withDefaults(
+  defineProps<{
+    days: CalendarDay[]
+    /** Any day of the month on screen. */
+    month: number
+    occurrences: Occurrence[]
+    /** Time planned for todos, listed among the events. */
+    todoBlocks?: TodoBlock[]
+    zone: string
+    now: number
+    today: number
+    calendars: (id: string) => SyncedCalendar | undefined
+    selectedKey: string | null
+  }>(),
+  { todoBlocks: () => [] },
+)
+const emit = defineEmits<{ open: [occurrence: Occurrence]; openTodo: [block: TodoBlock]; showDay: [day: number]; create: [start: number, allDay: boolean] }>()
 
 /** Three items per cell, then "+N more". */
 const VISIBLE = 3
@@ -40,7 +47,7 @@ const weeks = computed(() => {
     rows.push(props.days.slice(index, index + 7))
   }
   return rows.map((days) => {
-    const items = layoutSpans(props.occurrences, days)
+    const items = layoutSpans<Occurrence | TodoBlock>([...props.occurrences, ...props.todoBlocks], days)
     return {
       days,
       cells: days.map((day, index) => ({ day, ...cellOverflow(items, index, VISIBLE) })),
@@ -117,8 +124,25 @@ function onKeydown(event: KeyboardEvent): void {
   void nextTick(() => root.value?.querySelector<HTMLElement>(`[data-day="${next}"]`)?.focus())
 }
 
-function itemTime(occurrence: Occurrence): string {
-  return inAllDayRow(occurrence) ? '' : timeIn(occurrence.start, props.zone)
+function itemTime(item: Occurrence | TodoBlock): string {
+  return inAllDayRow(item) ? '' : timeIn(item.start, props.zone)
+}
+
+/** How an item of a day looks: an event in its calendar's color, or a todo's planned time in the Do colors. */
+function itemLook(item: Occurrence | TodoBlock): { state: Record<string, boolean>; color: Record<string, string>; label: string; title: string } {
+  if (isTodoBlock(item)) {
+    return { state: { todo: true, conflict: item.conflict, past: item.end <= props.now }, color: TODO_COLOR, label: todoBlockLabel(item, props.zone, props.now), title: item.todo.title }
+  }
+  const calendar = props.calendars(item.event.calendarId)
+  return { state: blockState(item, props.now), color: calendarColor(calendar), label: occurrenceLabel(item, props.zone, calendar, props.now), title: item.event.summary || 'Untitled event' }
+}
+
+function openItem(item: Occurrence | TodoBlock): void {
+  if (isTodoBlock(item)) {
+    emit('openTodo', item)
+  } else {
+    emit('open', item)
+  }
 }
 </script>
 
@@ -138,7 +162,7 @@ function itemTime(occurrence: Occurrence): string {
         :class="{ outside: !inMonth(cell.day), today: cell.day.wall === today }"
         :data-day="cell.day.wall"
         :tabindex="focused === cell.day.wall ? 0 : -1"
-        :aria-label="`${longDate(cell.day.wall)}${cell.shown.length + cell.more === 0 ? ', nothing planned' : `, ${cell.shown.length + cell.more} ${cell.shown.length + cell.more === 1 ? 'event' : 'events'}`}`"
+        :aria-label="`${longDate(cell.day.wall)}${cell.shown.length + cell.more === 0 ? ', nothing planned' : `, ${cell.shown.length + cell.more} ${cell.shown.length + cell.more === 1 ? 'item' : 'items'}`}`"
         :aria-current="cell.day.wall === today ? 'date' : undefined"
         @focus="focused = cell.day.wall"
         @dblclick.self="emit('create', cell.day.start, true)"
@@ -149,17 +173,17 @@ function itemTime(occurrence: Occurrence): string {
             <button
               type="button"
               class="item"
-              :class="{ ...blockState(item.occurrence, now), filled: inAllDayRow(item.occurrence), selected: item.occurrence.key === selectedKey }"
-              :style="calendarColor(calendars(item.occurrence.event.calendarId))"
+              :class="{ ...itemLook(item.occurrence).state, filled: inAllDayRow(item.occurrence), selected: item.occurrence.key === selectedKey }"
+              :style="itemLook(item.occurrence).color"
               data-occurrence=""
               data-cell-item=""
               tabindex="-1"
-              :aria-label="occurrenceLabel(item.occurrence, zone, calendars(item.occurrence.event.calendarId), now)"
-              @click="emit('open', item.occurrence)"
+              :aria-label="itemLook(item.occurrence).label"
+              @click="openItem(item.occurrence)"
             >
               <span v-if="!inAllDayRow(item.occurrence)" class="dot" aria-hidden="true"></span>
               <span v-if="itemTime(item.occurrence)" class="time">{{ itemTime(item.occurrence) }}</span>
-              <span class="title">{{ item.occurrence.event.summary || 'Untitled event' }}</span>
+              <span class="title">{{ itemLook(item.occurrence).title }}</span>
             </button>
           </li>
           <li v-if="cell.more > 0">
@@ -277,9 +301,13 @@ function itemTime(occurrence: Occurrence): string {
   border-radius: 50%;
   background: var(--cal);
 }
-.item.pending .dot {
+.item.pending .dot,
+.item.conflict .dot {
   background: transparent;
   border: 1px solid var(--cal);
+}
+.item.todo .title {
+  color: color-mix(in srgb, var(--cal) 65%, var(--ink));
 }
 .time {
   color: var(--ink-2);
