@@ -443,8 +443,9 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   API keeps them in `message_signals`, apart from the message row and only for messages that have any. Anyone can
   write an Authentication-Results header, so a DMARC pass counts only when the receiving server surely wrote it: at
   Gmail and Microsoft 365 the topmost header is always theirs. A generic IMAP server may add none, and then the
-  sender's own header could name any server, the recipient's too, so for IMAP accounts neither a DMARC pass nor a
-  DMARC failure in that header counts: a pass never overrules the server's spam verdict (`ReceivingServers`). A junk keyword
+  sender's own header could name any server, the recipient's too, so on IMAP accounts a pass never overrules the
+  server's spam verdict (`ReceivingServers`). A pass counts only when trusted; a failure always counts, because a
+  forged failure can only send the forger's own mail to Spam. A junk keyword
   set or cleared after ingest is not read again (flag changes carry only seen, flagged, answered and draft).
 - Classification runs after the ingest commits, on its own Messenger transport (`classify`) with its own consumer
   (`classifier` in Compose), so a first sync never holds up sending. It goes in batches of 200 per transaction, ten
