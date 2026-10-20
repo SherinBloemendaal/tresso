@@ -19,8 +19,8 @@ use Symfony\Component\Validator\Constraints as Assert;
  * under it (folders, threads, messages, outgoing messages, calendars) is gone too, and a removed calendar means its
  * events are gone. Calendar events come as stored (series with their rule, overrides with their recurrenceId), for
  * series that end after two years ago. Notifications come once delivered (from the last week), so every device can
- * show and clear them; event notes are the user's private notes. A todo whose email is gone keeps its `messageId`
- * until it changes again; clients treat a link to an email they do not have as no link.
+ * show and clear them; event notes are the user's private notes. A todo whose email is gone changes too, without
+ * the link; clients also treat a link to an email they do not have as no link.
  */
 #[ApiResource(
     shortName: 'SyncChanges',

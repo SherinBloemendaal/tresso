@@ -89,7 +89,7 @@ final readonly class TodoResource
         public int $position,
         /** manual, suggested or automatic (made by a smart inbox). */
         public string $source,
-        /** The email it came from; null for a todo of the user's own, or once that email is gone. */
+        /** The email it came from; null for a todo of the user's own, or once that email or its account is gone. */
         public ?string $messageId,
         public ?string $threadId,
         public \DateTimeImmutable $createdAt,
