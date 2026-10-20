@@ -71,6 +71,7 @@ framework:
             App\Notification\SendMailNotification: push
             App\HandOver\NotifyOverdueHandOver: push
             App\Bulk\RunBulkAction: bulk
+            App\Brief\DeliverDailyBrief: push
 
 when@test:
     framework:

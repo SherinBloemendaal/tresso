@@ -1,0 +1,19 @@
+{% autoescape false %}
+Your daily brief for {{ date }}, made at {{ time }}: {{ count }} {{ count == 1 ? 'conversation' : 'conversations' }} to know.
+Nothing here asks anything of you. Note them in Tresso to mark them read and archive them:
+{{ briefUrl }}
+{% for section in sections %}
+
+{{ section.name|upper }}
+{% for entry in section.entries %}
+* {{ entry.subject ?: '(no subject)' }}
+  {{ entry.from }}{% if entry.receivedAt %}, {{ entry.receivedAt|date('D j M H:i', zone) }}{% endif %} ({{ entry.account }})
+{% if entry.snippet %}  {{ entry.snippet }}
+{% endif %}
+  {{ webUrl }}/inbox/{{ entry.threadId }}
+{% endfor %}
+{% endfor %}
+
+Your daily brief is set to come by email. Change that in the brief settings:
+{{ settingsUrl }}
+{% endautoescape %}

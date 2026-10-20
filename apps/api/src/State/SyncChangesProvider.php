@@ -72,6 +72,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 mailNotifications: [],
                 unsubscriptions: [],
                 handOvers: [],
+                dailyBriefs: [],
                 deleted: [],
             );
         }
@@ -97,6 +98,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             mailNotifications: $this->mailNotifications($range),
             unsubscriptions: $this->unsubscriptions($range),
             handOvers: $this->handOvers($range),
+            dailyBriefs: $this->dailyBriefs($range),
             deleted: $this->deleted($range),
         );
     }
@@ -144,6 +146,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 SELECT u.change_seq, COUNT(*) FROM unsubscription u JOIN mail_account a ON a.id = u.mail_account_id WHERE a.owner_id = :user AND u.change_seq > :since GROUP BY u.change_seq
                 UNION ALL
                 SELECT h.change_seq, COUNT(*) FROM hand_over h WHERE h.owner_id = :user AND h.change_seq > :since GROUP BY h.change_seq
+                UNION ALL
+                SELECT b.change_seq, COUNT(*) FROM daily_brief b WHERE b.owner_id = :user AND b.change_seq > :since GROUP BY b.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -725,6 +729,28 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'createdAt' => self::date($r['created_at']),
             'closedAt' => self::date($r['closed_at']),
             'updatedAt' => self::date($r['updated_at']),
+        ], $rows);
+    }
+
+    /**
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function dailyBriefs(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT b.id, b.covers_from, b.covers_until, b.thread_ids, b.created_at
+             FROM daily_brief b WHERE b.owner_id = :user AND b.change_seq > :since AND b.change_seq <= :until ORDER BY b.change_seq',
+            $range,
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'coversFrom' => self::date($r['covers_from']),
+            'coversUntil' => self::date($r['covers_until']),
+            'threadIds' => json_decode(\is_string($r['thread_ids']) ? $r['thread_ids'] : '[]', true, flags: \JSON_THROW_ON_ERROR),
+            'createdAt' => self::date($r['created_at']),
         ], $rows);
     }
 

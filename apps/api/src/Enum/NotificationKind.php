@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Enum;
 
+use App\Brief\DailyBriefDelivery;
 use App\Notification\NotificationChannelChoice;
 
 /**
@@ -27,13 +28,13 @@ enum NotificationKind: string
 
     /**
      * The kinds whose channels the user chooses per kind (channelsByKind). Reminders carry their own channels, so they
-     * are not among them.
+     * are not among them; other features add their kinds here (mail, the daily brief).
      *
      * @return list<string>
      */
     public static function withChosenChannels(): array
     {
-        return [self::LeaveNow->value, self::Brief->value, self::FollowUp->value, self::Mail->value, self::HandOver->value];
+        return [self::LeaveNow->value, self::Brief->value, self::FollowUp->value, self::Mail->value, self::HandOver->value, DailyBriefDelivery::KIND];
     }
 
     /** Where this kind goes unless the user chose otherwise. Reminders carry their own channels. */

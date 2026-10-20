@@ -24,9 +24,11 @@ class NotificationPreferences
     #[ORM\JoinColumn(nullable: false, onDelete: 'CASCADE')]
     private User $user;
 
+    public const string DEFAULT_TIME_ZONE = 'UTC';
+
     /** IANA zone the quiet hours and all-day reminders are read in. */
     #[ORM\Column(length: 64)]
-    private string $timeZone = 'UTC';
+    private string $timeZone = self::DEFAULT_TIME_ZONE;
 
     #[ORM\Column]
     private bool $quietHoursEnabled = false;

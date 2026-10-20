@@ -15,6 +15,7 @@ use App\Enum\TravelMode;
 use App\Notification\NotificationChannelChoice;
 use App\Notification\PlanUserNotifications;
 use App\Realtime\AfterCommitDispatcher;
+use App\Repository\DailyBriefSettingsRepository;
 use App\Repository\NotificationPreferencesRepository;
 use App\Security\CurrentUser;
 use Doctrine\ORM\EntityManagerInterface;
@@ -31,6 +32,7 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
         private CurrentUser $currentUser,
         private AfterCommitDispatcher $afterCommit,
         private SelfAddresses $selfAddresses,
+        private DailyBriefSettingsRepository $briefSettings,
     ) {
     }
 
@@ -98,6 +100,10 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
             }
             foreach ($data->channelsByKind ?? [] as $kind => $channels) {
                 $preferences->setChannelsFor((string) $kind, \is_array($channels) ? NotificationChannelChoice::fromValues(array_values($channels)) : null);
+            }
+            if ($zoneChanged) {
+                // The daily brief comes at its time of day in the new zone.
+                $this->briefSettings->findOneFor($user)?->reschedule($preferences->getTimeZone(), new \DateTimeImmutable());
             }
             $this->entityManager->flush();
             if ($zoneChanged || $planningBefore !== self::planning($preferences)) {

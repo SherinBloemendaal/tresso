@@ -6,16 +6,18 @@ namespace App\Service;
 
 use App\Calendar\LocalCalendars;
 use App\Classification\BuiltinSmartInboxes;
+use App\Entity\DailyBriefSettings;
 use App\Entity\NotificationPreferences;
 use App\Entity\User;
 use App\Entity\UserSettings;
 use App\Notification\ReminderRules;
 use Doctrine\ORM\EntityManagerInterface;
+use Psr\Clock\ClockInterface;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 
 /**
  * Creates a user together with everything a new account needs: settings, the built-in smart inboxes, the local
- * Tresso calendar, and the notification preferences with the default reminder rules.
+ * Tresso calendar, the notification preferences with the default reminder rules, and the daily brief settings.
  */
 final readonly class UserProvisioner
 {
@@ -24,6 +26,7 @@ final readonly class UserProvisioner
         private UserPasswordHasherInterface $passwordHasher,
         private BuiltinSmartInboxes $builtinSmartInboxes,
         private ReminderRules $reminderRules,
+        private ClockInterface $clock,
     ) {
     }
 
@@ -33,9 +36,11 @@ final readonly class UserProvisioner
         $user->setPassword($this->passwordHasher->hashPassword($user, $plainPassword));
         $this->entityManager->persist($user);
         $this->entityManager->persist(new UserSettings($user));
-        $this->entityManager->persist(new NotificationPreferences($user));
+        $preferences = new NotificationPreferences($user);
+        $this->entityManager->persist($preferences);
         $this->reminderRules->createDefaults($user);
         $this->entityManager->persist(LocalCalendars::create($user));
+        $this->entityManager->persist(new DailyBriefSettings($user, $preferences->getTimeZone(), $this->clock->now()));
 
         $this->builtinSmartInboxes->ensure($user);
 
