@@ -519,14 +519,23 @@ final class ClassificationTest extends DatabaseTestCase
         self::assertSame('authentication_failed', $this->senderRuleOfResponse()['spamOverrules'] ?? null);
     }
 
-    public function testDmarcFailuresOfAGenericImapServerAreNotTrustedEither(): void
+    public function testADmarcFailureCountsEvenOnAGenericImapAccountAndBeatsASenderRule(): void
     {
+        // A forged failure could only send the forger's own mail to Spam; a forged From with a real failure must not
+        // reach To do through the rule for that address.
+        $this->connection()->executeStatement(
+            "INSERT INTO sender_rule (id, owner_id, sender, category_id, verdict, updated_at)
+             SELECT :id, c.owner_id, 'ceo@bank.example', c.id, 'do', NOW() FROM category c JOIN app_user u ON u.id = c.owner_id
+             WHERE u.email = 'kim@example.test' AND c.builtin = 'todo'",
+            ['id' => Uuid::v7()->toRfc4122()],
+        );
         $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
-            $this->message('1', 'Statement', ['from' => ['address' => 'news@bank.example'], 'headers' => ['authentication-results' => 'mx.company.example; dmarc=fail (p=REJECT) header.from=bank.example']]),
+            $this->message('1', 'Wire this today', ['from' => ['address' => 'ceo@bank.example'], 'headers' => ['authentication-results' => 'mx.company.example; dmarc=fail (p=REJECT) header.from=bank.example']]),
         ]]);
         $this->runClassification();
 
-        self::assertSame('direct', $this->changes(0)['threads'][0]['classificationReason']);
+        $thread = $this->changes(0)['threads'][0];
+        self::assertSame([$this->builtinIds($this->changes(0))['spam'], 'none', 'authentication_failed'], $this->classificationOf($thread));
     }
 
     public function testForgettingASenderRuleWaitsForACorrectionOfTheUser(): void

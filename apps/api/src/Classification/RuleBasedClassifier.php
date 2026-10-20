@@ -167,10 +167,6 @@ final readonly class RuleBasedClassifier implements Classifier
     }
 
     /**
-     * DMARC failed and the sender's domain asks receivers to reject or quarantine such mail. Failing DMARC alone is
-     * not enough: forwarded mail and mailing lists fail it too.
-     */
-    /**
      * Why the message is spam whatever the user remembered for its sender, or null. Failed authentication always wins
      * (the exclude list is From-based too, so it cannot rescue it either); the server's spam verdict wins unless the
      * sender is authenticated or the Spam smart inbox excludes them. Both lean on the From address, which is easy to
@@ -190,15 +186,15 @@ final readonly class RuleBasedClassifier implements Classifier
     }
 
     /**
-     * DMARC failed with a reject or quarantine policy, according to an Authentication-Results header the receiving
-     * server surely wrote (see {@see ReceivingServers}): an untrusted header proves nothing either way.
+     * DMARC failed and the sender's domain asks receivers to reject or quarantine such mail. Failing DMARC alone is
+     * not enough: forwarded mail and mailing lists fail it too. Unlike a pass, a failure counts in any header, trusted
+     * or not (see {@see ReceivingServers}): a forged failure can only send the forger's own mail to Spam.
      */
     public static function failedAuthentication(MailToClassify $mail): bool
     {
         $results = strtolower($mail->header('authentication-results') ?? '');
 
-        return $mail->authenticationResultsTrusted
-            && 1 === preg_match('/\bdmarc=fail\b/', $results)
+        return 1 === preg_match('/\bdmarc=fail\b/', $results)
             && 1 === preg_match('/\b(p|policy\.dmarc|policy\.published-domain-policy)=(reject|quarantine)\b/', $results);
     }
 
