@@ -17,6 +17,7 @@ use App\Entity\MessageLocation;
 use App\Entity\MessageReference;
 use App\Entity\MessageSignals;
 use App\Entity\MessageText;
+use App\HandOver\HandOvers;
 use App\Mailbox\MailboxChanges;
 use App\Repository\MailboxChangeRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -35,6 +36,7 @@ final readonly class MessageIngestor
         private MailboxChanges $changes,
         private ClassificationScheduler $classification,
         private InvitationRecorder $invitations,
+        private HandOvers $handOvers,
     ) {
     }
 
@@ -142,6 +144,9 @@ final readonly class MessageIngestor
 
         // Flushed per message so the next message in the batch can thread onto this one.
         $this->entityManager->flush();
+
+        // The delegate's reply closes the hand-over of this conversation.
+        $this->handOvers->messageArrived($message, new \DateTimeImmutable());
     }
 
     private function findExisting(MailAccount $account, ?string $messageId, string $rawObjectKey): ?Message

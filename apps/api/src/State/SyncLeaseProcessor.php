@@ -7,6 +7,7 @@ namespace App\State;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProcessorInterface;
 use App\ApiResource\SyncLease;
+use App\HandOver\HandOvers;
 use App\Outbox\DraftFiling;
 use App\Outbox\Outbox;
 use App\Repository\DraftCopyRemovalRepository;
@@ -35,6 +36,7 @@ final readonly class SyncLeaseProcessor implements ProcessorInterface
         private DraftCopyRemovalRepository $removals,
         private MailboxChangeRepository $mailboxChanges,
         private Unsubscriptions $unsubscriptions,
+        private HandOvers $handOvers,
     ) {
     }
 
@@ -46,10 +48,12 @@ final readonly class SyncLeaseProcessor implements ProcessorInterface
         );
         $accountIds = array_map(static fn (LeasedAccount $account): string => $account->id, $accounts);
 
-        // Every heartbeat also releases scheduled mail whose time has come, in case its release message got lost, and
-        // tells the worker which accounts have outbound work, in case it missed the realtime notification.
+        // Every heartbeat also releases scheduled mail whose time has come and marks hand-overs whose due date passed,
+        // in case their delayed message got lost, and tells the worker which accounts have outbound work, in case it
+        // missed the realtime notification.
         $now = new \DateTimeImmutable();
         $this->entityManager->wrapInTransaction(fn () => $this->outbox->releaseDue($accountIds, $now));
+        $this->entityManager->wrapInTransaction(fn () => $this->handOvers->markDue($accountIds, $now));
 
         // Mail to send, drafts to file or remove, changes to messages, calendar changes to write and one-click
         // unsubscribes are all handled when the worker hears the account has outbound work.
