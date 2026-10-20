@@ -15,6 +15,7 @@ import {
   startOfMonth,
   startOfWallDay,
   startOfWeek,
+  todoBlocks as plannedTodoBlocks,
   toWall,
   type CalendarDay,
   type EditScope,
@@ -124,6 +125,12 @@ export const useCalendarStore = defineStore('calendar', () => {
   const occurrences = computed(() =>
     loaded.value.filter((occurrence) => visibleCalendarIds.value.has(occurrence.event.calendarId) && occurrence.event.status !== 'cancelled' && occurrence.event.selfResponse !== 'declined'),
   )
+
+  /** Time planned for open todos on the days on screen; Tresso keeps it, in no calendar. */
+  const todoBlocks = computed(() => {
+    const range = days.value
+    return range.length === 0 ? [] : plannedTodoBlocks(mail.todos, range[0]!.start, range[range.length - 1]!.end)
+  })
 
   /** Invitations still waiting for the user's answer, from now on. */
   const unanswered = computed(() => occurrences.value.filter((occurrence) => occurrence.event.selfResponse === 'needs-action' && occurrence.end > now.value))
@@ -307,6 +314,7 @@ export const useCalendarStore = defineStore('calendar', () => {
     notice,
     rows,
     occurrences,
+    todoBlocks,
     unanswered,
     calendars,
     newEventCalendar,

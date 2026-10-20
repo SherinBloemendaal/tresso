@@ -1,34 +1,48 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import {
+  isTodoBlock,
   occurrenceTimes,
   relativeDay,
   RESPONSE_WORDS,
   shortDate,
+  todoBlockTimes,
   type CalendarDay,
   type Occurrence,
   type SyncedCalendar,
+  type TodoBlock,
 } from '@tresso/core'
-import { calendarColor, joinLabel, occurrenceLabel } from '@/calendar/look'
+import { calendarColor, joinLabel, occurrenceLabel, TODO_COLOR, todoBlockLabel } from '@/calendar/look'
 import AppIcon from '@/components/AppIcon.vue'
 
-const props = defineProps<{
-  days: CalendarDay[]
-  occurrences: Occurrence[]
-  zone: string
-  now: number
-  today: number
-  calendars: (id: string) => SyncedCalendar | undefined
-  selectedKey: string | null
-}>()
-const emit = defineEmits<{ open: [occurrence: Occurrence] }>()
+const props = withDefaults(
+  defineProps<{
+    days: CalendarDay[]
+    occurrences: Occurrence[]
+    /** Time planned for todos, listed among the events. */
+    todoBlocks?: TodoBlock[]
+    zone: string
+    now: number
+    today: number
+    calendars: (id: string) => SyncedCalendar | undefined
+    selectedKey: string | null
+  }>(),
+  { todoBlocks: () => [] },
+)
+const emit = defineEmits<{ open: [occurrence: Occurrence]; openTodo: [block: TodoBlock] }>()
 
-/** Days with something planned, each with what touches it; a multi-day event is listed on each of its days. */
+/**
+ * Days with something planned, each with what touches it; a multi-day event is listed on each of its days. A todo's
+ * planned time goes among the events by its start.
+ */
 const groups = computed(() =>
   props.days
     .map((day) => ({
       day,
-      items: props.occurrences.filter((occurrence) => (occurrence.end === occurrence.start ? occurrence.start >= day.start && occurrence.start < day.end : occurrence.start < day.end && occurrence.end > day.start)),
+      items: [
+        ...props.occurrences.filter((occurrence) => (occurrence.end === occurrence.start ? occurrence.start >= day.start && occurrence.start < day.end : occurrence.start < day.end && occurrence.end > day.start)),
+        ...props.todoBlocks.filter((block) => block.start < day.end && block.end > day.start),
+      ].sort((a, b) => Number(!a.allDay) - Number(!b.allDay) || a.start - b.start),
     }))
     .filter((group) => group.items.length > 0),
 )
@@ -55,28 +69,41 @@ function sub(day: CalendarDay): string {
         {{ relativeDay(group.day.wall, today) }} <span class="sub">{{ sub(group.day) }}</span>
       </h3>
       <ul class="rows">
-        <li v-for="occurrence in group.items" :key="occurrence.key" class="row" :class="{ past: occurrence.end <= now }" :style="calendarColor(calendars(occurrence.event.calendarId))">
-          <button
-            type="button"
-            class="open"
-            :class="{ selected: occurrence.key === selectedKey }"
-            :aria-label="occurrenceLabel(occurrence, zone, calendars(occurrence.event.calendarId), now)"
-            @click="emit('open', occurrence)"
-          >
-            <span class="bar" aria-hidden="true"></span>
-            <span class="time">{{ occurrenceTimes(occurrence, zone) }}</span>
-            <span class="text">
-              <span class="title">{{ occurrence.event.summary || 'Untitled event' }}</span>
-              <span class="meta">
-                <template v-if="occurrence.event.location">{{ occurrence.event.location }}, </template>{{ calendars(occurrence.event.calendarId)?.name ?? '' }}
+        <template v-for="occurrence in group.items" :key="occurrence.key">
+          <li v-if="isTodoBlock(occurrence)" class="row todo" :class="{ past: occurrence.end <= now }" :style="TODO_COLOR">
+            <button type="button" class="open" :class="{ selected: occurrence.key === selectedKey }" :aria-label="todoBlockLabel(occurrence, zone, now)" @click="emit('openTodo', occurrence)">
+              <span class="bar" aria-hidden="true"></span>
+              <span class="time">{{ todoBlockTimes(occurrence, zone) }}</span>
+              <span class="text">
+                <span class="title">{{ occurrence.todo.title }}</span>
+                <span class="meta">Todo<template v-if="occurrence.conflict">, that time is taken</template></span>
               </span>
-            </span>
-            <span v-if="chip(occurrence)" class="chip" :class="{ pending: occurrence.event.selfResponse === 'needs-action' }">{{ chip(occurrence) }}</span>
-          </button>
-          <a v-if="occurrence.event.conference" class="button button-quiet join" :href="occurrence.event.conference.url" target="_blank" rel="noopener noreferrer">
-            <AppIcon name="video" :size="15" /> {{ joinLabel(occurrence.event.conference.provider) }}
-          </a>
-        </li>
+              <span class="chip" :class="{ pending: occurrence.conflict }">{{ occurrence.conflict ? 'Conflict' : 'Planned' }}</span>
+            </button>
+          </li>
+          <li v-else class="row" :class="{ past: occurrence.end <= now }" :style="calendarColor(calendars(occurrence.event.calendarId))">
+            <button
+              type="button"
+              class="open"
+              :class="{ selected: occurrence.key === selectedKey }"
+              :aria-label="occurrenceLabel(occurrence, zone, calendars(occurrence.event.calendarId), now)"
+              @click="emit('open', occurrence)"
+            >
+              <span class="bar" aria-hidden="true"></span>
+              <span class="time">{{ occurrenceTimes(occurrence, zone) }}</span>
+              <span class="text">
+                <span class="title">{{ occurrence.event.summary || 'Untitled event' }}</span>
+                <span class="meta">
+                  <template v-if="occurrence.event.location">{{ occurrence.event.location }}, </template>{{ calendars(occurrence.event.calendarId)?.name ?? '' }}
+                </span>
+              </span>
+              <span v-if="chip(occurrence)" class="chip" :class="{ pending: occurrence.event.selfResponse === 'needs-action' }">{{ chip(occurrence) }}</span>
+            </button>
+            <a v-if="occurrence.event.conference" class="button button-quiet join" :href="occurrence.event.conference.url" target="_blank" rel="noopener noreferrer">
+              <AppIcon name="video" :size="15" /> {{ joinLabel(occurrence.event.conference.provider) }}
+            </a>
+          </li>
+        </template>
       </ul>
     </section>
   </div>

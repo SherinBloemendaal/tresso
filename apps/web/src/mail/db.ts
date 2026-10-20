@@ -149,7 +149,7 @@ type Stores = StoreNames<MailSchema>[]
 type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
 const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes', 'todos', 'unsubscriptions', 'handOvers', 'dailyBriefs', 'calendars', 'calendarEvents']
-const VERSION = 10
+const VERSION = 11
 
 export function databaseName(userId: string): string {
   return `tresso-mail-${userId}`
@@ -279,6 +279,13 @@ export class IndexedDbMailStore implements MailStore {
           events.createIndex('byCalendar', 'calendarId')
           events.createIndex('bySeriesStart', 'seriesStartsAt')
           events.createIndex('bySeriesEnd', 'seriesEndsAt')
+        }
+        if (oldVersion >= 6 && oldVersion < 11) {
+          // Todos stored before todos were planned in the calendar hold no time; the sync from the start below brings it.
+          const todos = transaction.objectStore('todos')
+          for (let cursor = await todos.openCursor(); cursor !== null; cursor = await cursor.continue()) {
+            await cursor.update({ ...cursor.value, plannedStart: null, plannedEnd: null, planState: null })
+          }
         }
         // Outgoing mail, contacts, signatures, drafts, smart inboxes, todos, unsubscriptions, hand-overs, daily briefs and
         // calendars come from the delta: an existing copy syncs again from the start.

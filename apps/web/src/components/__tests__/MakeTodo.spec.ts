@@ -48,6 +48,9 @@ const made: Todo = {
   source: 'manual',
   messageId: 'm2',
   threadId: 't1',
+  plannedStart: null,
+  plannedEnd: null,
+  planState: null,
   createdAt: '2026-10-19T10:00:00Z',
   updatedAt: '2026-10-19T10:00:00Z',
 }

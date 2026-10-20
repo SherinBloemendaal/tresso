@@ -2,13 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { daysFrom, expandOccurrences, type SyncedCalendarEvent } from '@tresso/core'
-import { calendar as calendarRow, calendarEvent } from '@tresso/core/testing'
+import { daysFrom, expandOccurrences, todoBlocks, type SyncedCalendarEvent } from '@tresso/core'
+import { calendar as calendarRow, calendarEvent, todo } from '@tresso/core/testing'
 import { useCalendarStore } from '@/stores/calendar'
 import { useMailStore } from '@/stores/mail'
+import AgendaList from '../calendar/AgendaList.vue'
 import EventEditor from '../calendar/EventEditor.vue'
 import MonthGrid from '../calendar/MonthGrid.vue'
 import TimeGrid from '../calendar/TimeGrid.vue'
+import TodoBlockDetail from '../calendar/TodoBlockDetail.vue'
 import InvitationCard from '../InvitationCard.vue'
 
 const AMS = 'Europe/Amsterdam'
@@ -20,7 +22,7 @@ function timed(id: string, start: string, end: string, extra: Partial<SyncedCale
 }
 
 function router() {
-  return createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { template: '<div />' } }, { path: '/calendar/:view?/:date?', name: 'calendar', component: { template: '<div />' } }] })
+  return createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { template: '<div />' } }, { path: '/calendar/:view?/:date?', name: 'calendar', component: { template: '<div />' } }, { path: '/todos/:todoId', name: 'todo', component: { template: '<div />' } }] })
 }
 
 describe('time grid', () => {
@@ -77,6 +79,60 @@ describe('time grid', () => {
     await wrapper.findAll('.block')[2]!.trigger('click')
     expect(wrapper.emitted('open')?.[0]?.[0]).toMatchObject({ event: { id: 'Lunch' } })
     wrapper.unmount()
+  })
+})
+
+describe('todos in the calendar', () => {
+  const days = daysFrom(Date.UTC(2026, 9, 19), 7, AMS)
+  const planned = { dueDate: '2026-10-23', durationMinutes: 60, plannedStart: '2026-10-20T12:00:00+00:00', plannedEnd: '2026-10-20T13:00:00+00:00', planState: 'planned' as const }
+  const occurrences = expandOccurrences([timed('Review', '2026-10-20T14:30:00', '2026-10-20T15:30:00')], days[0]!.start, days[6]!.end, AMS)
+  const blocks = todoBlocks([todo('report', { ...planned, title: 'Write the report' }), todo('slides', { ...planned, title: 'Send the slides', plannedStart: '2026-10-21T08:00:00+00:00', plannedEnd: '2026-10-21T08:30:00+00:00', planState: 'conflict' })], days[0]!.start, days[6]!.end)
+
+  it('places planned todos on the time grid among the events, in the Do colors', async () => {
+    const wrapper = mount(TimeGrid, { props: { days, occurrences, todoBlocks: blocks, zone: AMS, now, today: Date.UTC(2026, 9, 20), calendars: () => work, selectedKey: null } })
+    const todos = wrapper.findAll('.block.todo')
+    expect(todos.map((block) => block.find('.title').text())).toEqual(['Write the report', 'Send the slides'])
+    expect(todos[0]!.attributes('style')).toContain('top: 840px')
+    expect(todos[0]!.attributes('style')).toContain('--cal: var(--do)')
+    expect(todos[0]!.attributes('aria-label')).toBe('Todo: Write the report, Tuesday 20 October, 14:00 to 15:00')
+    expect(todos[1]!.classes()).toContain('conflict')
+    expect(todos[1]!.find('.meta').text()).toBe('Time taken, 10:00 to 10:30')
+    // The todo and the review overlap, so they share the width.
+    expect(wrapper.findAll('.block').find((block) => block.text().includes('Review'))!.attributes('style')).toContain('left: calc(35% + 2px)')
+
+    await todos[0]!.trigger('click')
+    expect(wrapper.emitted('openTodo')?.[0]?.[0]).toMatchObject({ key: 'todo:report' })
+    expect(wrapper.emitted('open')).toBeUndefined()
+  })
+
+  it('lists planned todos in the month and the agenda', async () => {
+    const month = mount(MonthGrid, { props: { days: daysFrom(Date.UTC(2026, 8, 28), 35, AMS), month: Date.UTC(2026, 9, 1), occurrences, todoBlocks: blocks, zone: AMS, now, today: Date.UTC(2026, 9, 20), calendars: () => work, selectedKey: null } })
+    const tuesday = month.get(`[data-day="${Date.UTC(2026, 9, 20)}"]`)
+    expect(tuesday.findAll('.item').map((item) => item.text())).toEqual(['14:00Write the report', '14:30Review'])
+    await tuesday.findAll('.item')[0]!.trigger('click')
+    expect(month.emitted('openTodo')?.[0]?.[0]).toMatchObject({ key: 'todo:report' })
+
+    const agenda = mount(AgendaList, { props: { days, occurrences, todoBlocks: blocks, zone: AMS, now, today: Date.UTC(2026, 9, 20), calendars: () => work, selectedKey: null } })
+    expect(agenda.findAll('.row').map((row) => [row.find('.time').text(), row.find('.title').text(), row.find('.chip').exists() ? row.find('.chip').text() : ''])).toEqual([
+      ['14:00 to 15:00', 'Write the report', 'Planned'],
+      ['14:30 to 15:30', 'Review', ''],
+      ['10:00 to 10:30', 'Send the slides', 'Conflict'],
+    ])
+    await agenda.findAll('.row .open')[2]!.trigger('click')
+    expect(agenda.emitted('openTodo')?.[0]?.[0]).toMatchObject({ key: 'todo:slides' })
+  })
+
+  it('offers to plan again, remove the time or check the todo off', async () => {
+    const detail = mount(TodoBlockDetail, { props: { block: blocks[1]!, zone: AMS, now, busy: false, error: null }, global: { plugins: [router()] } })
+    expect(detail.get('h2').text()).toBe('Send the slides')
+    expect(detail.get('.when').text()).toBe('Wednesday 21 October, 10:00 to 10:30')
+    expect(detail.get('.conflict').text()).toContain('This time is taken now')
+    const buttons = detail.findAll('.actions button')
+    expect(buttons.map((button) => button.text())).toEqual(['Done', 'Plan again', 'Remove from calendar'])
+    await buttons[1]!.trigger('click')
+    await buttons[2]!.trigger('click')
+    await buttons[0]!.trigger('click')
+    expect(Object.keys(detail.emitted())).toEqual(expect.arrayContaining(['plan', 'unplan', 'done']))
   })
 })
 

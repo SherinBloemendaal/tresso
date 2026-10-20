@@ -13,6 +13,7 @@ import { RouterLink, RouterView } from 'vue-router'
       <RouterLink :to="{ name: 'settings-notifications' }" class="item">Notifications</RouterLink>
       <RouterLink :to="{ name: 'settings-batches' }" class="item">Batched delivery</RouterLink>
       <RouterLink :to="{ name: 'settings-brief' }" class="item">Daily brief</RouterLink>
+      <RouterLink :to="{ name: 'settings-calendar' }" class="item">Calendar</RouterLink>
     </nav>
     <main class="content">
       <RouterView />

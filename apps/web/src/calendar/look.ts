@@ -1,4 +1,4 @@
-import { occurrenceWhen, RESPONSE_WORDS, toWall, type Occurrence, type SyncedCalendar } from '@tresso/core'
+import { longDate, occurrenceWhen, RESPONSE_WORDS, todoBlockTimes, toWall, type Occurrence, type SyncedCalendar, type TodoBlock } from '@tresso/core'
 
 /** The default calendar color when a calendar has none the browser understands. */
 const FALLBACK = '#6E56CF'
@@ -7,6 +7,16 @@ const FALLBACK = '#6E56CF'
 export function calendarColor(calendar: SyncedCalendar | undefined): Record<string, string> {
   const color = calendar?.color && /^#[0-9a-f]{3,8}$/i.test(calendar.color) ? calendar.color : FALLBACK
   return { '--cal': color }
+}
+
+/** Time planned for a todo takes the Do colors, the one verdict color the calendar shows. */
+export const TODO_COLOR: Record<string, string> = { '--cal': 'var(--do)' }
+
+/** What a screen reader hears for the time a todo is planned at. */
+export function todoBlockLabel(block: TodoBlock, zone: string, now: number): string {
+  const parts = [`Todo: ${block.todo.title}`, `${longDate(toWall(block.start, zone), toWall(now, zone))}, ${todoBlockTimes(block, zone)}`]
+  if (block.conflict) parts.push('that time is taken')
+  return parts.join(', ')
 }
 
 /** How a block looks: no reply or maybe is dashed, an event that ended today is faded. */
