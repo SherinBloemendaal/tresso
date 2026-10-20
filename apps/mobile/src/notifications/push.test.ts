@@ -123,6 +123,12 @@ describe('tappedRoute', () => {
     expect(tappedRoute({ path: '/todos' })).toBe('/todos')
   })
 
+  it('opens Waiting on for a hand-over past its due date', () => {
+    expect(tappedRoute({ kind: 'hand_over', path: '/waiting?nudge=0199-h1' })).toBe('/waiting?nudge=0199-h1')
+    expect(tappedRoute({ path: '/waiting' })).toBe('/waiting')
+    expect(tappedRoute({ path: '/waiting/elsewhere' })).toBeNull()
+  })
+
   it('opens nothing for paths the phone has no screen for, or that leave the app', () => {
     expect(tappedRoute({ kind: 'reminder', path: '/calendar/events/e1' })).toBeNull()
     expect(tappedRoute({ path: '/thread/t1/extra' })).toBeNull()

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { SyncedHandOver, SyncedOutgoingMessage } from '@tresso/core'
 import { handOverProblem } from '../form'
 import { statusText } from '../format'
+import { OneAtATime } from '../oneAtATime'
 
 const lisa = { address: 'lisa@company.example', name: 'Lisa Bakker' }
 
@@ -57,5 +58,38 @@ describe('statusText', () => {
 
     expect(statusText(nudged, nudge('sent'), now)).toMatch(/^Nudged /)
     expect(statusText(nudged, nudge('cancelled'), now)).toBe('Waiting')
+  })
+})
+
+describe('OneAtATime', () => {
+  it('drops a second tap while the first is on its way, and takes the next one after', async () => {
+    const gate = new OneAtATime()
+    let finish!: () => void
+    let runs = 0
+    const task = () =>
+      new Promise<void>((resolve) => {
+        runs += 1
+        finish = resolve
+      })
+
+    const first = gate.run(task)
+    const second = gate.run(task)
+    expect(await second).toBe(false)
+    finish()
+    expect(await first).toBe(true)
+    expect(runs).toBe(1)
+
+    const third = gate.run(task)
+    finish()
+    expect(await third).toBe(true)
+    expect(runs).toBe(2)
+  })
+
+  it('takes the next tap after a failure', async () => {
+    const gate = new OneAtATime()
+
+    await expect(gate.run(() => Promise.reject(new Error('offline')))).rejects.toThrow('offline')
+
+    expect(await gate.run(async () => {})).toBe(true)
   })
 })
