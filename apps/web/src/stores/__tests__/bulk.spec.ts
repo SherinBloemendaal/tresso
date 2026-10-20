@@ -118,6 +118,31 @@ describe('bulk store', () => {
     expect(notice?.action?.label).toBe('Undo')
   })
 
+  it('is not busy again when the answer to a stop comes after the action ended', async () => {
+    replies['POST /api/v1/bulk-actions'] = [state({})]
+    replies['GET /api/v1/bulk-actions/b1'] = [state({ status: 'done', conversations: 3, changed: 3, canUndo: true })]
+    let answer: (response: Response) => void = () => undefined
+    const fetch = vi.mocked(globalThis.fetch)
+    const respond = fetch.getMockImplementation()!
+    fetch.mockImplementation(async (input, init) =>
+      String(input).endsWith('/cancel') ? new Promise<Response>((resolve) => (answer = resolve)) : respond(input, init),
+    )
+    const bulk = useBulkStore()
+
+    const done = bulk.start({ in: 'inbox', action: 'archive' })
+    await vi.advanceTimersByTimeAsync(0)
+    const stopping = bulk.cancel()
+    await vi.advanceTimersByTimeAsync(500)
+    await done
+    expect(bulk.busy).toBe(false)
+
+    answer(new Response(JSON.stringify(state({ status: 'failed', conversations: 3, error: 'You stopped it.' }))))
+    await stopping
+
+    expect(bulk.running).toBeNull()
+    expect(bulk.busy).toBe(false)
+  })
+
   it('offers no undo when nothing could be put back', async () => {
     replies['POST /api/v1/bulk-actions'] = [state({ status: 'done', conversations: 2, changed: 2, unrestorable: 2, canUndo: true })]
 
