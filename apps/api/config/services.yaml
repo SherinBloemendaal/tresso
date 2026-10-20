@@ -42,6 +42,8 @@ when@test:
         App\Tests\Support\InMemoryObjectStorage:
             public: true
         App\Storage\ObjectStorage: '@App\Tests\Support\InMemoryObjectStorage'
+        App\Tests\Support\StatementHook:
+            tags: ['doctrine.middleware']
         # Scans run against a stand-in; ClamdScannerTest talks to a real clamd.
         App\Tests\Support\FakeVirusScanner:
             public: true
