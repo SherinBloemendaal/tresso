@@ -43,4 +43,7 @@ final class CreateSmartInbox
     #[Assert\NotBlank]
     #[Assert\Choice(callback: [Verdict::class, 'values'])]
     public string $verdict = '';
+
+    /** New mail judged `do` here becomes a todo; only with the `do` verdict. */
+    public bool $autoCreateTodo = false;
 }

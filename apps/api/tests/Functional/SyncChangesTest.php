@@ -84,7 +84,7 @@ final class SyncChangesTest extends DatabaseTestCase
 
         self::assertSame($cursor, $page['cursor']);
         self::assertFalse($page['hasMore']);
-        self::assertSame([], [...$page['mailAccounts'], ...$page['folders'], ...$page['threads'], ...$page['messages'], ...$page['signatures'], ...$page['smartInboxes'], ...$page['deleted']]);
+        self::assertSame([], [...$page['mailAccounts'], ...$page['folders'], ...$page['threads'], ...$page['messages'], ...$page['signatures'], ...$page['smartInboxes'], ...$page['todos'], ...$page['deleted']]);
     }
 
     public function testFlagChangeReturnsOnlyThatMessage(): void
@@ -253,6 +253,7 @@ final class SyncChangesTest extends DatabaseTestCase
             'includeSenders' => ['@supplier.example'],
             'excludeSenders' => [],
             'verdict' => 'do',
+            'autoCreateTodo' => false,
             'position' => 5,
         ]], $page['smartInboxes']);
 
@@ -335,14 +336,14 @@ final class SyncChangesTest extends DatabaseTestCase
     }
 
     /**
-     * @return array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, signatures: list<array<string, mixed>>, smartInboxes: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>}
+     * @return array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, signatures: list<array<string, mixed>>, smartInboxes: list<array<string, mixed>>, todos: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>}
      */
     private function changes(int $since, int $limit = 500): array
     {
         $this->client->request('GET', \sprintf('/api/v1/sync/changes?since=%d&limit=%d', $since, $limit), server: $this->kim);
         self::assertResponseIsSuccessful();
 
-        /** @var array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, signatures: list<array<string, mixed>>, smartInboxes: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>} */
+        /** @var array{cursor: int, hasMore: bool, mailAccounts: list<array<string, mixed>>, folders: list<array<string, mixed>>, threads: list<array<string, mixed>>, messages: list<array<string, mixed>>, signatures: list<array<string, mixed>>, smartInboxes: list<array<string, mixed>>, todos: list<array<string, mixed>>, deleted: list<array{type: string, id: string}>} */
         return $this->decodedResponse();
     }
 

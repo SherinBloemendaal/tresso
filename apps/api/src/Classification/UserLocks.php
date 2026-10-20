@@ -8,8 +8,8 @@ use Doctrine\DBAL\Connection;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * Per-user advisory locks, held until the transaction ends. Paths that need both take them in this order, smart
- * inboxes first, so they never wait on each other in a circle.
+ * Per-user advisory locks, held until the transaction ends. Paths that need more than one take them in this order
+ * (smart inboxes, classification, todos), so they never wait on each other in a circle.
  */
 final readonly class UserLocks
 {
@@ -27,6 +27,12 @@ final readonly class UserLocks
     public function classification(Uuid $userId): void
     {
         $this->lock('classify:'.$userId->toRfc4122());
+    }
+
+    /** Writes that must not give one email two todos take turns: making a todo from it, by hand or automatically. */
+    public function todos(Uuid $userId): void
+    {
+        $this->lock('todos:'.$userId->toRfc4122());
     }
 
     private function lock(string $key): void

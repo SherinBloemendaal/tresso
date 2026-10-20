@@ -76,6 +76,8 @@ final readonly class SmartInboxResource
         public array $includeSenders,
         public array $excludeSenders,
         public string $verdict,
+        /** Whether new mail judged `do` here becomes a todo; only with the `do` verdict. */
+        public bool $autoCreateTodo,
         public int $position,
     ) {
     }
@@ -90,6 +92,7 @@ final readonly class SmartInboxResource
             $smartInbox->getIncludeSenders(),
             $smartInbox->getExcludeSenders(),
             $smartInbox->getVerdict()->value,
+            $smartInbox->isAutoCreateTodo(),
             $smartInbox->getPosition(),
         );
     }

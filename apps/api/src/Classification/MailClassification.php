@@ -13,6 +13,7 @@ use App\Enum\Verdict;
 use App\Repository\CategoryRepository;
 use App\Repository\MailAccountRepository;
 use App\Repository\SenderRuleRepository;
+use App\Todo\EmailTodos;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Uid\Uuid;
@@ -20,7 +21,9 @@ use Symfony\Component\Uid\Uuid;
 /**
  * Runs the {@see Classifier} over a user's mail and stores the outcome: on each incoming message (clients notify on
  * its verdict) and on its conversation, which takes the smart inbox and verdict of its newest incoming message. The
- * user's own messages are never classified. Conversations the user put in a smart inbox themselves keep it.
+ * user's own messages are never classified. Conversations the user put in a smart inbox themselves keep it. New mail
+ * in a smart inbox that asks for todos gets one (see {@see EmailTodos::makeAutomatically()}); classifying again later
+ * makes none.
  *
  * Work goes in batches, each in its own transaction, so change numbers commit in order and a crash loses at most one
  * batch, which the next run picks up again. Runs for one user take turns on an advisory lock, so two runs never
@@ -47,6 +50,7 @@ final readonly class MailClassification
         private SenderRuleRepository $senderRules,
         private MailAccountRepository $accounts,
         private UserLocks $locks,
+        private EmailTodos $emailTodos,
     ) {
     }
 
@@ -122,6 +126,7 @@ final readonly class MailClassification
             $byMessage[$id] = $classification;
         }
         $this->entityManager->flush();
+        $this->emailTodos->makeAutomatically($user, array_values(array_intersect_key($messages, $byMessage)), $now);
 
         // A conversation follows its newest incoming message, if that is one classified just now.
         $threads = [];

@@ -49,7 +49,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
 
         [$until, $hasMore] = $this->boundary($userId, $since, $limit);
         if ($until === $since) {
-            return new SyncChanges($since, false, [], [], [], [], [], [], [], [], [], [], [], [], []);
+            return new SyncChanges($since, false, [], [], [], [], [], [], [], [], [], [], [], [], [], []);
         }
 
         $range = ['user' => $userId, 'since' => $since, 'until' => $until];
@@ -69,6 +69,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             $this->calendarEvents($range),
             $this->notifications($range),
             $this->eventNotes($range),
+            $this->todos($range),
             $this->deleted($range),
         );
     }
@@ -108,6 +109,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 SELECT n.change_seq, COUNT(*) FROM scheduled_notification n WHERE n.user_id = :user AND n.change_seq > :since GROUP BY n.change_seq
                 UNION ALL
                 SELECT o.change_seq, COUNT(*) FROM event_note o WHERE o.user_id = :user AND o.change_seq > :since GROUP BY o.change_seq
+                UNION ALL
+                SELECT o.change_seq, COUNT(*) FROM todo o WHERE o.owner_id = :user AND o.change_seq > :since GROUP BY o.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -361,7 +364,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private function smartInboxes(array $range): array
     {
         $rows = $this->connection->fetchAllAssociative(
-            'SELECT c.id, c.builtin, c.name, c.instructions, c.include_senders, c.exclude_senders, c.verdict, c.position
+            'SELECT c.id, c.builtin, c.name, c.instructions, c.include_senders, c.exclude_senders, c.verdict, c.auto_create_todo, c.position
              FROM category c WHERE c.owner_id = :user AND c.change_seq > :since AND c.change_seq <= :until ORDER BY c.change_seq',
             $range,
         );
@@ -374,6 +377,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'includeSenders' => json_decode(\is_string($r['include_senders']) ? $r['include_senders'] : '[]', true, flags: \JSON_THROW_ON_ERROR),
             'excludeSenders' => json_decode(\is_string($r['exclude_senders']) ? $r['exclude_senders'] : '[]', true, flags: \JSON_THROW_ON_ERROR),
             'verdict' => $r['verdict'],
+            'autoCreateTodo' => (bool) $r['auto_create_todo'],
             'position' => self::int($r['position']),
         ], $rows);
     }
@@ -517,6 +521,38 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'eventId' => $r['event_id'],
             'recurrenceId' => '' === $r['occurrence_key'] ? null : $r['occurrence_key'],
             'text' => $r['text'],
+            'updatedAt' => self::date($r['updated_at']),
+        ], $rows);
+    }
+
+    /**
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function todos(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT o.id, o.title, o.notes, o.due_date, o.due_time, o.duration_minutes, o.completed_at, o.position, o.source,
+                    o.message_id, m.thread_id, o.created_at, o.updated_at
+             FROM todo o LEFT JOIN message m ON m.id = o.message_id
+             WHERE o.owner_id = :user AND o.change_seq > :since AND o.change_seq <= :until ORDER BY o.change_seq',
+            $range,
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'title' => $r['title'],
+            'notes' => $r['notes'],
+            'dueDate' => $r['due_date'],
+            'dueTime' => null === $r['due_time'] ? null : substr(self::text($r['due_time']), 0, 5),
+            'durationMinutes' => null === $r['duration_minutes'] ? null : self::int($r['duration_minutes']),
+            'completedAt' => self::date($r['completed_at']),
+            'position' => self::int($r['position']),
+            'source' => $r['source'],
+            'messageId' => $r['message_id'],
+            'threadId' => $r['thread_id'],
+            'createdAt' => self::date($r['created_at']),
             'updatedAt' => self::date($r['updated_at']),
         ], $rows);
     }
