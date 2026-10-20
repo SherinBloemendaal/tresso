@@ -69,7 +69,11 @@ Built next to phase 1, each step its own pull request. See "3.13 Calendar" in th
 - [ ] C5 Google and Microsoft calendars and online meetings: Google Calendar API and Microsoft Graph calendar sync
   through the provider OAuth layer (1.6), Teams meetings through Graph, Google Meet through `conferenceData`, join
   buttons for every recognized meeting link
-- [ ] C6 Calendar assistant interfaces in the open edition with the deterministic meeting time finder
+- [x] C6 Calendar assistant interfaces in the open edition with the deterministic meeting time finder: the
+  `EventDraftInterpreter`, `MeetingTimeFinder`, `EventExtractor` and `MeetingBriefWriter` interfaces with their
+  capabilities; meeting times from the user's calendars within their working hours, focus blocks, buffer, travel time
+  and notice, across time zones and daylight saving, each slot explained, with the same API for planning todos; event
+  suggestions from a message's calendar parts
 
 Tresso Cloud: natural language event creation, meeting time suggestions with attendees' availability, events and
 deadlines extracted from mail, meeting briefs.
