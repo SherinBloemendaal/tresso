@@ -18,6 +18,7 @@ function state(override: Partial<BulkActionState>): BulkActionState {
     restored: 0,
     canUndo: false,
     error: null,
+    waitingSince: null,
     createdAt: '2026-10-20T10:00:00+00:00',
     finishedAt: null,
     ...override,
@@ -97,6 +98,24 @@ describe('bulk store', () => {
     await vi.advanceTimersByTimeAsync(600)
     expect(requests.map((request) => `${request.method} ${request.path}`).slice(-2)).toEqual(['POST /api/v1/bulk-actions/b1/undo', 'GET /api/v1/bulk-actions/b1'])
     expect(last(compose.notices)?.text).toBe('Put back 330 messages.')
+  })
+
+  it('stops an action under way and still offers the undo', async () => {
+    replies['POST /api/v1/bulk-actions'] = [state({})]
+    replies['POST /api/v1/bulk-actions/b1/cancel'] = [state({ status: 'failed', conversations: 200, changed: 210, canUndo: true, error: 'You stopped it. What was done stays done, and can be undone.' })]
+    replies['GET /api/v1/bulk-actions/b1'] = [state({ status: 'failed', conversations: 200, changed: 210, canUndo: true, error: 'You stopped it. What was done stays done, and can be undone.' })]
+    const bulk = useBulkStore()
+
+    const done = bulk.start({ in: 'inbox', action: 'archive' })
+    await vi.advanceTimersByTimeAsync(0)
+    await bulk.cancel()
+    await vi.advanceTimersByTimeAsync(500)
+
+    expect((await done)?.status).toBe('failed')
+    expect(requests.map((request) => `${request.method} ${request.path}`)).toContain('POST /api/v1/bulk-actions/b1/cancel')
+    const notice = last(useComposeStore().notices)
+    expect(notice?.text).toBe('Stopped after 200 conversations: You stopped it. What was done stays done, and can be undone.')
+    expect(notice?.action?.label).toBe('Undo')
   })
 
   it('offers no undo when nothing could be put back', async () => {

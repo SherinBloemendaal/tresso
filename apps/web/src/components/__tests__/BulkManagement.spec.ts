@@ -47,6 +47,7 @@ const done: BulkActionState = {
   restored: 0,
   canUndo: true,
   error: null,
+  waitingSince: null,
   createdAt: '2026-10-20T10:00:00+00:00',
   finishedAt: '2026-10-20T10:00:01+00:00',
 }
