@@ -11,8 +11,9 @@ async function pushOwner() {
 
 async function show(payload) {
   // A push for someone else than who turned notifications on here (they never signed out, and another user signs in
-  // here now) shows nothing of theirs, and this browser stops getting pushes; the server then forgets the device.
-  if (typeof payload.userId === 'string' && payload.userId !== (await pushOwner())) {
+  // here now), or one that does not say whom it is for, shows nothing of it, and this browser stops getting pushes;
+  // the server then forgets the device. The server names the user in every push (NotificationDispatcher).
+  if (typeof payload.userId !== 'string' || payload.userId !== (await pushOwner())) {
     await (await self.registration.pushManager.getSubscription())?.unsubscribe()
     await self.registration.showNotification('Tresso', { body: 'Notifications in this browser are off. Turn them on again in Settings > Notifications.', tag: 'tresso-off' })
     return

@@ -56,6 +56,8 @@ describe('ReadingPane actions', () => {
   const actions: Record<string, unknown>[] = []
   let refuse: string | null
   let later: ChangePage | null
+  /** While set, pulls after the first fail, as offline. */
+  let offline: boolean
   /** While set, marking read waits for it before the server answers. */
   let holdMarkRead: Promise<void> | null
   let router: Router
@@ -67,12 +69,16 @@ describe('ReadingPane actions', () => {
     refuse = null
     later = null
     holdMarkRead = null
+    offline = false
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input))
         if (url.pathname === '/api/v1/sync/changes') {
           const since = Number(url.searchParams.get('since'))
+          if (offline && since > 0) {
+            throw new TypeError('Failed to fetch')
+          }
           const first = page(1, {
             mailAccounts: [account],
             folders,
@@ -149,6 +155,24 @@ describe('ReadingPane actions', () => {
     release()
     await vi.waitFor(() => expect(wrapper.text()).toContain('Budget review'))
     expect(wrapper.text()).not.toContain('Loading the conversation')
+    wrapper.unmount()
+  })
+
+  it('says a conversation could not be loaded when the pull fails, and opens it once a pull works again', async () => {
+    offline = true
+    later = page(2, {
+      threads: [{ id: 't2', mailAccountId: 'work', subject: 'Budget review', messageCount: 1, lastMessageAt: '2026-10-19T10:00:00Z', smartInboxId: null, verdict: 'do', classificationReason: null }],
+      messages: [{ ...message('m3', ['inbox'], '2026-10-19T10:00:00Z', false), threadId: 't2', subject: 'Budget review' }],
+    })
+    const wrapper = mount(ReadingPane, { props: { threadId: 't2', backTo: '/' }, global: { plugins: [router] }, attachTo: document.body })
+
+    await vi.waitFor(() => expect(wrapper.get('[role="alert"]').text()).toContain('could not be loaded: Failed to fetch'))
+    expect(wrapper.text()).not.toContain('Loading the conversation')
+    expect(wrapper.text()).not.toContain('no longer exists')
+
+    offline = false
+    await wrapper.get('[role="alert"] button').trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Budget review'))
     wrapper.unmount()
   })
 
