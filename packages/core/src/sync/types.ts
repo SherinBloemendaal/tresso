@@ -2,7 +2,7 @@
 
 import type { BuiltinCategory, Verdict } from '../domain'
 import type { SyncedCalendar, SyncedCalendarEvent } from '../calendar/types'
-import type { SyncedEventNote, SyncedNotification } from '../notifications'
+import type { SyncedEventNote, SyncedMailNotification, SyncedNotification } from '../notifications'
 
 export type FolderRole = 'inbox' | 'sent' | 'drafts' | 'trash' | 'spam' | 'archive' | 'all' | 'custom'
 
@@ -243,6 +243,7 @@ export interface ChangePage {
   notifications: SyncedNotification[]
   eventNotes: SyncedEventNote[]
   todos: SyncedTodo[]
+  mailNotifications: SyncedMailNotification[]
   deleted: Deleted[]
 }
 

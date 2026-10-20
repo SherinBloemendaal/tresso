@@ -59,6 +59,7 @@ describe('message actions in large selections', () => {
             notifications: [],
             eventNotes: [],
             todos: [],
+            mailNotifications: [],
             deleted: [],
           }
           return new Response(JSON.stringify(since === 0 ? first : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [] }))

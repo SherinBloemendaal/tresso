@@ -28,6 +28,7 @@ function page(cursor: number, hasMore = false, ids: string[] = []): ChangePage {
     notifications: [],
     eventNotes: [],
     todos: [],
+    mailNotifications: [],
     deleted: [],
   }
 }

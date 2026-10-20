@@ -1,9 +1,9 @@
 /**
  * Wire format of notifications: /api/v1/notifications, /notification-devices, /notification-settings,
- * /reminder-rules, and the `notifications` of the delta.
+ * /reminder-rules, and the `notifications` and `mailNotifications` of the delta.
  */
 
-export type NotificationKind = 'reminder' | 'leave_now' | 'brief' | 'follow_up'
+export type NotificationKind = 'reminder' | 'leave_now' | 'brief' | 'follow_up' | 'mail'
 /** The phone app (Expo push), the desktop app and browsers (web push), or email. */
 export type NotificationChannel = 'phone' | 'desktop' | 'email'
 export type DeviceKind = 'web_push' | 'expo' | 'desktop'
@@ -26,6 +26,30 @@ export interface SyncedNotification {
   round: number
   /** When a snoozed notification comes again; null otherwise. */
   snoozedUntil: string | null
+}
+
+/**
+ * A delivered notification about new mail that needs the user (judged `do` or `delegate`, unread, in an inbox), as the
+ * delta carries it: the desktop app shows the ones sent to the desktop. The phone and browsers got theirs by push.
+ */
+export interface SyncedMailNotification {
+  id: string
+  /** Null once the message or conversation is gone. */
+  messageId: string | null
+  threadId: string | null
+  /** The sender. */
+  title: string
+  /** The subject (with "To hand over: " for `delegate`), and the start of the text on a second line. */
+  body: string
+  deliveredAt: string
+  channels: NotificationChannel[]
+  /** Delivered during quiet hours or another busy event: show it without sound. */
+  silent: boolean
+}
+
+/** Where a tap on a mail notification leads, in every client: the conversation. */
+export function mailNotificationPath(threadId: string): string {
+  return `/thread/${threadId}`
 }
 
 /** A notification from /api/v1/notifications: delivered in the last week or planned for the coming days. */
