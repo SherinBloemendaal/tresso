@@ -1453,34 +1453,47 @@ edition hands over by mail.
   composer of its own so it never touches what the user is writing): the newest message from someone else is
   forwarded with its files, the note above the original with "Could you get back to me by {due date}?", and once the
   forward is queued `POST /api/v1/hand-overs` records it (`messageId`, `delegate`, `note`, `dueAt`, `forwardId`; scope
-  `mail:write`). The API checks that the forward came from the message's account, went to the delegate and was not
-  cancelled or failed, and that the due date lies ahead (at most a year). When recording fails, the forward is
+  `mail:write`). The API checks that the forward came from the message's account, answers the message handed over,
+  went to the delegate, was not cancelled or failed and handed over nothing before (one hand-over per forward, also
+  for two requests at once), and that the due date lies ahead (at most a year; stored in UTC, whatever zone the client
+  wrote). The clients refuse a second submit while the first is under way. When recording fails, the forward is
   cancelled and its draft thrown away. Until the forward leaves (the undo window), Undo cancels it and withdraws the
   hand-over (`DELETE`); afterwards the hand-over stays.
 - **Entity** `hand_over` (owner-scoped, tracked for the delta, tombstone type `handOver`): account, message handed
-  over (SET NULL when it goes; the subject is kept), delegate address and name, note, due date, state (`open`,
-  `replied`, `done`), forward, `overdueAt`, `nudgedAt`, the latest nudge, the reply that closed it, created, closed
-  and updated times. It points at the message rather than the thread, because conversations merge; the delta gives
-  the thread the message is in, and the client stores resolve it again from their own copy.
-- **Closing:** every newly stored message is checked on ingest: from the delegate's address, in the conversation of
-  the message handed over, and received after it was handed over closes it as `replied` with that message. The user
-  can mark it done or put a closed one back (`PATCH /api/v1/hand-overs/{id}` with `done`).
+  over (SET NULL when it goes; the subject is kept), the conversation it was handed over in (followed through merges,
+  SET NULL), delegate address and name, note, due date, state (`open`, `replied`, `done`), forward and its Message-ID,
+  `overdueAt`, `nudgedAt`, the latest nudge, the reply that closed it, created, closed and updated times. The delta
+  gives the conversation of the message, or the kept one once the message is gone; the client stores resolve it again
+  from their own copy the same way. When the message janitor removes a message a hand-over points at, the hand-over
+  gets a new change number, so clients learn the link is gone.
+- **Closing:** every newly stored message is checked on ingest. From the delegate's address, received after the
+  conversation was handed over, and in it (the conversation of the message handed over, the kept conversation, or a
+  reply to the forward by its Message-ID) closes it as `replied` with that message. Not an answer
+  (`App\HandOver\ReplyCheck`): automatic replies (`Auto-Submitted` other than `no`, `Precedence` `auto_reply`,
+  `bulk`, `junk` or `list`, `X-Autoreply`, `X-Autorespond`; the worker sends these headers), mail in Spam or flagged
+  as junk, and mail whose sender failed DMARC in any Authentication-Results header (a forged From; as in
+  classification, a failure counts trusted or not, and a forged failure only keeps a hand-over open). The user can
+  mark it done or put a closed one back (`PATCH /api/v1/hand-overs/{id}` with `done`).
 - **Due dates:** recording (or a new `dueAt` in a `PATCH`) dispatches `HandOverDue` after the commit with
   `DelayStamp::delayUntil(dueAt)` on the `async` transport, like the release of scheduled mail. Its handler locks the
   hand-over and, when it is still open without a reply, sets `overdueAt` once; every worker heartbeat marks overdue
   hand-overs of the leased accounts too, in case a message got lost. A new due date clears `overdueAt`. Becoming
   overdue dispatches `NotifyOverdueHandOver` after the commit (transport `push`), which sends "No reply from {delegate}
-  yet" through the `NotificationDispatcher` (kind `hand_over`, path `/waiting?nudge={id}`, the phone's `reminders`
-  channel) on the channels the user chose for `hand_over` in `channelsByKind`, else the phone and the desktop. Its
+  yet" through the `NotificationDispatcher` (kind `hand_over`, a `NotificationKind` case, path `/waiting?nudge={id}`,
+  the phone's `reminders` channel) on the channels the user chose for `hand_over` in `channelsByKind`, else the phone and the desktop. Its
   delivery key `handOver:{id}:{due date}` makes a retried message notify no device twice, while a new due date that
   passes tells again. The clients also tell the user when a hand-over becomes overdue in a page they apply
-  (`takeOverdueHandOvers` of the mail stores, not for the first pull of a copy): natively on the desktop app, whose
-  delivery comes through the delta, and as a notice with the nudge one click away in every app.
+  (`takeOverdueHandOvers` of the mail stores, not for the first pull of a copy): natively on the desktop app, and as
+  a notice with the nudge one click away in every app. That is the desktop app's only path: the dispatcher sends
+  nothing to its device, and the delta's `notifications` are calendar notifications only, so it shows each once.
 - **Nudges:** `POST /api/v1/hand-overs/{id}/nudge` (scope `mail:send`, `html` and an optional `sendAt` a few seconds
   ahead for undo) queues a reply to the delegate through the outbox, in the same conversation: to the forward's copy
   in Sent when it was synced, else to the message handed over, with "Re:" and the forward's subject. Clients suggest
   the text (`nudgeText`) and add the account's default signature; Undo cancels the outgoing message, and a cancelled
-  or failed nudge no longer counts as nudged. "Edit first" opens the follow-up in the compose window instead.
+  or failed nudge no longer counts as nudged. A nudge is refused (409) while the previous one is scheduled, queued or
+  being sent, and the clients refuse a second send while one is under way. "Edit first" opens the follow-up in the
+  compose window instead; any message the user sends to the delegate as a reply in the conversation, or to the
+  forward, counts as the latest nudge (recorded when the outbox queues it).
 - **Clients:** both stores keep hand-overs (`handOvers()` in "Waiting on" order: open ones by due date, then closed
   ones). The web client has Hand over in the reading pane (H) and offers it right after a conversation is judged
   `delegate`; the dialog (vee-validate) takes the person, the note and a due date (today while an hour of it is left,
