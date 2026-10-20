@@ -63,6 +63,15 @@ describe('time grid', () => {
     wrapper.unmount()
   })
 
+  it('gives an event crossing midnight one tab stop', () => {
+    const night = expandOccurrences([timed('Night', '2026-10-20T22:00:00', '2026-10-21T02:00:00')], days[0]!.start, days[6]!.end, AMS)
+    const wrapper = mount(TimeGrid, { props: { days, occurrences: night, zone: AMS, now, today: Date.UTC(2026, 9, 20), calendars: () => work, selectedKey: null } })
+    const pieces = wrapper.findAll('.block')
+    expect(pieces).toHaveLength(2)
+    expect(pieces.map((piece) => piece.attributes('tabindex'))).toEqual(['0', '-1'])
+    wrapper.unmount()
+  })
+
   it('opens an event and starts a new one where the user clicks', async () => {
     const wrapper = grid()
     await wrapper.findAll('.block')[2]!.trigger('click')
@@ -87,6 +96,30 @@ describe('month grid', () => {
     expect((document.activeElement as HTMLElement).dataset.day).toBe(String(Date.UTC(2026, 9, 27)))
     await wrapper.get(`[data-day="${Date.UTC(2026, 9, 27)}"]`).trigger('keydown', { key: 'Enter' })
     expect(wrapper.emitted('showDay')?.[0]).toEqual([Date.UTC(2026, 9, 27)])
+    wrapper.unmount()
+  })
+
+  it('moves into the events and "+N more" of a day with Enter, and back with Escape', async () => {
+    const days = daysFrom(Date.UTC(2026, 8, 28), 35, AMS)
+    const busy = expandOccurrences(
+      [1, 2, 3, 4].map((n) => timed(`Item ${n}`, `2026-10-20T0${n}:00:00`, `2026-10-20T0${n}:30:00`)),
+      days[0]!.start,
+      days[34]!.end,
+      AMS,
+    )
+    const wrapper = mount(MonthGrid, {
+      props: { days, month: Date.UTC(2026, 9, 1), occurrences: busy, zone: AMS, now, today: Date.UTC(2026, 9, 20), calendars: () => work, selectedKey: null },
+      attachTo: document.body,
+    })
+    const cell = wrapper.get(`[data-day="${Date.UTC(2026, 9, 20)}"]`)
+    ;(cell.element as HTMLElement).focus()
+    await cell.trigger('keydown', { key: 'Enter' })
+    expect(document.activeElement?.textContent).toContain('Item 1')
+    await wrapper.get('[data-cell-item]').trigger('keydown', { key: 'ArrowDown' })
+    ;(document.activeElement as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    expect(document.activeElement?.textContent).toContain('+2 more')
+    ;(document.activeElement as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(document.activeElement).toBe(cell.element)
     wrapper.unmount()
   })
 })
@@ -152,6 +185,26 @@ describe('editor and invitation card', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    ['weekly', 'FREQ=WEEKLY;BYDAY=MO', '2026-10-05', '20261019T070000Z'],
+    ['monthly', 'FREQ=MONTHLY;BYDAY=3MO', '2026-09-21', '20261019T070000Z'],
+  ])('moves one occurrence of a %s series to another weekday with "This event"', async (_kind, rule, first, key) => {
+    const series = timed('Series', `${first}T09:00:00`, `${first}T09:30:00`, { recurrence: rule })
+    const monday = expandOccurrences([series], Date.UTC(2026, 9, 19), Date.UTC(2026, 9, 20), AMS)[0]!
+    expect(monday.recurrenceId).toBe(key)
+    const wrapper = mount(EventEditor, { props: { target: { kind: 'edit', occurrence: monday } }, global: { plugins: [router()] } })
+    await wrapper.findAll('input[type="date"]')[0]!.setValue('2026-10-20')
+    await flushPromises()
+    const scopes = wrapper.findAll('.scope input[type="radio"]').map((input) => (input.element as HTMLInputElement).value)
+    expect(scopes).toContain('this')
+    await wrapper.get('.scope input[value="this"]').setValue(true)
+    await wrapper.get('form').trigger('submit')
+    await vi.waitFor(() => expect(wrapper.emitted('saved')).toHaveLength(1))
+    expect(requests[0]?.path).toBe(`/api/v1/calendar-events/Series?scope=this&recurrenceId=${key}`)
+    expect(requests[0]?.body).toMatchObject({ recurrence: rule, start: { dateTime: '2026-10-20T09:00:00', timeZone: AMS } })
+    wrapper.unmount()
+  })
+
   it('shows what is wrong before saving', async () => {
     const wrapper = mount(EventEditor, { props: { target: { kind: 'new', start: Date.UTC(2026, 9, 22, 8), allDay: false } }, global: { plugins: [router()] } })
     const times = wrapper.findAll('input[type="time"]')
@@ -201,6 +254,18 @@ describe('editor and invitation card', () => {
     await flushPromises()
     expect(requests[1]).toEqual({ method: 'POST', path: '/api/v1/calendar-events/event-1/response', body: { response: 'accepted', recurrenceId: '20261023T080000Z', comment: null, notify: true } })
     expect(wrapper.text()).toContain('You answered: Going')
+  })
+
+  it('asks to apply an update before answering it', async () => {
+    const update = { id: 'm3', method: 'REQUEST', kind: 'update', uid: 'x', recurrenceId: null, sequence: 3, summary: 'Moved review', description: '', location: '', allDay: true, start: { date: '2026-10-22' }, end: { date: '2026-10-23' }, recurrence: null, organizer: null, attendees: [], conference: null, eventId: 'event-1', selfResponse: 'needs-action', canRespond: true, conflicts: [], canApply: true }
+    answer = () => update
+    const wrapper = mount(InvitationCard, { props: { messageId: 'm3' }, global: { plugins: [router()] } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('Apply the update')
+    expect(wrapper.find('.responses').exists()).toBe(false)
+    await wrapper.get('.invitation').trigger('keydown', { key: 'y' })
+    await flushPromises()
+    expect(requests).toHaveLength(1)
   })
 
   it('offers to apply calendar mail the calendar did not take', async () => {

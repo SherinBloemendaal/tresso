@@ -7,7 +7,10 @@ import {
   defaultCalendar,
   deleteRequest,
   readerTimeZone,
+  copyStart,
   expandOccurrences,
+  expandRange,
+  occurrenceFromServer,
   saveRequest,
   startOfMonth,
   startOfWallDay,
@@ -17,9 +20,11 @@ import {
   type EditScope,
   type EventInput,
   type Occurrence,
+  type ServerOccurrence,
   type SyncedCalendar,
   type SyncedCalendarEvent,
 } from '@tresso/core'
+import { errorMessage } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
 import { useMailStore } from '@/stores/mail'
 
@@ -65,6 +70,11 @@ export interface InvitationConflict {
 }
 
 export type Response = 'accepted' | 'tentative' | 'declined'
+
+/** An instant as the occurrences endpoint takes it (2026-10-01T00:00:00+00:00). */
+function atom(instant: number): string {
+  return `${new Date(instant).toISOString().slice(0, 19)}+00:00`
+}
 
 /**
  * The calendar views' state: which days are shown, in which zone, and the occurrences in them, expanded on the device
@@ -118,6 +128,9 @@ export const useCalendarStore = defineStore('calendar', () => {
   /** Invitations still waiting for the user's answer, from now on. */
   const unanswered = computed(() => occurrences.value.filter((occurrence) => occurrence.event.selfResponse === 'needs-action' && occurrence.end > now.value))
 
+  /** Series too long to walk through here, and history the server could not give; shown above the view. */
+  const notice = ref<string | null>(null)
+
   let reading = 0
   async function load(): Promise<void> {
     const database = mail.currentStore()
@@ -132,11 +145,29 @@ export const useCalendarStore = defineStore('calendar', () => {
       const from = range[0]!.start
       const to = range[range.length - 1]!.end
       const events = await database.calendarEvents(from, to)
+      const expanded = expandRange(events, from, to, zone.value)
+      let occurrences = expanded.occurrences
+      const notes: string[] = []
+      if (expanded.truncated.length > 0) {
+        notes.push('Some repeating events have too many occurrences to show them all here.')
+      }
+      // Older than the copy on this device: the server reads that part.
+      const older = copyStart(Date.now())
+      if (from < older) {
+        try {
+          const history = await serverOccurrences(from, Math.min(to, older))
+          const shown = new Set(occurrences.map(sameOccurrence))
+          occurrences = [...occurrences, ...history.filter((occurrence) => !shown.has(sameOccurrence(occurrence)))].sort((a, b) => a.start - b.start || a.key.localeCompare(b.key))
+        } catch (error) {
+          notes.push(`Events from before ${new Date(older).getUTCFullYear()} could not be loaded: ${errorMessage(error)}`)
+        }
+      }
       if (mine !== reading) {
         return
       }
       rows.value = events
-      loaded.value = expandOccurrences(events, from, to, zone.value)
+      loaded.value = occurrences
+      notice.value = notes.length === 0 ? null : notes.join(' ')
     } finally {
       if (mine === reading) {
         loading.value = false
@@ -144,7 +175,37 @@ export const useCalendarStore = defineStore('calendar', () => {
     }
   }
 
-  watch([days, () => mail.revision, () => mail.ready], () => void load(), { immediate: true })
+  /** The same occurrence whether the device or the server read it. */
+  function sameOccurrence(occurrence: Occurrence): string {
+    return `${occurrence.event.calendarId}:${occurrence.recurrenceId ?? occurrence.event.id}:${occurrence.start}`
+  }
+
+  /** Occurrences the server reads for a range, in steps the endpoint takes (at most 400 days). */
+  async function serverOccurrences(from: number, to: number): Promise<Occurrence[]> {
+    const step = 365 * 86_400_000
+    const occurrences: Occurrence[] = []
+    for (let start = from; start < to; start += step) {
+      const query = new URLSearchParams({ from: atom(start), to: atom(Math.min(to, start + step)), timeZone: zone.value })
+      const answer = await auth.api<ServerOccurrence[]>(`/api/v1/calendar-occurrences?${query.toString()}`)
+      occurrences.push(...answer.map((occurrence) => occurrenceFromServer(occurrence, zone.value)))
+    }
+    return occurrences
+  }
+
+  /**
+   * The occurrence with its full event, for the detail and the editor: an occurrence the server read has only what
+   * the range endpoint gives. Its series is used when the event is one; an override read alone is edited by itself.
+   */
+  async function complete(occurrence: Occurrence): Promise<Occurrence> {
+    if (!occurrence.fromServer) {
+      return occurrence
+    }
+    const event = await auth.api<SyncedCalendarEvent>(`/api/v1/calendar-events/${encodeURIComponent(occurrence.event.id)}`)
+    const series = occurrence.recurring && event.recurrenceId === null ? event : null
+    return { ...occurrence, event, series, seriesId: event.id }
+  }
+
+  watch([days, () => mail.calendarRevision, () => mail.ready], () => void load(), { immediate: true })
 
   function show(kind: CalendarViewKind, day?: number): void {
     view.value = kind
@@ -243,6 +304,7 @@ export const useCalendarStore = defineStore('calendar', () => {
     today,
     days,
     loading,
+    notice,
     rows,
     occurrences,
     unanswered,
@@ -261,5 +323,6 @@ export const useCalendarStore = defineStore('calendar', () => {
     invitation,
     applyInvitation,
     upcoming,
+    complete,
   }
 })

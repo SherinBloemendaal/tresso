@@ -15,6 +15,7 @@ import {
   peopleOn,
   eventSpan,
   sortCalendars,
+  touchesCalendars,
   sortSmartInboxes,
   stillAsClassified,
   storedDraft,
@@ -126,12 +127,12 @@ interface MailSchema extends DBSchema {
   handOvers: { key: string; value: SyncedHandOver; indexes: { byAccount: string } }
   dailyBriefs: { key: string; value: SyncedDailyBrief }
   calendars: { key: string; value: SyncedCalendar; indexes: { byAccount: string } }
-  calendarEvents: { key: string; value: StoredCalendarEvent; indexes: { bySeries: [string, string]; byCalendar: string; byStart: number } }
+  calendarEvents: { key: string; value: StoredCalendarEvent; indexes: { bySeries: [string, string]; byCalendar: string; bySeriesStart: number; bySeriesEnd: number } }
 }
 
 /**
- * An event with the instants its series can touch, for finding the rows a range needs. A series without an end has
- * Infinity, which is a valid key where null is not.
+ * An event with the instants it can touch, and those its whole series can touch, for finding every row of the series
+ * a range needs in one read. A series without an end has Infinity, which is a valid key where null is not.
  */
 interface StoredCalendarEvent {
   id: string
@@ -139,6 +140,8 @@ interface StoredCalendarEvent {
   uid: string
   startsAt: number
   endsAt: number
+  seriesStartsAt: number
+  seriesEndsAt: number
   event: SyncedCalendarEvent
 }
 
@@ -164,6 +167,8 @@ export type ClosedElsewhere = 'upgraded' | 'deleted' | 'terminated'
 export class IndexedDbMailStore implements MailStore {
   /** Threads classified on this device whose server version has not arrived yet; see {@link restoreThread}. */
   private readonly unconfirmed = new Set<string>()
+  /** Raised by every page that changed calendars or events; see calendarChanges. */
+  private calendarRevision = 0
 
   /** Why the connection closed under this tab, if it did; every call then says the copy is closing. */
   private closedElsewhere: ClosedElsewhere | null = null
@@ -272,7 +277,8 @@ export class IndexedDbMailStore implements MailStore {
           const events = database.createObjectStore('calendarEvents', { keyPath: 'id' })
           events.createIndex('bySeries', ['calendarId', 'uid'])
           events.createIndex('byCalendar', 'calendarId')
-          events.createIndex('byStart', 'startsAt')
+          events.createIndex('bySeriesStart', 'seriesStartsAt')
+          events.createIndex('bySeriesEnd', 'seriesEndsAt')
         }
         // Outgoing mail, contacts, signatures, drafts, smart inboxes, todos, unsubscriptions, hand-overs, daily briefs and
         // calendars come from the delta: an existing copy syncs again from the start.
@@ -343,7 +349,7 @@ export class IndexedDbMailStore implements MailStore {
           await deleteCalendar(tx, deleted.id)
           break
         case 'calendarEvent':
-          await tx.objectStore('calendarEvents').delete(deleted.id)
+          await deleteCalendarEvent(tx, deleted.id)
           break
         case 'draft': {
           const local = await tx.objectStore('drafts').get(deleted.id)
@@ -388,8 +394,7 @@ export class IndexedDbMailStore implements MailStore {
       await tx.objectStore('calendars').put(calendar)
     }
     for (const event of page.calendarEvents) {
-      const span = eventSpan(event)
-      await tx.objectStore('calendarEvents').put({ id: event.id, calendarId: event.calendarId, uid: event.uid, startsAt: span.startsAt, endsAt: span.endsAt ?? Infinity, event })
+      await writeCalendarEvent(tx, event)
     }
     for (const thread of page.threads) {
       await tx.objectStore('threads').put(thread)
@@ -430,6 +435,9 @@ export class IndexedDbMailStore implements MailStore {
 
     await tx.objectStore('meta').put(page.cursor, 'cursor')
     await tx.done
+    if (touchesCalendars(page)) {
+      this.calendarRevision += 1
+    }
   }
 
   /**
@@ -549,18 +557,20 @@ export class IndexedDbMailStore implements MailStore {
 
   async calendarEvents(from: number, to: number): Promise<SyncedCalendarEvent[]> {
     const tx = this.db.transaction('calendarEvents')
-    const store = tx.objectStore('calendarEvents')
-    const touching = (await store.index('byStart').getAll(IDBKeyRange.upperBound(to, true))).filter((stored) => stored.endsAt > from)
-    const series = new Map(touching.map((stored) => [`${stored.calendarId}\u0000${stored.uid}`, [stored.calendarId, stored.uid] as [string, string]]))
-    const events: SyncedCalendarEvent[] = []
-    // Every row of a series that touches the range: an override moved out of it still takes its occurrence away.
-    for (const key of series.values()) {
-      for (const stored of await store.index('bySeries').getAll(key)) {
-        events.push(stored.event)
-      }
-    }
+    const starts = tx.store.index('bySeriesStart')
+    const ends = tx.store.index('bySeriesEnd')
+    // Every row carries the span of its whole series. Of the series starting before the range ends and those ending
+    // after it begins, the smaller set is read and the other bound checked on it.
+    const before = IDBKeyRange.upperBound(to, true)
+    const after = IDBKeyRange.lowerBound(from, true)
+    const [startCount, endCount] = await Promise.all([starts.count(before), ends.count(after)])
+    const rows = startCount <= endCount ? (await starts.getAll(before)).filter((row) => row.seriesEndsAt > from) : (await ends.getAll(after)).filter((row) => row.seriesStartsAt < to)
     await tx.done
-    return events
+    return rows.map((row) => row.event)
+  }
+
+  calendarChanges(): number {
+    return this.calendarRevision
   }
 
   async calendarEvent(id: string): Promise<SyncedCalendarEvent | null> {
@@ -877,6 +887,43 @@ async function deleteAccount(tx: WriteTx, accountId: string): Promise<void> {
   // The account's calendars go with it.
   for (const calendarId of await tx.objectStore('calendars').index('byAccount').getAllKeys(accountId)) {
     await deleteCalendar(tx, calendarId)
+  }
+}
+
+async function writeCalendarEvent(tx: WriteTx, event: SyncedCalendarEvent): Promise<void> {
+  const store = tx.objectStore('calendarEvents')
+  const previous = await store.get(event.id)
+  const span = eventSpan(event)
+  const endsAt = span.endsAt ?? Infinity
+  await store.put({ id: event.id, calendarId: event.calendarId, uid: event.uid, startsAt: span.startsAt, endsAt, seriesStartsAt: span.startsAt, seriesEndsAt: endsAt, event })
+  await spanSeries(tx, event.calendarId, event.uid)
+  if (previous !== undefined && (previous.calendarId !== event.calendarId || previous.uid !== event.uid)) {
+    await spanSeries(tx, previous.calendarId, previous.uid)
+  }
+}
+
+async function deleteCalendarEvent(tx: WriteTx, id: string): Promise<void> {
+  const store = tx.objectStore('calendarEvents')
+  const previous = await store.get(id)
+  await store.delete(id)
+  if (previous !== undefined) {
+    await spanSeries(tx, previous.calendarId, previous.uid)
+  }
+}
+
+/** Gives every row of a series the span of the whole series: from its earliest start to its latest end. */
+async function spanSeries(tx: WriteTx, calendarId: string, uid: string): Promise<void> {
+  const store = tx.objectStore('calendarEvents')
+  const rows = await store.index('bySeries').getAll([calendarId, uid])
+  if (rows.length === 0) {
+    return
+  }
+  const seriesStartsAt = Math.min(...rows.map((row) => row.startsAt))
+  const seriesEndsAt = Math.max(...rows.map((row) => row.endsAt))
+  for (const row of rows) {
+    if (row.seriesStartsAt !== seriesStartsAt || row.seriesEndsAt !== seriesEndsAt) {
+      await store.put({ ...row, seriesStartsAt, seriesEndsAt })
+    }
   }
 }
 

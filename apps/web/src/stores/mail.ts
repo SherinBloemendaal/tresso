@@ -98,8 +98,8 @@ export const useMailStore = defineStore('mail', () => {
     return smartInbox.value === null ? { kind: 'inbox', mailAccountId: mailbox.value } : { kind: 'smartInbox', smartInboxId: smartInbox.value }
   })
   const calendars = ref<SyncedCalendar[]>([])
-  /** Raised whenever the copy may have changed, so views that read more of it (the calendar) read again. */
-  const revision = ref(0)
+  /** Raised whenever the copy's calendars or events changed, so the calendar views expand again only then. */
+  const calendarRevision = ref(0)
   const listLimit = ref(LIST_STEP)
   const hasMore = ref(false)
   const syncState = ref<SyncState>('idle')
@@ -397,7 +397,7 @@ export const useMailStore = defineStore('mail', () => {
     latestBrief.value = newest === undefined ? null : briefView(newest, await database.conversations(newest.threadIds))
     dailyBriefs.value = nextBriefs
     calendars.value = nextCalendars
-    revision.value += 1
+    calendarRevision.value = database.calendarChanges()
     smartInboxes.value = nextSmartInboxes
     smartInboxCounts.value = nextSmartCounts
     outbox.value = nextOutbox
@@ -707,7 +707,7 @@ export const useMailStore = defineStore('mail', () => {
     dailyBriefs,
     latestBrief,
     calendars,
-    revision,
+    calendarRevision,
     hasMore,
     syncState,
     pulls,

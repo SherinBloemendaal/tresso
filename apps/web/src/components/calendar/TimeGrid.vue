@@ -35,6 +35,16 @@ const HOUR_HEIGHT = 60
 const hours = Array.from({ length: 24 }, (_, hour) => hour)
 
 const columns = computed(() => props.days.map((day) => ({ day, blocks: layoutDay(props.occurrences, day, props.zone) })))
+/** The day each timed occurrence first shows on: an event crossing midnight has one tab stop, on its first piece. */
+const firstColumn = computed(() => {
+  const first = new Map<string, number>()
+  columns.value.forEach((column, index) => {
+    for (const block of column.blocks) {
+      if (!first.has(block.occurrence.key)) first.set(block.occurrence.key, index)
+    }
+  })
+  return first
+})
 const spans = computed(() => layoutSpans(props.occurrences.filter(inAllDayRow), props.days))
 const lanes = computed(() => Math.max(0, ...spans.value.map((item) => item.lane + 1)))
 
@@ -113,8 +123,8 @@ const dayLength = (day: CalendarDay): number => Math.round((day.end - day.start)
 </script>
 
 <template>
-  <section ref="grid" class="time-grid" :style="{ '--days': String(days.length) }" aria-roledescription="calendar" @keydown="onKeydown">
-    <div class="head" role="row">
+  <section ref="grid" class="time-grid" :style="{ '--days': String(days.length) }" aria-label="Events by time" aria-description="Tab reaches one event; the arrow keys move to the events before, after and on the days around it." @keydown="onKeydown">
+    <div class="head">
       <span class="gutter" aria-hidden="true"></span>
       <h3 v-for="day in days" :id="`day-${day.wall}`" :key="day.wall" class="day-name" :class="{ today: isToday(day) }">
         <span class="visually-hidden">{{ shortDate(day.wall) }}</span>
@@ -173,7 +183,7 @@ const dayLength = (day: CalendarDay): number => Math.round((day.end - day.start)
             :data-key="block.occurrence.key"
             :data-column="columns.indexOf(column)"
             :data-top="block.top"
-            :tabindex="focusKey === block.occurrence.key ? 0 : -1"
+            :tabindex="focusKey === block.occurrence.key && firstColumn.get(block.occurrence.key) === columns.indexOf(column) ? 0 : -1"
             :aria-label="occurrenceLabel(block.occurrence, zone, calendars(block.occurrence.event.calendarId), now)"
             @click="emit('open', block.occurrence)"
           >

@@ -22,6 +22,7 @@ const hidden = calendarEvent('hidden', 'personal')
 describe('calendar store', () => {
   const requests: { method: string; path: string; body: unknown }[] = []
   let events: SyncedCalendarEvent[]
+  let answer: () => string
 
   beforeEach(() => {
     vi.useFakeTimers({ now: Date.UTC(2026, 9, 20, 8, 24), toFake: ['Date'] })
@@ -29,6 +30,7 @@ describe('calendar store', () => {
     setActivePinia(createPinia())
     requests.length = 0
     events = [weekly, declined, invited, hidden]
+    answer = () => JSON.stringify(weekly)
     const mail = useMailStore()
     mail.calendars = [calendarRow('work', 'work', { name: 'Work' }), calendarRow('personal', 'home', { name: 'Personal', visible: false })]
     vi.spyOn(mail, 'currentStore').mockReturnValue({ calendarEvents: async () => events } as unknown as MailStore)
@@ -38,7 +40,7 @@ describe('calendar store', () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input))
         requests.push({ method: init?.method ?? 'GET', path: `${url.pathname}${url.search}`, body: init?.body ? JSON.parse(String(init.body)) : undefined })
-        return init?.method === 'DELETE' ? new Response(null, { status: 204 }) : new Response(JSON.stringify(weekly), { status: 200 })
+        return init?.method === 'DELETE' ? new Response(null, { status: 204 }) : new Response(answer(), { status: 200 })
       }),
     )
   })
@@ -91,6 +93,23 @@ describe('calendar store', () => {
       'DELETE /api/v1/calendar-events/weekly?scope=this&recurrenceId=20261022T070000Z',
     ])
     expect(requests[1]!.body).toEqual({ response: 'tentative', recurrenceId: '20261022T070000Z', comment: null, notify: true })
+  })
+
+  it('reads a range older than the copy on the device from the server', async () => {
+    events = []
+    answer = () =>
+      JSON.stringify([
+        { id: 'o1', eventId: 'old', calendarId: 'work', recurrenceId: null, recurring: false, allDay: false, start: { dateTime: '2023-03-14T09:00:00+00:00' }, end: { dateTime: '2023-03-14T10:00:00+00:00' }, timeZone: AMS, status: 'confirmed', summary: 'Old review', location: '', transparency: 'busy', visibility: 'public', organizer: null, attendeeCount: 0, selfResponse: null, conference: null },
+      ])
+    const store = useCalendarStore()
+    store.zone = AMS
+    store.show('month', parseWall('2023-03-01')!)
+    await nextTick()
+    await store.load()
+    await flushPromises()
+    expect([...new Set(requests.map((r) => r.path.split('?')[0]))]).toEqual(['/api/v1/calendar-occurrences'])
+    expect(requests[0]!.path).toContain('from=2023-02-26T23%3A00%3A00%2B00%3A00')
+    expect(store.occurrences.map((o) => [o.event.summary, o.fromServer])).toEqual([['Old review', true]])
   })
 
   it('shows and hides a calendar for the user through the API', async () => {
