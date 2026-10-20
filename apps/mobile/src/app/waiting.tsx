@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, SectionList, StyleSheet, Text, View } from 'react-native'
 import { Stack, useRouter } from 'expo-router'
 import { handOverStatus, type SyncedHandOver, type SyncedOutgoingMessage } from '@tresso/core'
@@ -47,11 +47,19 @@ export default function WaitingScreen() {
     { title: 'Closed', data: list.filter((handOver) => handOver.state !== 'open').slice(0, CLOSED_SHOWN) },
   ].filter((section) => section.data.length > 0)
 
+  // Set at once, unlike state, so a second tap before the list updates does not nudge twice.
+  const acting = useRef(false)
+
   async function act(handOver: SyncedHandOver, run: (handOver: SyncedHandOver) => Promise<void>) {
+    if (acting.current) {
+      return
+    }
+    acting.current = true
     setBusy(handOver.id)
     try {
       await run(handOver)
     } finally {
+      acting.current = false
       setBusy(null)
     }
   }
