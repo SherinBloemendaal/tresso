@@ -443,8 +443,8 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   API keeps them in `message_signals`, apart from the message row and only for messages that have any. Anyone can
   write an Authentication-Results header, so a DMARC pass counts only when the receiving server surely wrote it: at
   Gmail and Microsoft 365 the topmost header is always theirs. A generic IMAP server may add none, and then the
-  sender's own header could name any server, the recipient's too, so for IMAP accounts a DMARC pass never overrules
-  the server's spam verdict (`ReceivingServers`). A junk keyword
+  sender's own header could name any server, the recipient's too, so for IMAP accounts neither a DMARC pass nor a
+  DMARC failure in that header counts: a pass never overrules the server's spam verdict (`ReceivingServers`). A junk keyword
   set or cleared after ingest is not read again (flag changes carry only seen, flagged, answered and draft).
 - Classification runs after the ingest commits, on its own Messenger transport (`classify`) with its own consumer
   (`classifier` in Compose), so a first sync never holds up sending. It goes in batches of 200 per transaction, ten
@@ -460,9 +460,11 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   alone from then on), remembers the choice for the sender as a sender rule (one per sender), takes the sender's
   address off that smart inbox's exclude list, and classifies again the last 30 days of mail from that sender. When a
   domain entry on that exclude list covers the sender the correction is refused (422): the rule would never apply.
-  When the sender's mail fails DMARC with a reject or quarantine policy, the correction is made and remembered, but
-  the answer says so (`senderRule.failsAuthentication`): new mail from that sender keeps going to Spam, because its
-  From address could be anyone's. The web client tells the user.
+  When new mail like this keeps going to Spam whatever the rule says, the correction is made and remembered, and the
+  answer says why (`senderRule.spamOverrules`): `authentication_failed` (it fails DMARC with a reject or quarantine
+  policy, so its From address could be anyone's) or `server_spam` (the mail server marks it as spam and its sender is
+  not authenticated in a header Tresso can trust, which on a generic IMAP account is never). The web client tells the
+  user in an app-wide notice, which stays when the conversation leaves the list it was moved from.
   `GET /api/v1/sender-rules` and `DELETE /api/v1/sender-rules/{id}` (scopes `settings:read`, `settings:write`) list
   and forget them; forgetting one takes the classification lock first, so it waits for a correction of the same user,
   and classifies that sender's recent mail again.
