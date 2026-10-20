@@ -1189,11 +1189,16 @@ accepted.
     (`BYMONTHDAY=-1`, numbered days in different weeks such as `BYDAY=1MO,1WE`, `RDATE`s, more often than daily) are
     refused with the reason. A changed description is written to Graph as HTML that keeps the body's Teams join
     block. A write the provider accepted reports the provider's version back as `current`, which replaces the stored
-    object unless a newer change of the user's waits; one it could not read back keeps the last known ETag. A write
-    that failed after a first step reached Google reports Google's id and new ETag with its retry, and the API bases
-    the next attempt on them. A move to another calendar of the same Google account (a delete and a create of the same
-    UID in one claim) is Google's `events.move`, which tells no one. A 403 means calendars are not allowed only for the
-    calendar list or a token without the scopes; on one calendar it skips that calendar, and on a write it is a
+    object unless a newer change of the user's waits; one it could not read back keeps the last known ETag. Both
+    providers write a series step by step (the master, then each occurrence): a write that failed after a first step
+    reports the provider's id, ETag and version with its retry. The API bases the next attempt on them, and when no
+    attempt is left the provider's version replaces Tresso's, so the two never stay apart. A move to another calendar
+    of the same Google account (a delete and a create of the same UID in one claim) is Google's `events.move`, which
+    tells no one; it is made only when the event still is the version Tresso moved (else the delete is a conflict),
+    and the update after it is conditional on the moved event's ETag. `events.move` makes the target calendar the
+    organizer, so the API refuses to move a meeting with guests between calendars of one Google account and says why.
+    A 403 means calendars are not allowed only for the calendar list (unless it is a rate limit, which is retried like
+    any failure) or a token without the scopes; on one calendar it skips that calendar, and on a write it is a
     refusal.
   - **Scheduling:** both providers send invitations, updates, cancellations and replies themselves, so the API sends
     no iTIP mail for these calendars and puts no incoming invitation into them (the provider does). The calendar
