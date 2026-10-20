@@ -65,6 +65,10 @@ type Credentials struct {
 // again. The API has already marked the account as auth_failed.
 var ErrReauthorize = errors.New("account must be authorized again")
 
+// ErrNotGranted means the user has not allowed the feature (calendars) at the provider yet. The API has already set
+// the account's calendar status, which tells the user how to allow it.
+var ErrNotGranted = errors.New("the user has not allowed this feature at the provider")
+
 // AccessToken returns the provider access token of an OAuth account and when it expires. Workers never see the
 // refresh token: the API renews access tokens itself.
 func (c Credentials) AccessToken() (token string, expiresAt time.Time, err error) {
@@ -181,16 +185,37 @@ func (c *Client) RefreshCredentials(ctx context.Context, accountID, workerID str
 	return c.credentials(ctx, accountID, workerID, true)
 }
 
+// CalendarCredentials is Credentials for the account's calendars: the access token must also carry the calendar
+// scopes. It returns ErrNotGranted (wrapped) while the user has not allowed calendar access; mail goes on meanwhile.
+func (c *Client) CalendarCredentials(ctx context.Context, accountID, workerID string) (Credentials, error) {
+	return c.credentialsFor(ctx, accountID, workerID, false, "calendar")
+}
+
+// RefreshCalendarCredentials is CalendarCredentials after the provider refused the access token.
+func (c *Client) RefreshCalendarCredentials(ctx context.Context, accountID, workerID string) (Credentials, error) {
+	return c.credentialsFor(ctx, accountID, workerID, true, "calendar")
+}
+
 func (c *Client) credentials(ctx context.Context, accountID, workerID string, rejected bool) (Credentials, error) {
+	return c.credentialsFor(ctx, accountID, workerID, rejected, "")
+}
+
+func (c *Client) credentialsFor(ctx context.Context, accountID, workerID string, rejected bool, feature string) (Credentials, error) {
 	var out Credentials
 	path := "/internal/sync/accounts/" + url.PathEscape(accountID) + "/credentials?workerId=" + url.QueryEscape(workerID)
 	if rejected {
 		path += "&rejected=1"
 	}
+	if feature != "" {
+		path += "&feature=" + url.QueryEscape(feature)
+	}
 	err := c.do(ctx, http.MethodGet, path, nil, &out)
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) && httpErr.Status == http.StatusConflict {
 		return out, fmt.Errorf("%w: %w", ErrReauthorize, err)
+	}
+	if errors.As(err, &httpErr) && httpErr.Status == http.StatusForbidden && feature != "" {
+		return out, fmt.Errorf("%w: %w", ErrNotGranted, err)
 	}
 	return out, err
 }

@@ -15,8 +15,11 @@ import (
 
 	"tresso/sync/internal/api"
 	"tresso/sync/internal/caldavsync"
+	"tresso/sync/internal/calsync"
 	"tresso/sync/internal/config"
 	"tresso/sync/internal/gmailsync"
+	"tresso/sync/internal/googlecal"
+	"tresso/sync/internal/graphcal"
 	"tresso/sync/internal/graphsync"
 	"tresso/sync/internal/imapsync"
 	"tresso/sync/internal/lease"
@@ -66,14 +69,22 @@ func run(logger *slog.Logger) error {
 	calendarOptions := caldavsync.DefaultOptions()
 	calendarOptions.AllowHTTP = cfg.AllowUnsafeServers
 	calendarSyncer := caldavsync.New(client, dialer, cfg.WorkerID, calendarOptions, workerLogger)
+	providerCalendarOptions := calsync.DefaultOptions()
+	googleCalendarSyncer := calsync.New(client, googlecal.NewProvider(googlecal.DefaultClientOptions()), dialer, cfg.WorkerID, providerCalendarOptions, workerLogger)
+	graphCalendarSyncer := calsync.New(client, graphcal.NewProvider(graphcal.DefaultClientOptions()), dialer, cfg.WorkerID, providerCalendarOptions, workerLogger)
+	triggerCalendars := func(accountID string) {
+		calendarSyncer.Trigger(accountID)
+		googleCalendarSyncer.Trigger(accountID)
+		graphCalendarSyncer.Trigger(accountID)
+	}
 	syncerFor := func(provider string) (lease.Syncer, error) {
 		switch provider {
 		case "imap":
 			return lease.WithCompanion(imapSyncer, calendarSyncer), nil
 		case "gmail":
-			return gmailSyncer, nil
+			return lease.WithCompanion(gmailSyncer, googleCalendarSyncer), nil
 		case "microsoft":
-			return graphSyncer, nil
+			return lease.WithCompanion(graphSyncer, graphCalendarSyncer), nil
 		default:
 			return nil, fmt.Errorf("%w: %s", lease.ErrUnsupportedProvider, provider)
 		}
@@ -93,13 +104,13 @@ func run(logger *slog.Logger) error {
 	manager.OnOutbox(func(ctx context.Context, accountIDs []string) {
 		for _, id := range accountIDs {
 			dispatcher.Trigger(ctx, id)
-			calendarSyncer.Trigger(id)
+			triggerCalendars(id)
 		}
 	})
 	subscriber := realtime.NewSubscriber(client, &http.Client{}, func(accountID string) {
 		if manager.Holds(accountID) {
 			dispatcher.Trigger(ctx, accountID)
-			calendarSyncer.Trigger(accountID)
+			triggerCalendars(accountID)
 		}
 	}, logger.With("worker", cfg.WorkerID))
 	go subscriber.Run(ctx)

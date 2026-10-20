@@ -1,0 +1,592 @@
+package googlecal
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base32"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"tresso/sync/internal/api"
+	"tresso/sync/internal/calsync"
+	"tresso/sync/internal/ical"
+	"tresso/sync/internal/providerhttp"
+)
+
+// ConferenceRequest is the property the API puts on an event to ask the provider for an online meeting.
+const ConferenceRequest = "X-TRESSO-CONFERENCE-REQUEST"
+
+// fields is the part of an event Tresso writes. Pointers and slices are always sent, so a cleared value is cleared
+// at Google too; the JSON of two values compares their content.
+type fields struct {
+	Summary      string     `json:"summary"`
+	Description  string     `json:"description"`
+	Location     string     `json:"location"`
+	Start        eventTime  `json:"start"`
+	End          eventTime  `json:"end"`
+	Recurrence   []string   `json:"recurrence"`
+	Status       string     `json:"status"`
+	Transparency string     `json:"transparency"`
+	Visibility   string     `json:"visibility"`
+	Attendees    []person   `json:"attendees"`
+	Reminders    *reminders `json:"reminders"`
+}
+
+// fromVEvent reads what Tresso writes from one VEVENT. zone is the calendar's, for floating times.
+func fromVEvent(v *ical.Component, info calendarInfo, master bool) (fields, error) {
+	var f fields
+	startProp := v.Get("DTSTART")
+	if startProp == nil {
+		return f, errors.New("the event has no start")
+	}
+	start, err := ical.ParseTime(*startProp)
+	if err != nil {
+		return f, err
+	}
+	end, err := ical.End(v, start)
+	if err != nil {
+		return f, err
+	}
+	f.Start, f.End = toGoogleTime(start, info.TimeZone), toGoogleTime(end, info.TimeZone)
+	f.Summary, f.Description, f.Location = v.Text("SUMMARY"), v.Text("DESCRIPTION"), v.Text("LOCATION")
+	f.Recurrence = []string{}
+	if master {
+		for _, p := range v.Props {
+			switch p.Name {
+			case "RRULE", "RDATE", "EXDATE":
+				f.Recurrence = append(f.Recurrence, p.Line())
+			}
+		}
+	}
+	switch strings.ToUpper(v.Text("STATUS")) {
+	case "TENTATIVE":
+		f.Status = "tentative"
+	case "CANCELLED":
+		f.Status = "cancelled"
+	default:
+		f.Status = "confirmed"
+	}
+	f.Transparency = "opaque"
+	if strings.EqualFold(v.Text("TRANSP"), "TRANSPARENT") {
+		f.Transparency = "transparent"
+	}
+	switch strings.ToUpper(v.Text("CLASS")) {
+	case "PRIVATE":
+		f.Visibility = "private"
+	case "CONFIDENTIAL":
+		f.Visibility = "confidential"
+	case "PUBLIC":
+		f.Visibility = "public"
+	default:
+		f.Visibility = "default"
+	}
+	f.Attendees = []person{}
+	for _, p := range v.All("ATTENDEE") {
+		address := ical.Address(p.Value)
+		if address == "" {
+			continue
+		}
+		role := strings.ToUpper(p.Param("ROLE"))
+		kind := strings.ToUpper(p.Param("CUTYPE"))
+		f.Attendees = append(f.Attendees, person{
+			Email:          address,
+			DisplayName:    p.Param("CN"),
+			Optional:       role == "OPT-PARTICIPANT" || role == "NON-PARTICIPANT",
+			Resource:       kind == "RESOURCE" || kind == "ROOM",
+			ResponseStatus: responseStatus(p.Param("PARTSTAT")),
+		})
+	}
+	f.Reminders = toReminders(ical.Alarms(v), info)
+	return f, nil
+}
+
+// toGoogleTime writes a time the way Google takes it; a floating time is read in the calendar's zone.
+func toGoogleTime(t ical.Time, calendarZone string) eventTime {
+	switch {
+	case t.Date:
+		return eventTime{Date: t.T.Format("2006-01-02")}
+	case t.Floating:
+		zone := calendarZone
+		loc, err := time.LoadLocation(zone)
+		if zone == "" || err != nil {
+			return eventTime{DateTime: t.T.Format(time.RFC3339), TimeZone: "UTC"}
+		}
+		wall := time.Date(t.T.Year(), t.T.Month(), t.T.Day(), t.T.Hour(), t.T.Minute(), t.T.Second(), 0, loc)
+		return eventTime{DateTime: wall.Format(time.RFC3339), TimeZone: zone}
+	case t.Zone == "":
+		return eventTime{DateTime: t.T.UTC().Format(time.RFC3339), TimeZone: "UTC"}
+	default:
+		loc, err := time.LoadLocation(t.Zone)
+		if err != nil {
+			return eventTime{DateTime: t.T.UTC().Format(time.RFC3339), TimeZone: "UTC"}
+		}
+		return eventTime{DateTime: t.T.In(loc).Format(time.RFC3339), TimeZone: t.Zone}
+	}
+}
+
+// Google keeps at most 5 reminders per event, of at most four weeks.
+const (
+	maxReminders       = 5
+	maxReminderMinutes = 40320
+)
+
+// toReminders keeps the calendar's default reminders when the event has exactly those.
+func toReminders(alarms []ical.Alarm, info calendarInfo) *reminders {
+	out := []reminder{}
+	for _, alarm := range alarms {
+		if len(out) == maxReminders || alarm.Minutes > maxReminderMinutes {
+			continue
+		}
+		method := "popup"
+		if alarm.Email {
+			method = "email"
+		}
+		out = append(out, reminder{Method: method, Minutes: alarm.Minutes})
+	}
+	if len(info.DefaultReminders) > 0 && sameReminders(out, info.DefaultReminders) {
+		return &reminders{UseDefault: true, Overrides: []reminder{}}
+	}
+	return &reminders{UseDefault: false, Overrides: out}
+}
+
+func sameReminders(a, b []reminder) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	count := map[reminder]int{}
+	for _, r := range a {
+		count[r]++
+	}
+	for _, r := range b {
+		count[r]--
+	}
+	for _, n := range count {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// currentFields reads Tresso's view of an event Google has, through the same conversion as the desired one, so
+// differences in how either side spells a value never count as a change.
+func currentFields(e event, info calendarInfo, original *ical.Time) (fields, error) {
+	v, err := toVEvent(e, info, original)
+	if err != nil {
+		return fields{}, err
+	}
+	return fromVEvent(v, info, original == nil)
+}
+
+func equal(a, b any) bool {
+	left, _ := json.Marshal(a)
+	right, _ := json.Marshal(b)
+	return string(left) == string(right)
+}
+
+// eventID is the id a new event gets: derived from its UID, so a create that is retried finds the event it made.
+// Google takes 5 to 1024 characters of base32hex (a-v, 0-9).
+func eventID(uid string) string {
+	sum := sha256.Sum256([]byte("tresso:" + uid))
+	return "tr" + strings.ToLower(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:20]))
+}
+
+// instanceID is Google's id of one occurrence of a series.
+func instanceID(masterID string, original ical.Time) string {
+	return masterID + "_" + ical.RecurrenceKey(original)
+}
+
+func (s *session) Write(ctx context.Context, calendar calsync.Calendar, operation api.CalendarOperation) (api.OperationResult, error) {
+	info := info(calendar)
+	if operation.Kind == "delete" {
+		return s.delete(ctx, calendar, operation)
+	}
+	if operation.Ical == nil {
+		return api.OperationResult{Outcome: api.OperationFailed, Error: text("The event was removed before it could be saved.")}, nil
+	}
+	doc, err := ical.Parse(*operation.Ical)
+	if err != nil {
+		return api.OperationResult{Outcome: api.OperationFailed, Error: text("The event could not be read.")}, nil
+	}
+
+	var current series
+	exists := false
+	if operation.RemoteID != nil {
+		current, exists, err = s.series(ctx, calendar.RemoteID, *operation.RemoteID, operation.UID)
+		if err != nil {
+			return s.failure(ctx, calendar, operation, err)
+		}
+		if !exists {
+			// Gone at Google: the API removes it.
+			return api.OperationResult{Outcome: api.OperationConflict}, nil
+		}
+		if operation.IfMatch != nil && *operation.IfMatch != current.etag() {
+			return s.conflict(calendar, *operation.RemoteID, current), nil
+		}
+	}
+
+	notify := "none"
+	if operation.Notify {
+		notify = "all"
+	}
+	w := &writer{session: s, calendar: calendar, info: info, operation: operation, notify: notify, self: s.self}
+	var masterID string
+	if !exists {
+		masterID, err = w.create(ctx, doc)
+	} else {
+		masterID = *operation.RemoteID
+		err = w.update(ctx, doc, current)
+	}
+	if err != nil {
+		var refused *refusal
+		if errors.As(err, &refused) {
+			return s.refused(ctx, calendar, operation, refused.message)
+		}
+		if providerhttp.IsStatus(err, http.StatusPreconditionFailed) && masterID != "" {
+			return s.reread(ctx, calendar, operation, masterID, true)
+		}
+		return s.failure(ctx, calendar, operation, err)
+	}
+	return s.reread(ctx, calendar, operation, masterID, false)
+}
+
+// refusal is a change Google cannot take; it is reported to the user, not retried.
+type refusal struct{ message string }
+
+func (r *refusal) Error() string { return r.message }
+
+type writer struct {
+	session   *session
+	calendar  calsync.Calendar
+	info      calendarInfo
+	operation api.CalendarOperation
+	notify    string
+	self      string
+}
+
+func (w *writer) query(conference bool) url.Values {
+	q := url.Values{"sendUpdates": {w.notify}}
+	if conference {
+		q.Set("conferenceDataVersion", "1")
+	}
+	return q
+}
+
+func (w *writer) create(ctx context.Context, doc *ical.Component) (string, error) {
+	master := doc.Master()
+	if master == nil {
+		return "", &refusal{"Google cannot store an occurrence without its series."}
+	}
+	f, err := fromVEvent(master, w.info, true)
+	if err != nil {
+		return "", &refusal{"The event could not be read: " + err.Error()}
+	}
+	id := eventID(w.operation.UID)
+	body := struct {
+		fields
+		ID             string          `json:"id"`
+		ICalUID        string          `json:"iCalUID"`
+		ConferenceData *conferenceData `json:"conferenceData,omitempty"`
+	}{fields: f, ID: id, ICalUID: w.operation.UID, ConferenceData: w.conferenceRequest(master, nil)}
+	var created event
+	err = w.session.send(ctx, http.MethodPost, w.session.calendarURL(w.calendar.RemoteID), w.query(body.ConferenceData != nil), "", body, &created)
+	if providerhttp.IsStatus(err, http.StatusConflict) {
+		// A retried create: the event exists, and the rest of the write is an update of it.
+		current, found, getErr := w.session.series(ctx, w.calendar.RemoteID, id, w.operation.UID)
+		if getErr != nil {
+			return "", getErr
+		}
+		if !found {
+			return "", err
+		}
+		return id, w.update(ctx, doc, current)
+	}
+	if err != nil {
+		return "", err
+	}
+	if created.ID != "" {
+		id = created.ID
+	}
+	current := series{master: &created}
+	return id, w.overrides(ctx, doc, id, current)
+}
+
+// conferenceRequest asks Google for a Meet meeting when the event asks for one and has none yet.
+func (w *writer) conferenceRequest(v *ical.Component, current *event) *conferenceData {
+	if !strings.EqualFold(v.Text(ConferenceRequest), "meet") {
+		return nil
+	}
+	if current != nil && current.ConferenceData != nil && len(current.ConferenceData.EntryPoints) > 0 {
+		return nil
+	}
+	request := &createRequest{RequestID: eventID(w.operation.UID + "/meet")}
+	request.ConferenceSolutionKey.Type = "hangoutsMeet"
+	return &conferenceData{CreateRequest: request}
+}
+
+func (w *writer) organizes(current series) bool {
+	e := current.master
+	if e == nil && len(current.exceptions) > 0 {
+		e = &current.exceptions[0]
+	}
+	if e == nil || e.Organizer == nil {
+		return true
+	}
+	return e.Organizer.Self || ical.Address(e.Organizer.Email) == w.self
+}
+
+func (w *writer) update(ctx context.Context, doc *ical.Component, current series) error {
+	master := doc.Master()
+	if master != nil && current.master != nil {
+		if err := w.patch(ctx, master, *current.master, nil, w.organizes(current)); err != nil {
+			return err
+		}
+	}
+	return w.overrides(ctx, doc, objectIDOf(current), current)
+}
+
+func objectIDOf(s series) string {
+	if s.master != nil {
+		return s.master.ID
+	}
+	return s.exceptions[0].RecurringEventID
+}
+
+// overrides writes each changed occurrence to its instance at Google.
+func (w *writer) overrides(ctx context.Context, doc *ical.Component, masterID string, current series) error {
+	organizes := w.organizes(current)
+	byKey := map[string]event{}
+	zone := w.info.TimeZone
+	if current.master != nil {
+		zone = zoneOf(current.master.Start, w.info)
+	}
+	for _, exception := range current.exceptions {
+		if exception.OriginalStartTime == nil {
+			continue
+		}
+		if original, err := googleTime(*exception.OriginalStartTime, zone); err == nil {
+			byKey[ical.RecurrenceKey(original)] = exception
+		}
+	}
+	for _, override := range doc.Overrides() {
+		original, err := ical.ParseTime(*override.Get("RECURRENCE-ID"))
+		if err != nil {
+			return &refusal{"An occurrence of the event could not be read."}
+		}
+		existing, ok := byKey[ical.RecurrenceKey(original)]
+		if ok && existing.cancelled() {
+			continue
+		}
+		if !ok {
+			// The occurrence as the series has it: patching it makes it an exception at Google.
+			if current.master == nil {
+				continue
+			}
+			existing = *current.master
+			existing.ID = instanceID(masterID, original)
+			existing.Recurrence = nil
+			existing.RecurringEventID = masterID
+			existing.ETag = ""
+			existing.ConferenceData = nil
+		}
+		if err := w.patch(ctx, override, existing, &original, organizes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// patch sends what changed of one event or occurrence. An invited user can only answer and set their reminders;
+// other changes of theirs are refused, and the user keeps seeing Google's version.
+func (w *writer) patch(ctx context.Context, v *ical.Component, current event, original *ical.Time, organizes bool) error {
+	desired, err := fromVEvent(v, w.info, original == nil)
+	if err != nil {
+		return &refusal{"The event could not be read: " + err.Error()}
+	}
+	have, err := currentFields(current, w.info, original)
+	if err != nil {
+		return err
+	}
+	conference := w.conferenceRequest(v, &current)
+	if !organizes {
+		return w.answer(ctx, desired, have, current)
+	}
+	if equal(desired, have) && conference == nil {
+		return nil
+	}
+	if current.ID == "" {
+		return fmt.Errorf("google: no event id to update")
+	}
+	body := struct {
+		fields
+		ConferenceData *conferenceData `json:"conferenceData,omitempty"`
+	}{fields: desired, ConferenceData: conference}
+	if original != nil {
+		// An occurrence keeps the series' recurrence.
+		body.Recurrence = nil
+	}
+	return w.session.send(ctx, http.MethodPatch, w.session.calendarURL(w.calendar.RemoteID, current.ID), w.query(conference != nil), current.ETag, patchBody(body, original != nil), nil)
+}
+
+// patchBody leaves the recurrence out of an occurrence's patch.
+func patchBody(body any, occurrence bool) any {
+	if !occurrence {
+		return body
+	}
+	data, _ := json.Marshal(body)
+	var m map[string]any
+	_ = json.Unmarshal(data, &m)
+	delete(m, "recurrence")
+	return m
+}
+
+// answer sends the invited user's response (with the comment) and reminders.
+func (w *writer) answer(ctx context.Context, desired, have fields, current event) error {
+	other := desired
+	other.Attendees, other.Reminders = have.Attendees, have.Reminders
+	if !equal(other, have) {
+		return &refusal{"Only the organizer can change this event; your change was not saved at Google."}
+	}
+	want := ""
+	for _, attendee := range desired.Attendees {
+		if ical.Address(attendee.Email) == w.self {
+			want = attendee.ResponseStatus
+		}
+	}
+	attendees := make([]person, len(current.Attendees))
+	copy(attendees, current.Attendees)
+	answered := false
+	for i := range attendees {
+		if attendees[i].Self || ical.Address(attendees[i].Email) == w.self {
+			if want != "" && attendees[i].ResponseStatus != want {
+				attendees[i].ResponseStatus = want
+				if w.operation.Comment != nil {
+					attendees[i].Comment = *w.operation.Comment
+				}
+				answered = true
+			}
+		}
+	}
+	body := map[string]any{}
+	if answered {
+		body["attendees"] = attendees
+	}
+	if !equal(desired.Reminders, have.Reminders) {
+		body["reminders"] = desired.Reminders
+	}
+	if len(body) == 0 {
+		return nil
+	}
+	return w.session.send(ctx, http.MethodPatch, w.session.calendarURL(w.calendar.RemoteID, current.ID), w.query(false), current.ETag, body, nil)
+}
+
+func (s *session) delete(ctx context.Context, calendar calsync.Calendar, operation api.CalendarOperation) (api.OperationResult, error) {
+	if operation.RemoteID == nil {
+		return api.OperationResult{Outcome: api.OperationDone}, nil
+	}
+	current, exists, err := s.series(ctx, calendar.RemoteID, *operation.RemoteID, operation.UID)
+	if err != nil {
+		return s.failure(ctx, calendar, operation, err)
+	}
+	if !exists {
+		return api.OperationResult{Outcome: api.OperationDone}, nil
+	}
+	if operation.IfMatch != nil && *operation.IfMatch != current.etag() {
+		return s.conflict(calendar, *operation.RemoteID, current), nil
+	}
+	notify := "none"
+	if operation.Notify {
+		notify = "all"
+	}
+	tag := ""
+	if current.master != nil {
+		tag = current.master.ETag
+	}
+	err = s.send(ctx, http.MethodDelete, s.calendarURL(calendar.RemoteID, *operation.RemoteID), url.Values{"sendUpdates": {notify}}, tag, nil, nil)
+	switch {
+	case err == nil, providerhttp.IsStatus(err, http.StatusNotFound), providerhttp.IsStatus(err, http.StatusGone):
+		return api.OperationResult{Outcome: api.OperationDone}, nil
+	case providerhttp.IsStatus(err, http.StatusPreconditionFailed):
+		return s.reread(ctx, calendar, operation, *operation.RemoteID, true)
+	default:
+		return s.failure(ctx, calendar, operation, err)
+	}
+}
+
+// reread reports the event as Google has it after the write (with a Meet link Google added), or after a conflict.
+func (s *session) reread(ctx context.Context, calendar calsync.Calendar, operation api.CalendarOperation, masterID string, conflict bool) (api.OperationResult, error) {
+	current, found, err := s.series(ctx, calendar.RemoteID, masterID, operation.UID)
+	if err != nil {
+		if conflict {
+			return s.failure(ctx, calendar, operation, err)
+		}
+		// Written, but not read back: the next sync brings Google's version.
+		return api.OperationResult{Outcome: api.OperationDone, RemoteID: &masterID}, nil
+	}
+	if conflict {
+		if !found {
+			return api.OperationResult{Outcome: api.OperationConflict}, nil
+		}
+		return s.conflict(calendar, masterID, current), nil
+	}
+	if !found {
+		return api.OperationResult{Outcome: api.OperationDone, RemoteID: &masterID}, nil
+	}
+	etag := current.etag()
+	result := api.OperationResult{Outcome: api.OperationDone, RemoteID: &masterID, ETag: &etag}
+	if text, err := current.toICalendar(info(calendar)); err == nil {
+		result.Current = &api.RemoteObject{RemoteID: masterID, ETag: &etag, Ical: &text}
+	}
+	return result, nil
+}
+
+func (s *session) conflict(calendar calsync.Calendar, remoteID string, current series) api.OperationResult {
+	etag := current.etag()
+	text, err := current.toICalendar(info(calendar))
+	if err != nil {
+		return api.OperationResult{Outcome: api.OperationConflict}
+	}
+	return api.OperationResult{Outcome: api.OperationConflict, Current: &api.RemoteObject{RemoteID: remoteID, ETag: &etag, Ical: &text}}
+}
+
+// failure turns a provider error into the outcome the API needs; lost access also ends the session.
+func (s *session) failure(ctx context.Context, calendar calsync.Calendar, operation api.CalendarOperation, err error) (api.OperationResult, error) {
+	var statusErr *providerhttp.StatusError
+	switch {
+	case errors.Is(err, providerhttp.ErrUnauthorized), errors.Is(err, api.ErrReauthorize), errors.Is(err, api.ErrNotGranted):
+		return api.OperationResult{Outcome: api.OperationRetry, Error: text("Google refused Tresso's access to this calendar.")}, err
+	case errors.As(err, &statusErr) && (&Provider{}).NotGranted(err):
+		return api.OperationResult{Outcome: api.OperationRetry, Error: text("Tresso is not allowed to change this calendar at Google.")}, err
+	case errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusForbidden:
+		return s.refused(ctx, calendar, operation, "Google refused the change: the calendar is read-only for you.")
+	case errors.As(err, &statusErr) && statusErr.StatusCode >= 400 && statusErr.StatusCode < 500 && statusErr.StatusCode != http.StatusTooManyRequests:
+		return s.refused(ctx, calendar, operation, fmt.Sprintf("Google refused the event (HTTP %d).", statusErr.StatusCode))
+	case errors.As(err, &statusErr):
+		return api.OperationResult{Outcome: api.OperationRetry, Error: text(fmt.Sprintf("Google had a problem (HTTP %d).", statusErr.StatusCode))}, nil
+	default:
+		return api.OperationResult{Outcome: api.OperationRetry, Error: text("Google could not be reached.")}, nil
+	}
+}
+
+// refused reports a change Google will not take, with Google's version so the user sees what is there.
+func (s *session) refused(ctx context.Context, calendar calsync.Calendar, operation api.CalendarOperation, message string) (api.OperationResult, error) {
+	result := api.OperationResult{Outcome: api.OperationFailed, Error: text(message)}
+	if operation.RemoteID == nil {
+		return result, nil
+	}
+	current, found, err := s.series(ctx, calendar.RemoteID, *operation.RemoteID, operation.UID)
+	if err != nil || !found {
+		return result, nil
+	}
+	result.Current = s.conflict(calendar, *operation.RemoteID, current).Current
+	return result, nil
+}
+
+func text(s string) *string {
+	return &s
+}
