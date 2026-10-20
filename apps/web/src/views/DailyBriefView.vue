@@ -39,7 +39,8 @@ async function load(): Promise<void> {
   }
   view.value = next
   loaded.value = mail.ready
-  if (next !== null) {
+  // Only the newest brief stops being new by being opened; looking at an older one leaves it new.
+  if (next !== null && next.brief.id === mail.dailyBriefs[0]?.id) {
     brief.seen(next.brief.id)
   }
 }
@@ -112,6 +113,10 @@ function sender(entry: BriefEntry): { name: string | null; address: string } {
 function senderLabel(entry: BriefEntry): string {
   const from = sender(entry)
   return from.name?.trim() || from.address || 'Unknown sender'
+}
+
+function smartInboxName(smartInboxId: string | null): string {
+  return mail.smartInboxes.find((smartInbox) => smartInbox.id === smartInboxId)?.name ?? 'another smart inbox'
 }
 
 function noteAll(): void {
@@ -207,7 +212,7 @@ function briefLabel(createdAt: string): string {
             <section v-for="group in groups" :key="group.key" class="group" :aria-label="group.label">
               <h2 class="group-title">{{ group.label }} <span class="group-count">{{ group.entries.length }}</span></h2>
               <ul class="items">
-                <li v-for="entry in group.entries" :key="entry.conversation.threadId" class="item" :class="{ done: entry.noted }">
+                <li v-for="entry in group.entries" :key="entry.conversation.threadId" class="item" :class="{ done: entry.noted || entry.moved }">
                   <SenderAvatar :sender="sender(entry)" :size="32" />
                   <span class="text">
                     <span class="subject">{{ entry.conversation.subject || '(no subject)' }}</span>
@@ -219,7 +224,11 @@ function briefLabel(createdAt: string): string {
                     </span>
                   </span>
                   <span class="item-actions">
-                    <template v-if="entry.noted">
+                    <template v-if="entry.moved">
+                      <span class="moved-chip">Moved to {{ smartInboxName(entry.conversation.smartInboxId) }}</span>
+                      <RouterLink :to="{ name: 'unified-thread', params: { threadId: entry.conversation.threadId } }" class="button open">Open</RouterLink>
+                    </template>
+                    <template v-else-if="entry.noted">
                       <span class="noted-chip"><AppIcon name="do" :size="14" />Noted</span>
                       <button
                         v-if="actions.undoable.value.has(entry.conversation.threadId)"
@@ -487,6 +496,17 @@ h1 {
   background: var(--know-soft);
   color: var(--know);
   gap: 6px;
+}
+.moved-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--do-soft);
+  color: var(--do);
+  font-size: 12px;
+  font-weight: 600;
 }
 .noted-chip {
   display: inline-flex;

@@ -110,7 +110,10 @@ describe('DailyBriefView', () => {
             eventNotes: [],
             todos: [],
             mailNotifications: [],
-            dailyBriefs: [{ id: 'b1', coversFrom: '2026-10-19T08:00:00+00:00', coversUntil: '2026-10-20T07:59:59+00:00', threadIds: ['t1', 't2', 't3'], createdAt: '2026-10-20T08:00:00+00:00' }],
+            dailyBriefs: [
+              { id: 'b1', coversFrom: '2026-10-19T08:00:00+00:00', coversUntil: '2026-10-20T07:59:59+00:00', threadIds: ['t1', 't2', 't3'], createdAt: '2026-10-20T08:00:00+00:00' },
+              { id: 'b0', coversFrom: '2026-10-18T08:00:00+00:00', coversUntil: '2026-10-19T07:59:59+00:00', threadIds: ['t1'], createdAt: '2026-10-19T08:00:00+00:00' },
+            ],
             deleted: [],
           }
           return new Response(JSON.stringify(since === 0 ? first : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [], smartInboxes: [], dailyBriefs: [] }))
@@ -227,5 +230,31 @@ describe('DailyBriefView', () => {
 
   it('remembers the brief as seen', () => {
     expect(localStorage.getItem('tresso.brief.seen')).toBe('b1')
+  })
+
+  it('never archives a conversation moved to To do when the whole brief is noted', async () => {
+    await rows()[2]!.findAll('button').find((button) => button.text() === 'Needs me')!.trigger('click')
+    const t3 = () => rows().find((row) => row.get('.subject').text() === 'Subject t3')!
+    await vi.waitFor(() => expect(t3().find('.moved-chip').exists()).toBe(true))
+    expect(t3().get('.moved-chip').text()).toBe('Moved to To do')
+    expect(t3().findAll('button').some((button) => button.text().includes('Noted'))).toBe(false)
+    expect(wrapper!.get('.progress').text()).toBe('0 of 2 noted')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'K', shiftKey: true }))
+
+    await vi.waitFor(() => expect(wrapper!.get('.progress').text()).toBe('All 2 noted'))
+    expect((actions() as { action: string; messageIds: string[] }[]).map((action) => [action.action, [...action.messageIds].sort()])).toEqual([
+      ['markRead', ['m1', 'm2']],
+      ['archive', ['m1', 'm2']],
+    ])
+  })
+
+  it('leaves the newest brief new when an older one is opened', async () => {
+    localStorage.clear()
+    await router.push('/brief/b0')
+    await settle()
+
+    expect(rows().map((row) => row.get('.subject').text())).toEqual(['Subject t1'])
+    expect(localStorage.getItem('tresso.brief.seen')).toBeNull()
   })
 })
