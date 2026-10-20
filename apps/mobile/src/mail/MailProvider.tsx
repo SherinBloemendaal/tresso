@@ -93,6 +93,10 @@ interface Mail extends MailState {
   removeTodo(id: string): Promise<void>
   /** Checks a todo off or opens it again; the copy is pulled right after. */
   setTodoDone(id: string, done: boolean): Promise<void>
+  /** Plans a todo at the earliest free time before it is due (again); the copy is pulled right after. */
+  planTodo(id: string): Promise<void>
+  /** Gives the time a todo holds in the calendar back; the copy is pulled right after. */
+  unplanTodo(id: string): Promise<void>
   /** Every hand-over, in "Waiting on" order. */
   handOvers(): Promise<SyncedHandOver[]>
   outgoing(id: string): Promise<SyncedOutgoingMessage | null>
@@ -293,6 +297,20 @@ export function MailProvider({ children }: { children: ReactNode }) {
     },
     [todosApi, session],
   )
+  const planTodo = useCallback(
+    async (id: string) => {
+      await todosApi.plan(id)
+      await session.syncNow()
+    },
+    [todosApi, session],
+  )
+  const unplanTodo = useCallback(
+    async (id: string) => {
+      await todosApi.unplan(id)
+      await session.syncNow()
+    },
+    [todosApi, session],
+  )
   const handOvers = useCallback(async () => (await session.database?.handOvers()) ?? [], [session])
   const outgoing = useCallback(async (id: string) => (await session.database?.outgoing(id)) ?? null, [session])
   const handOverApi = useMemo<HandOverApi>(
@@ -352,6 +370,8 @@ export function MailProvider({ children }: { children: ReactNode }) {
       makeTodo,
       removeTodo,
       setTodoDone,
+      planTodo,
+      unplanTodo,
       handOvers,
       outgoing,
       handOverApi,
@@ -359,7 +379,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
       clearOverdue,
       respond,
     }),
-    [userId, touch, ready, synced, version, syncState, syncError, lookupError, live, pulls, mailAccounts, folders, act, inbox, triageWaiting, newestInInbox, summaries, smartInboxes, classifyThread, releaseThread, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, removeTodo, setTodoDone, handOvers, outgoing, handOverApi, overdue, clearOverdue, respond],
+    [userId, touch, ready, synced, version, syncState, syncError, lookupError, live, pulls, mailAccounts, folders, act, inbox, triageWaiting, newestInInbox, summaries, smartInboxes, classifyThread, releaseThread, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, removeTodo, setTodoDone, planTodo, unplanTodo, handOvers, outgoing, handOverApi, overdue, clearOverdue, respond],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>

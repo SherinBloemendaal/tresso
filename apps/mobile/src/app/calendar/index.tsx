@@ -5,21 +5,29 @@ import {
   addDays,
   daysFrom,
   inAllDayRow,
+  isTodoBlock,
   layoutDay,
   longDate,
   occurrenceTimes,
+  plannedLabel,
   RESPONSE_WORDS,
   startOfWallDay,
+  todoBlockTimes,
   toWall,
   wallParts,
   WEEKDAYS_SHORT,
   weekdayOf,
   type Occurrence,
   type SyncedCalendar,
+  type TodoBlock,
 } from '@tresso/core'
 import { agendaDays, occurrenceParams, weekStrip } from '@/calendar/agenda'
+import { askTodoPlan } from '@/calendar/askTodoPlan'
 import { tint } from '@/calendar/colors'
+import { todoPlanChoices, type TodoPlanAction } from '@/calendar/todoPlan'
 import { useOccurrences, useReaderZone } from '@/calendar/useOccurrences'
+import { useNotices } from '@/components/Notices'
+import { useMail } from '@/mail/MailProvider'
 import { useTheme, type Theme } from '@/theme'
 
 /** 64 px per hour in the day view, as the mobile design has it. */
@@ -31,6 +39,8 @@ export default function CalendarScreen() {
   const theme = useTheme()
   const styles = useMemo(() => makeStyles(theme), [theme])
   const router = useRouter()
+  const mail = useMail()
+  const notices = useNotices()
   const [mode, setMode] = useState<'agenda' | 'day'>('agenda')
   const [now, setNow] = useState(() => Date.now())
   const zone = useReaderZone()
@@ -43,9 +53,24 @@ export default function CalendarScreen() {
   }, [])
 
   const range = useMemo(() => (mode === 'agenda' ? daysFrom(today, AGENDA_DAYS, zone) : daysFrom(day, 1, zone)), [mode, today, day, zone])
-  const { occurrences, calendars, loaded } = useOccurrences(range[0]!.start, range[range.length - 1]!.end, zone)
+  const { occurrences, todoBlocks, calendars, loaded } = useOccurrences(range[0]!.start, range[range.length - 1]!.end, zone)
 
   const open = (occurrence: Occurrence) => router.push({ pathname: '/calendar/event', params: occurrenceParams(occurrence) })
+
+  /** A todo's planned time: plan it again, give the time back, or check the todo off. */
+  const openTodo = (block: TodoBlock) => {
+    const run = async (action: TodoPlanAction): Promise<void> => {
+      try {
+        if (action === 'plan') await mail.planTodo(block.todo.id)
+        else if (action === 'unplan') await mail.unplanTodo(block.todo.id)
+        else await mail.setTodoDone(block.todo.id, true)
+      } catch (error) {
+        notices.notify({ text: error instanceof Error ? error.message : String(error), tone: 'error' })
+      }
+    }
+    const where = plannedLabel(block.todo, zone, today) ?? ''
+    askTodoPlan(block.todo.title, `${where}. Busy for others.`, todoPlanChoices(block.todo, { withDone: true }), (action) => void run(action))
+  }
 
   return (
     <View style={styles.screen}>
@@ -69,9 +94,9 @@ export default function CalendarScreen() {
         )}
       </View>
       {mode === 'agenda' ? (
-        <Agenda zone={zone} occurrences={occurrences} days={range} today={today} now={now} calendars={calendars} loaded={loaded} styles={styles} onOpen={open} />
+        <Agenda zone={zone} occurrences={occurrences} todoBlocks={todoBlocks} days={range} today={today} now={now} calendars={calendars} loaded={loaded} styles={styles} theme={theme} onOpen={open} onOpenTodo={openTodo} />
       ) : (
-        <DayView zone={zone} day={day} today={today} now={now} occurrences={occurrences} calendars={calendars} styles={styles} theme={theme} onDay={setDay} onOpen={open} />
+        <DayView zone={zone} day={day} today={today} now={now} occurrences={occurrences} todoBlocks={todoBlocks} calendars={calendars} styles={styles} theme={theme} onDay={setDay} onOpen={open} onOpenTodo={openTodo} />
       )}
     </View>
   )
@@ -79,9 +104,22 @@ export default function CalendarScreen() {
 
 type Styles = ReturnType<typeof makeStyles>
 
-function Agenda(props: { zone: string; occurrences: Occurrence[]; days: ReturnType<typeof daysFrom>; today: number; now: number; calendars: Map<string, SyncedCalendar>; loaded: boolean; styles: Styles; onOpen: (o: Occurrence) => void }) {
+function Agenda(props: {
+  zone: string
+  occurrences: Occurrence[]
+  todoBlocks: TodoBlock[]
+  days: ReturnType<typeof daysFrom>
+  today: number
+  now: number
+  calendars: Map<string, SyncedCalendar>
+  loaded: boolean
+  styles: Styles
+  theme: Theme
+  onOpen: (o: Occurrence) => void
+  onOpenTodo: (block: TodoBlock) => void
+}) {
   const { styles } = props
-  const sections = agendaDays(props.days, props.occurrences, props.today).map((group) => ({ key: String(group.day.wall), title: group.title, subtitle: group.subtitle, data: group.items }))
+  const sections = agendaDays(props.days, props.occurrences, props.today, props.todoBlocks).map((group) => ({ key: String(group.day.wall), title: group.title, subtitle: group.subtitle, data: group.items }))
   return (
     <SectionList
       sections={sections}
@@ -96,8 +134,39 @@ function Agenda(props: { zone: string; occurrences: Occurrence[]; days: ReturnTy
           {section.subtitle !== '' && <Text style={styles.muted}>{section.subtitle}</Text>}
         </View>
       )}
-      renderItem={({ item }) => <AgendaRow zone={props.zone} occurrence={item} calendar={props.calendars.get(item.event.calendarId)} now={props.now} styles={styles} onOpen={props.onOpen} />}
+      renderItem={({ item }) =>
+        isTodoBlock(item) ? (
+          <TodoRow zone={props.zone} block={item} now={props.now} styles={styles} theme={props.theme} onOpen={props.onOpenTodo} />
+        ) : (
+          <AgendaRow zone={props.zone} occurrence={item} calendar={props.calendars.get(item.event.calendarId)} now={props.now} styles={styles} onOpen={props.onOpen} />
+        )
+      }
     />
+  )
+}
+
+/** A todo's planned time in the agenda, in the Do color. */
+function TodoRow({ zone, block, now, styles, theme, onOpen }: { zone: string; block: TodoBlock; now: number; styles: Styles; theme: Theme; onOpen: (block: TodoBlock) => void }) {
+  const times = todoBlockTimes(block, zone)
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.row, block.end <= now && styles.past, pressed && styles.pressed]}
+      onPress={() => onOpen(block)}
+      accessibilityRole="button"
+      accessibilityLabel={[`Todo: ${block.todo.title}`, times, block.conflict ? 'that time is taken' : null].filter(Boolean).join(', ')}
+    >
+      <View style={[styles.bar, { backgroundColor: theme.do }]} />
+      <Text style={styles.time}>{times}</Text>
+      <View style={styles.texts}>
+        <Text style={styles.title} numberOfLines={1}>
+          {block.todo.title}
+        </Text>
+        <Text style={styles.muted} numberOfLines={1}>
+          {block.conflict ? 'Todo, that time is taken' : 'Todo'}
+        </Text>
+      </View>
+      <Text style={[styles.chip, { borderColor: theme.do, borderStyle: block.conflict ? 'dashed' : 'solid' }]}>{block.conflict ? 'Conflict' : 'Planned'}</Text>
+    </Pressable>
   )
 }
 
@@ -136,16 +205,19 @@ function DayView(props: {
   today: number
   now: number
   occurrences: Occurrence[]
+  todoBlocks: TodoBlock[]
   calendars: Map<string, SyncedCalendar>
   styles: Styles
   theme: Theme
   onDay: (day: number) => void
   onOpen: (o: Occurrence) => void
+  onOpenTodo: (block: TodoBlock) => void
 }) {
   const { styles, day, zone } = props
   const [calendarDay] = daysFrom(day, 1, zone)
-  const blocks = layoutDay(props.occurrences, calendarDay!, zone)
-  const allDay = props.occurrences.filter(inAllDayRow)
+  const items = [...props.occurrences, ...props.todoBlocks]
+  const blocks = layoutDay<Occurrence | TodoBlock>(items, calendarDay!, zone)
+  const allDay = items.filter(inAllDayRow)
   const scroller = useRef<ScrollViewInstance>(null)
   const nowParts = wallParts(toWall(props.now, zone))
   const nowTop = ((nowParts.hour * 60 + nowParts.minute) / 60) * HOUR
@@ -186,18 +258,20 @@ function DayView(props: {
       </Text>
       {allDay.length > 0 && (
         <View style={styles.allDay}>
-          {allDay.map((occurrence) => {
-            const color = props.calendars.get(occurrence.event.calendarId)?.color ?? '#6E56CF'
+          {allDay.map((item) => {
+            const todo = isTodoBlock(item)
+            const color = todo ? props.theme.do : (props.calendars.get(item.event.calendarId)?.color ?? '#6E56CF')
+            const title = todo ? item.todo.title : item.event.summary || 'Untitled event'
             return (
               <Pressable
-                key={occurrence.key}
+                key={item.key}
                 style={[styles.allDayItem, { backgroundColor: tint(color, 0.16) }]}
-                onPress={() => props.onOpen(occurrence)}
+                onPress={() => (todo ? props.onOpenTodo(item) : props.onOpen(item))}
                 accessibilityRole="button"
-                accessibilityLabel={`${occurrence.event.summary || 'Untitled event'}, ${occurrenceTimes(occurrence, zone)}`}
+                accessibilityLabel={`${todo ? `Todo: ${title}` : title}, ${todo ? todoBlockTimes(item, zone) : occurrenceTimes(item, zone)}`}
               >
                 <Text style={styles.blockTitle} numberOfLines={1}>
-                  {occurrence.event.summary || 'Untitled event'}
+                  {title}
                 </Text>
               </Pressable>
             )
@@ -213,13 +287,17 @@ function DayView(props: {
           ))}
           <View style={styles.columns}>
             {blocks.map((block) => {
-              const color = props.calendars.get(block.occurrence.event.calendarId)?.color ?? '#6E56CF'
-              const pending = block.occurrence.event.selfResponse === 'needs-action' || block.occurrence.event.selfResponse === 'tentative'
+              const item = block.occurrence
+              if (isTodoBlock(item)) {
+                return <TodoBlockView key={item.key} block={item} top={block.top} height={block.height} column={block.column} columns={block.columns} zone={zone} now={props.now} styles={styles} theme={props.theme} onOpen={props.onOpenTodo} />
+              }
+              const color = props.calendars.get(item.event.calendarId)?.color ?? '#6E56CF'
+              const pending = item.event.selfResponse === 'needs-action' || item.event.selfResponse === 'tentative'
               const width = block.columns === 1 ? 100 : 65
               const left = block.columns === 1 ? 0 : (block.column * 35) / (block.columns - 1)
               return (
                 <Pressable
-                  key={block.occurrence.key}
+                  key={item.key}
                   style={[
                     styles.block,
                     {
@@ -231,17 +309,17 @@ function DayView(props: {
                       backgroundColor: pending ? props.theme.surface : tint(color, 0.16),
                       borderColor: pending ? color : 'transparent',
                       borderStyle: pending ? 'dashed' : 'solid',
-                      opacity: block.occurrence.end <= props.now ? 0.55 : 1,
+                      opacity: item.end <= props.now ? 0.55 : 1,
                     },
                   ]}
-                  onPress={() => props.onOpen(block.occurrence)}
+                  onPress={() => props.onOpen(item)}
                   accessibilityRole="button"
-                  accessibilityLabel={`${block.occurrence.event.summary || 'Untitled event'}, ${occurrenceTimes(block.occurrence, zone)}`}
+                  accessibilityLabel={`${item.event.summary || 'Untitled event'}, ${occurrenceTimes(item, zone)}`}
                 >
                   <Text style={styles.blockTitle} numberOfLines={1}>
-                    {block.occurrence.event.summary || 'Untitled event'}
+                    {item.event.summary || 'Untitled event'}
                   </Text>
-                  {block.height >= 45 && <Text style={styles.blockMeta}>{occurrenceTimes(block.occurrence, zone)}</Text>}
+                  {block.height >= 45 && <Text style={styles.blockMeta}>{occurrenceTimes(item, zone)}</Text>}
                 </Pressable>
               )
             })}
@@ -250,6 +328,40 @@ function DayView(props: {
         </View>
       </ScrollView>
     </View>
+  )
+}
+
+/** A todo's planned time on the day view: the Do color, dashed when the time was taken. */
+function TodoBlockView(props: { block: TodoBlock; top: number; height: number; column: number; columns: number; zone: string; now: number; styles: Styles; theme: Theme; onOpen: (block: TodoBlock) => void }) {
+  const { block, styles, theme } = props
+  const width = props.columns === 1 ? 100 : 65
+  const left = props.columns === 1 ? 0 : (props.column * 35) / (props.columns - 1)
+  const times = todoBlockTimes(block, props.zone)
+  return (
+    <Pressable
+      style={[
+        styles.block,
+        {
+          top: (props.top / 60) * HOUR,
+          height: Math.max((props.height / 60) * HOUR - 2, 22),
+          left: `${left}%`,
+          width: `${width}%`,
+          borderLeftColor: theme.do,
+          backgroundColor: block.conflict ? theme.surface : tint(theme.do, 0.16),
+          borderColor: block.conflict ? theme.do : 'transparent',
+          borderStyle: block.conflict ? 'dashed' : 'solid',
+          opacity: block.end <= props.now ? 0.55 : 1,
+        },
+      ]}
+      onPress={() => props.onOpen(block)}
+      accessibilityRole="button"
+      accessibilityLabel={[`Todo: ${block.todo.title}`, times, block.conflict ? 'that time is taken' : null].filter(Boolean).join(', ')}
+    >
+      <Text style={styles.blockTitle} numberOfLines={1}>
+        {block.todo.title}
+      </Text>
+      {props.height >= 45 && <Text style={styles.blockMeta}>{block.conflict ? `Time taken, ${times}` : times}</Text>}
+    </Pressable>
   )
 }
 

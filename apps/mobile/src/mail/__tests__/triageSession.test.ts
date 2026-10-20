@@ -66,7 +66,7 @@ function host(overrides: Partial<TriageHost> = {}) {
       },
       makeTodo: async (messageId, request) => {
         calls.push(`todo ${messageId} ${JSON.stringify(request)}`)
-        return { id: 'todo-1', title: 'Budget', notes: '', dueDate: null, dueTime: null, durationMinutes: null, completedAt: null, position: 0, source: 'manual', messageId, threadId: 't1', createdAt: '', updatedAt: '', made: true }
+        return { id: 'todo-1', title: 'Budget', notes: '', dueDate: null, dueTime: null, durationMinutes: null, completedAt: null, position: 0, source: 'manual', messageId, threadId: 't1', plannedStart: null, plannedEnd: null, planState: null, createdAt: '', updatedAt: '', made: true }
       },
       removeTodo: async (id) => {
         calls.push(`remove ${id}`)

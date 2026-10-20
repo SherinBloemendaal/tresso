@@ -34,4 +34,16 @@ describe('todoApi', () => {
       { path: '/api/v1/todos/t1', method: 'DELETE', contentType: null, body: undefined },
     ])
   })
+
+  it('plans a todo in the calendar and gives the time back', async () => {
+    const { calls, todos } = recording()
+
+    await todos.plan('t1')
+    await todos.unplan('t1')
+
+    expect(calls).toEqual([
+      { path: '/api/v1/todos/t1/plan', method: 'POST', contentType: null, body: undefined },
+      { path: '/api/v1/todos/t1/plan', method: 'DELETE', contentType: null, body: undefined },
+    ])
+  })
 })
