@@ -370,12 +370,15 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   the action's own id are older. Every account in scope must have the folder an archive or trash needs before
   anything starts, and a user has one bulk action (or undo) under way at a time (409 otherwise, checked under a
   per-user advisory lock). Each moved or flagged message is one change the worker makes on the mail server, oldest
-  first, so while one of the user's accounts has 1000 or more changes the worker has yet to make, the run waits
-  (queued again 30 seconds later) instead of holding up what the user does to single conversations. `GET
-  /api/v1/bulk-actions/{id}` reports the progress (`running`, `done`, `failed`); a smart inbox or target folder
-  deleted meanwhile stops the run and keeps what it did, as does a run that still fails after its retries (marked
-  with plain SQL, since the failed batch closed the entity manager; the listener never throws, so the consumer
-  keeps running).
+  first, so while an account the next batch touches has 1000 or more changes the worker has yet to make, the run
+  waits (queued again 30 seconds later, `waitingSince` set) instead of holding up what the user does to single
+  conversations; a backlog on an account outside the batch holds nothing up. A run that has waited an hour (an
+  account with expired credentials, or one no worker leases) stops and says which mail server is behind, so the user
+  can undo what was done or start again. `POST /api/v1/bulk-actions/{id}/cancel` stops an action or its undo at
+  once. `GET /api/v1/bulk-actions/{id}` reports the progress (`running`, `done`, `failed`); a smart inbox or target
+  folder deleted meanwhile stops the run and keeps what it did, as does a run that still fails after its retries
+  (marked with plain SQL, since the failed batch closed the entity manager; the listener never throws, so the
+  consumer keeps running). A stopped action can still be undone.
   `GET /api/v1/bulk-selection` counts a scope (conversations, messages, accounts) before the user confirms.
 - **Their undo** works like a single action's (`undoPlan` in `packages/core`): each batch records, per message it
   moved, where it went and the one folder it came from (`bulk_action_move`); messages that came from several folders,
@@ -856,7 +859,8 @@ older than a week, a month, three months or a year, after asking with the count 
 does the same for that sender at once. Clean up in the sidebar shows the cleanup suggestions, each with what its rule
 found and one button. The server works through the action; the web client asks how it is doing (soon at first, then
 every four seconds), shows the progress, pulls the delta when it is done and says how it went with the undo
-(`apps/web/src/stores/bulk.ts`). One bulk action runs at a time: the buttons are disabled from the first click.
+(`apps/web/src/stores/bulk.ts`), with a Stop button while it runs. One bulk action runs at a time: the buttons are
+disabled from the first click.
 
 Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
 addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is
