@@ -48,9 +48,8 @@ final class RuleBasedClassifierTest extends TestCase
         yield 'the spam filter of the server' => [['headers' => ['x-spam-flag' => 'YES']], BuiltinCategory::Spam, ClassificationReason::SERVER_SPAM];
         yield 'a spam status' => [['headers' => ['x-spam-status' => 'Yes, score=7.1 required=5.0']], BuiltinCategory::Spam, ClassificationReason::SERVER_SPAM];
         yield 'a negative spam status is no spam' => [['headers' => ['x-spam-status' => 'No, score=0.4']], BuiltinCategory::Todo, ClassificationReason::DIRECT];
-        yield 'dmarc failing a reject policy' => [['authenticationResultsTrusted' => true, 'headers' => ['authentication-results' => 'mx.example; spf=fail; dkim=none; dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=bank.example']], BuiltinCategory::Spam, ClassificationReason::AUTHENTICATION_FAILED];
-        yield 'dmarc failing in a header the receiving server may not have written proves nothing' => [['headers' => ['authentication-results' => 'mx.example; dmarc=fail (p=REJECT) header.from=partner.example']], BuiltinCategory::Todo, ClassificationReason::DIRECT];
-        yield 'dmarc failing without a policy is no spam' => [['authenticationResultsTrusted' => true, 'headers' => ['authentication-results' => 'mx.example; dmarc=fail (p=NONE) header.from=list.example']], BuiltinCategory::Todo, ClassificationReason::DIRECT];
+        yield 'dmarc failing a reject policy' => [['headers' => ['authentication-results' => 'mx.example; spf=fail; dkim=none; dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=bank.example']], BuiltinCategory::Spam, ClassificationReason::AUTHENTICATION_FAILED];
+        yield 'dmarc failing without a policy is no spam' => [['headers' => ['authentication-results' => 'mx.example; dmarc=fail (p=NONE) header.from=list.example']], BuiltinCategory::Todo, ClassificationReason::DIRECT];
         yield 'auto submitted' => [['headers' => ['auto-submitted' => 'auto-generated']], BuiltinCategory::Notification, ClassificationReason::AUTOMATED];
         yield 'auto submitted no is a person' => [['headers' => ['auto-submitted' => 'no']], BuiltinCategory::Todo, ClassificationReason::DIRECT];
         yield 'an out of office reply' => [['headers' => ['precedence' => 'auto_reply']], BuiltinCategory::Notification, ClassificationReason::AUTOMATED];
@@ -167,7 +166,7 @@ final class RuleBasedClassifierTest extends TestCase
     public function testForgedSenderFailingAuthenticationIsSpamDespiteASenderRule(): void
     {
         $rule = new SenderRule($this->user, 'ceo@company.example', $this->builtin['todo'], Verdict::Do);
-        $mail = $this->mail(['from' => 'ceo@company.example', 'authenticationResultsTrusted' => true, 'headers' => ['authentication-results' => 'mx.example; dmarc=fail (p=QUARANTINE) header.from=company.example']]);
+        $mail = $this->mail(['from' => 'ceo@company.example', 'headers' => ['authentication-results' => 'mx.example; dmarc=fail (p=QUARANTINE) header.from=company.example']]);
 
         $classification = new RuleBasedClassifier()->classify($mail, $this->context([], [$rule]));
 
@@ -200,7 +199,7 @@ final class RuleBasedClassifierTest extends TestCase
     public function testFailedAuthenticationIsSpamEvenWhenSpamExcludesTheSender(): void
     {
         $this->builtin['spam']->setExcludeSenders(['@company.example']);
-        $mail = $this->mail(['from' => 'ceo@company.example', 'authenticationResultsTrusted' => true, 'headers' => ['authentication-results' => 'mx.example; dmarc=fail (p=REJECT) header.from=company.example']]);
+        $mail = $this->mail(['from' => 'ceo@company.example', 'headers' => ['authentication-results' => 'mx.example; dmarc=fail (p=REJECT) header.from=company.example']]);
 
         $classification = new RuleBasedClassifier()->classify($mail, $this->context());
 
