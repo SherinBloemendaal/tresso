@@ -348,13 +348,14 @@ func (c *Client) discover(ctx context.Context, candidates []string) (Account, er
 		}
 		lastErr = err
 	}
-	// A candidate that could not answer now (a timeout, a 5xx) may be the right one: try again soon rather than
-	// telling the user there is none, or asking them to confirm another.
-	if temporary != nil {
-		return Account{}, temporary
-	}
+	// A server the user can confirm is offered, even when another candidate could not answer now: confirming is
+	// the user's way forward. Without one, a candidate that could not answer (a timeout, a 5xx) may be the right one:
+	// try again soon rather than telling the user there is none.
 	if unconfirmed != "" {
 		return Account{}, &ConfirmError{URL: unconfirmed}
+	}
+	if temporary != nil {
+		return Account{}, temporary
 	}
 	return Account{}, fmt.Errorf("%w (%v)", ErrNotCalDAV, lastErr)
 }
