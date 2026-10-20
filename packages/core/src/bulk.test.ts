@@ -61,8 +61,11 @@ describe('bulk action words', () => {
   })
 
   it('tell how far a run got', () => {
-    expect(bulkProgressText({ action: 'trash', status: 'running', conversations: 400, restored: 0 })).toBe('Moving to Trash: 400 conversations done')
-    expect(bulkProgressText({ action: 'trash', status: 'undoing', conversations: 400, restored: 20 })).toBe('Putting back: 20 messages so far')
+    expect(bulkProgressText({ action: 'trash', status: 'running', conversations: 400, restored: 0, waitingSince: null })).toBe('Moving to Trash: 400 conversations done')
+    expect(bulkProgressText({ action: 'trash', status: 'undoing', conversations: 400, restored: 20, waitingSince: null })).toBe('Putting back: 20 messages so far')
+    expect(bulkProgressText({ action: 'archive', status: 'running', conversations: 600, restored: 0, waitingSince: '2026-10-20T10:00:00+00:00' })).toBe(
+      'Archiving: 600 conversations done, waiting for the mail server to catch up',
+    )
   })
 
   it('say what an undo cannot put back', () => {
