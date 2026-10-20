@@ -84,7 +84,7 @@ const MailContext = createContext<Mail | null>(null)
  */
 export function MailProvider({ children }: { children: ReactNode }) {
   const auth = useAuth()
-  const [state, setState] = useState<MailState>({ userId: null, ready: false, version: 0, syncState: 'idle', syncError: null, live: false })
+  const [state, setState] = useState<MailState>({ userId: null, ready: false, version: 0, syncState: 'idle', syncError: null, live: false, pulls: 0 })
   const [lookupError, setLookupError] = useState<string | null>(null)
   const session = useMemo(
     () =>
@@ -222,7 +222,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
     },
     [todosApi, session],
   )
-  const { userId, ready, version, syncState, syncError, live } = state
+  const { userId, ready, version, syncState, syncError, live, pulls } = state
   const mail = useMemo<Mail>(
     () => ({
       userId,
@@ -231,6 +231,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
       syncState,
       syncError: syncError ?? lookupError,
       live,
+      pulls,
       mailAccounts,
       folders,
       act,
@@ -252,7 +253,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
       makeTodo,
       setTodoDone,
     }),
-    [userId, touch, ready, version, syncState, syncError, lookupError, live, mailAccounts, folders, act, inbox, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, setTodoDone],
+    [userId, touch, ready, version, syncState, syncError, lookupError, live, pulls, mailAccounts, folders, act, inbox, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, setTodoDone],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>
