@@ -458,6 +458,9 @@ final readonly class EventEditor
         $newEnd = self::shiftTime($newStart, $length, $newStart->timeZone);
 
         $fresh = !$sameKind || self::normalizeRule($changes->rrule) !== self::normalizeRule($oldRule);
+        // Moved to another day with the rule left alone: the weekdays and days of the month move along, so the series
+        // repeats on the new day, and its exceptions, moved by the same shift, still match.
+        $rule = $fresh ? $changes->rrule : self::shiftRule($changes->rrule, self::daysBetween($anchor, $changes->start), $changes->start);
         $overrides = array_filter(CalendarDocument::events($vcalendar), static fn (VEvent $event): bool => '' !== CalendarDocument::recurrenceKey($event));
         if ($fresh) {
             foreach ($overrides as $override) {
@@ -467,7 +470,13 @@ final readonly class EventEditor
             $master->remove('RDATE');
         } elseif (0 !== $shift || $changes->start->timeZone !== $masterStart->timeZone) {
             foreach ($overrides as $override) {
+                $atItsTime = self::atItsOwnTime($override);
                 self::shiftProperty(Props::dateTime($override, 'RECURRENCE-ID'), $shift, $masterStart->timeZone, $changes->start->timeZone, $vcalendar);
+                if ($atItsTime) {
+                    // Changed in other ways only: it moves with the series.
+                    self::shiftProperty(Props::dateTime($override, 'DTSTART'), $shift, $masterStart->timeZone, $changes->start->timeZone, $vcalendar);
+                    self::shiftProperty(Props::dateTime($override, 'DTEND'), $shift, $masterStart->timeZone, $changes->start->timeZone, $vcalendar);
+                }
             }
             foreach ([...Props::dateTimes($master, 'EXDATE'), ...Props::dateTimes($master, 'RDATE')] as $property) {
                 self::shiftProperty($property, $shift, $masterStart->timeZone, $changes->start->timeZone, $vcalendar);
@@ -475,7 +484,7 @@ final readonly class EventEditor
         }
 
         $this->write($master, new EventChanges(
-            $changes->summary, $changes->description, $changes->location, $changes->url, $newStart, $newEnd, $changes->rrule,
+            $changes->summary, $changes->description, $changes->location, $changes->url, $newStart, $newEnd, $rule,
             $changes->status, $changes->transparency, $changes->visibility, $changes->attendees, $changes->reminders, $changes->conferenceUrl,
             $changes->useDefaultReminders, $changes->travelMinutes, $changes->important,
         ), $vcalendar, true, $self);
@@ -508,6 +517,16 @@ final readonly class EventEditor
 
         $sameKind = $occurrence->isDate === $changes->start->isDate;
         $shift = $sameKind ? self::wallClockSeconds($changes->start) - self::wallClockSeconds($occurrence) : 0;
+        // The new series starts where the occurrence belongs in the series, moved as far as the user moved what was
+        // shown: from a moved occurrence its override's own time is not the series' time. Its override goes along,
+        // moved by the same shift, so it still matches its occurrence.
+        if ($sameKind) {
+            $start = self::shiftTime($this->keyStart($master, $key, $vcalendar), $shift, $changes->start->timeZone);
+            $end = self::shiftTime($start, self::wallClockSeconds($changes->end) - self::wallClockSeconds($changes->start), $changes->end->timeZone);
+        } else {
+            $start = $changes->start;
+            $end = $changes->end;
+        }
 
         foreach (CalendarDocument::events($vcalendar) as $override) {
             $overrideKey = CalendarDocument::recurrenceKey($override);
@@ -520,7 +539,13 @@ final readonly class EventEditor
             }
             $moved = clone $override;
             Props::set($moved, 'UID', $uid);
+            $atItsTime = self::atItsOwnTime($moved);
             self::shiftProperty(Props::dateTime($moved, 'RECURRENCE-ID'), $shift, $occurrence->timeZone, $changes->start->timeZone, $next);
+            if (($overrideKey === $key || $atItsTime) && 0 !== $shift) {
+                // The occurrence the user edited shows where they put it; others not moved before move along.
+                self::shiftProperty(Props::dateTime($moved, 'DTSTART'), $shift, $occurrence->timeZone, $changes->start->timeZone, $next);
+                self::shiftProperty(Props::dateTime($moved, 'DTEND'), $shift, $occurrence->timeZone, $changes->start->timeZone, $next);
+            }
             $next->add($moved);
         }
         foreach (['EXDATE', 'RDATE'] as $name) {
@@ -539,12 +564,15 @@ final readonly class EventEditor
         self::touch($master, true);
 
         $rule = $changes->rrule;
-        if (null !== $remaining && self::normalizeRule($rule) === self::normalizeRule($oldRule)) {
-            $rule = self::withCount((string) $oldRule, $remaining);
+        if (self::normalizeRule($rule) === self::normalizeRule($oldRule)) {
+            if (null !== $remaining) {
+                $rule = self::withCount((string) $oldRule, $remaining);
+            }
+            $rule = $sameKind ? self::shiftRule($rule, self::daysBetween($occurrence, $changes->start), $changes->start) : $rule;
         }
         Props::set($newMaster, 'SEQUENCE', 0);
         $this->write($newMaster, new EventChanges(
-            $changes->summary, $changes->description, $changes->location, $changes->url, $changes->start, $changes->end, $rule,
+            $changes->summary, $changes->description, $changes->location, $changes->url, $start, $end, $rule,
             $changes->status, $changes->transparency, $changes->visibility, $changes->attendees, $changes->reminders, $changes->conferenceUrl,
             $changes->useDefaultReminders, $changes->travelMinutes, $changes->important,
         ), $next, true, $self);
@@ -648,6 +676,13 @@ final readonly class EventEditor
         if (null !== $override) {
             return EventReader::time(self::dtStart($override), $vcalendar);
         }
+
+        return $this->keyStart($master, $key, $vcalendar);
+    }
+
+    /** Where the occurrence with this key belongs in the series: its recurrence id as a time of the series. */
+    private function keyStart(VEvent $master, string $key, VCalendar $vcalendar): EventTime
+    {
         $masterStart = EventReader::time(self::dtStart($master), $vcalendar);
         $instant = RecurrenceKey::require($key);
         if ($masterStart->isDate) {
@@ -826,6 +861,81 @@ final readonly class EventEditor
     private static function wallClockSeconds(EventTime $time): int
     {
         return new \DateTimeImmutable(self::wallClock($time)->format('Y-m-d H:i:s'), new \DateTimeZone('UTC'))->getTimestamp();
+    }
+
+    /** Whether an override still starts at the time of the occurrence it changes (it changed other things). */
+    private static function atItsOwnTime(VEvent $override): bool
+    {
+        $recurrenceId = Props::dateTime($override, 'RECURRENCE-ID');
+        $start = Props::dateTime($override, 'DTSTART');
+        if (null === $recurrenceId || null === $start || $recurrenceId->hasTime() !== $start->hasTime()) {
+            return false;
+        }
+        $utc = new \DateTimeZone('UTC');
+
+        return $recurrenceId->getDateTime($utc)->getTimestamp() === $start->getDateTime($utc)->getTimestamp();
+    }
+
+    /** Calendar days from one time's date to another's, on their clocks. */
+    private static function daysBetween(EventTime $from, EventTime $to): int
+    {
+        $day = static fn (EventTime $time): int => (int) floor(self::wallClock($time)->setTime(0, 0)->getTimestamp() / 86400);
+
+        return $day($to) - $day($from);
+    }
+
+    /**
+     * A rule moved with its series by a number of days: a single weekday moves along (BYDAY=MO by one day is BYDAY=TU,
+     * while a list such as every weekday stays as it is), and
+     * a monthly or yearly rule takes the day of the month, the week of the month or the month of the day it moved
+     * to. Parts that cannot move as one (several days of the month, BYSETPOS) are left as they are.
+     */
+    private static function shiftRule(?string $rule, int $days, EventTime $to): ?string
+    {
+        if (null === $rule || 0 === $days) {
+            return $rule;
+        }
+        $codes = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+        $target = self::wallClock($to);
+        $parts = explode(';', $rule);
+        $freq = '';
+        foreach ($parts as $part) {
+            if (str_starts_with(strtoupper($part), 'FREQ=')) {
+                $freq = strtoupper(substr($part, 5));
+            }
+        }
+        $weekday = $codes[(int) $target->format('w')];
+        $week = intdiv((int) $target->format('j') - 1, 7) + 1;
+        $isLast = $target->modify('+7 days')->format('n') !== $target->format('n');
+
+        foreach ($parts as $index => $part) {
+            [$name, $value] = array_pad(explode('=', $part, 2), 2, '');
+            $name = strtoupper($name);
+            if ('BYDAY' === $name) {
+                $weekdays = explode(',', strtoupper($value));
+                if ('MONTHLY' === $freq || 'YEARLY' === $freq) {
+                    if (1 === \count($weekdays) && 1 === preg_match('/^([+-]?\d+)[A-Z]{2}$/', $weekdays[0], $match)) {
+                        $ordinal = ((int) $match[1] < 0 && $isLast) || 5 === $week ? -1 : $week;
+                        $parts[$index] = 'BYDAY='.$ordinal.$weekday;
+                    }
+                    continue;
+                }
+                // One weekday moves with the series. A list of them (every weekday, Monday and Thursday) stays: moving one
+                // occurrence by a day does not make Saturday a weekday.
+                if (1 === \count($weekdays) && 1 === preg_match('/^([+-]?\d+)?([A-Z]{2})$/', $weekdays[0], $match)) {
+                    $at = array_search($match[2], $codes, true);
+                    if (false !== $at) {
+                        $parts[$index] = 'BYDAY='.$match[1].$codes[(($at + $days) % 7 + 7) % 7];
+                    }
+                }
+            } elseif ('BYMONTHDAY' === $name && !str_contains($value, ',') && (int) $value > 0) {
+                $parts[$index] = 'BYMONTHDAY='.$target->format('j');
+            } elseif ('BYMONTH' === $name && 'YEARLY' === $freq && !str_contains($value, ',')) {
+                $parts[$index] = 'BYMONTH='.$target->format('n');
+            }
+        }
+
+        return implode(';', $parts);
     }
 
     private static function normalizeRule(?string $rule): ?string

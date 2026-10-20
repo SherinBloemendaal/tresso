@@ -135,6 +135,110 @@ final class CalendarEventApiTest extends DatabaseTestCase
         self::assertSame('FREQ=WEEKLY;UNTIL=20261102T075959Z', $original['recurrence']);
     }
 
+    public function testThisAndFollowingFromAMovedOccurrenceKeepsTheSeriesTimeAndCarriesTheOverride(): void
+    {
+        $series = $this->create(['recurrence' => 'FREQ=WEEKLY;COUNT=4']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=this&recurrenceId=20261026T080000Z', self::event($this->calendarId, [
+            'start' => ['dateTime' => '2026-10-27T14:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-27T14:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        // From the moved occurrence, shown on Tuesday at 14:00, only the title changes for this and the later ones.
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=following&recurrenceId=20261026T080000Z', self::event($this->calendarId, [
+            'summary' => 'Weekly sync, renamed',
+            'recurrence' => 'FREQ=WEEKLY;COUNT=4',
+            'start' => ['dateTime' => '2026-10-27T14:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-27T14:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        $occurrences = $this->occurrences($this->kim, '2026-10-01T00:00:00+00:00', '2026-12-01T00:00:00+00:00');
+        self::assertSame(
+            ['2026-10-19T07:00:00+00:00', '2026-10-27T13:00:00+00:00', '2026-11-02T08:00:00+00:00', '2026-11-09T08:00:00+00:00'],
+            array_map(static fn (array $o): ?string => \is_array($o['start']) && \is_string($o['start']['dateTime'] ?? null) ? $o['start']['dateTime'] : null, $occurrences),
+            'The rest of the series stays on Monday at 09:00, and the moved Tuesday shows once.',
+        );
+        self::assertSame(['Weekly sync, renamed', 'Weekly sync, renamed'], \array_slice(array_column($occurrences, 'summary'), 2));
+        self::assertSame([true, true, true], array_column(\array_slice($occurrences, 1), 'recurring'));
+    }
+
+    public function testMovingAllEventsToAnotherWeekdayMovesTheRuleAndKeepsTheExceptions(): void
+    {
+        $series = $this->create(['recurrence' => 'FREQ=WEEKLY;BYDAY=MO;COUNT=4']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=this&recurrenceId=20261102T080000Z', self::event($this->calendarId, [
+            'summary' => 'Weekly sync, one off',
+            'start' => ['dateTime' => '2026-11-02T09:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-11-02T09:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        // Monday 26 October, with the rule untouched, is moved to Tuesday for all events.
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=all&recurrenceId=20261026T080000Z', self::event($this->calendarId, [
+            'recurrence' => 'FREQ=WEEKLY;BYDAY=MO;COUNT=4',
+            'start' => ['dateTime' => '2026-10-27T09:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-27T09:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertSame('FREQ=WEEKLY;BYDAY=TU;COUNT=4', $this->decodedResponse()['recurrence']);
+
+        $occurrences = $this->occurrences($this->kim, '2026-10-01T00:00:00+00:00', '2026-12-01T00:00:00+00:00');
+        self::assertSame(
+            [['Weekly sync', '2026-10-20T07:00:00+00:00'], ['Weekly sync', '2026-10-27T08:00:00+00:00'], ['Weekly sync, one off', '2026-11-03T08:00:00+00:00'], ['Weekly sync', '2026-11-10T08:00:00+00:00']],
+            array_map(static fn (array $o): array => [$o['summary'], \is_array($o['start']) ? $o['start']['dateTime'] : null], $occurrences),
+        );
+    }
+
+    public function testMovingAllEventsOfEveryWeekdayKeepsTheWeekdays(): void
+    {
+        $series = $this->create(['recurrence' => 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;COUNT=10']);
+        // Monday 19 October dragged to Tuesday for all events: the series starts a day later, still on weekdays.
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=all&recurrenceId=20261019T070000Z', self::event($this->calendarId, [
+            'recurrence' => 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;COUNT=10',
+            'start' => ['dateTime' => '2026-10-20T09:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-20T09:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertSame('FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;COUNT=10', $this->decodedResponse()['recurrence']);
+
+        $days = array_map(static fn (array $o): string => \is_array($o['start']) && \is_string($o['start']['dateTime'] ?? null) ? new \DateTimeImmutable($o['start']['dateTime'])->setTimezone(new \DateTimeZone('Europe/Amsterdam'))->format('D') : '', $this->occurrences($this->kim, '2026-10-01T00:00:00+00:00', '2026-12-01T00:00:00+00:00'));
+        self::assertNotContains('Sat', $days);
+        self::assertNotContains('Sun', $days);
+        self::assertCount(10, $days);
+    }
+
+    public function testMovingAllEventsOfADailySeriesKeepsItsWeekdays(): void
+    {
+        $series = $this->create(['recurrence' => 'FREQ=DAILY;BYDAY=MO,WE,FR;COUNT=6']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=all&recurrenceId=20261019T070000Z', self::event($this->calendarId, [
+            'recurrence' => 'FREQ=DAILY;BYDAY=MO,WE,FR;COUNT=6',
+            'start' => ['dateTime' => '2026-10-21T09:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-21T09:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertSame('FREQ=DAILY;BYDAY=MO,WE,FR;COUNT=6', $this->decodedResponse()['recurrence']);
+    }
+
+    public function testMovingThisAndFollowingToAnotherDayMovesAMonthlyRule(): void
+    {
+        $series = $this->create([
+            'recurrence' => 'FREQ=MONTHLY;BYDAY=3MO;COUNT=4',
+            'start' => ['dateTime' => '2026-09-21T09:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-09-21T09:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]);
+        // The third Monday of October moves to the third Tuesday, and every later one with it.
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=following&recurrenceId=20261019T070000Z', self::event($this->calendarId, [
+            'recurrence' => 'FREQ=MONTHLY;BYDAY=3MO;COUNT=4',
+            'start' => ['dateTime' => '2026-10-20T09:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-20T09:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+        self::assertSame('FREQ=MONTHLY;BYDAY=3TU;COUNT=3', $this->decodedResponse()['recurrence']);
+
+        $starts = array_map(static fn (array $o): ?string => \is_array($o['start']) && \is_string($o['start']['dateTime'] ?? null) ? $o['start']['dateTime'] : null, $this->occurrences($this->kim, '2026-09-01T00:00:00+00:00', '2027-01-01T00:00:00+00:00'));
+        self::assertSame(['2026-09-21T07:00:00+00:00', '2026-10-20T07:00:00+00:00', '2026-11-17T08:00:00+00:00', '2026-12-15T08:00:00+00:00'], $starts);
+    }
+
     public function testEditingAllOccurrencesMovesTheSeriesAndItsExceptions(): void
     {
         $series = $this->create(['recurrence' => 'FREQ=WEEKLY;COUNT=3']);
@@ -452,6 +556,31 @@ final class CalendarEventApiTest extends DatabaseTestCase
         $marked = array_column($delta['calendarEvents'], 'thisAndFuture', 'summary');
         ksort($marked);
         self::assertSame(['Sync' => false, 'Sync, later' => true, 'Sync, moved' => false], $marked);
+    }
+
+    public function testReprojectingGivesRowsFromBeforeTheColumnTheirRange(): void
+    {
+        $calendar = static::getContainer()->get(\App\Repository\CalendarRepository::class)->find($this->calendarId);
+        self::assertNotNull($calendar);
+        $ical = implode("\r\n", ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Test//EN',
+            'BEGIN:VEVENT', 'UID:old-range@test', 'DTSTAMP:20261019T080000Z', 'DTSTART:20261019T080000Z', 'DURATION:PT30M', 'RRULE:FREQ=DAILY;COUNT=5', 'SUMMARY:Sync', 'END:VEVENT',
+            'BEGIN:VEVENT', 'UID:old-range@test', 'DTSTAMP:20261019T080000Z', 'RECURRENCE-ID;RANGE=THISANDFUTURE:20261021T080000Z', 'DTSTART:20261021T090000Z', 'DURATION:PT30M', 'SUMMARY:Sync, later', 'END:VEVENT',
+            'END:VCALENDAR', '']);
+        $entityManager = static::getContainer()->get(\Doctrine\ORM\EntityManagerInterface::class);
+        $entityManager->wrapInTransaction(static fn () => static::getContainer()->get(\App\Calendar\CalendarStore::class)->save(new \App\Entity\CalendarObject($calendar, 'old-range@test', ''), \App\Calendar\ICalendar\CalendarDocument::parse($ical)));
+        // As a row projected before the column existed has it.
+        static::getContainer()->get(\Doctrine\DBAL\Connection::class)->executeStatement('UPDATE calendar_event SET this_and_future = false');
+        $entityManager->clear();
+
+        $tester = new \Symfony\Component\Console\Tester\CommandTester(new \Symfony\Bundle\FrameworkBundle\Console\Application($this->client->getKernel())->find('app:calendar:reproject'));
+        $tester->execute([]);
+        $tester->assertCommandIsSuccessful();
+
+        $delta = $this->getJson('/api/v1/sync/changes?since=0', $this->kim);
+        self::assertIsArray($delta['calendarEvents']);
+        $marked = array_column($delta['calendarEvents'], 'thisAndFuture', 'summary');
+        ksort($marked);
+        self::assertSame(['Sync' => false, 'Sync, later' => true], $marked);
     }
 
     public function testManagesLocalCalendars(): void
