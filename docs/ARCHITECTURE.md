@@ -597,12 +597,23 @@ the copy is still opening waits for it to be closed again before deleting it. Th
 drafts that exist only in the old IndexedDB copy (unsaved edits, messages whose outcome is pending) are carried over,
 each removed from the old copy once moved, and then that copy is removed.
 
-The desktop app notifies natively about mail that needs the user: a message that is unread, in an inbox and judged
-`do` or `delegate` for the first time, whether it arrived judged or was classified later (the mail store's `apply`
-records these arrivals, `apps/web/src/mail/mailNotifications.ts` words them). Nothing pops up for the mail synced at
-start or while the app has focus, nor for old mail reaching the device late (received more than 15 minutes before
-notifications were switched on), and more than three at once become one summary. The browser build shows none: the
-browser is meant to get Web Push from the server (see the table above), which is not built yet.
+The desktop app notifies natively about mail that needs the user. Which mail that is, and when, the server decides
+(see "New mail" under Reminders and notifications): the app shows the mail notifications the delta brings
+(`mailNotifications`) that were delivered to the desktop channel, so it follows the user's channels, holds and quiet
+hours, and the phone and the desktop never disagree about a message. `apps/web/src/mail/mailNotifications.ts` picks and
+words them. Nothing pops up for what the first pull after start brings, while the app has focus, or for notifications
+delivered more than 15 minutes before notifications were switched on (a copy rebuilt, a device that was offline); each
+is shown once, and more than three at once become one summary. A click brings the window to the front and opens the
+conversation (`/thread/{id}`), through the notification plugin's action listener, which the main window may register,
+unminimize and focus for. The app never subscribes to Web Push, so a desktop gets each notification once.
+
+Browsers get Web Push from the server. Settings > Notifications turns it on per browser: the browser asks the user,
+subscribes with the server's VAPID key and registers as a `web_push` device (and turning it off removes the device and
+the subscription). A service worker (`apps/web/public/push-worker.js`) shows the pushes, also while no Tresso tab is
+open, and a click opens what it is about in an open tab (which routes there itself) or in a new one. The same page
+chooses where new mail notifies (phone, desktop and browsers, email: `channelsByKind.mail`) and whether meetings hold
+it (`holdMailInMeetings`). `/thread/{id}`, where every mail notification leads, opens the conversation in the Unified
+Inbox.
 
 The mobile app (Expo Router, screens in `apps/mobile/src/app`) is the `mobile` OAuth client with the same redirect
 URI. expo-auth-session opens the authorization page in the system's authentication browser
@@ -639,6 +650,15 @@ written in tiptap, as on the web, running in a web view: `apps/mobile/editor/edi
 (`editorProtocol.ts`); its page has a Content-Security-Policy that allows no connection, and links may only be web
 and mail addresses. Leaving the screen keeps the draft; Cancel asks whether to keep or delete one with content.
 
+Push on the phone (`apps/mobile/src/notifications`): at every launch the app creates the Android channels the API's
+pushes name (`reminders`, `mail` and their `_silent` twins). Once signed in, it asks the user for permission and
+registers its Expo push token as an `expo` device, again when the token changes; the token needs the EAS project id
+in the build (`extra.eas.projectId`, which `eas init` writes to `app.json`), and without it the app says that this
+phone cannot get notifications. A sign-out removes the device first, so the user's notifications stop coming; when the
+server cannot be told, the app signs out anyway and says so (the next sign-in on the phone takes the device over). A
+tapped mail notification opens its conversation (`/thread/[id]`). While the app is open, mail goes to the list without
+a banner or sound (the user is in their mail already), and reminders show as a banner unless they came silently.
+
 Shared TypeScript lives in `packages/core` (MIT): domain types, the OAuth flow, and the client side of the sync
 protocol, so every client syncs the same way:
 
@@ -654,7 +674,7 @@ IndexedDB (`apps/web/src/mail/db.ts`), the desktop app and the phone in SQLite (
 deleted on sign-out after it is closed. Next to the synced records each stores a summary per thread (senders,
 snippet, unread count, whether it is in an inbox), recomputed whenever one of its messages changes, so the inbox lists
 read a few dozen rows through an index however much mail is stored, plus the people the user exchanged mail with and
-the drafts. How arrivals, contacts and drafts follow the delta is shared (`packages/core/src/store/rules.ts`), and
+the drafts. How contacts and drafts follow the delta is shared (`packages/core/src/store/rules.ts`), and
 both stores run the same tests (`describeMailStore`, exported as `@tresso/core/testing`; the SQLite store on sql.js).
 
 The SQLite store writes one change at a time (a device may give each exclusive transaction its own connection without
@@ -1023,7 +1043,7 @@ after. Everything lives in `apps/api/src/Notification`.
   the address in the settings (or the sign-in address) from the system sender `NOTIFICATIONS_FROM`. Reminders carry
   their own channels; other kinds use the user's choice per kind (`channelsByKind` in the notification settings,
   keyed by kind name so other features add their own), else the kind's default: leave-now on the phone, briefs and
-  follow-ups on the desktop. Devices register with `POST /api/v1/notification-devices`:
+  follow-ups on the desktop, new mail on the phone and the desktop. Devices register with `POST /api/v1/notification-devices`:
   - Web push (`web_push`): the browser's subscription. Messages are encrypted per RFC 8291 (aes128gcm) and signed
     with VAPID (RFC 8292, ES256) on ext-openssl, checked against the RFC's own example. Endpoints come from clients,
     so they must be https and requests refuse private networks. Keys come from `WEB_PUSH_PUBLIC_KEY` and
@@ -1032,11 +1052,12 @@ after. Everything lives in `apps/api/src/Notification`.
   - Mobile (`expo`): the Expo push token; sent through Expo's push service (`EXPO_ACCESS_TOKEN` when the project
     requires it). A `PushMessage` names its Android notification channel; the phone creates `reminders` (calendar
     notifications, the default) at high importance (a banner, with sound) and `reminders_silent` at low importance without
-    sound for silent deliveries, at every launch (on Android the channel decides sound). Mail notifications (phase
-    3.7) add `mail` and `mail_silent` the same way. Expo's receipts are read some minutes after each
+    sound for silent deliveries, at every launch (on Android the channel decides sound). Mail notifications go to
+    `mail` and `mail_silent`, which the phone creates the same way. Expo's receipts are read some minutes after each
     send, and phones they report as `DeviceNotRegistered` are removed.
   - Desktop (`desktop`): no push service; the delivered notification reaches the running app through the delta
-    (`notifications`) and the realtime ping that comes with every change, and the app shows it natively.
+    (`notifications`, and `mailNotifications` for mail) and the realtime ping that comes with every change, and the
+    app shows it natively.
   - A subscription the push service reports gone (404, 410, `DeviceNotRegistered`) is removed.
 - **Quiet hours, working hours and focus** (`/api/v1/notification-settings`), in the user's time zone:
   - Quiet hours per day (past midnight they end the next day). A notification that fires in quiet hours for an
@@ -1051,8 +1072,10 @@ after. Everything lives in `apps/api/src/Notification`.
   - Focus blocks (busy, no one else, titled "Focus..."): while the user is in one, notifications wait until it ends
     (`holdDuringFocus`); reminders of meetings with others and leave-now come through. With `focusDuringBusy`,
     while the user is in another busy event they take part in, notifications of events they are invited to are
-    delivered silently; their own meetings and leave-now alerts break through. `holdMailInMeetings` is kept for
-    mail notifications (phase 3.7).
+    delivered silently; their own meetings and leave-now alerts break through. Mail notifications wait for the end
+    of a focus block too, and for the end of a meeting the user takes part in (busy, with other people;
+    `holdMailInMeetings`, on by default); in quiet hours and, with `focusDuringBusy`, in other busy events they come
+    silently.
   - Important events (`important`, stored as `PRIORITY:1`; `PRIORITY` 1 to 4 from other clients counts too) come
     through quiet hours, working hours and focus.
 - **Scheduling:** `scheduled_notification` holds one row per occurrence, kind and reminder, planned for the next 8
@@ -1072,8 +1095,23 @@ after. Everything lives in `apps/api/src/Notification`.
   doubles each time (at most 5 attempts), and one that never reported back (a crash) after 10 minutes; a send that
   went out never is. A retry reaches only the targets of the first delivery, not devices registered since. The sweep
   delivers each notification on its own: one that fails is logged and moved 5 minutes later (dropped once its event
-  is 2 hours past), and the other notifications, the receipts and the planning go on. Calendar notifications use the key `calendar:{notification}:{round}`;
-  any other feature (mail, phase 3.7) sends through the same dispatcher with keys of its own.
+  is 2 hours past), and the other notifications, the receipts and the planning go on. Calendar notifications use the key `calendar:{notification}:{round}`,
+  mail notifications `mail:{notification}`; any other feature sends through the same dispatcher with keys of its own.
+- **New mail:** only mail that needs the user notifies: a message judged `do` or `delegate` for the first time
+  (when it arrived, or when classification ran again), unread, in an inbox, and received in the last hour (an
+  account's history being fetched is not news). Classification hands every message it judges to the `MailNotifier`
+  in its own transaction, which keeps one `mail_notification` per message (unique on the message, under the user's
+  classification lock), so a message notifies at most once, whatever runs again. After the commit a
+  `SendMailNotification` (transport `push`) delivers it under a lock on the row: the message must still need the user
+  (unread, `do` or `delegate`, in an inbox) or the notification is dropped; a focus block or a meeting holds it until
+  its end (a delayed message comes back then); quiet hours and other busy events make it silent; no channel chosen
+  for `mail` drops it. It goes out with the sender as title, the subject (with "To hand over: " for `delegate`) and
+  the start of the text as body, `/thread/{thread}` to open, and the Android `mail` channel. The claim is part of the
+  transaction that marks it delivered, as for calendar notifications, and a second scheduler task
+  (`SweepMailNotifications`, every minute) delivers what a lost message missed and sends failed or stuck deliveries
+  again. Nothing is delivered more than 2 hours after its time. Delivered ones reach the delta (`mailNotifications`:
+  the message, thread, title, body, channels and whether it was silent, from the last week), which is how the desktop
+  app shows them; waiting and dropped ones never do.
 - **Lateness:** nothing is delivered more than 2 hours after its time, nor a reminder more than 15 minutes after its
   event started (or after its own later time, for alarms relative to the end and snoozes); follow-ups are the
   exception. A replan that moves a notification into the past drops it.
@@ -1100,7 +1138,7 @@ after. Everything lives in `apps/api/src/Notification`.
 - **Devices and addresses:** a push endpoint belongs to one user: registering it removes it from whoever had it
   before (someone signed out on that phone). Registrations of one endpoint take turns (an advisory lock), so two at
   once do not fail on its unique key. Known limit: Expo gives no proof that the caller holds the phone, so anyone
-  who learns another user's Expo push token can register it and receive that user's reminders until the owner's app
+  who learns another user's Expo push token can register it and receive that user's reminders and mail notifications until the owner's app
   registers again (each launch). Binding a registration to a challenge sent to the device is a later step (C4, with
   the phone's push registration); web push endpoints are unguessable capability URLs. Email notifications go only to the user's sign-in address or one of
   their mail accounts' addresses.

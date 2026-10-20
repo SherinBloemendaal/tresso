@@ -114,7 +114,9 @@ Tresso Cloud: AI classification with feedback learning, automatic todo extractio
   their messages
 - [x] 3.5 Tauri desktop with a local SQLite cache instead of the web view's IndexedDB
 - [x] 3.6 Mobile message actions: read on open, archive, trash, unread and flag, with the exact undo
-- [ ] 3.7 Mobile compose and push (only `do` and `delegate` by default)
+- [x] 3.7 Mobile compose and push: new mail judged `do` or `delegate` (unread, in an inbox) reaches the phone, the
+  desktop app and browsers once, held in meetings and focus blocks and silent in quiet hours; a tap opens the
+  conversation
 
 Tresso Cloud: teams, shared inboxes, assignments, internal comments, delegation rules, workload.
 
