@@ -43,6 +43,7 @@ import {
 } from '@tresso/core'
 import type { Contact, Conversation, Draft, ListScope } from '@/mail/db'
 import { deleteMailStore, openMailStore } from '@/mail/store'
+import type { ClosedElsewhere } from '@/mail/db'
 import { forTheDesktop, mailNotifications, overdueNotifications } from '@/mail/mailNotifications'
 import { notifier } from '@/platform/notifier'
 import { useAuthStore } from '@/stores/auth'
@@ -99,6 +100,11 @@ export const useMailStore = defineStore('mail', () => {
   const hasMore = ref(false)
   const syncState = ref<SyncState>('idle')
   const syncError = ref<string | null>(null)
+  /**
+   * Another tab upgraded the copy to a newer Tresso: this tab's code cannot open it, so it says to reload. Null while
+   * nothing of the kind happened.
+   */
+  const updatedElsewhere = ref<string | null>(null)
   const live = ref(false)
   const ready = ref(false)
   /**
@@ -150,7 +156,7 @@ export const useMailStore = defineStore('mail', () => {
     openings.add(opening)
     let database: MailStore
     try {
-      database = await openMailStore(forUserId)
+      database = await openMailStore(forUserId, (reason) => void closedElsewhere(mine, forUserId, reason))
       if (mine !== generation) {
         await database.close()
         return
@@ -287,6 +293,27 @@ export const useMailStore = defineStore('mail', () => {
     const taken = overdue.value
     overdue.value = []
     return taken
+  }
+
+  /**
+   * The copy closed under this tab. Upgraded by a newer Tresso in another tab: this tab stops and says to reload.
+   * Deleted (a sign-out in another tab) or closed by the browser: this tab opens a fresh copy and syncs it again.
+   */
+  async function closedElsewhere(opened: number, forUserId: string, reason: ClosedElsewhere): Promise<void> {
+    if (opened !== generation) {
+      return
+    }
+    await stop()
+    if (reason === 'upgraded') {
+      updatedElsewhere.value = 'Tresso was updated in another tab. Reload this tab to keep using it.'
+      return
+    }
+    try {
+      await start(forUserId)
+    } catch (error) {
+      syncState.value = 'error'
+      syncError.value = `The mail on this device was removed elsewhere and could not be opened again: ${error instanceof Error ? error.message : String(error)}`
+    }
   }
 
   /** Stops syncing and closes the copy; a start still under way gives up. */
@@ -675,6 +702,7 @@ export const useMailStore = defineStore('mail', () => {
     syncState,
     pulls,
     syncError,
+    updatedElsewhere,
     live,
     ready,
     start,

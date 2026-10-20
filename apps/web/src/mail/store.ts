@@ -1,15 +1,16 @@
 import { draftOnlyHere, SqliteMailStore, type MailStore } from '@tresso/core'
-import { databaseName, deleteMailDatabase, IndexedDbMailStore } from '@/mail/db'
+import { databaseName, deleteMailDatabase, IndexedDbMailStore, type ClosedElsewhere } from '@/mail/db'
 import { isDesktop } from '@/platform/desktop'
 import { deleteDesktopSql, openDesktopSql } from '@/platform/desktopSql'
 
 /**
  * Opens the user's mail copy: SQLite in the desktop app, IndexedDB in the browser. The first time the desktop app
  * opens one, drafts that exist only in the web view's old IndexedDB copy are carried over and that copy is removed.
+ * In the browser, `onClosedElsewhere` hears when another tab or the browser closes the copy under this tab.
  */
-export async function openMailStore(userId: string): Promise<MailStore> {
+export async function openMailStore(userId: string, onClosedElsewhere?: (reason: ClosedElsewhere) => void): Promise<MailStore> {
   if (!isDesktop) {
-    return IndexedDbMailStore.open(userId)
+    return IndexedDbMailStore.open(userId, onClosedElsewhere)
   }
   const store = await SqliteMailStore.open(await openDesktopSql(databaseName(userId)))
   try {
