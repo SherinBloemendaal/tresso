@@ -9,6 +9,11 @@ describe('smartInboxSchema', () => {
     expect(smartInboxSchema.safeParse(valid).success).toBe(true)
   })
 
+  it('delivers as mail comes unless batch delivery is ticked', () => {
+    expect(smartInboxSchema.parse(valid).batchDelivery).toBe(false)
+    expect(smartInboxSchema.parse({ ...valid, batchDelivery: true }).batchDelivery).toBe(true)
+  })
+
   it.each([
     ['a blank name', { name: '  ' }, 'name'],
     ['a bare domain', { includeSenders: ['supplier.example'] }, 'includeSenders.0'],

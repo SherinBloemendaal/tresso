@@ -8,6 +8,7 @@ import {
   inList,
   listFolders,
   mergeContact,
+  newerUnsubscription,
   peopleOn,
   sortSmartInboxes,
   stillAsClassified,
@@ -32,6 +33,7 @@ import {
   type SyncedSmartInbox,
   type SyncedThread,
   type SyncedTodo,
+  type SyncedUnsubscription,
   type Verdict,
 } from '@tresso/core'
 
@@ -44,7 +46,7 @@ export type Conversation = ConversationSummary
  * A conversation as IndexedDB keeps it: booleans and null cannot be index keys, so the list flags are numbers and a
  * missing smart inbox is '', which the lists read through indexes and so stay fast however much mail is stored.
  */
-interface StoredConversation extends Omit<ConversationSummary, 'inbox' | 'active' | 'smartInboxId'> {
+interface StoredConversation extends Omit<ConversationSummary, 'inbox' | 'active' | 'smartInboxId' | 'batchedAt'> {
   /** 1 when the inboxes list the thread (see ConversationSummary.inbox). */
   inbox: 0 | 1
   /** 1 when that thread is in an inbox and has unread mail. */
@@ -55,6 +57,8 @@ interface StoredConversation extends Omit<ConversationSummary, 'inbox' | 'active
   unreadActive: 0 | 1
   /** '' when the thread has no smart inbox (yet). */
   smartInboxId: string
+  /** 0 when no batch delivered the thread. */
+  batchedAt: number
 }
 
 function toSummary(stored: StoredConversation): ConversationSummary {
@@ -73,6 +77,8 @@ function toSummary(stored: StoredConversation): ConversationSummary {
     inbox: stored.inbox === 1,
     active: stored.active === 1,
     smartInboxId: stored.smartInboxId === '' ? null : stored.smartInboxId,
+    heldUntil: stored.heldUntil ?? null,
+    batchedAt: stored.batchedAt === 0 ? null : stored.batchedAt,
     verdict: stored.verdict,
     classificationReason: stored.classificationReason,
   }
@@ -101,18 +107,20 @@ interface MailSchema extends DBSchema {
       byAccountUnreadInbox: [string, number]
       bySmartInboxDate: [string, number, number]
       bySmartInboxUnread: [string, number]
+      byInboxBatchDate: [number, number, number]
     }
   }
   signatures: { key: string; value: SyncedSignature }
   smartInboxes: { key: string; value: SyncedSmartInbox }
   todos: { key: string; value: SyncedTodo; indexes: { byMessage: string; byThread: string } }
+  unsubscriptions: { key: string; value: SyncedUnsubscription; indexes: { byAccount: string } }
 }
 
 type Stores = StoreNames<MailSchema>[]
 type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
-const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes', 'todos']
-const VERSION = 6
+const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes', 'todos', 'unsubscriptions']
+const VERSION = 7
 
 export function databaseName(userId: string): string {
   return `tresso-mail-${userId}`
@@ -182,8 +190,19 @@ export class IndexedDbMailStore implements MailStore {
           todos.createIndex('byMessage', 'messageId')
           todos.createIndex('byThread', 'threadId')
         }
-        // Outgoing mail, contacts, signatures, drafts, smart inboxes and todos come from the delta: an existing copy
-        // syncs again from the start.
+        if (oldVersion < 7) {
+          database.createObjectStore('unsubscriptions', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+          const conversations = transaction.objectStore('conversations')
+          conversations.createIndex('byInboxBatchDate', ['inbox', 'batchedAt', 'lastMessageAt'])
+          if (oldVersion >= 1) {
+            // Stored before batched delivery: nothing was held or batched. The sync from the start below brings it.
+            for (let cursor = await conversations.openCursor(); cursor !== null; cursor = await cursor.continue()) {
+              await cursor.update({ ...cursor.value, heldUntil: null, batchedAt: 0 })
+            }
+          }
+        }
+        // Outgoing mail, contacts, signatures, drafts, smart inboxes, todos and unsubscriptions come from the delta:
+        // an existing copy syncs again from the start.
         if (oldVersion >= 1) {
           await transaction.objectStore('meta').delete('cursor')
         }
@@ -295,6 +314,9 @@ export class IndexedDbMailStore implements MailStore {
     for (const outgoing of page.outgoingMessages) {
       await tx.objectStore('outgoing').put(outgoing)
     }
+    for (const unsubscription of page.unsubscriptions ?? []) {
+      await tx.objectStore('unsubscriptions').put(unsubscription)
+    }
     for (const draft of page.drafts) {
       await applyDraft(tx, draft)
     }
@@ -394,7 +416,7 @@ export class IndexedDbMailStore implements MailStore {
     return this.list({ kind: 'inbox', mailAccountId }, limit)
   }
 
-  /** The threads of a list (an inbox or a smart inbox), newest first. */
+  /** The threads of a list, newest first; the batches by batch first (see MailStore.list). */
   async list(scope: ListScope, limit: number): Promise<ConversationSummary[]> {
     const tx = this.db.transaction('conversations')
     const conversations: ConversationSummary[] = []
@@ -513,6 +535,18 @@ export class IndexedDbMailStore implements MailStore {
   }
 
   /** Outgoing mail that is not settled: scheduled, on its way, or failed. Newest first. */
+  async unsubscriptions(): Promise<SyncedUnsubscription[]> {
+    return this.db.getAll('unsubscriptions')
+  }
+
+  async noteUnsubscription(unsubscription: SyncedUnsubscription): Promise<void> {
+    const tx = this.db.transaction('unsubscriptions', 'readwrite')
+    if (newerUnsubscription(await tx.store.get(unsubscription.id), unsubscription)) {
+      await tx.store.put(unsubscription)
+    }
+    await tx.done
+  }
+
   async outbox(): Promise<SyncedOutgoingMessage[]> {
     const all = await this.db.getAll('outgoing')
 
@@ -636,6 +670,10 @@ type ConversationStore = ReturnType<IDBPTransaction<MailSchema, ['conversations'
 
 /** A cursor over the threads of a list, newest first, through the index that covers it. */
 function openList(store: ConversationStore, scope: ListScope) {
+  if (scope.kind === 'batch') {
+    // batchedAt is 0 for conversations no batch delivered.
+    return store.index('byInboxBatchDate').openCursor(IDBKeyRange.bound([1, 1, -Infinity], [1, Infinity, Infinity]), 'prev')
+  }
   if (scope.kind === 'smartInbox') {
     return store.index('bySmartInboxDate').openCursor(IDBKeyRange.bound([scope.smartInboxId, 1, -Infinity], [scope.smartInboxId, 1, Infinity]), 'prev')
   }
@@ -674,7 +712,7 @@ async function deleteAccount(tx: WriteTx, accountId: string): Promise<void> {
       await tx.objectStore('drafts').put({ ...draft, mailAccountId: null })
     }
   }
-  for (const store of ['folders', 'threads', 'messages', 'conversations', 'outgoing'] as const) {
+  for (const store of ['folders', 'threads', 'messages', 'conversations', 'outgoing', 'unsubscriptions'] as const) {
     const index = tx.objectStore(store).index('byAccount')
     for (let cursor = await index.openCursor(accountId); cursor !== null; cursor = await cursor.continue()) {
       await cursor.delete()
@@ -709,6 +747,7 @@ async function refreshConversation(tx: WriteTx, threadId: string, lists: ListFol
   await tx.objectStore('conversations').put({
     ...summary,
     smartInboxId: summary.smartInboxId ?? '',
+    batchedAt: summary.batchedAt ?? 0,
     inbox: summary.inbox ? 1 : 0,
     unreadInbox: summary.inbox && summary.unreadCount > 0 ? 1 : 0,
     active: summary.active ? 1 : 0,

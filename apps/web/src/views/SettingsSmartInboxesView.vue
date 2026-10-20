@@ -3,13 +3,16 @@ import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { verdictLabel, type SenderRule, type SyncedSmartInbox } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
+import { useBatchesStore } from '@/stores/batches'
 import { useMailStore } from '@/stores/mail'
 import { useSmartInboxesStore } from '@/stores/smartInboxes'
+import AppIcon from '@/components/AppIcon.vue'
 import SmartInboxMark from '@/components/SmartInboxMark.vue'
 import VerdictChip from '@/components/VerdictChip.vue'
 
 const store = useSmartInboxesStore()
 const mail = useMailStore()
+const batches = useBatchesStore()
 
 const groups = computed(() => [
   { label: 'Built in', rows: store.smartInboxes.filter((s) => s.builtin !== null) },
@@ -63,7 +66,10 @@ async function forget(rule: SenderRule): Promise<void> {
   }
 }
 
-onMounted(loadRules)
+onMounted(() => {
+  void loadRules()
+  void batches.load()
+})
 </script>
 
 <template>
@@ -83,13 +89,14 @@ onMounted(loadRules)
         <tr>
           <th scope="col">Name</th>
           <th scope="col">Verdict</th>
+          <th scope="col">Batch delivery</th>
           <th scope="col"><span class="visually-hidden">Actions</span></th>
         </tr>
       </thead>
       <template v-for="group in groups" :key="group.label">
         <tbody v-if="group.rows.length > 0">
           <tr class="group-row">
-            <th scope="rowgroup" colspan="3">{{ group.label }}</th>
+            <th scope="rowgroup" colspan="4">{{ group.label }}</th>
           </tr>
           <tr v-for="smartInbox in group.rows" :key="smartInbox.id">
             <td>
@@ -102,6 +109,10 @@ onMounted(loadRules)
               </span>
             </td>
             <td><VerdictChip :verdict="smartInbox.verdict" /></td>
+            <td class="batched">
+              <AppIcon v-if="smartInbox.batchDelivery" name="clock" :size="16" label="In batches" />
+              <span v-else class="visually-hidden">As it comes</span>
+            </td>
             <td class="actions">
               <RouterLink :to="{ name: 'settings-smart-inbox', params: { smartInboxId: smartInbox.id } }" class="button button-quiet" :aria-label="`Edit ${smartInbox.name}`">
                 Edit
@@ -111,7 +122,11 @@ onMounted(loadRules)
         </tbody>
       </template>
     </table>
-    <p class="hint">Changes apply to new mail and the last 30 days.</p>
+    <p class="hint">
+      Changes apply to new mail and the last 30 days.
+      <template v-if="batches.timesLabel">Batch delivery holds mail and delivers it at {{ batches.timesLabel }}.</template>
+      <RouterLink :to="{ name: 'settings-batches' }">Change batch times</RouterLink>
+    </p>
 
     <section class="remembered" aria-labelledby="remembered-title">
       <h3 id="remembered-title">Remembered senders</h3>
@@ -222,6 +237,9 @@ h3 {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 420px;
+}
+.batched {
+  color: var(--ink-2);
 }
 .actions {
   text-align: right;

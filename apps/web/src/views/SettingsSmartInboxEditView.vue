@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
@@ -9,6 +9,7 @@ import FieldLabel from '@/forms/FieldLabel.vue'
 import { provideRequiredFields } from '@/forms/required'
 import { SMART_INBOX_INSTRUCTIONS_MAX, SMART_INBOX_NAME_MAX, smartInboxSchema, type SmartInboxValues } from '@/forms/smartInboxes'
 import { useMailStore } from '@/stores/mail'
+import { useBatchesStore } from '@/stores/batches'
 import { useSmartInboxesStore } from '@/stores/smartInboxes'
 import AppIcon from '@/components/AppIcon.vue'
 import SenderListField from '@/components/SenderListField.vue'
@@ -19,6 +20,7 @@ const route = useRoute()
 const router = useRouter()
 const store = useSmartInboxesStore()
 const mail = useMailStore()
+const batches = useBatchesStore()
 
 const id = computed(() => (typeof route.params.smartInboxId === 'string' ? route.params.smartInboxId : 'new'))
 const isNew = computed(() => id.value === 'new')
@@ -37,7 +39,7 @@ const VERDICT_HELP: Record<Verdict, string> = {
 
 const { defineField, handleSubmit, errors, values, meta, resetForm, setErrors } = useForm<SmartInboxValues>({
   validationSchema: toTypedSchema(smartInboxSchema),
-  initialValues: { name: '', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'do', autoCreateTodo: false },
+  initialValues: { name: '', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'do', autoCreateTodo: false, batchDelivery: false },
 })
 const [name] = defineField('name')
 const [instructions] = defineField('instructions')
@@ -52,6 +54,9 @@ watch(verdict, (next) => {
     autoCreateTodo.value = false
   }
 })
+const [batchDelivery] = defineField('batchDelivery')
+
+onMounted(() => void batches.load())
 
 function listError(path: 'includeSenders' | 'excludeSenders'): string | null {
   return Object.entries(errors.value).find(([field]) => field === path || field.startsWith(`${path}[`))?.[1] ?? null
@@ -60,7 +65,7 @@ function listError(path: 'includeSenders' | 'excludeSenders'): string | null {
 function saved(): SmartInboxValues {
   const smartInbox = existing.value
   if (smartInbox === null) {
-    return { name: '', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'do', autoCreateTodo: false }
+    return { name: '', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'do', autoCreateTodo: false, batchDelivery: false }
   }
 
   return {
@@ -70,6 +75,7 @@ function saved(): SmartInboxValues {
     excludeSenders: [...smartInbox.excludeSenders],
     verdict: smartInbox.verdict,
     autoCreateTodo: smartInbox.autoCreateTodo,
+    batchDelivery: smartInbox.batchDelivery ?? false,
   }
 }
 
@@ -108,6 +114,7 @@ function changes(current: SmartInboxValues): SmartInboxUpdate {
   if (!sameList(current.excludeSenders, original.excludeSenders)) changed.excludeSenders = current.excludeSenders
   if (current.verdict !== original.verdict) changed.verdict = current.verdict
   if (current.autoCreateTodo !== original.autoCreateTodo) changed.autoCreateTodo = current.autoCreateTodo
+  if (current.batchDelivery !== original.batchDelivery) changed.batchDelivery = current.batchDelivery
 
   return changed
 }
@@ -231,6 +238,16 @@ function saveShortcut(event: KeyboardEvent): void {
           :disabled="verdict !== 'do'"
           aria-describedby="auto-create-todo-help"
         />
+      </div>
+      <div class="switch-row">
+        <span class="switch-text">
+          <FieldLabel name="batchDelivery" tag="label" for="batch-delivery">Deliver in batches</FieldLabel>
+          <small id="batch-delivery-help" class="hint">
+            Holds matches until {{ batches.timesLabel ?? 'your next batch time' }}.
+            <RouterLink :to="{ name: 'settings-batches' }">Change batch times</RouterLink>
+          </small>
+        </span>
+        <input id="batch-delivery" v-model="batchDelivery" type="checkbox" role="switch" class="switch" aria-describedby="batch-delivery-help" />
       </div>
 
       <p v-if="error" class="form-error" role="alert">{{ error }}</p>

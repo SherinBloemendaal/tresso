@@ -19,6 +19,8 @@ export const smartInboxSchema = z
     verdict: z.enum(['do', 'delegate', 'know', 'none']),
     // A switch always has a value: not a field to fill in.
     autoCreateTodo: z.boolean().default(false),
+    /** A checkbox: off unless ticked, so never "required". */
+    batchDelivery: z.boolean().default(false),
   })
   .superRefine((values, context) => {
     if (values.autoCreateTodo && values.verdict !== 'do') {

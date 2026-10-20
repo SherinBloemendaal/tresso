@@ -19,6 +19,10 @@ const props = defineProps<{
   smartInboxCounts: Map<string, number>
   /** The smart inbox on screen; null when an inbox is. */
   smartInbox: string | null
+  /** Whether the batches are on screen. */
+  batches: boolean
+  /** When the next batch comes, e.g. "13:00"; null while unknown. */
+  nextBatch: string | null
   live: boolean
 }>()
 const emit = defineEmits<{ signOut: [] }>()
@@ -53,7 +57,7 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
     <button type="button" class="button button-primary compose" @click="compose.openNew()">Compose <kbd>C</kbd></button>
 
     <div class="group">
-      <RouterLink :to="{ name: 'unified' }" class="item" :aria-current="mailbox === null && smartInbox === null ? 'page' : undefined">
+      <RouterLink :to="{ name: 'unified' }" class="item" :aria-current="mailbox === null && smartInbox === null && !batches ? 'page' : undefined">
         <AppIcon name="inbox" />
         <span class="label">Unified Inbox</span>
         <span v-if="totalUnread > 0" class="count">{{ totalUnread }}<span class="visually-hidden"> unread</span></span>
@@ -87,6 +91,11 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         <span class="label">{{ item.name }}</span>
         <span v-if="(smartInboxCounts.get(item.id) ?? 0) > 0" class="count">{{ smartInboxCounts.get(item.id) }}<span class="visually-hidden"> unread</span></span>
       </RouterLink>
+      <RouterLink :to="{ name: 'batches' }" class="item smart" :aria-current="batches ? 'page' : undefined">
+        <AppIcon name="clock" :size="20" class="batches-icon" />
+        <span class="label">Batches</span>
+        <span v-if="nextBatch" class="count"><span class="visually-hidden">Next batch at </span>{{ nextBatch }}</span>
+      </RouterLink>
       <RouterLink :to="{ name: 'settings-smart-inbox', params: { smartInboxId: 'new' } }" class="add">+ New smart inbox</RouterLink>
     </div>
 
@@ -97,7 +106,7 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         :key="account.id"
         :to="{ name: 'account', params: { accountId: account.id } }"
         class="item account"
-        :aria-current="mailbox === account.id && smartInbox === null ? 'page' : undefined"
+        :aria-current="mailbox === account.id && smartInbox === null && !batches ? 'page' : undefined"
       >
         <SenderAvatar :sender="{ name: account.displayName, address: account.emailAddress }" :size="24" />
         <span class="account-text">
@@ -222,6 +231,10 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
 }
 .count {
   font-size: 12px;
+  color: var(--ink-2);
+}
+.batches-icon {
+  flex-shrink: 0;
   color: var(--ink-2);
 }
 .add {

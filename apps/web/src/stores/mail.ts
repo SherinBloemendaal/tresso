@@ -28,8 +28,11 @@ import {
   type SyncedSmartInbox,
   type SyncedThread,
   type SyncedTodo,
+  type SyncedUnsubscription,
   type ThreadClassification,
   type ThreadClassificationRequest,
+  type UnsubscribeRequest,
+  type Unsubscription,
   type Verdict,
 } from '@tresso/core'
 import type { Contact, Conversation, Draft, ListScope } from '@/mail/db'
@@ -59,18 +62,26 @@ export const useMailStore = defineStore('mail', () => {
   const unreadCounts = ref<Map<string, number>>(new Map())
   /** Outgoing mail that is scheduled, on its way or failed. */
   const outbox = ref<SyncedOutgoingMessage[]>([])
-  /** null: the Unified Inbox; otherwise one account's inbox. Ignored while a smart inbox is on screen. */
+  /** null: the Unified Inbox; otherwise one account's inbox. Ignored while a smart inbox or the batches are on screen. */
   const mailbox = ref<string | null>(null)
   /** The smart inbox on screen, or null for an inbox (see `mailbox`). */
   const smartInbox = ref<string | null>(null)
+  /** Whether the batches are on screen: what the batches delivered that is still in an inbox. */
+  const batches = ref(false)
   const smartInboxes = ref<SyncedSmartInbox[]>([])
   /** Threads with unread mail per smart inbox. */
   const smartInboxCounts = ref<Map<string, number>>(new Map())
   /** Every todo, open ones first in the user's order (see compareTodos). */
   const todos = ref<SyncedTodo[]>([])
-  const scope = computed<ListScope>(() =>
-    smartInbox.value === null ? { kind: 'inbox', mailAccountId: mailbox.value } : { kind: 'smartInbox', smartInboxId: smartInbox.value },
-  )
+  /** The user's unsubscribe requests, of every account. */
+  const unsubscriptions = ref<SyncedUnsubscription[]>([])
+  const scope = computed<ListScope>(() => {
+    if (batches.value) {
+      return { kind: 'batch' }
+    }
+
+    return smartInbox.value === null ? { kind: 'inbox', mailAccountId: mailbox.value } : { kind: 'smartInbox', smartInboxId: smartInbox.value }
+  })
   const listLimit = ref(LIST_STEP)
   const hasMore = ref(false)
   const syncState = ref<SyncState>('idle')
@@ -251,6 +262,7 @@ export const useMailStore = defineStore('mail', () => {
     smartInboxes.value = []
     smartInboxCounts.value = new Map()
     todos.value = []
+    unsubscriptions.value = []
     outbox.value = []
     await stopping?.stop()
     await database?.close()
@@ -272,7 +284,7 @@ export const useMailStore = defineStore('mail', () => {
     if (database === null) {
       return
     }
-    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts, nextTodos] = await Promise.all([
+    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts, nextTodos, nextUnsubscriptions] = await Promise.all([
       database.mailAccounts(),
       database.folders(),
       database.signatures(),
@@ -282,6 +294,7 @@ export const useMailStore = defineStore('mail', () => {
       database.smartInboxes(),
       database.unreadSmartInboxCounts(),
       database.todos(),
+      database.unsubscriptions(),
     ])
     todos.value = nextTodos
     smartInboxes.value = nextSmartInboxes
@@ -293,23 +306,37 @@ export const useMailStore = defineStore('mail', () => {
     hasMore.value = nextConversations.length > listLimit.value
     conversations.value = nextConversations.slice(0, listLimit.value)
     unreadCounts.value = nextCounts
+    unsubscriptions.value = nextUnsubscriptions
   }
 
   async function showMailbox(mailAccountId: string | null): Promise<void> {
-    if (mailbox.value === mailAccountId && smartInbox.value === null) {
+    if (mailbox.value === mailAccountId && smartInbox.value === null && !batches.value) {
       return
     }
     mailbox.value = mailAccountId
     smartInbox.value = null
+    batches.value = false
     listLimit.value = LIST_STEP
     await refresh()
   }
 
   async function showSmartInbox(smartInboxId: string): Promise<void> {
-    if (smartInbox.value === smartInboxId) {
+    if (smartInbox.value === smartInboxId && !batches.value) {
       return
     }
     smartInbox.value = smartInboxId
+    mailbox.value = null
+    batches.value = false
+    listLimit.value = LIST_STEP
+    await refresh()
+  }
+
+  async function showBatches(): Promise<void> {
+    if (batches.value) {
+      return
+    }
+    batches.value = true
+    smartInbox.value = null
     mailbox.value = null
     listLimit.value = LIST_STEP
     await refresh()
@@ -360,6 +387,27 @@ export const useMailStore = defineStore('mail', () => {
   /** The messages with these ids this device has, e.g. the emails todos link to. */
   async function messages(ids: string[]): Promise<SyncedMessage[]> {
     return ids.length === 0 ? [] : ((await db.value?.messages(ids)) ?? [])
+  }
+
+  /** The messages of each of these threads (e.g. the conversations on screen), oldest first per thread. */
+  async function threadMessages(threadIds: string[]): Promise<Map<string, SyncedMessage[]>> {
+    const loaded = await Promise.all(threadIds.map(async (threadId) => [threadId, (await thread(threadId))?.messages ?? []] as const))
+
+    return new Map(loaded)
+  }
+
+  /**
+   * Asks the server to unsubscribe from the sender of this message (one-click or by mail). Its answer is stored at
+   * once, so the button gives way to "pending" before the delta brings it. Throws when the server refuses, with its
+   * reason.
+   */
+  async function unsubscribe(messageId: string): Promise<Unsubscription> {
+    const request: UnsubscribeRequest = { messageId }
+    const result = await auth.send<Unsubscription>('POST', '/api/v1/unsubscriptions', request)
+    await db.value?.noteUnsubscription(result)
+    await refresh()
+
+    return result
   }
 
   /** Threads in the list on screen from any of these senders (lower-case addresses), loaded in the list or not. */
@@ -537,9 +585,11 @@ export const useMailStore = defineStore('mail', () => {
     outbox,
     mailbox,
     smartInbox,
+    batches,
     smartInboxes,
     smartInboxCounts,
     todos,
+    unsubscriptions,
     hasMore,
     syncState,
     pulls,
@@ -554,11 +604,14 @@ export const useMailStore = defineStore('mail', () => {
     refresh,
     showMailbox,
     showSmartInbox,
+    showBatches,
     classifyThread,
     showMore,
     thread,
     todosOfThread,
     messages,
+    threadMessages,
+    unsubscribe,
     threadsFrom,
     threadsBefore,
     describeThreads,

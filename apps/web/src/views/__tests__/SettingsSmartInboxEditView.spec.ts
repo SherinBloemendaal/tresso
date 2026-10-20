@@ -31,6 +31,7 @@ describe('SettingsSmartInboxEditView', () => {
     mail.smartInboxes = [
       smartInbox('todo', 'todo', { name: 'To do', verdict: 'do' }),
       smartInbox('invoices', null, { name: 'Invoices', verdict: 'do', includeSenders: ['@supplier.example'], instructions: 'Bills' }),
+      smartInbox('newsletters', null, { name: 'Newsletters', verdict: 'know', batchDelivery: true }),
     ]
     vi.spyOn(mail, 'syncNow').mockResolvedValue()
     vi.stubGlobal(
@@ -38,6 +39,9 @@ describe('SettingsSmartInboxEditView', () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input))
         const method = init?.method ?? 'GET'
+        if (url.pathname === '/api/v1/batch-delivery') {
+          return new Response(JSON.stringify({ times: ['08:00', '12:00', '17:00'], timeZone: 'Europe/Amsterdam', configured: true, nextBatchAt: '2026-10-20T10:00:00Z' }))
+        }
         const body = init?.body ? (JSON.parse(String(init.body)) as Partial<SmartInbox>) : undefined
         requests.push({ method, path: url.pathname, body })
         if (method === 'DELETE') {
@@ -54,6 +58,7 @@ describe('SettingsSmartInboxEditView', () => {
       routes: [
         { path: '/settings/smart-inboxes', name: 'settings-smart-inboxes', component: { template: '<p>list</p>' } },
         { path: '/settings/smart-inboxes/:smartInboxId', name: 'settings-smart-inbox', component: SettingsSmartInboxEditView },
+        { path: '/settings/batches', name: 'settings-batches', component: { template: '<p>batches</p>' } },
       ],
     })
   })
@@ -94,7 +99,7 @@ describe('SettingsSmartInboxEditView', () => {
       {
         method: 'POST',
         path: '/api/v1/smart-inboxes',
-        body: { name: 'Partners', instructions: '', includeSenders: ['@partner.example', 'anna@else.example'], excludeSenders: [], verdict: 'delegate', autoCreateTodo: false },
+        body: { name: 'Partners', instructions: '', includeSenders: ['@partner.example', 'anna@else.example'], excludeSenders: [], verdict: 'delegate', autoCreateTodo: false, batchDelivery: false },
       },
     ])
     expect(router.currentRoute.value.name).toBe('settings-smart-inboxes')
@@ -147,6 +152,30 @@ describe('SettingsSmartInboxEditView', () => {
     await settle()
 
     expect(requests).toEqual([{ method: 'PATCH', path: '/api/v1/smart-inboxes/todo', body: { verdict: 'know', autoCreateTodo: false } }])
+  })
+
+  it('turns batch delivery on and off with the rest of the form', async () => {
+    const wrapper = await mountFor('invoices')
+
+    const checkbox = wrapper.get<HTMLInputElement>('#batch-delivery')
+    expect(checkbox.element.checked).toBe(false)
+    expect(wrapper.get('label[for="batch-delivery"]').text()).toBe('Deliver in batches')
+    expect(wrapper.get('#batch-delivery-help').text()).toContain('Holds matches until 08:00, 12:00 and 17:00.')
+    await checkbox.setValue(true)
+    await wrapper.get('form').trigger('submit')
+    await settle()
+
+    expect(requests).toEqual([{ method: 'PATCH', path: '/api/v1/smart-inboxes/invoices', body: { batchDelivery: true } }])
+
+    wrapper.unmount()
+    requests.length = 0
+    const batched = await mountFor('newsletters')
+    expect(batched.get<HTMLInputElement>('#batch-delivery').element.checked).toBe(true)
+    await batched.get('#batch-delivery').setValue(false)
+    await batched.get('form').trigger('submit')
+    await settle()
+
+    expect(requests).toEqual([{ method: 'PATCH', path: '/api/v1/smart-inboxes/newsletters', body: { batchDelivery: false } }])
   })
 
   it('shows what the server refused on the field', async () => {
