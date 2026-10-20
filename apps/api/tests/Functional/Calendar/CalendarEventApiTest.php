@@ -435,6 +435,25 @@ final class CalendarEventApiTest extends DatabaseTestCase
         self::assertSame([['type' => 'calendarEvent', 'id' => $series['id']]], $delta['deleted']);
     }
 
+    public function testTheDeltaMarksOverridesThatChangeTheFuture(): void
+    {
+        $calendar = static::getContainer()->get(\App\Repository\CalendarRepository::class)->find($this->calendarId);
+        self::assertNotNull($calendar);
+        $ical = implode("\r\n", ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Test//EN',
+            'BEGIN:VEVENT', 'UID:range@test', 'DTSTAMP:20261019T080000Z', 'DTSTART:20261019T080000Z', 'DURATION:PT30M', 'RRULE:FREQ=DAILY;COUNT=5', 'SUMMARY:Sync', 'END:VEVENT',
+            'BEGIN:VEVENT', 'UID:range@test', 'DTSTAMP:20261019T080000Z', 'RECURRENCE-ID;RANGE=THISANDFUTURE:20261021T080000Z', 'DTSTART:20261021T090000Z', 'DURATION:PT30M', 'SUMMARY:Sync, later', 'END:VEVENT',
+            'BEGIN:VEVENT', 'UID:range@test', 'DTSTAMP:20261019T080000Z', 'RECURRENCE-ID:20261020T080000Z', 'DTSTART:20261020T100000Z', 'DURATION:PT30M', 'SUMMARY:Sync, moved', 'END:VEVENT',
+            'END:VCALENDAR', '']);
+        $entityManager = static::getContainer()->get(\Doctrine\ORM\EntityManagerInterface::class);
+        $entityManager->wrapInTransaction(static fn () => static::getContainer()->get(\App\Calendar\CalendarStore::class)->save(new \App\Entity\CalendarObject($calendar, 'range@test', ''), \App\Calendar\ICalendar\CalendarDocument::parse($ical)));
+
+        $delta = $this->getJson('/api/v1/sync/changes?since=0', $this->kim);
+        self::assertIsArray($delta['calendarEvents']);
+        $marked = array_column($delta['calendarEvents'], 'thisAndFuture', 'summary');
+        ksort($marked);
+        self::assertSame(['Sync' => false, 'Sync, later' => true, 'Sync, moved' => false], $marked);
+    }
+
     public function testManagesLocalCalendars(): void
     {
         $this->client->jsonRequest('POST', '/api/v1/calendars', ['name' => 'Family', 'color' => '#E0457B'], $this->kim);

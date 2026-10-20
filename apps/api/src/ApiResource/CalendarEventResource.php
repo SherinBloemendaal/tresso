@@ -152,6 +152,8 @@ final readonly class CalendarEventResource
         public ?int $travelMinutes,
         public bool $defaultReminders,
         public bool $important,
+        /** An override with RANGE=THISANDFUTURE: it changes every later occurrence of the series too. */
+        public bool $thisAndFuture,
     ) {
     }
 
@@ -186,6 +188,7 @@ final readonly class CalendarEventResource
             $event->getTravelMinutes(),
             $event->usesDefaultReminders(),
             $event->isImportant(),
+            $event->changesTheFuture(),
         );
     }
 }
