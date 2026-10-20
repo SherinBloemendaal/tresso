@@ -1854,9 +1854,10 @@ master keys (DATA_KEYS, environment)
   `tresso:provider-grant-tokens:<id>`); `v1.<base64>` from before still opens with key version 1.
 - What a mail notification says (the subject and the start of the text, or for a summary who it is from) is sealed in
   `mail_notification.sealed_body` (`tresso:mail-notification-body:<id>`). Its title (the sender's name, or for a summary
-  how many) stays plaintext like the sender columns. Once clients no longer get a notification through the delta (7
-  days after it was delivered or dropped), an hourly job clears its title and body; the row stays, because it is what
-  makes a message notify at most once.
+  how many) stays plaintext like the sender columns. Once clients no longer get a notification through the delta (7 days
+  after it was delivered or dropped, or for one still waiting 7 days after its fire time, when it can no longer be
+  delivered), an hourly job clears its title and body; the row stays, because it is what makes a message notify at most
+  once.
 - **Plaintext on purpose:** subject, sender and recipient addresses and names, dates, flags, sizes, folder and thread
   structure, attachment names and types. The server queries them: threading matches the normalized subject and the
   participants, sender rules and smart inboxes match addresses, recipient suggestions and the meeting brief search
@@ -1907,12 +1908,13 @@ snippets just before sending them. Deleting a user removes their documents.
 #### Re-encryption and migration
 
 Re-encryption runs in the background on its own. An hourly sweep (`SweepReencryption`) queues a job
-(`ReencryptUserData`, transport `reencrypt`, the lowest priority, consumed by the messenger worker) for every user whose
-data is not all on their current version (`user.data_key_version`, which re-encryption sets when nothing is left) or
-who still has older versions to retire: after a deploy every user from before has one, after a rotation the rotated
-users do. A job works for up to 50 seconds, then queues itself again while work is left, and comes back after the grace
-period to retire an older version; one job per user runs at a time (an advisory lock), so duplicates do nothing. It
-logs progress per step, and `app:crypto:reencrypt --status` counts what is left, per kind of row and in users.
+(`ReencryptUserData`, transport `reencrypt`, with a consumer of its own, so a long run never holds up mail or pushes)
+for every user whose data is not all on their current version (`user.data_key_version`, which re-encryption sets when
+nothing is left) or who still has older versions to retire: after a deploy every user from before has one, after a
+rotation the rotated users do. A job works for up to 50 seconds (checked before every row, so it overshoots by one
+object at most), then queues itself again while work is left, and comes back after the grace period to retire an older
+version; one job per user runs at a time (an advisory lock), so duplicates do nothing. It logs progress per step, and
+`app:crypto:reencrypt --status` counts what is left, per kind of row and in users.
 
 `bin/console app:crypto:reencrypt --all` (or `--user=<email>`, repeatable) does the same work now, in the foreground. It
 brings each user's data to the current key version: their keys (version 1 from the old data key), credentials and
