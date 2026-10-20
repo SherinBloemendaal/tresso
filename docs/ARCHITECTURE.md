@@ -1479,15 +1479,23 @@ edition hands over by mail.
 - **Due dates:** recording (or a new `dueAt` in a `PATCH`) dispatches `HandOverDue` after the commit with
   `DelayStamp::delayUntil(dueAt)` on the `async` transport, like the release of scheduled mail. Its handler locks the
   hand-over and, when it is still open without a reply, sets `overdueAt` once; every worker heartbeat marks overdue
-  hand-overs of the leased accounts too, in case a message got lost. A new due date clears `overdueAt`. Becoming
-  overdue dispatches `NotifyOverdueHandOver` after the commit (transport `push`), which sends "No reply from {delegate}
-  yet" through the `NotificationDispatcher` (kind `hand_over`, a `NotificationKind` case, path `/waiting?nudge={id}`,
-  the phone's `reminders` channel) on the channels the user chose for `hand_over` in `channelsByKind`, else the phone and the desktop. Its
-  delivery key `handOver:{id}:{due date}` makes a retried message notify no device twice, while a new due date that
-  passes tells again. The clients also tell the user when a hand-over becomes overdue in a page they apply
-  (`takeOverdueHandOvers` of the mail stores, not for the first pull of a copy): natively on the desktop app, and as
-  a notice with the nudge one click away in every app. That is the desktop app's only path: the dispatcher sends
-  nothing to its device, and the delta's `notifications` are calendar notifications only, so it shows each once.
+  hand-overs of the leased accounts too, in case a message got lost. A new due date clears `overdueAt` and starts a
+  new round.
+- **Telling the user** works like new mail (see "New mail" under Reminders and notifications): the server decides.
+  Becoming overdue dispatches `NotifyOverdueHandOver` after the commit (transport `push`); the `HandOverNotifier`
+  locks the hand-over, which must still be open and overdue. A focus block (`holdDuringFocus`) makes the notice wait
+  for its end (a delayed message comes back then); quiet hours and other busy events (`focusDuringBusy`) make it
+  silent. It goes out as "No reply from {delegate} yet" through the `NotificationDispatcher` (kind `hand_over`, a
+  `NotificationKind` case, path `/waiting?nudge={id}`, the phone's `reminders` channel, `userId` in its data) on the
+  channels the user chose for `hand_over` in `channelsByKind`, else the phone and the desktop, keyed
+  `handOver:{id}:{overdue at}`, so a retry never notifies a device twice and a new round tells again. The claim is part
+  of the transaction that records the notice on the hand-over (`notifiedAt`, `notifiedChannels`, `notifiedSilently`;
+  with no channel chosen the decision is recorded with none), and a scheduler task (`SweepHandOverNotices`, every
+  minute) delivers what a lost message or an ended hold missed and sends failed or stuck deliveries again. The delta
+  carries the recorded notice, which is how the desktop app shows it: natively when it went to the desktop channel, as
+  for mail (not for the first pull, while the app has focus, or for notices delivered more than 15 minutes before
+  notifications were switched on; once per round, `deliveredNotices` in `@tresso/core`). Every app also shows a notice
+  with the nudge one click away for each delivered notice that went out on any channel.
 - **Nudges:** `POST /api/v1/hand-overs/{id}/nudge` (scope `mail:send`, `html` and an optional `sendAt` a few seconds
   ahead for undo) queues a reply to the delegate through the outbox, in the same conversation: to the forward's copy
   in Sent when it was synced, else to the message handed over, with "Re:" and the forward's subject. Clients suggest
