@@ -58,9 +58,9 @@ export default function BriefScreen() {
         }
         renderSectionHeader={({ section }) => <Text style={styles.section}>{section.title}</Text>}
         renderItem={({ item }) => (
-          <View style={[styles.row, item.noted && styles.done]}>
+          <View style={[styles.row, (item.noted || item.moved) && styles.done]}>
             <Pressable style={styles.texts} onPress={() => router.push(`/thread/${item.conversation.threadId}`)} accessibilityRole="button" accessibilityLabel={`${item.conversation.subject || '(no subject)'}, from ${senderLabel(item)}`}>
-              <Text style={[styles.subject, item.noted && styles.mutedSubject]} numberOfLines={1}>
+              <Text style={[styles.subject, (item.noted || item.moved) && styles.mutedSubject]} numberOfLines={1}>
                 {item.conversation.subject || '(no subject)'}
               </Text>
               {item.conversation.snippet !== '' && (
@@ -72,7 +72,9 @@ export default function BriefScreen() {
                 {senderLabel(item)} · {shortTime(item.conversation.lastMessageAt)}
               </Text>
             </Pressable>
-            {item.noted ? (
+            {item.moved ? (
+              <Text style={styles.moved}>Moved</Text>
+            ) : item.noted ? (
               <Text style={styles.noted}>Noted</Text>
             ) : (
               <Pressable style={({ pressed }) => [styles.note, pressed && styles.pressed]} disabled={busy} onPress={() => void note([item.conversation.threadId])} accessibilityRole="button" accessibilityLabel={`Noted: ${item.conversation.subject}`}>
@@ -106,6 +108,7 @@ function makeStyles(theme: Theme) {
     note: { minHeight: 44, paddingHorizontal: 14, borderRadius: 6, justifyContent: 'center', borderWidth: 1.5, borderColor: theme.know },
     noteLabel: { fontSize: 14, fontWeight: '600', color: theme.know },
     noted: { fontSize: 13, fontWeight: '600', color: theme.know },
+    moved: { fontSize: 13, fontWeight: '600', color: theme.accent },
     empty: { padding: 20, fontSize: 15, color: theme.ink2 },
   })
 }
