@@ -136,8 +136,10 @@ Microsoft Graph calendars, with Meet and Teams meetings), which adds its scopes 
 
 - **Start:** `POST /api/v1/provider-authorizations` (scope `settings:write`) with `{"provider": "google" | "microsoft",
   "features": ["mail", "calendar"], "mailAccountId": <optional, to sign in again or allow more>}`. Calendars alone
-  are only asked for an existing account (`mailAccountId`); the web client asks for both on a new sign-in, and for
-  `["calendar"]` when the user allows calendars later. The API stores a pending request (the
+  are only asked for an existing account (`mailAccountId`). The web client asks for calendars only when the user
+  chooses to ("Also sync my calendars" on a new sign-in, "Allow calendar access" later): a Microsoft tenant may not
+  let its users allow them, and asking would then cost the mail too. Signing in again asks for mail and the API adds
+  what the grant allows already. The API stores a pending request (the
   SHA-256 of a random 256-bit `state`, the PKCE verifier, the user, the requested scopes; 15 minutes, single use) and
   answers the provider's `authorizationUrl`. `GET /api/v1/oauth-providers` lists the providers this server has an
   OAuth app for.
@@ -179,6 +181,8 @@ Microsoft Graph calendars, with Meet and Teams meetings), which adds its scopes 
   keeps earlier scopes through `include_granted_scopes`, and the grant stores the union for Microsoft. Callers ask
   `ProviderAccessTokens::accessToken($grant, $feature)`. A grant without the mail scopes stops the mail accounts
   (409 for workers); one without the calendar scopes only refuses calendar tokens (`FeatureNotGranted`, 403). A
+  Microsoft refresh that fails for every scope the grant covers is tried again for mail alone: a user or admin who
+  withdrew only the calendar consent keeps the mail, and the grant loses the calendars (status `not_granted`). A
   sign-in that adds calendars wakes the worker holding the account, so calendars start syncing right away.
 
 ##### Registering the OAuth apps
@@ -1154,7 +1158,9 @@ accepted.
     writable; Meet when `allowedConferenceSolutionTypes` has `hangoutsMeet`), then `events.list` with
     `singleEvents=false`, `showDeleted=true` and the stored `nextSyncToken` (a 410 lists the calendar again).
     Exceptions are events of their own at Google (`recurringEventId`): a changed one makes the worker read its
-    whole series again (the master, then everything with its `iCalUID`), and a cancelled one is an `EXDATE`. The
+    whole series again (the master, then everything with its `iCalUID`), and a cancelled one is an `EXDATE`; writes
+    compare the series' recurrence with these `EXDATE`s, by meaning, so an invitee can answer such a series and an
+    unchanged one sends nothing. An event that cannot be written as iCalendar is skipped and keeps its stored copy. The
     remote id is the master's id; the ETag combines the master's and every exception's, so a change to any of them
     is a change of the resource. An occurrence the user was invited to alone (no master in the calendar) is an
     object of overrides only. `useDefault` reminders become the calendar's default reminders as `VALARM`s, and are
@@ -1163,8 +1169,10 @@ accepted.
     has `teamsForBusiness`). Graph has no change feed of series, so `calendars/{id}/calendarView/delta` over a window
     (a year back, five ahead) is only the signal: when it reports anything (Graph also reports changes outside its
     window), and at least daily, the calendar is listed with each event's `changeKey` (single events and series
-    masters only), and the API's inventory names what to fetch. A fetch reads the event in the zone it was made in
-    (`Prefer: outlook.timezone`, Windows zone names mapped to IANA names with the CLDR table) with
+    masters only), and the API's inventory names what to fetch. Events are always addressed under their calendar
+    (`/me/calendars/{id}/events/{id}`), which also finds them in calendars shared with the user. A fetch reads the
+    event in the zone it was made in (`Prefer: outlook.timezone`, Windows zone names mapped to IANA names with the
+    CLDR table; a zone Tresso cannot place, such as an old Outlook custom zone, is read in UTC) with
     `exceptionOccurrences` and `cancelledOccurrences`; Graph's recurrence patterns are written as `RRULE`s and back
     (`UNTIL` is the end date at the series' wall clock). The ETag is the master's `changeKey`, which Exchange changes
     with any change to the series. Graph gives a new event a UID of its own and lets no one set it, so Tresso keeps
@@ -1176,9 +1184,17 @@ accepted.
     the instance; Google takes the `EXDATE` in the recurrence). Only fields that changed are sent, compared through
     the same conversion both ways, so an unchanged event costs no write and sends no update mail; writes are
     conditional (`If-Match` on the event's ETag) and checked against the operation's ETag first, a mismatch being a
-    conflict with the provider's version. Rules Graph has no pattern for (`BYMONTHDAY=-1`, several numbered days,
-    `RDATE`s, more often than daily) are refused with the reason. A write the provider accepted reports the
-    provider's version back as `current`, which replaces the stored object unless a newer change of the user's waits.
+    conflict with the provider's version. A Google occurrence that is no exception yet is read as Google's own
+    instance first, so answering or changing one compares with its real time. Rules Graph has no pattern for
+    (`BYMONTHDAY=-1`, numbered days in different weeks such as `BYDAY=1MO,1WE`, `RDATE`s, more often than daily) are
+    refused with the reason. A changed description is written to Graph as HTML that keeps the body's Teams join
+    block. A write the provider accepted reports the provider's version back as `current`, which replaces the stored
+    object unless a newer change of the user's waits; one it could not read back keeps the last known ETag. A write
+    that failed after a first step reached Google reports Google's id and new ETag with its retry, and the API bases
+    the next attempt on them. A move to another calendar of the same Google account (a delete and a create of the same
+    UID in one claim) is Google's `events.move`, which tells no one. A 403 means calendars are not allowed only for the
+    calendar list or a token without the scopes; on one calendar it skips that calendar, and on a write it is a
+    refusal.
   - **Scheduling:** both providers send invitations, updates, cancellations and replies themselves, so the API sends
     no iTIP mail for these calendars and puts no incoming invitation into them (the provider does). The calendar
     operation carries `notify` (false when the user said not to tell anyone; folded writes notify when any of them
