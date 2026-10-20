@@ -830,7 +830,8 @@ Conversations in the Spam smart inbox stay out of the inboxes, also when the ser
 (`restoreThread`), unless the delta changed the conversation since. In the web client the sidebar lists the smart
 inboxes with unread counts, the list and the reading pane show the verdict and change it or move the conversation,
 and Settings > Smart inboxes edits them and lists the remembered senders. The IndexedDB copy moved to version 5 and the
-SQLite copy to schema 3; both sync again from the start. Todos (3.14) moved them to version 6 and schema 4, hand-overs (3.15) to version 7 and schema 5.
+SQLite copy to schema 3; both sync again from the start. Todos (3.14) moved them to version 6 and schema 4, batched
+delivery to version 7 and schema 5, hand-overs (3.15) to version 8 and schema 6.
 
 Both stores keep held conversations out of the lists and counts, list the delivered batches through an index on
 inbox, batch time and date, and keep the unsubscribe requests (dropped with their account). The web client has a
