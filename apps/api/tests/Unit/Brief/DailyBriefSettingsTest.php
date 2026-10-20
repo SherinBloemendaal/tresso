@@ -1,0 +1,40 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Tests\Unit\Brief;
+
+use App\Entity\DailyBriefSettings;
+use App\Entity\User;
+use PHPUnit\Framework\TestCase;
+
+final class DailyBriefSettingsTest extends TestCase
+{
+    public function testAnotherTimeAfterTodaysBriefMakesNoSecondBriefToday(): void
+    {
+        $settings = new DailyBriefSettings(new User('kim@example.test', 'Kim'), 'UTC', new \DateTimeImmutable('2026-10-20T07:00:00+00:00'));
+        $settings->ran(new \DateTimeImmutable('2026-10-20T07:59:59+00:00'), 'UTC', new \DateTimeImmutable('2026-10-20T08:00:00+00:00'));
+
+        $settings->change(true, '18:00', 'UTC', new \DateTimeImmutable('2026-10-20T09:00:00+00:00'));
+
+        self::assertSame('2026-10-21T18:00:00+00:00', $settings->getNextRunAt()->format(\DATE_ATOM));
+    }
+
+    public function testAnotherZoneAfterTodaysBriefMakesNoSecondBriefToday(): void
+    {
+        $settings = new DailyBriefSettings(new User('kim@example.test', 'Kim'), 'UTC', new \DateTimeImmutable('2026-10-20T07:00:00+00:00'));
+        $settings->ran(new \DateTimeImmutable('2026-10-20T07:59:59+00:00'), 'UTC', new \DateTimeImmutable('2026-10-20T08:00:00+00:00'));
+
+        $settings->reschedule('America/New_York', new \DateTimeImmutable('2026-10-20T09:00:00+00:00'));
+
+        self::assertSame('2026-10-21T12:00:00+00:00', $settings->getNextRunAt()->format(\DATE_ATOM));
+    }
+
+    public function testTheFirstBriefComesTheSameDay(): void
+    {
+        $settings = new DailyBriefSettings(new User('kim@example.test', 'Kim'), 'UTC', new \DateTimeImmutable('2026-10-20T07:00:00+00:00'));
+
+        self::assertSame('2026-10-20T08:00:00+00:00', $settings->getNextRunAt()->format(\DATE_ATOM));
+        self::assertNull($settings->getLastRunAt());
+    }
+}

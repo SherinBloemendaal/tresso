@@ -19,6 +19,7 @@ use App\Repository\DailyBriefSettingsRepository;
 use App\Repository\NotificationPreferencesRepository;
 use App\Security\CurrentUser;
 use Doctrine\ORM\EntityManagerInterface;
+use Psr\Clock\ClockInterface;
 use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 
 /**
@@ -33,6 +34,7 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
         private AfterCommitDispatcher $afterCommit,
         private SelfAddresses $selfAddresses,
         private DailyBriefSettingsRepository $briefSettings,
+        private ClockInterface $clock,
     ) {
     }
 
@@ -103,7 +105,7 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
             }
             if ($zoneChanged) {
                 // The daily brief comes at its time of day in the new zone.
-                $this->briefSettings->findOneFor($user)?->reschedule($preferences->getTimeZone(), new \DateTimeImmutable());
+                $this->briefSettings->findOneFor($user)?->reschedule($preferences->getTimeZone(), $this->clock->now());
             }
             $this->entityManager->flush();
             if ($zoneChanged || $planningBefore !== self::planning($preferences)) {
