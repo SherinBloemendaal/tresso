@@ -1,4 +1,5 @@
 import type { NotificationChannel } from '../notifications'
+import { sameRule } from './rules'
 import type { Occurrence } from './occurrences'
 import type { AttendeeRole, EventStatus, EventTime, SyncedCalendar, SyncedCalendarEvent } from './types'
 import { DAY, formatDate, formatDateTime, parseRecurrenceKey, parseWall, toWall } from './zones'
@@ -67,6 +68,10 @@ export function editScopes(occurrence: Occurrence, change?: EventChange): EditSc
   if (!occurrence.recurring) {
     return []
   }
+  // An occurrence read from the server without its series (older than the copy on the device): only itself.
+  if (occurrence.series === null) {
+    return ['this']
+  }
   const scopes: EditScope[] = occurrence.first ? ['this', 'all'] : ['this', 'following', 'all']
   if (change === undefined) {
     return scopes
@@ -74,10 +79,38 @@ export function editScopes(occurrence: Occurrence, change?: EventChange): EditSc
   if (change.after.calendarId !== change.before.calendarId) {
     return ['all']
   }
-  if (change.after.recurrence !== change.before.recurrence) {
+  if (!sameRule(change.after.recurrence, change.before.recurrence)) {
     return scopes.filter((scope) => scope !== 'this')
   }
   return scopes
+}
+
+/**
+ * What to save for a scope. "This event" saves what the editor shows. "All events" and "This and following" from an
+ * occurrence that has its own row (a moved one) save the series as it is with only what the user changed in the
+ * editor, so the override's own title, place or times are not copied onto every occurrence. Times the user left
+ * alone stay where the occurrence is, with the series' own length, so the series does not move.
+ */
+export function inputForScope(occurrence: Occurrence, before: EventInput, after: EventInput, scope: EditScope): EventInput {
+  const series = occurrence.series
+  if (scope === 'this' || series === null || occurrence.event.id === series.id) {
+    return after
+  }
+  const result: EventInput = { ...inputFromEvent(series), organizerMailAccountId: after.organizerMailAccountId }
+  const changed = <K extends keyof EventInput>(key: K): boolean => JSON.stringify(after[key]) !== JSON.stringify(before[key])
+  for (const key of Object.keys(after) as (keyof EventInput)[]) {
+    if (key !== 'start' && key !== 'end' && changed(key)) {
+      ;(result as unknown as Record<string, unknown>)[key] = after[key]
+    }
+  }
+  if (changed('start') || changed('end')) {
+    result.start = after.start
+    result.end = after.end
+  } else {
+    result.start = before.start
+    result.end = withLength(before.start, series.start, series.end)
+  }
+  return result
 }
 
 /** The words the scope dialog offers. */

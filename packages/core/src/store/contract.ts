@@ -91,6 +91,7 @@ export function calendarEvent(id: string, calendarId: string, extra: Partial<Syn
     travelMinutes: null,
     defaultReminders: true,
     important: false,
+    thisAndFuture: false,
     ...extra,
   }
 }
@@ -883,6 +884,27 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
         expect((await db.calendarEvent('single'))?.summary).toBe('Event single')
         await db.apply(page({ cursor: 31, deleted: [{ type: 'calendarEvent', id: 'single' }] }))
         expect(await db.calendarEvent('single')).toBeNull()
+      })
+
+      it('finds a series by its whole span after one of its rows moves away or goes', async () => {
+        // The series ends in January 2026 by itself; its moved December occurrence keeps it in December's range.
+        const ended = calendarEvent('short', 'tresso', { uid: 'short@tresso.test', start: { dateTime: '2026-01-05T09:00:00', timeZone: 'Europe/Amsterdam' }, end: { dateTime: '2026-01-05T09:30:00', timeZone: 'Europe/Amsterdam' }, recurrence: 'FREQ=DAILY;UNTIL=20260110T080000Z' })
+        const late = calendarEvent('short-late', 'tresso', { uid: 'short@tresso.test', recurrenceId: '20260106T080000Z', start: { dateTime: '2026-12-20T09:00:00', timeZone: 'Europe/Amsterdam' }, end: { dateTime: '2026-12-20T09:30:00', timeZone: 'Europe/Amsterdam' } })
+        await db.apply(page({ cursor: 31, calendarEvents: [ended, late] }))
+        const shortRows = async () => (await db.calendarEvents(Date.UTC(2026, 11, 1), Date.UTC(2026, 11, 31))).map((e) => e.id).filter((id) => id.startsWith('short')).sort()
+        expect(await shortRows()).toEqual(['short', 'short-late'])
+        await db.apply(page({ cursor: 32, deleted: [{ type: 'calendarEvent', id: 'short-late' }] }))
+        expect(await shortRows()).toEqual([])
+      })
+
+      it('counts only pages that change calendars or events', async () => {
+        const before = db.calendarChanges()
+        await db.apply(page({ cursor: 31, signatures: [signature('sig-x', 'X')] }))
+        expect(db.calendarChanges()).toBe(before)
+        await db.apply(page({ cursor: 32, calendarEvents: [calendarEvent('single', 'tresso', { summary: 'Renamed' })] }))
+        expect(db.calendarChanges()).toBe(before + 1)
+        await db.apply(page({ cursor: 33, deleted: [{ type: 'calendar', id: 'home-cal' }] }))
+        expect(db.calendarChanges()).toBe(before + 2)
       })
 
       it('drops the events of a deleted calendar, and the calendars of a deleted account', async () => {

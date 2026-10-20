@@ -1,6 +1,6 @@
 import ICAL from 'ical.js'
 import type { EventTime, SyncedCalendarEvent } from './types'
-import { DAY, isTimeZone, parseRecurrenceKey, parseWall, recurrenceKey, toInstant, toWall, wallOf, wallParts } from './zones'
+import { DAY, formatDateTime, isTimeZone, parseRecurrenceKey, parseWall, recurrenceKey, toInstant, toWall, wallOf, wallParts, utc } from './zones'
 
 /**
  * One occurrence of an event, as the views show it: recurrence expanded, overrides applied and excluded dates left
@@ -29,10 +29,107 @@ export interface Occurrence {
   endDate: string | null
   /** The zone the event's own times are in; null for floating and all-day events. */
   timeZone: string | null
+  /**
+   * Read from the server (GET /api/v1/calendar-occurrences) for a range older than the copy on the device: its event
+   * has only the fields the range endpoint gives, and its series is not on the device.
+   */
+  fromServer: boolean
+}
+
+/** An occurrence as GET /api/v1/calendar-occurrences gives it: instants (UTC) for timed ones, dates for all-day ones. */
+export interface ServerOccurrence {
+  id: string
+  eventId: string
+  calendarId: string
+  recurrenceId: string | null
+  recurring: boolean
+  allDay: boolean
+  start: { date: string } | { dateTime: string }
+  end: { date: string } | { dateTime: string }
+  timeZone: string | null
+  status: SyncedCalendarEvent['status']
+  summary: string
+  location: string
+  transparency: SyncedCalendarEvent['transparency']
+  visibility: SyncedCalendarEvent['visibility']
+  organizer: SyncedCalendarEvent['organizer']
+  attendeeCount: number
+  selfResponse: SyncedCalendarEvent['selfResponse']
+  conference: SyncedCalendarEvent['conference']
+}
+
+/** How far back the delta keeps series in the copy on the device (SyncChangesProvider::eventWindow). */
+export const COPY_YEARS = 2
+
+/** The instant before which the copy on the device may lack occurrences, with a day to spare. */
+export function copyStart(now: number): number {
+  const date = new Date(now)
+  return utc(date.getUTCFullYear() - COPY_YEARS, date.getUTCMonth(), date.getUTCDate()) + DAY
+}
+
+/** An occurrence the server read, as the views show it; times in the reader's zone. */
+export function occurrenceFromServer(occurrence: ServerOccurrence, readerZone: string): Occurrence {
+  const time = (value: ServerOccurrence['start']): EventTime =>
+    'date' in value ? { date: value.date } : { dateTime: formatDateTime(Date.parse(value.dateTime)), timeZone: 'UTC' }
+  const event: SyncedCalendarEvent = {
+    id: occurrence.eventId,
+    calendarId: occurrence.calendarId,
+    uid: '',
+    recurrenceId: occurrence.recurrenceId,
+    sequence: 0,
+    status: occurrence.status,
+    summary: occurrence.summary,
+    description: '',
+    location: occurrence.location,
+    url: null,
+    transparency: occurrence.transparency,
+    visibility: occurrence.visibility,
+    allDay: occurrence.allDay,
+    start: time(occurrence.start),
+    end: time(occurrence.end),
+    recurrence: null,
+    rdates: [],
+    exdates: [],
+    organizer: occurrence.organizer,
+    attendees: [],
+    selfResponse: occurrence.selfResponse,
+    reminders: [],
+    conference: occurrence.conference,
+    messageId: null,
+    syncError: null,
+    travelMinutes: null,
+    defaultReminders: true,
+    important: false,
+    thisAndFuture: false,
+  }
+  const start = instantOf(event.start, readerZone)
+  return {
+    key: `${occurrence.eventId}:${occurrence.recurrenceId ?? ''}`,
+    event,
+    seriesId: occurrence.eventId,
+    series: null,
+    recurrenceId: occurrence.recurrenceId,
+    recurring: occurrence.recurring,
+    first: false,
+    allDay: occurrence.allDay,
+    start,
+    end: Math.max(start, instantOf(event.end, readerZone)),
+    startDate: 'date' in occurrence.start ? occurrence.start.date : null,
+    endDate: 'date' in occurrence.end ? occurrence.end.date : null,
+    timeZone: occurrence.timeZone,
+    fromServer: true,
+  }
 }
 
 /** How far one series is walked before it stops, as on the server: an old dense series costs no more than a new one. */
-const MAX_STEPS = 100_000
+export const MAX_STEPS = 100_000
+
+/** The occurrences of a range, and the series that had more to walk than {@link MAX_STEPS} (shown cut short). */
+export interface ExpandedRange {
+  occurrences: Occurrence[]
+  /** Ids of series whose walk stopped at the step limit; the server refuses such a range with a 422. */
+  truncated: string[]
+}
 
 /** A zone the platform knows: the event's own, else the reader's. */
 function zoneOr(zone: string | null, readerZone: string): string {
@@ -70,58 +167,133 @@ function wallOfIcal(time: ICAL.Time): number {
   return wallOf({ year: time.year, month: time.month, day: time.day, hour: time.isDate ? 0 : time.hour, minute: time.isDate ? 0 : time.minute, second: time.isDate ? 0 : time.second })
 }
 
+/** The parts of a rule by name, upper-cased. */
+export function ruleParts(rule: string): Map<string, string> {
+  const parts = new Map<string, string>()
+  for (const part of rule.toUpperCase().split(';')) {
+    const at = part.indexOf('=')
+    if (at > 0) parts.set(part.slice(0, at), part.slice(at + 1))
+  }
+  return parts
+}
+
+const MONTH_LENGTHS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+function numbers(value: string | undefined): number[] {
+  return value === undefined ? [] : value.split(',').map(Number).filter((n) => Number.isInteger(n) && n !== 0)
+}
+
 /**
- * The starts (wall times in the series' zone) of a rule, from the series start on, while they are before `until`.
- * The series start always counts as the first occurrence (RFC 5545), also when the rule would not produce it.
+ * Whether a rule can never give an occurrence: a day of the month no month of BYMONTH has (BYMONTH=2;BYMONTHDAY=30),
+ * a day of the month or year beyond any. ical.js loops forever looking for one with DAILY and gives normalized
+ * dates (2 March) with YEARLY, so such a rule is only its start, as RFC 5545 counts DTSTART.
  */
-function* ruleStarts(rule: string, start: number, date: boolean, zone: string | null, readerZone: string, until: number): Generator<number> {
+export function neverMatches(parts: Map<string, string>): boolean {
+  const monthDays = numbers(parts.get('BYMONTHDAY'))
+  if (monthDays.some((day) => Math.abs(day) > 31)) return monthDays.every((day) => Math.abs(day) > 31)
+  if (numbers(parts.get('BYYEARDAY')).length > 0 && numbers(parts.get('BYYEARDAY')).every((day) => Math.abs(day) > 366)) return true
+  const months = numbers(parts.get('BYMONTH'))
+  if (months.length === 0 || monthDays.length === 0) return false
+  return !months.some((month) => monthDays.some((day) => Math.abs(day) <= (MONTH_LENGTHS[month - 1] ?? 0)))
+}
+
+/** Whether a produced day keeps to BYMONTH and BYMONTHDAY; ical.js may give a normalized day that does not. */
+function keepsTo(parts: Map<string, string>, wall: number): boolean {
+  const day = wallParts(wall)
+  const months = numbers(parts.get('BYMONTH'))
+  if (months.length > 0 && !months.includes(day.month)) return false
+  const monthDays = numbers(parts.get('BYMONTHDAY'))
+  if (monthDays.length === 0) return true
+  const length = new Date(utc(day.year, day.month, 0)).getUTCDate()
+  return monthDays.some((wanted) => (wanted > 0 ? wanted === day.day : length + 1 + wanted === day.day))
+}
+
+/** The fixed periods the server jumps over (Occurrences::jump): hours in elapsed time, days and weeks on the clock. */
+const PERIODS: Record<string, number> = { HOURLY: 3_600_000, DAILY: DAY, WEEKLY: 7 * DAY }
+
+interface RuleWalk {
+  /** Clock readings of the starts, in the zone the series is read in. */
+  starts: number[]
+  truncated: boolean
+}
+
+/**
+ * The starts of a rule (clock readings in `readingZone`), from the series start on, while they are at most `until`;
+ * `from` is a clock reading too. Like sabre on the server:
+ * - the rule steps on the clock (an hourly series too: 00:00, 01:00, 02:00, 03:00 on the night clocks go back);
+ * - the series start always counts as the first occurrence, also when the rule would not give it, or its UNTIL is
+ *   before it (RFC 5545 counts DTSTART, and COUNT includes it);
+ * - an UNTIL date on a timed series is midnight of that date; a UTC UNTIL is compared as an instant, also for a
+ *   floating series, which is read in the reader's zone;
+ * - a rule of a fixed period without COUNT is jumped to two periods before `from` (hours in elapsed time, days and
+ *   weeks on the clock), so old series cost no more.
+ */
+function walkRule(rule: string, start: number, date: boolean, readingZone: string, from: number, until: number): RuleWalk {
+  const parts = ruleParts(rule)
+  const result: number[] = [start]
+  if (neverMatches(parts)) {
+    return { starts: result, truncated: false }
+  }
+
   const recur = ICAL.Recur.fromString(rule)
   if (recur.until !== null && recur.until !== undefined) {
-    // Iterate in wall time: an UNTIL in UTC becomes the clock reading in the series' zone.
     const end = recur.until
-    let wall: number
+    let limit: number
     if (end.isDate) {
-      wall = date ? wallOfIcal(end) : wallOfIcal(end) + DAY - 1000
-    } else if (end.zone?.tzid === 'UTC' && zone !== null) {
-      wall = toWall(Date.UTC(end.year, end.month - 1, end.day, end.hour, end.minute, end.second), zoneOr(zone, readerZone))
+      // A date: the day itself for all-day series, its midnight for timed ones (as sabre reads it).
+      limit = wallOfIcal(end)
+    } else if (end.zone?.tzid === 'UTC') {
+      limit = toWall(utc(end.year, end.month - 1, end.day, end.hour, end.minute, end.second), readingZone)
     } else {
-      wall = wallOfIcal(end)
+      limit = wallOfIcal(end)
     }
-    if (date) {
-      wall = Math.floor(wall / DAY) * DAY
+    if (date) limit = Math.floor(limit / DAY) * DAY
+    if (limit < start) {
+      return { starts: result, truncated: false }
     }
-    recur.until = icalTime(wall, date)
+    recur.until = icalTime(limit, date)
   }
   const count = recur.count ?? null
-  const iterator = recur.iterator(icalTime(start, date))
-  let produced = 0
-  let first = true
-  for (let step = 0; step < MAX_STEPS; step++) {
+  // Counted here: ical.js would count days it gives in error (a 30 February as 2 March) and not the start.
+  recur.count = null
+  if (count !== null && count <= 1) {
+    return { starts: result, truncated: false }
+  }
+  let origin = start
+  const freq = parts.get('FREQ') ?? ''
+  const period = PERIODS[freq]
+  if (period !== undefined && count === null) {
+    const interval = Math.max(1, Number(parts.get('INTERVAL') ?? 1))
+    if (freq === 'HOURLY' && !date) {
+      const first = toInstant(start, readingZone)
+      const periods = Math.floor((toInstant(from, readingZone) - first) / (period * interval)) - 2
+      if (periods > 0) origin = toWall(first + periods * interval * period, readingZone)
+    } else {
+      const periods = Math.floor((from - start) / (period * interval)) - 2
+      if (periods > 0) origin = start + periods * interval * period
+    }
+  }
+  const iterator = recur.iterator(icalTime(origin, date))
+  let produced = 1
+  for (let step = 0; ; step++) {
+    if (step >= MAX_STEPS) {
+      return { starts: result, truncated: true }
+    }
     const next = iterator.next()
     if (next === null || next === undefined) {
-      return
+      return { starts: result, truncated: false }
     }
     const wall = wallOfIcal(next)
-    if (first) {
-      first = false
-      if (wall !== start) {
-        produced += 1
-        yield start
-        if (count !== null && produced >= count) {
-          return
-        }
-      }
+    if (wall > until) {
+      return { starts: result, truncated: false }
     }
-    if (wall >= until) {
-      return
-    }
-    if (wall < start) {
+    if (wall <= start || !keepsTo(parts, wall)) {
       continue
     }
+    result.push(wall)
     produced += 1
-    yield wall
     if (count !== null && produced >= count) {
-      return
+      return { starts: result, truncated: false }
     }
   }
 }
@@ -144,6 +316,7 @@ function single(event: SyncedCalendarEvent, series: SyncedCalendarEvent | null, 
     startDate: 'date' in event.start ? event.start.date : null,
     endDate: 'date' in event.end ? event.end.date : null,
     timeZone: 'dateTime' in event.start ? event.start.timeZone : null,
+    fromServer: false,
   }
 }
 
@@ -159,61 +332,80 @@ function dateOf(wall: number): string {
   return `${String(parts.year).padStart(4, '0')}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`
 }
 
+/** How long a row lasts: whole days for all-day rows, elapsed time otherwise. */
+function lengthOf(event: SyncedCalendarEvent, readerZone: string): number {
+  if ('date' in event.start) {
+    return Math.max(0, Math.round((wallOfTime(event.end) - wallOfTime(event.start)) / DAY)) * DAY
+  }
+  return Math.max(0, instantOf(event.end, readerZone) - instantOf(event.start, readerZone))
+}
+
 /** The occurrences of a series in a range, overrides applied. */
-function seriesOccurrences(master: SyncedCalendarEvent, overrides: Map<string, SyncedCalendarEvent>, from: number, to: number, readerZone: string): Occurrence[] {
+function seriesOccurrences(master: SyncedCalendarEvent, overrides: Map<string, SyncedCalendarEvent>, from: number, to: number, readerZone: string, truncated: string[]): Occurrence[] {
   const date = 'date' in master.start
   const zone = 'dateTime' in master.start ? master.start.timeZone : null
   const readingZone = zoneOr(zone, readerZone)
   const startWall = wallOfTime(master.start)
-  const endWall = wallOfTime(master.end)
-  const startInstant = instantOf(master.start, readerZone)
-  const length = date ? Math.max(0, Math.round((endWall - startWall) / DAY)) : Math.max(0, instantOf(master.end, readerZone) - startInstant)
-  // Walk until the range ends, in the series' wall time, with a day to spare for zones and long events.
-  const until = toWall(to, readingZone) + DAY + (date ? length * DAY : 0) + 14 * 3_600_000
-  const earliest = toWall(from, readingZone) - DAY - (date ? length * DAY : length) - 14 * 3_600_000
+  const length = lengthOf(master, readerZone)
 
   const keyOf = (wall: number): string => (date ? recurrenceKey(wall, true) : zone === null ? recurrenceKey(wall, false) : recurrenceKey(toInstant(wall, readingZone), false))
+  // The clock reading of a key in the series' zone.
+  const wallOfKey = (key: string): number | null => {
+    const value = parseRecurrenceKey(key)
+    return value === null ? null : date || zone === null ? value : toWall(value, readingZone)
+  }
+  // A THISANDFUTURE override changes every later occurrence, moved as far as it moves its own (RFC 5545 3.8.4.4).
+  const ranges = [...overrides.entries()].filter(([, override]) => override.thisAndFuture).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  const shiftOf = (key: string, override: SyncedCalendarEvent): number => (wallOfTime(override.start) - (wallOfKey(key) ?? wallOfTime(override.start)))
+  const reach = Math.max(length, ...ranges.map(([key, override]) => Math.abs(shiftOf(key, override)) + lengthOf(override, readerZone)))
+  // Walk in the series' wall time, with a day to spare for zones, long events and moved ones.
+  const until = toWall(to, readingZone) + DAY + reach + 14 * 3_600_000
+  const earliest = toWall(from, readingZone) - DAY - reach - 14 * 3_600_000
+
   const firstKey = keyOf(startWall)
   const exdates = new Set(master.exdates)
   const starts = new Map<string, number>()
   if (master.recurrence !== null) {
-    for (const wall of ruleStarts(master.recurrence, startWall, date, zone, readerZone, until)) {
-      if (wall >= earliest) {
-        starts.set(keyOf(wall), wall)
-      }
+    const walk = walkRule(master.recurrence, startWall, date, readingZone, earliest, until)
+    if (walk.truncated) truncated.push(master.id)
+    for (const wall of walk.starts) {
+      if (wall >= earliest) starts.set(keyOf(wall), wall)
     }
   } else {
     starts.set(firstKey, startWall)
   }
   for (const rdate of master.rdates) {
-    const value = parseRecurrenceKey(rdate)
-    if (value === null) {
-      continue
-    }
-    // Keys of timed series are UTC instants (floating ones their clock reading); dates are dates.
-    const wall = date || zone === null ? value : toWall(value, readingZone)
-    if (wall >= earliest && wall < until) {
+    const wall = wallOfKey(rdate)
+    if (wall !== null && wall >= earliest && wall < until) {
       starts.set(keyOf(wall), wall)
     }
   }
 
   const occurrences: Occurrence[] = []
-  const remaining = new Map(overrides)
+  const seen = new Set<string>()
   for (const [key, wall] of [...starts.entries()].sort((a, b) => a[1] - b[1])) {
     if (exdates.has(key)) {
       continue
     }
-    const override = remaining.get(key)
+    seen.add(key)
+    const override = overrides.get(key)
     if (override !== undefined) {
-      remaining.delete(key)
       occurrences.push(single(override, master, key, true, key === firstKey, readerZone))
       continue
     }
-    const start = date ? toInstant(wall, readerZone) : toInstant(wall, readingZone)
-    const end = date ? toInstant(wall + length * DAY, readerZone) : start + length
+    let range: [string, SyncedCalendarEvent] | undefined
+    for (const candidate of ranges) {
+      if (candidate[0] >= key) break
+      range = candidate
+    }
+    const source = range === undefined ? master : range[1]
+    const shown = range === undefined ? wall : wall + shiftOf(range[0], range[1])
+    const span = lengthOf(source, readerZone)
+    const start = date ? toInstant(shown, readerZone) : toInstant(shown, readingZone)
+    const end = date ? toInstant(shown + span, readerZone) : start + span
     occurrences.push({
       key: `${master.id}:${key}`,
-      event: master,
+      event: source,
       seriesId: master.id,
       series: master,
       recurrenceId: key,
@@ -222,14 +414,16 @@ function seriesOccurrences(master: SyncedCalendarEvent, overrides: Map<string, S
       allDay: master.allDay,
       start,
       end,
-      startDate: date ? dateOf(wall) : null,
-      endDate: date ? dateOf(wall + length * DAY) : null,
+      startDate: date ? dateOf(shown) : null,
+      endDate: date ? dateOf(shown + span) : null,
       timeZone: zone,
+      fromServer: false,
     })
   }
-  // An override whose occurrence the series no longer has still shows.
-  for (const [key, override] of remaining) {
-    if (!exdates.has(key)) {
+  // Overrides moved here from an occurrence outside the walk, ones whose occurrence the series no longer has, and
+  // ones whose occurrence an EXDATE removed: the server shows them all, as their own event.
+  for (const [key, override] of overrides) {
+    if (!seen.has(key)) {
       occurrences.push(single(override, master, key, true, key === firstKey, readerZone))
     }
   }
@@ -237,10 +431,10 @@ function seriesOccurrences(master: SyncedCalendarEvent, overrides: Map<string, S
 }
 
 /**
- * The occurrences of events in a range [from, to) of instants, sorted by start and then by length (longest first).
- * Floating and all-day events are read in `readerZone`.
+ * The occurrences of events in a range [from, to) of instants, sorted by start and then by length (longest first),
+ * with the series whose walk was cut short. Floating and all-day events are read in `readerZone`.
  */
-export function expandOccurrences(events: Iterable<SyncedCalendarEvent>, from: number, to: number, readerZone: string): Occurrence[] {
+export function expandRange(events: Iterable<SyncedCalendarEvent>, from: number, to: number, readerZone: string): ExpandedRange {
   const masters = new Map<string, SyncedCalendarEvent>()
   const overrides = new Map<string, Map<string, SyncedCalendarEvent>>()
   for (const event of events) {
@@ -257,12 +451,13 @@ export function expandOccurrences(events: Iterable<SyncedCalendarEvent>, from: n
     forSeries.set(event.recurrenceId, event)
   }
 
+  const truncated: string[] = []
   const occurrences: Occurrence[] = []
   for (const [key, master] of masters) {
     const own = overrides.get(key) ?? new Map<string, SyncedCalendarEvent>()
     overrides.delete(key)
     if (isSeries(master)) {
-      occurrences.push(...seriesOccurrences(master, own, from, to, readerZone))
+      occurrences.push(...seriesOccurrences(master, own, from, to, readerZone, truncated))
       continue
     }
     const occurrence = single(master, null, null, false, true, readerZone)
@@ -279,7 +474,13 @@ export function expandOccurrences(events: Iterable<SyncedCalendarEvent>, from: n
       }
     }
   }
-  return occurrences.sort((a, b) => a.start - b.start || b.end - b.start - (a.end - a.start) || a.key.localeCompare(b.key))
+  occurrences.sort((a, b) => a.start - b.start || b.end - b.start - (a.end - a.start) || a.key.localeCompare(b.key))
+  return { occurrences, truncated }
+}
+
+/** {@link expandRange} without the series that were cut short. */
+export function expandOccurrences(events: Iterable<SyncedCalendarEvent>, from: number, to: number, readerZone: string): Occurrence[] {
+  return expandRange(events, from, to, readerZone).occurrences
 }
 
 /**

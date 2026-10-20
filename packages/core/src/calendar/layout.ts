@@ -172,16 +172,15 @@ export function layoutSpans(occurrences: Occurrence[], days: CalendarDay[]): Spa
 }
 
 /**
- * What a day cell of the month view shows: the items on lanes below `visible`, and how many it leaves out ("+N
- * more"). An item that spans several days counts as left out on every day it covers.
+ * What a day cell of the month view shows: up to `visible` items, and how many it leaves out ("+N more"), decided for
+ * this cell alone. When the day has more than fit, one line goes to "+N more" and the items on the lowest lanes show,
+ * so a multi-day item keeps its place where it fits.
  */
 export function cellOverflow(items: SpanItem[], dayIndex: number, visible: number): { shown: SpanItem[]; more: number } {
-  const onDay = items.filter((item) => item.first <= dayIndex && item.last >= dayIndex)
-  const total = onDay.length
-  if (total <= visible) {
+  const onDay = items.filter((item) => item.first <= dayIndex && item.last >= dayIndex).sort((a, b) => a.lane - b.lane)
+  if (onDay.length <= visible) {
     return { shown: onDay, more: 0 }
   }
-  // One lane goes to the "+N more" line.
-  const shown = onDay.filter((item) => item.lane < visible - 1)
-  return { shown, more: total - shown.length }
+  const shown = onDay.slice(0, Math.max(0, visible - 1))
+  return { shown, more: onDay.length - shown.length }
 }

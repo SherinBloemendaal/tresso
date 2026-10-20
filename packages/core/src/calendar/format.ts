@@ -1,6 +1,6 @@
 import type { Occurrence } from './occurrences'
 import type { ParticipationStatus } from './types'
-import { addDays, DAY, parseWall, startOfWallDay, toWall, wallParts, weekdayOf } from './zones'
+import { addDays, DAY, parseWall, startOfWallDay, toWall, wallParts, weekdayOf, utc } from './zones'
 
 export const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const
 export const WEEKDAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const
@@ -70,7 +70,7 @@ export function occurrenceWhen(occurrence: Occurrence, zone: string, today?: num
 export function isoWeek(wall: number): number {
   const day = startOfWallDay(wall)
   const thursday = day + (3 - ((weekdayOf(day) + 6) % 7)) * DAY
-  const yearStart = Date.UTC(wallParts(thursday).year, 0, 1)
+  const yearStart = utc(wallParts(thursday).year, 0, 1)
   return Math.floor((thursday - yearStart) / DAY / 7) + 1
 }
 
@@ -83,7 +83,7 @@ export function startOfWeek(wall: number, weekStart = 1): number {
 /** Midnight of the first of the month a day is in. */
 export function startOfMonth(wall: number): number {
   const parts = wallParts(wall)
-  return Date.UTC(parts.year, parts.month - 1, 1)
+  return utc(parts.year, parts.month - 1, 1)
 }
 
 /** How lists name a guest's answer. */

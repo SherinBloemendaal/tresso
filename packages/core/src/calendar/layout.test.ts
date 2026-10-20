@@ -86,6 +86,20 @@ describe('span layout', () => {
     ])
   })
 
+  it('decides "+N more" for each cell, not by the lanes of the whole week', () => {
+    // "early" holds lane 0 on Monday and Tuesday, so b1 to b4 (Tuesday and Wednesday) take lanes 1 to 4. On Wednesday
+    // lane 0 is free: the cell still shows two items and "+2 more", not one item and "+3 more".
+    const allDay = (id: string, start: string, end: string) => calendarEvent(id, 'cal', { allDay: true, start: { date: start }, end: { date: end } })
+    const items = layoutSpans(
+      occurrences([allDay('early', '2026-10-19', '2026-10-21'), ...['b1', 'b2', 'b3', 'b4'].map((id) => allDay(id, '2026-10-20', '2026-10-22'))]),
+      week,
+    )
+    expect(items.find((i) => i.occurrence.event.id === 'b1')?.lane).toBe(1)
+    const wednesday = cellOverflow(items, 2, 3)
+    expect(wednesday.shown.map((i) => i.occurrence.event.id)).toEqual(['b1', 'b2'])
+    expect(wednesday.more).toBe(2)
+  })
+
   it('says how many items a month cell leaves out', () => {
     const many = occurrences([1, 2, 3, 4, 5].map((n) => timed(`m${n}`, `2026-10-20T0${n}:00:00`, `2026-10-20T0${n}:30:00`)))
     const items = layoutSpans(many, week)

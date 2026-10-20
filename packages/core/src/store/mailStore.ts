@@ -98,6 +98,8 @@ export interface MailStore extends SyncStore {
    */
   calendarEvents(from: number, to: number): Promise<SyncedCalendarEvent[]>
   calendarEvent(id: string): Promise<SyncedCalendarEvent | null>
+  /** Raised whenever applied pages changed calendars or events, so views expand again only then. */
+  calendarChanges(): number
   /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
   inbox(mailAccountId: string | null, limit: number): Promise<ConversationSummary[]>
   /**

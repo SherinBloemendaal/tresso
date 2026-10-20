@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { calendarEvent } from '../store/contract'
-import { deleteRequest, durationMinutes, editScopes, inputFromEvent, inputFromOccurrence, reminderInputs, saveRequest, withLength } from './editing'
+import { deleteRequest, durationMinutes, editScopes, inputForScope, inputFromEvent, inputFromOccurrence, reminderInputs, saveRequest, withLength } from './editing'
 import { expandOccurrences } from './occurrences'
 
 const AMS = 'Europe/Amsterdam'
@@ -51,9 +51,10 @@ describe('editor values', () => {
       recurrence: 'FREQ=WEEKLY;BYDAY=MO',
     })
     expect(inputFromOccurrence(override!, AMS)).toMatchObject({ start: { dateTime: '2026-10-13T14:00:00', timeZone: AMS }, recurrence: 'FREQ=WEEKLY;BYDAY=MO' })
-    // Saving a moved occurrence unchanged is no change of the rule, so every scope stays on offer.
+    // A rule written another way is the same rule: "This event" stays on offer.
     const before = inputFromOccurrence(override!, AMS)
-    expect(editScopes(override!, { before, after: { ...before } })).toEqual(['this', 'following', 'all'])
+    expect(editScopes(override!, { before, after: { ...before, recurrence: 'freq=weekly;wkst=MO;byday=MO;INTERVAL=1' } })).toEqual(['this', 'following', 'all'])
+    expect(editScopes(override!, { before, after: { ...before, recurrence: 'FREQ=WEEKLY;BYDAY=TU' } })).toEqual(['following', 'all'])
   })
 
   it('reads reminders before the start with their channels, and leaves default reminders to the rules', () => {
@@ -71,6 +72,30 @@ describe('editor values', () => {
   it('keeps the length when the start moves', () => {
     expect(withLength({ dateTime: '2026-10-20T14:00:00', timeZone: AMS }, series.start, series.end)).toEqual({ dateTime: '2026-10-20T15:00:00', timeZone: AMS })
     expect(withLength({ date: '2026-10-22' }, { date: '2026-10-20' }, { date: '2026-10-23' })).toEqual({ date: '2026-10-25' })
+  })
+})
+
+describe('saving a scope from a moved occurrence', () => {
+  const before = inputFromOccurrence(override!, AMS)
+
+  it('changes the series by what the user changed, not by the moved occurrence', () => {
+    const body = inputForScope(override!, before, { ...before, location: 'Room 4' }, 'all')
+    expect(body).toMatchObject({ summary: series.summary, location: 'Room 4', reminders: inputFromEvent(series).reminders })
+    // The times stay where the occurrence is, with the series' own hour, so the series does not move.
+    expect(body.start).toEqual({ dateTime: '2026-10-13T14:00:00', timeZone: AMS })
+    expect(body.end).toEqual({ dateTime: '2026-10-13T15:00:00', timeZone: AMS })
+  })
+
+  it('takes new times the user gave', () => {
+    const moved = { ...before, start: { dateTime: '2026-10-13T16:00:00', timeZone: AMS }, end: { dateTime: '2026-10-13T16:30:00', timeZone: AMS } }
+    expect(inputForScope(override!, before, moved, 'following')).toMatchObject({ start: moved.start, end: moved.end, summary: series.summary })
+  })
+
+  it('saves exactly what the editor shows for this event, and for a series row', () => {
+    const after = { ...before, location: 'Room 4' }
+    expect(inputForScope(override!, before, after, 'this')).toBe(after)
+    const fromSeries = inputFromOccurrence(third!, AMS)
+    expect(inputForScope(third!, fromSeries, { ...fromSeries, summary: 'New' }, 'all')).toMatchObject({ summary: 'New' })
   })
 })
 

@@ -1,4 +1,4 @@
-import { DAY, recurrenceKey, toInstant, wallParts, weekdayOf } from './zones'
+import { DAY, recurrenceKey, toInstant, wallParts, weekdayOf, utc } from './zones'
 
 /** The ways an event can repeat that the editor offers; anything else is shown as it is and kept unless changed. */
 export type RepeatPreset = 'none' | 'daily' | 'weekdays' | 'weekly' | 'biweekly' | 'monthlyByDay' | 'monthlyByDate' | 'yearly' | 'custom'
@@ -102,7 +102,7 @@ export function withEnd(rule: string, end: RepeatEnd, allDay: boolean, zone: str
       return `${bare};COUNT=${Math.max(1, Math.floor(end.count))}`
     case 'until': {
       const [year, month, day] = end.date.split('-').map(Number) as [number, number, number]
-      const lastDay = Date.UTC(year, month - 1, day)
+      const lastDay = utc(year, month - 1, day)
       if (allDay) {
         return `${bare};UNTIL=${recurrenceKey(lastDay, true)}`
       }
@@ -192,4 +192,27 @@ export function describeRule(rule: string): string {
     sentence += `, until ${day} ${MONTHS[month - 1]} ${year}`
   }
   return sentence
+}
+
+/**
+ * Whether two rules give the same series, however they are written: the order of parts, letter case, INTERVAL=1
+ * and WKST=MO (the defaults) make no difference. Rules from Outlook, Apple and Thunderbird keep their own spelling
+ * through the editor, and only a rule the user changed counts as a new one.
+ */
+export function sameRule(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) {
+    return a === b
+  }
+  const canonical = (rule: string): string =>
+    rule
+      .toUpperCase()
+      .split(';')
+      .filter((part) => part !== '' && part !== 'INTERVAL=1' && part !== 'WKST=MO')
+      .map((part) => {
+        const [name, value = ''] = part.split('=')
+        return name === 'BYDAY' || name === 'BYMONTH' || name === 'BYMONTHDAY' ? `${name}=${value.split(',').sort().join(',')}` : part
+      })
+      .sort()
+      .join(';')
+  return canonical(a) === canonical(b)
 }

@@ -2,7 +2,7 @@ import { actionResult, type AppliedAction, type MessageAction } from '../actions
 import { compareBriefs } from '../brief'
 import type { Verdict } from '../domain'
 import { compareHandOvers } from '../handOvers'
-import { sortCalendars } from '../calendar/calendars'
+import { sortCalendars, touchesCalendars } from '../calendar/calendars'
 import { eventSpan } from '../calendar/occurrences'
 import type { SyncedCalendar, SyncedCalendarEvent } from '../calendar/types'
 import { sortSmartInboxes } from '../smartInboxes'
@@ -60,9 +60,19 @@ CREATE TABLE IF NOT EXISTS hand_overs (id TEXT PRIMARY KEY NOT NULL, mail_accoun
 CREATE INDEX IF NOT EXISTS hand_overs_by_account ON hand_overs (mail_account_id);
 CREATE TABLE IF NOT EXISTS daily_briefs (id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS calendars (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT, json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS calendar_events (id TEXT PRIMARY KEY NOT NULL, calendar_id TEXT NOT NULL, uid TEXT NOT NULL, starts_at INTEGER NOT NULL, ends_at INTEGER, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS calendar_events (
+  id TEXT PRIMARY KEY NOT NULL,
+  calendar_id TEXT NOT NULL,
+  uid TEXT NOT NULL,
+  starts_at INTEGER NOT NULL,
+  ends_at INTEGER,
+  series_starts_at INTEGER NOT NULL,
+  series_ends_at INTEGER,
+  json TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS calendar_events_by_series ON calendar_events (calendar_id, uid);
-CREATE INDEX IF NOT EXISTS calendar_events_by_start ON calendar_events (starts_at);
+CREATE INDEX IF NOT EXISTS calendar_events_by_series_start ON calendar_events (series_starts_at);
+CREATE INDEX IF NOT EXISTS calendar_events_by_series_end ON calendar_events (series_ends_at);
 `
 
 /** Every table any version made, so a rebuild leaves none of an old shape behind. */
@@ -99,6 +109,8 @@ export class SqliteMailStore implements MailStore {
   private readonly unconfirmed = new Set<string>()
   /** Set while the copy must sync from the start (see resyncFromStart); kept in the database too, so it holds after a restart. */
   private resyncing: boolean
+  /** Raised by every page that changed calendars or events; see calendarChanges. */
+  private calendarRevision = 0
   /** Counts the resyncs asked for, so one asked for while a pull from the start is finishing is not lost. */
   private resyncsAsked = 0
   /** Which resync the pull under way began from the start for, if it did; only then may its pages move the cursor. */
@@ -249,7 +261,7 @@ export class SqliteMailStore implements MailStore {
             await deleteCalendar(tx, deleted.id)
             break
           case 'calendarEvent':
-            await tx.run('DELETE FROM calendar_events WHERE id = ?', [deleted.id])
+            await deleteCalendarEvent(tx, deleted.id)
             break
           case 'draft': {
             const local = await readDraft(tx, deleted.id)
@@ -294,8 +306,7 @@ export class SqliteMailStore implements MailStore {
         await tx.run('INSERT OR REPLACE INTO calendars (id, mail_account_id, json) VALUES (?, ?, ?)', [calendar.id, calendar.mailAccountId, JSON.stringify(calendar)])
       }
       for (const event of page.calendarEvents) {
-        const span = eventSpan(event)
-        await tx.run('INSERT OR REPLACE INTO calendar_events (id, calendar_id, uid, starts_at, ends_at, json) VALUES (?, ?, ?, ?, ?, ?)', [event.id, event.calendarId, event.uid, span.startsAt, span.endsAt, JSON.stringify(event)])
+        await writeCalendarEvent(tx, event)
       }
       for (const thread of page.threads) {
         await writeThread(tx, thread)
@@ -345,6 +356,9 @@ export class SqliteMailStore implements MailStore {
         finished = this.resyncsAsked
       }
     })
+    if (touchesCalendars(page)) {
+      this.calendarRevision += 1
+    }
     // A resync asked for while this page was being stored still stands: the next pull begins from the start again.
     if (finished !== null && finished === this.resyncsAsked) {
       this.resyncing = false
@@ -415,15 +429,14 @@ export class SqliteMailStore implements MailStore {
   }
 
   async calendarEvents(from: number, to: number): Promise<SyncedCalendarEvent[]> {
-    const touching = await this.reader.all<{ calendar_id: string; uid: string }>('SELECT DISTINCT calendar_id, uid FROM calendar_events WHERE starts_at < ? AND (ends_at IS NULL OR ends_at > ?)', [to, from])
-    const events: SyncedCalendarEvent[] = []
-    // Every row of a series that touches the range: an override moved out of it still takes its occurrence away.
-    for (const { calendar_id: calendarId, uid } of touching) {
-      for (const row of await this.reader.all<JsonRow>('SELECT json FROM calendar_events WHERE calendar_id = ? AND uid = ?', [calendarId, uid])) {
-        events.push(parse<SyncedCalendarEvent>(row))
-      }
-    }
-    return events
+    // Every row carries the span of its whole series, so one query finds the series that touch the range with all
+    // their rows: an override moved out of the range still takes its occurrence away.
+    const rows = await this.reader.all<JsonRow>('SELECT json FROM calendar_events WHERE series_starts_at < ? AND (series_ends_at IS NULL OR series_ends_at > ?)', [to, from])
+    return rows.map((row) => parse<SyncedCalendarEvent>(row))
+  }
+
+  calendarChanges(): number {
+    return this.calendarRevision
   }
 
   async calendarEvent(id: string): Promise<SyncedCalendarEvent | null> {
@@ -785,6 +798,44 @@ async function deleteAccount(tx: Sql, accountId: string): Promise<void> {
     await deleteCalendar(tx, row.id)
   }
   await tx.run('DELETE FROM mail_accounts WHERE id = ?', [accountId])
+}
+
+async function writeCalendarEvent(tx: Sql, event: SyncedCalendarEvent): Promise<void> {
+  const previous = await tx.first<{ calendar_id: string; uid: string }>('SELECT calendar_id, uid FROM calendar_events WHERE id = ?', [event.id])
+  const span = eventSpan(event)
+  await tx.run('INSERT OR REPLACE INTO calendar_events (id, calendar_id, uid, starts_at, ends_at, series_starts_at, series_ends_at, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [
+    event.id,
+    event.calendarId,
+    event.uid,
+    span.startsAt,
+    span.endsAt,
+    span.startsAt,
+    span.endsAt,
+    JSON.stringify(event),
+  ])
+  await spanSeries(tx, event.calendarId, event.uid)
+  if (previous !== null && (previous.calendar_id !== event.calendarId || previous.uid !== event.uid)) {
+    await spanSeries(tx, previous.calendar_id, previous.uid)
+  }
+}
+
+async function deleteCalendarEvent(tx: Sql, id: string): Promise<void> {
+  const row = await tx.first<{ calendar_id: string; uid: string }>('SELECT calendar_id, uid FROM calendar_events WHERE id = ?', [id])
+  await tx.run('DELETE FROM calendar_events WHERE id = ?', [id])
+  if (row !== null) {
+    await spanSeries(tx, row.calendar_id, row.uid)
+  }
+}
+
+/** Gives every row of a series the span of the whole series: from its earliest start to its latest end, if any. */
+async function spanSeries(tx: Sql, calendarId: string, uid: string): Promise<void> {
+  const rows = await tx.all<{ starts_at: number; ends_at: number | null }>('SELECT starts_at, ends_at FROM calendar_events WHERE calendar_id = ? AND uid = ?', [calendarId, uid])
+  if (rows.length === 0) {
+    return
+  }
+  const startsAt = Math.min(...rows.map((row) => row.starts_at))
+  const endsAt = rows.some((row) => row.ends_at === null) ? null : Math.max(...rows.map((row) => row.ends_at as number))
+  await tx.run('UPDATE calendar_events SET series_starts_at = ?, series_ends_at = ? WHERE calendar_id = ? AND uid = ?', [startsAt, endsAt, calendarId, uid])
 }
 
 async function deleteCalendar(tx: Sql, calendarId: string): Promise<void> {

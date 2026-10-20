@@ -10,6 +10,15 @@ import { deviceTimeZone } from '../timeZone'
  */
 
 export const MINUTE = 60_000
+
+/** Date.UTC for every year: Date.UTC reads the years 0 to 99 as 1900 to 1999. 400 Gregorian years are exactly 146,097 days. */
+export function utc(year: number, monthIndex: number, day = 1, hour = 0, minute = 0, second = 0): number {
+  if (year >= 100) {
+    return Date.UTC(year, monthIndex, day, hour, minute, second)
+  }
+  return Date.UTC(year + 400, monthIndex, day, hour, minute, second) - 146_097 * 86_400_000
+}
+
 export const HOUR = 60 * MINUTE
 export const DAY = 24 * HOUR
 
@@ -25,19 +34,25 @@ export interface WallParts {
 
 const formatters = new Map<string, Intl.DateTimeFormat>()
 
+/** 1900-01-01T00:00:00Z; see toWall. */
+const EARLIEST_INTL = Date.UTC(1900, 0, 1)
+
+/**
+ * A formatter for the clock in a zone. Only options every engine the clients run on takes, Hermes on the phone
+ * included: no `era`, and `hour12: false` rather than `hourCycle` (some engines then write midnight as 24).
+ */
 function partsFormatter(zone: string): Intl.DateTimeFormat {
   let formatter = formatters.get(zone)
   if (formatter === undefined) {
     formatter = new Intl.DateTimeFormat('en-US', {
       timeZone: zone,
-      hourCycle: 'h23',
+      hour12: false,
       year: 'numeric',
       month: 'numeric',
       day: 'numeric',
       hour: 'numeric',
       minute: 'numeric',
       second: 'numeric',
-      era: 'short',
     })
     formatters.set(zone, formatter)
   }
@@ -61,12 +76,17 @@ export function readerTimeZone(): string {
 
 /** The clock reading in a zone at an instant. */
 export function toWall(instant: number, zone: string): number {
+  // Intl's calendar turns Julian before 1582 and zones had local mean time before 1900: an old series (an hourly
+  // one from year 1) is read with the zone's offset of 1900, without Intl.
+  if (instant < EARLIEST_INTL) {
+    return instant + offsetAt(EARLIEST_INTL, zone) * MINUTE
+  }
   const values: Record<string, string> = {}
   for (const part of partsFormatter(zone).formatToParts(new Date(instant))) {
     values[part.type] = part.value
   }
-  const year = values.era === 'BC' || values.era === 'B' ? 1 - Number(values.year) : Number(values.year)
-  const wall = Date.UTC(year, Number(values.month) - 1, Number(values.day), Number(values.hour), Number(values.minute), Number(values.second))
+  const hour = Number(values.hour) % 24
+  const wall = utc(Number(values.year), Number(values.month) - 1, Number(values.day), hour, Number(values.minute), Number(values.second))
   // Intl leaves out milliseconds; they never depend on the zone.
   return wall + (((instant % 1000) + 1000) % 1000)
 }
@@ -77,16 +97,18 @@ export function offsetAt(instant: number, zone: string): number {
 }
 
 /**
- * The instant a clock reading in a zone stands for, as RFC 5545 reads one: a reading that happens twice (when clocks
- * go back) is the first of the two, and one that never happens (when clocks go forward) is read with the offset
- * from before the change, so it lands as far after the change as it was meant to be after the old time.
+ * The instant a clock reading in a zone stands for, as the server (PHP) reads one: a reading that happens twice (when
+ * clocks go back) is the later of the two, and one that never happens (when clocks go forward) is read with the
+ * offset from before the change, so it lands as far after the change as it was meant to be after the old time.
+ * RFC 5545 asks for the first of a repeated reading; the server's reading wins, so every device and the server's
+ * reminders agree on when an event at 02:30 on that night is.
  */
 export function toInstant(wall: number, zone: string): number {
   const before = offsetAt(wall - DAY, zone)
   const after = offsetAt(wall + DAY, zone)
   const candidates = [...new Set([before, after])].map((offset) => wall - offset * MINUTE).filter((instant) => toWall(instant, zone) === wall)
   if (candidates.length > 0) {
-    return Math.min(...candidates)
+    return Math.max(...candidates)
   }
   return wall - before * MINUTE
 }
@@ -104,7 +126,7 @@ export function wallParts(wall: number): WallParts {
 }
 
 export function wallOf(parts: Partial<WallParts> & Pick<WallParts, 'year' | 'month' | 'day'>): number {
-  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0)
+  return utc(parts.year, parts.month - 1, parts.day, parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0)
 }
 
 /** Midnight of the day a wall time falls on. */
@@ -125,8 +147,8 @@ export function addDays(wall: number, days: number): number {
 /** The same day of the month a number of months later, held to the month's last day. */
 export function addMonths(wall: number, months: number): number {
   const parts = wallParts(wall)
-  const first = Date.UTC(parts.year, parts.month - 1 + months, 1)
-  const last = new Date(Date.UTC(parts.year, parts.month + months, 0)).getUTCDate()
+  const first = utc(parts.year, parts.month - 1 + months, 1)
+  const last = new Date(utc(parts.year, parts.month + months, 0)).getUTCDate()
   return first + (Math.min(parts.day, last) - 1) * DAY + (wall - startOfWallDay(wall))
 }
 
@@ -151,7 +173,7 @@ export function parseWall(value: string): number | null {
     return null
   }
   const [, year, month, day, hour, minute, second] = match.map(Number) as number[]
-  const wall = Date.UTC(year!, month! - 1, day!, Number.isNaN(hour) ? 0 : hour!, Number.isNaN(minute) ? 0 : minute!, Number.isNaN(second) ? 0 : second!)
+  const wall = utc(year!, month! - 1, day!, Number.isNaN(hour) ? 0 : hour!, Number.isNaN(minute) ? 0 : minute!, Number.isNaN(second) ? 0 : second!)
   const parts = wallParts(wall)
   return parts.month === month && parts.day === day ? wall : null
 }
@@ -163,7 +185,7 @@ export function parseRecurrenceKey(key: string): number | null {
     return null
   }
   const [, year, month, day, hour, minute, second] = match.map(Number) as number[]
-  return Date.UTC(year!, month! - 1, day!, Number.isNaN(hour) ? 0 : hour!, Number.isNaN(minute) ? 0 : minute!, Number.isNaN(second) ? 0 : second!)
+  return utc(year!, month! - 1, day!, Number.isNaN(hour) ? 0 : hour!, Number.isNaN(minute) ? 0 : minute!, Number.isNaN(second) ? 0 : second!)
 }
 
 /** The recurrence id of an all-day occurrence (a wall date) or a timed one (an instant). */

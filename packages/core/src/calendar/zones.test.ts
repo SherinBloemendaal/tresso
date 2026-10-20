@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDateTime, offsetAt, offsetLabel, parseWall, recurrenceKey, toInstant, toWall, zoneLabel } from './zones'
+import { formatDateTime, offsetAt, offsetLabel, parseWall, recurrenceKey, toInstant, toWall, utc, zoneLabel } from './zones'
 
 const wall = (value: string): number => parseWall(value)!
 
@@ -11,10 +11,11 @@ describe('time zones', () => {
     expect(toInstant(wall('2026-10-20T10:24'), 'America/New_York')).toBe(Date.UTC(2026, 9, 20, 14, 24))
   })
 
-  it('reads a time that happens twice when clocks go back as the first one', () => {
-    // Amsterdam goes from 03:00 CEST back to 02:00 CET on 25 October 2026.
-    expect(toInstant(wall('2026-10-25T02:30'), 'Europe/Amsterdam')).toBe(Date.UTC(2026, 9, 25, 0, 30))
+  it('reads a time that happens twice when clocks go back as the later one, as the server does', () => {
+    // Amsterdam goes from 03:00 CEST back to 02:00 CET on 25 October 2026; the server reads 02:30 as 02:30 CET.
+    expect(toInstant(wall('2026-10-25T02:30'), 'Europe/Amsterdam')).toBe(Date.UTC(2026, 9, 25, 1, 30))
     expect(toInstant(wall('2026-10-25T03:30'), 'Europe/Amsterdam')).toBe(Date.UTC(2026, 9, 25, 2, 30))
+    expect(toInstant(wall('2026-10-25T01:30'), 'Europe/Amsterdam')).toBe(Date.UTC(2026, 9, 24, 23, 30))
   })
 
   it('moves a time that never happens when clocks go forward past the change', () => {
@@ -41,6 +42,13 @@ describe('time zones', () => {
   it('writes recurrence ids as the API does', () => {
     expect(recurrenceKey(Date.UTC(2026, 9, 19, 7, 0), false)).toBe('20261019T070000Z')
     expect(recurrenceKey(Date.UTC(2026, 9, 19), true)).toBe('20261019')
+  })
+
+  it('keeps the first centuries apart from the 1900s', () => {
+    expect(new Date(utc(1, 0, 1)).toISOString()).toBe('0001-01-01T00:00:00.000Z')
+    expect(new Date(utc(99, 11, 32)).toISOString()).toBe('0100-01-01T00:00:00.000Z')
+    expect(formatDateTime(toWall(utc(1, 0, 1, 12), 'UTC'))).toBe('0001-01-01T12:00:00')
+    expect(parseWall('0001-01-01T09:00')).toBe(utc(1, 0, 1, 9))
   })
 
   it('refuses dates that do not exist', () => {

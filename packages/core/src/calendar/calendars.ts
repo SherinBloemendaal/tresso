@@ -1,3 +1,4 @@
+import type { ChangePage } from '../sync/types'
 import type { SyncedCalendar } from './types'
 
 /** The user's order: by position, then the Tresso calendar first, then by name. */
@@ -11,4 +12,9 @@ export function sortCalendars<T extends Pick<SyncedCalendar, 'position' | 'name'
 export function defaultCalendar(calendars: SyncedCalendar[]): SyncedCalendar | null {
   const writable = calendars.filter((calendar) => calendar.writable)
   return writable.find((calendar) => calendar.isDefault && calendar.mailAccountId === null) ?? writable.find((calendar) => calendar.isDefault) ?? writable[0] ?? null
+}
+
+/** Whether a page of the delta changes what the calendar shows: calendars, events, or an account and its calendars. */
+export function touchesCalendars(page: ChangePage): boolean {
+  return page.calendars.length > 0 || page.calendarEvents.length > 0 || page.deleted.some((deleted) => deleted.type === 'calendar' || deleted.type === 'calendarEvent' || deleted.type === 'mailAccount')
 }
