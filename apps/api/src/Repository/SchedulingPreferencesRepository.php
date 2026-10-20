@@ -39,16 +39,17 @@ class SchedulingPreferencesRepository extends ServiceEntityRepository
     {
         $defaults = new SchedulingPreferences($user);
         $this->getEntityManager()->getConnection()->executeStatement(
-            'INSERT INTO scheduling_preferences (user_id, buffer_minutes, travel_minutes, minimum_notice_minutes, updated_at)
-             VALUES (:user, :buffer, :travel, :notice, :updated) ON CONFLICT (user_id) DO NOTHING',
+            'INSERT INTO scheduling_preferences (user_id, buffer_minutes, travel_minutes, minimum_notice_minutes, plan_todos, updated_at)
+             VALUES (:user, :buffer, :travel, :notice, :planTodos, :updated) ON CONFLICT (user_id) DO NOTHING',
             [
                 'user' => $user->getId()->toRfc4122(),
                 'buffer' => $defaults->getBufferMinutes(),
                 'travel' => $defaults->getTravelMinutes(),
                 'notice' => $defaults->getMinimumNoticeMinutes(),
+                'planTodos' => $defaults->plansTodos(),
                 'updated' => $defaults->getUpdatedAt(),
             ],
-            ['updated' => Types::DATETIME_IMMUTABLE],
+            ['planTodos' => Types::BOOLEAN, 'updated' => Types::DATETIME_IMMUTABLE],
         );
 
         // Refreshed: this request may have loaded the row before another request changed it and released the lock.

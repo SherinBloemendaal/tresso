@@ -20,4 +20,6 @@ final class UpdateSchedulingPreferences
 
     #[Assert\Range(min: 0, max: SchedulingRules::MAX_NOTICE_MINUTES)]
     public ?int $minimumNoticeMinutes = null;
+
+    public ?bool $planTodos = null;
 }

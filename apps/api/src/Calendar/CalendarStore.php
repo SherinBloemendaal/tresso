@@ -16,6 +16,7 @@ use App\Notification\PlanCalendarObject;
 use App\Realtime\AfterCommitDispatcher;
 use App\Realtime\RealtimeNotifier;
 use App\Repository\CalendarOperationRepository;
+use App\Todo\ReplanTodos;
 use Doctrine\ORM\EntityManagerInterface;
 use Sabre\VObject\Component\VCalendar;
 
@@ -98,10 +99,15 @@ final readonly class CalendarStore
         $this->entityManager->flush();
     }
 
-    /** The object's reminders follow its change, once the change is committed. */
+    /**
+     * The object's reminders follow its change, once the change is committed, and so does the time the owner's todos
+     * are planned at (once per commit, however many events it saves).
+     */
     private function planNotifications(CalendarObject $object): void
     {
-        $this->afterCommit->dispatch(new PlanCalendarObject($object->getId()->toRfc4122(), $object->getCalendar()->getOwner()->getId()->toRfc4122()));
+        $owner = $object->getCalendar()->getOwner()->getId()->toRfc4122();
+        $this->afterCommit->dispatch(new PlanCalendarObject($object->getId()->toRfc4122(), $owner));
+        $this->afterCommit->dispatchOnce('replan-todos:'.$owner, new ReplanTodos($owner));
     }
 
     /** Marks the rows of a resource with the reason its last change did not reach the provider (or clears it). */

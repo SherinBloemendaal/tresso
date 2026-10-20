@@ -16,6 +16,7 @@ use App\ApiResource\Input\Todo\MakeTodo;
 use App\ApiResource\Input\Todo\UpdateTodo;
 use App\Entity\Todo;
 use App\Security\Scope;
+use App\State\TodoPlanProcessor;
 use App\State\TodoProcessor;
 use App\State\TodoProvider;
 
@@ -23,6 +24,12 @@ use App\State\TodoProvider;
  * A todo of the signed-in user, synced to every device (the delta carries `todos`). One made from an email links to
  * it (`messageId`, `threadId`); an email has at most one todo, so making one again returns the one it has. Open todos
  * come in the user's order (`position`), done ones after them.
+ *
+ * An open todo with a due date and a duration can hold time in the calendar (`plannedStart`, `plannedEnd`), which counts
+ * as busy for the meeting time finder. `POST /todos/{id}/plan` plans it at the earliest free time before it is due
+ * (422 with the reason when there is none); `DELETE /todos/{id}/plan` gives the time back. Planned time moves when the
+ * calendar or the todo changes, or stays with `planState` `conflict` when no other free time is left; completing the
+ * todo, or clearing its due date or duration, gives it back.
  */
 #[ApiResource(
     shortName: 'Todo',
@@ -70,6 +77,24 @@ use App\State\TodoProvider;
             provider: TodoProvider::class,
             processor: TodoProcessor::class,
         ),
+        new Post(
+            uriTemplate: '/todos/{id}/plan',
+            status: 200,
+            description: 'Plans the todo at the earliest free time before it is due, again when it was planned.',
+            security: "is_granted('".Scope::ROLE_TODOS_WRITE."')",
+            input: false,
+            provider: TodoProvider::class,
+            processor: TodoPlanProcessor::class,
+            name: 'todo_plan',
+        ),
+        new Delete(
+            uriTemplate: '/todos/{id}/plan',
+            description: 'Gives the time the todo holds in the calendar back.',
+            security: "is_granted('".Scope::ROLE_TODOS_WRITE."')",
+            provider: TodoProvider::class,
+            processor: TodoPlanProcessor::class,
+            name: 'todo_unplan',
+        ),
     ],
 )]
 final readonly class TodoResource
@@ -92,6 +117,11 @@ final readonly class TodoResource
         /** The email it came from; null for a todo of the user's own, or once that email or its account is gone. */
         public ?string $messageId,
         public ?string $threadId,
+        /** The time it holds in the calendar; null while it is not planned. */
+        public ?\DateTimeImmutable $plannedStart,
+        public ?\DateTimeImmutable $plannedEnd,
+        /** planned, or conflict (the time is no longer free and none other was found); null while not planned. */
+        public ?string $planState,
         public \DateTimeImmutable $createdAt,
         public \DateTimeImmutable $updatedAt,
         /**
@@ -116,6 +146,9 @@ final readonly class TodoResource
             $todo->getSource()->value,
             $todo->getMessage()?->getId()->toRfc4122(),
             $todo->getMessage()?->getThread()->getId()->toRfc4122(),
+            $todo->getPlannedStart(),
+            $todo->getPlannedEnd(),
+            $todo->getPlanState()?->value,
             $todo->getCreatedAt(),
             $todo->getUpdatedAt(),
             $made,

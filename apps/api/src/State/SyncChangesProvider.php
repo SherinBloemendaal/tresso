@@ -667,7 +667,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     {
         $rows = $this->connection->fetchAllAssociative(
             'SELECT o.id, o.title, o.notes, o.due_date, o.due_time, o.duration_minutes, o.completed_at, o.position, o.source,
-                    o.message_id, m.thread_id, o.created_at, o.updated_at
+                    o.message_id, m.thread_id, o.planned_start, o.planned_end, o.plan_state, o.created_at, o.updated_at
              FROM todo o LEFT JOIN message m ON m.id = o.message_id
              WHERE o.owner_id = :user AND o.change_seq > :since AND o.change_seq <= :until ORDER BY o.change_seq',
             $range,
@@ -685,6 +685,9 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'source' => $r['source'],
             'messageId' => $r['message_id'],
             'threadId' => $r['thread_id'],
+            'plannedStart' => self::date($r['planned_start']),
+            'plannedEnd' => self::date($r['planned_end']),
+            'planState' => $r['plan_state'],
             'createdAt' => self::date($r['created_at']),
             'updatedAt' => self::date($r['updated_at']),
         ], $rows);

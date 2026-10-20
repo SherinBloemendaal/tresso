@@ -142,6 +142,52 @@ class TodoRepository extends ServiceEntityRepository
         return array_fill_keys($ids, true);
     }
 
+    /**
+     * The owner's open todos with planned time that starts after $from, earliest deadline first.
+     *
+     * @return list<Todo>
+     */
+    public function findPlannedFrom(User $owner, \DateTimeImmutable $from): array
+    {
+        /** @var list<Todo> */
+        return $this->createQueryBuilder('t')
+            ->where('t.owner = :owner')
+            ->andWhere('t.completedAt IS NULL')
+            ->andWhere('t.plannedStart > :from')
+            ->setParameter('owner', $owner->getId(), 'uuid')
+            ->setParameter('from', $from->setTimezone(new \DateTimeZone('UTC')), 'datetime_immutable')
+            ->orderBy('t.dueDate')
+            ->addOrderBy('t.dueTime')
+            ->addOrderBy('t.plannedStart')
+            ->addOrderBy('t.id')
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
+     * The owner's open todos without planned time that have what planning needs (a due date and a duration), earliest
+     * deadline first, then in the user's order.
+     *
+     * @return list<Todo>
+     */
+    public function findPlannable(User $owner): array
+    {
+        /** @var list<Todo> */
+        return $this->createQueryBuilder('t')
+            ->where('t.owner = :owner')
+            ->andWhere('t.completedAt IS NULL')
+            ->andWhere('t.plannedStart IS NULL')
+            ->andWhere('t.dueDate IS NOT NULL')
+            ->andWhere('t.durationMinutes IS NOT NULL')
+            ->setParameter('owner', $owner->getId(), 'uuid')
+            ->orderBy('t.dueDate')
+            ->addOrderBy('t.dueTime')
+            ->addOrderBy('t.position')
+            ->addOrderBy('t.id')
+            ->getQuery()
+            ->getResult();
+    }
+
     /** The position after the owner's last open todo, so a new one goes at the bottom. */
     public function nextPosition(User $owner): int
     {
