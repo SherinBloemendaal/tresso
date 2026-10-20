@@ -1243,7 +1243,10 @@ accepted.
     block. A write the provider accepted reports the provider's version back as `current`, which replaces the stored
     object unless a newer change of the user's waits; one it could not read back keeps the last known ETag. Both
     providers write a series step by step (the master, then each occurrence): every retry of a write to an event the
-    provider has reports the provider's id, ETag and version, because an earlier attempt may have written part of it. The API bases the next attempt on them, and when no
+    provider has reports the provider's id, ETag and version, because an earlier attempt may have written part of it. That version is adopted only when it is the one the
+    attempt read or its own steps left (Google: every event's ETag; Graph: the master's changeKey, read again after
+    each step): a provider that answers someone else's change with a 5xx instead of a 412 would otherwise let the
+    next attempt pass its If-Match and overwrite that change, so the retry is a conflict instead. The API bases the next attempt on them, and when no
     attempt is left the provider's version replaces Tresso's, so the two never stay apart. A move to another calendar
     of the same Google account (a delete and a create of the same UID in one claim) is Google's `events.move`, which
     tells no one; it is made only when the event still is the version Tresso moved (else nothing is written: the delete reports the
