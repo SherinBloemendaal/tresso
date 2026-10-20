@@ -61,6 +61,10 @@ final readonly class Reencryption
         $current = $this->keys->current($owner)->version;
         $failed = 0;
         foreach (self::STEPS as $step) {
+            if (self::past($until)) {
+                // The rest is for the next run; counting it below shows how much is left.
+                break;
+            }
             [$moved, $stepFailed] = match ($step) {
                 'credentials' => $this->credentials($owner),
                 'messages' => $this->messages($owner, $current, $batch, $until),
@@ -487,6 +491,10 @@ final readonly class Reencryption
         do {
             $rows = $this->connection->fetchAllAssociative($select, ['owner' => $owner->toRfc4122(), 'current' => $current, 'sealed' => 'f1.'.$current.'.%', 'after' => $after, 'batch' => $batch]);
             foreach ($rows as $row) {
+                // Checked per row: a row is one object at most, so a run overshoots its time by one object, not a batch.
+                if (self::past($until)) {
+                    return [$moved, $failed];
+                }
                 $id = self::string($row['id']);
                 $after = $id;
                 try {
@@ -497,9 +505,14 @@ final readonly class Reencryption
                     ++$failed;
                 }
             }
-        } while (\count($rows) === $batch && (null === $until || new \DateTimeImmutable() < $until));
+        } while (\count($rows) === $batch);
 
         return [$moved, $failed];
+    }
+
+    private static function past(?\DateTimeImmutable $until): bool
+    {
+        return null !== $until && new \DateTimeImmutable() >= $until;
     }
 
     /**

@@ -9,8 +9,10 @@ use Symfony\Component\Messenger\Attribute\AsMessageHandler;
 
 /**
  * A mail notification keeps what it says only as long as clients can still get it through the delta (7 days after it
- * was delivered); a dropped one, never shown, as long. After that its title and body are cleared. The row itself stays:
- * it is what makes a message notify at most once.
+ * was delivered); a dropped one, never shown, as long. One still waiting is cleared 7 days after its fire time: by
+ * then it can never be delivered any more ({@see MailNotifier::MAX_LATE}), while one held for a focus block or meeting
+ * has its fire time ahead and keeps what it says. After that its title and body are cleared. The row itself stays: it
+ * is what makes a message notify at most once.
  */
 #[AsMessageHandler]
 final readonly class MailNotificationRetention
@@ -37,7 +39,8 @@ final readonly class MailNotificationRetention
                 "UPDATE mail_notification SET title = '', body = '', sealed_body = NULL
                  WHERE id IN (
                      SELECT id FROM mail_notification
-                     WHERE COALESCE(delivered_at, dropped_at) < :cutoff AND (title <> '' OR body <> '' OR sealed_body IS NOT NULL)
+                     WHERE (COALESCE(delivered_at, dropped_at) < :cutoff OR (delivered_at IS NULL AND dropped_at IS NULL AND fire_at < :cutoff))
+                       AND (title <> '' OR body <> '' OR sealed_body IS NOT NULL)
                      LIMIT ".self::BATCH.'
                  )',
                 ['cutoff' => $cutoff],

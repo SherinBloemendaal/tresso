@@ -314,6 +314,19 @@ final class ReencryptCommandTest extends DatabaseTestCase
         self::assertNotNull($later[0]->last(DelayStamp::class));
     }
 
+    public function testABackgroundRunStopsAtItsDeadlineInsteadOfFinishingABatch(): void
+    {
+        $reencryption = static::getContainer()->get(Reencryption::class);
+        $left = $reencryption->legacyContentLeft();
+
+        $result = $reencryption->run($this->owner, 200, static function (): void {}, new \DateTimeImmutable('-1 second'));
+
+        self::assertSame($left, $reencryption->legacyContentLeft(), 'Nothing moved once its time was up, not even the rest of a batch.');
+        self::assertGreaterThan(0, $result->left);
+        $reencryption->run($this->owner, 200, static function (): void {});
+        self::assertSame(0, $reencryption->legacyContentLeft(), 'The next run goes on.');
+    }
+
     public function testNeedsUsersOrAll(): void
     {
         self::assertSame(Command::INVALID, $this->reencrypt([])->getStatusCode());
