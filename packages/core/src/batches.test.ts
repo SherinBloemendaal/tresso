@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { batchTimeLabel, unsubscribeOffer } from './batches'
+import { batchTimeLabel, oneClickUnsubscribeAvailable, unsubscribeOffer } from './batches'
 import type { SyncedMessage, SyncedUnsubscription } from './sync/types'
 
 function message(id: string, receivedAt: string, extra: Partial<SyncedMessage> = {}): SyncedMessage {
@@ -67,5 +67,13 @@ describe('batchTimeLabel', () => {
 
     expect(batchTimeLabel(Date.parse('2026-10-20T16:00:00Z'), now, 'en-GB', 'UTC')).toBe('16:00')
     expect(batchTimeLabel(Date.parse('2026-10-21T09:00:00Z'), now, 'en-GB', 'UTC')).toBe('Wed 09:00')
+  })
+})
+
+describe('oneClickUnsubscribeAvailable', () => {
+  it('is there for accounts whose provider vouches for senders, not for generic IMAP servers', () => {
+    expect(oneClickUnsubscribeAvailable({ provider: 'gmail' })).toBe(true)
+    expect(oneClickUnsubscribeAvailable({ provider: 'microsoft' })).toBe(true)
+    expect(oneClickUnsubscribeAvailable({ provider: 'imap' })).toBe(false)
   })
 })

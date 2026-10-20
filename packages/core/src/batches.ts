@@ -74,3 +74,16 @@ export function batchTimeLabel(at: number, now: number = Date.now(), locale?: st
   }
   return `${new Intl.DateTimeFormat(locale, { weekday: 'short', timeZone }).format(at)} ${time}`
 }
+
+/**
+ * Whether Tresso can unsubscribe from mail an account received: only when the receiving server's word on who sent it
+ * can be trusted. Gmail and Microsoft 365 always write their own authentication results; a generic IMAP server may not,
+ * so a forged sender looks the same there. Mirrors App\Classification\ReceivingServers.
+ */
+export function oneClickUnsubscribeAvailable(account: { provider: string }): boolean {
+  return account.provider !== 'imap'
+}
+
+/** Why an account offers no one-click unsubscribe, in the user's words. */
+export const NO_UNSUBSCRIBE_ON_IMAP =
+  "One-click unsubscribe is not available for IMAP accounts: their mail server's checks of who sent a message cannot be trusted, so Tresso cannot tell a real sender from a forged one. Unsubscribe on the sender's website instead."
