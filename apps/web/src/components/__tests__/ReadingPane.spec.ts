@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import type { ChangePage, SyncedMessage } from '@tresso/core'
+import type { ChangePage, SyncedMessage, SyncedUnsubscription } from '@tresso/core'
 import { deleteMailDatabase } from '@/mail/db'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
@@ -41,6 +41,10 @@ function message(id: string, folderIds: string[], receivedAt: string, seen: bool
   }
 }
 
+function unsubscription(status: SyncedUnsubscription['status'], error: string | null = null): SyncedUnsubscription {
+  return { id: 'u1', mailAccountId: 'work', sender: 'm2@example.test', method: 'oneClick', status, error, requestedAt: '2026-10-19T10:00:00Z', completedAt: null }
+}
+
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
   return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], mailNotifications: [], deleted: [], ...extra }
 }
@@ -58,6 +62,10 @@ describe('ReadingPane actions', () => {
   let later: ChangePage | null
   /** While set, pulls after the first fail, as offline. */
   let offline: boolean
+  /** Pages after the second, by the cursor they follow. */
+  const pages = new Map<number, ChangePage>()
+  const unsubscribes: unknown[] = []
+  let refuseUnsubscribe: boolean
   /** While set, marking read waits for it before the server answers. */
   let holdMarkRead: Promise<void> | null
   let router: Router
@@ -68,6 +76,9 @@ describe('ReadingPane actions', () => {
     actions.length = 0
     refuse = null
     later = null
+    pages.clear()
+    unsubscribes.length = 0
+    refuseUnsubscribe = false
     holdMarkRead = null
     offline = false
     vi.stubGlobal(
@@ -85,7 +96,14 @@ describe('ReadingPane actions', () => {
             threads: [{ id: 't1', mailAccountId: 'work', subject: 'Offsite plan', messageCount: 2, lastMessageAt: '2026-10-19T09:00:00Z', smartInboxId: null, verdict: null, classificationReason: null }],
             messages: [message('m1', ['sent'], '2026-10-19T08:00:00Z', true), message('m2', ['inbox'], '2026-10-19T09:00:00Z', false)],
           })
-          return new Response(JSON.stringify(since === 0 ? first : since === 1 && later !== null ? later : page(since)))
+          return new Response(JSON.stringify(since === 0 ? first : since === 1 && later !== null ? later : (pages.get(since) ?? page(since))))
+        }
+        if (url.pathname === '/api/v1/unsubscriptions') {
+          unsubscribes.push(JSON.parse(String(init?.body)))
+          if (refuseUnsubscribe) {
+            return new Response(JSON.stringify({ detail: 'Spam cannot be unsubscribed from.' }), { status: 422 })
+          }
+          return new Response(JSON.stringify(unsubscription('pending')), { status: 202 })
         }
         if (url.pathname === '/api/v1/message-actions') {
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>
@@ -325,5 +343,91 @@ describe('ReadingPane actions', () => {
 
     expect(await folderIdsOf('m2')).toEqual(['inbox'])
     expect(router.currentRoute.value.path).toBe('/inbox/t1')
+  })
+
+  describe('unsubscribe', () => {
+    const offering = { ...message('m2', ['inbox'], '2026-10-19T09:00:00Z', false), unsubscribe: 'oneClick' as const }
+
+    function button(wrapper: ReturnType<typeof mountPane>) {
+      return wrapper.find('button[aria-label="Unsubscribe from m2@example.test"]')
+    }
+
+    it('offers it, and shows the request pending and then done', async () => {
+      later = page(2, { messages: [offering] })
+      await useMailStore().syncNow()
+      const wrapper = mountPane()
+      await opened(wrapper)
+
+      await button(wrapper).trigger('click')
+      await vi.waitFor(() => expect(wrapper.find('[role="status"]').exists()).toBe(true))
+
+      expect(unsubscribes).toEqual([{ messageId: 'm2' }])
+      expect(button(wrapper).exists()).toBe(false)
+      expect(wrapper.get('[role="status"]').text()).toBe('Unsubscribing…')
+
+      // The delta brings the outcome later.
+      pages.set(2, page(3, { unsubscriptions: [unsubscription('done')] }))
+      await useMailStore().syncNow()
+      await vi.waitFor(() => expect(wrapper.get('[role="status"]').text()).toBe('Unsubscribed'))
+      expect(button(wrapper).exists()).toBe(false)
+    })
+
+    it('shows where a mailto unsubscribe goes and sends it only once the user says so', async () => {
+      later = page(2, { messages: [{ ...offering, unsubscribe: 'mailto' as const, unsubscribeMailto: 'leave@example.test' }] })
+      await useMailStore().syncNow()
+      const wrapper = mountPane()
+      await opened(wrapper)
+
+      await button(wrapper).trigger('click')
+
+      expect(unsubscribes).toEqual([])
+      expect(wrapper.text()).toContain('Sends an email saying "unsubscribe" to leave@example.test from your account.')
+      await wrapper.get('button[aria-label="Send the unsubscribe email to leave@example.test"]').trigger('click')
+      await vi.waitFor(() => expect(unsubscribes).toEqual([{ messageId: 'm2' }]))
+    })
+
+    it('says why the last attempt failed and offers it again', async () => {
+      later = page(2, { messages: [offering], unsubscriptions: [unsubscription('failed', 'Refused (HTTP 404).')] })
+      await useMailStore().syncNow()
+      const wrapper = mountPane()
+      await opened(wrapper)
+
+      expect(button(wrapper).exists()).toBe(true)
+      expect(wrapper.text()).toContain('The last attempt failed: Refused (HTTP 404).')
+    })
+
+    it('keeps the button and says why when the server refuses', async () => {
+      later = page(2, { messages: [offering] })
+      await useMailStore().syncNow()
+      refuseUnsubscribe = true
+      const wrapper = mountPane()
+      await opened(wrapper)
+
+      await button(wrapper).trigger('click')
+      await vi.waitFor(() => expect(useComposeStore().notices.map((n) => n.text)).toContain('Spam cannot be unsubscribed from.'))
+
+      await vi.waitFor(() => expect(button(wrapper).attributes('disabled')).toBeUndefined())
+      expect(useMailStore().unsubscriptions).toEqual([])
+    })
+
+    it('offers nothing for a conversation without an unsubscribe address', async () => {
+      const wrapper = mountPane()
+      await opened(wrapper)
+
+      expect(wrapper.text()).not.toContain('Unsubscribe')
+    })
+
+    it('offers nothing in Spam', async () => {
+      later = page(2, {
+        smartInboxes: [{ id: 'spam', builtin: 'spam', name: 'Spam', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'none', autoCreateTodo: false, position: 4 }],
+        threads: [{ id: 't1', mailAccountId: 'work', subject: 'Offsite plan', messageCount: 2, lastMessageAt: '2026-10-19T09:00:00Z', smartInboxId: 'spam', verdict: null, classificationReason: null }],
+        messages: [{ ...offering, smartInboxId: 'spam' }],
+      })
+      await useMailStore().syncNow()
+      const wrapper = mountPane()
+      await opened(wrapper)
+
+      expect(wrapper.text()).not.toContain('Unsubscribe')
+    })
   })
 })

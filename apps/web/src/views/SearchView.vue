@@ -4,6 +4,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { SCAN_TEXT, searchDay, searchFilters, withSearchFilter, type SearchAttachment, type SearchFilterName, type SearchHit, type SyncedFolder } from '@tresso/core'
 import { fileSize, shortTime } from '@/mail/format'
 import { useAuthStore } from '@/stores/auth'
+import { useBatchesStore } from '@/stores/batches'
 import { useMailStore } from '@/stores/mail'
 import { useSearchStore } from '@/stores/search'
 import AppIcon from '@/components/AppIcon.vue'
@@ -13,6 +14,7 @@ import SearchField from '@/components/SearchField.vue'
 
 const auth = useAuthStore()
 const mail = useMailStore()
+const batches = useBatchesStore()
 const search = useSearchStore()
 const route = useRoute()
 const router = useRouter()
@@ -115,6 +117,8 @@ function threadLink(hit: SearchHit) {
         :smart-inboxes="mail.smartInboxes"
         :smart-inbox-counts="mail.smartInboxCounts"
         :smart-inbox="null"
+        :batches="false"
+        :next-batch="batches.nextBatchLabel"
         :live="mail.live"
         @sign-out="auth.signOut()"
       />

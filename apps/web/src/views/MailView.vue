@@ -1,21 +1,29 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, watch } from 'vue'
-import { useRoute, type RouteLocationRaw } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, shallowRef, watch } from 'vue'
+import { RouterLink, useRoute, type RouteLocationRaw } from 'vue-router'
+import { unsubscribeOffer, type UnsubscribeOffer } from '@tresso/core'
 import { useAuthStore } from '@/stores/auth'
+import { useBatchesStore } from '@/stores/batches'
 import { useMailStore } from '@/stores/mail'
 import { useSelectionStore } from '@/stores/selection'
 import ConversationList from '@/components/ConversationList.vue'
 import MailboxSidebar from '@/components/MailboxSidebar.vue'
 import ReadingPane from '@/components/ReadingPane.vue'
+import UnsubscribeAction from '@/components/UnsubscribeAction.vue'
 
 const auth = useAuthStore()
 const mail = useMailStore()
 const route = useRoute()
+const batches = useBatchesStore()
 
 const accountId = computed(() => (typeof route.params.accountId === 'string' ? route.params.accountId : null))
 const smartInboxId = computed(() => (typeof route.params.smartInboxId === 'string' ? route.params.smartInboxId : null))
 const threadId = computed(() => (typeof route.params.threadId === 'string' ? route.params.threadId : null))
+const inBatches = computed(() => route.name === 'batches' || route.name === 'batches-thread')
 const title = computed(() => {
+  if (inBatches.value) {
+    return 'Batches'
+  }
   if (smartInboxId.value !== null) {
     return mail.smartInboxes.find((s) => s.id === smartInboxId.value)?.name ?? 'Smart inbox'
   }
@@ -23,6 +31,9 @@ const title = computed(() => {
   return accountId.value === null ? 'Unified Inbox' : (mail.accounts.find((a) => a.id === accountId.value)?.displayName ?? 'Inbox')
 })
 const backTo = computed(() => {
+  if (inBatches.value) {
+    return '/batches'
+  }
   if (smartInboxId.value !== null) {
     return `/smart/${smartInboxId.value}`
   }
@@ -30,7 +41,18 @@ const backTo = computed(() => {
   return accountId.value === null ? '/' : `/accounts/${accountId.value}`
 })
 
+const emptyText = computed(() => {
+  if (inBatches.value) {
+    return 'No batch delivered yet.'
+  }
+
+  return smartInboxId.value === null ? 'Nothing in this inbox.' : 'Nothing in this smart inbox.'
+})
+
 function linkTo(id: string): RouteLocationRaw {
+  if (inBatches.value) {
+    return { name: 'batches-thread', params: { threadId: id } }
+  }
   if (smartInboxId.value !== null) {
     return { name: 'smart-inbox-thread', params: { smartInboxId: smartInboxId.value, threadId: id } }
   }
@@ -43,14 +65,45 @@ function linkTo(id: string): RouteLocationRaw {
 const selection = useSelectionStore()
 // A selection belongs to the list it was made in.
 watch(
-  [accountId, smartInboxId],
-  ([account, smartInbox]) => {
+  [accountId, smartInboxId, inBatches],
+  ([account, smartInbox, batched]) => {
     selection.clear()
-    void (smartInbox === null ? mail.showMailbox(account) : mail.showSmartInbox(smartInbox))
+    if (batched) {
+      void mail.showBatches()
+    } else {
+      void (smartInbox === null ? mail.showMailbox(account) : mail.showSmartInbox(smartInbox))
+    }
   },
   { immediate: true },
 )
 onBeforeUnmount(() => selection.clear())
+// The sidebar and the batches say when the next batch comes.
+onMounted(() => void batches.load())
+
+/**
+ * What each batch conversation on screen offers to unsubscribe from. Only the listed conversations' messages are read,
+ * again when the list or the requests change; an older read that finishes late is dropped.
+ */
+const offers = shallowRef(new Map<string, UnsubscribeOffer | null>())
+let offersRun = 0
+watch(
+  [inBatches, () => mail.conversations, () => mail.unsubscriptions, () => mail.smartInboxes],
+  async ([batched, conversations, unsubscriptions, smartInboxes]) => {
+    const run = ++offersRun
+    if (!batched) {
+      offers.value = new Map()
+      return
+    }
+    const spam = smartInboxes.find((s) => s.builtin === 'spam')?.id
+    const shown = conversations.filter((c) => spam === undefined || c.smartInboxId !== spam)
+    const messages = await mail.threadMessages(shown.map((c) => c.threadId))
+    if (run !== offersRun) {
+      return
+    }
+    offers.value = new Map(shown.map((c) => [c.threadId, unsubscribeOffer(messages.get(c.threadId) ?? [], unsubscriptions)]))
+  },
+  { immediate: true },
+)
 
 function signOut(): void {
   void auth.signOut()
@@ -70,6 +123,8 @@ function signOut(): void {
         :smart-inboxes="mail.smartInboxes"
         :smart-inbox-counts="mail.smartInboxCounts"
         :smart-inbox="mail.smartInbox"
+        :batches="mail.batches"
+        :next-batch="batches.nextBatchLabel"
         :live="mail.live"
         @sign-out="signOut"
       />
@@ -83,10 +138,21 @@ function signOut(): void {
       :has-more="mail.hasMore"
       :loading="!mail.ready || mail.syncState === 'syncing'"
       :has-accounts="mail.accounts.length > 0"
-      :empty-text="smartInboxId === null ? 'Nothing in this inbox.' : 'Nothing in this smart inbox.'"
+      :empty-text="emptyText"
       :link-to="linkTo"
+      :group-by="inBatches ? 'batch' : 'day'"
       @show-more="mail.showMore()"
-    />
+    >
+      <template v-if="inBatches" #aside>
+        <p class="next-batch">
+          <span v-if="batches.nextBatchLabel">Next batch at {{ batches.nextBatchLabel }}</span>
+          <RouterLink :to="{ name: 'settings-batches' }">Change batch times</RouterLink>
+        </p>
+      </template>
+      <template v-if="inBatches" #extra="{ conversation }">
+        <UnsubscribeAction :offer="offers.get(conversation.threadId) ?? null" />
+      </template>
+    </ConversationList>
 
     <ReadingPane v-if="threadId" :key="threadId" class="reading-pane" :thread-id="threadId" :back-to="backTo" />
     <div v-else class="reading-pane placeholder">
@@ -112,6 +178,18 @@ function signOut(): void {
 .reading-pane,
 .mailboxes > :deep(nav) {
   min-height: 0;
+}
+.next-batch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: -4px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.next-batch a {
+  font-weight: 600;
+  text-decoration: none;
 }
 .placeholder {
   display: flex;

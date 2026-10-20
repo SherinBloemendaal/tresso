@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { RouterLink, type RouteLocationRaw } from 'vue-router'
+import { batchTimeLabel } from '@tresso/core'
 import type { Conversation } from '@/mail/db'
 import { dayLabel, senderName, shortTime } from '@/mail/format'
 import { useMailStore } from '@/stores/mail'
@@ -21,6 +22,14 @@ const props = defineProps<{
   hasAccounts: boolean
   linkTo: (threadId: string) => RouteLocationRaw
   emptyText?: string
+  /** How the rows are grouped: by day (the default), or by the batch that delivered them. */
+  groupBy?: 'day' | 'batch'
+}>()
+defineSlots<{
+  /** Under the title, e.g. when the next batch comes. */
+  aside?: () => unknown
+  /** Under a row, e.g. its unsubscribe button. */
+  extra?: (props: { conversation: Conversation }) => unknown
 }>()
 const emit = defineEmits<{ showMore: [] }>()
 
@@ -68,15 +77,24 @@ async function selectOlderThan(age: string): Promise<void> {
   selection.set(await mail.threadsBefore(Date.now() - Number(age)))
 }
 
+function groupOf(conversation: Conversation): { key: string; label: string } {
+  if (props.groupBy === 'batch' && conversation.batchedAt !== null) {
+    return { key: `batch-${conversation.batchedAt}`, label: `Delivered at ${batchTimeLabel(conversation.batchedAt)}` }
+  }
+  const label = dayLabel(conversation.lastMessageAt)
+
+  return { key: label, label }
+}
+
 const days = computed(() => {
-  const groups: { label: string; conversations: Conversation[] }[] = []
+  const groups: { key: string; label: string; conversations: Conversation[] }[] = []
   for (const conversation of props.conversations) {
-    const label = dayLabel(conversation.lastMessageAt)
+    const { key, label } = groupOf(conversation)
     const last = groups[groups.length - 1]
-    if (last?.label === label) {
+    if (last?.key === key) {
       last.conversations.push(conversation)
     } else {
-      groups.push({ label, conversations: [conversation] })
+      groups.push({ key, label, conversations: [conversation] })
     }
   }
 
@@ -91,12 +109,13 @@ const days = computed(() => {
         <h1>{{ title }}</h1>
         <MenuButton label="Select" menu-label="Select conversations" :items="ages" :disabled="conversations.length === 0" @choose="selectOlderThan" />
       </div>
+      <slot name="aside" />
       <SearchField />
     </header>
 
     <div class="scroll">
       <BulkBar v-if="selection.active" :conversations="conversations" />
-      <section v-for="day in days" :key="day.label" :aria-label="day.label">
+      <section v-for="day in days" :key="day.key" :aria-label="day.label">
         <h2 class="day">{{ day.label }}</h2>
         <div
           v-for="conversation in day.conversations"
@@ -142,6 +161,7 @@ const days = computed(() => {
             :smart-inbox-id="conversation.smartInboxId || null"
             :verdict="conversation.verdict ?? null"
           />
+          <div v-if="$slots.extra" class="extra"><slot name="extra" :conversation="conversation" /></div>
         </div>
       </section>
 
@@ -194,7 +214,15 @@ h1 {
 }
 .row {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
+}
+.extra {
+  flex-basis: 100%;
+  padding: 0 20px 10px 118px;
+}
+.extra:empty {
+  display: none;
 }
 .row:hover,
 .row.checked {

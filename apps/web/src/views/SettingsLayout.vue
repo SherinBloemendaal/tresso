@@ -11,6 +11,7 @@ import { RouterLink, RouterView } from 'vue-router'
       <RouterLink :to="{ name: 'settings-signatures' }" class="item">Signatures</RouterLink>
       <RouterLink :to="{ name: 'settings-smart-inboxes' }" class="item">Smart inboxes</RouterLink>
       <RouterLink :to="{ name: 'settings-notifications' }" class="item">Notifications</RouterLink>
+      <RouterLink :to="{ name: 'settings-batches' }" class="item">Batched delivery</RouterLink>
     </nav>
     <main class="content">
       <RouterView />

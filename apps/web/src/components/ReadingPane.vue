@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
-import { classificationReasonText, dueLabel, todoSourceMessage, type MessageAction, type SyncedMessage, type SyncedThread, type Todo } from '@tresso/core'
+import { classificationReasonText, dueLabel, unsubscribeOffer, todoSourceMessage, type MessageAction, type SyncedMessage, type SyncedThread, type Todo } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
 import type { AppliedAction } from '@tresso/core'
 import { shortcutAllowed, useMessageActions } from '@/mail/useMessageActions'
@@ -13,6 +13,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import ClassificationMenu from '@/components/ClassificationMenu.vue'
 import MessageCard from '@/components/MessageCard.vue'
 import MenuButton from '@/components/MenuButton.vue'
+import UnsubscribeAction from '@/components/UnsubscribeAction.vue'
 
 const props = defineProps<{ threadId: string; backTo: string }>()
 
@@ -53,6 +54,12 @@ const moveTargets = computed(() =>
     .filter((folder) => folder.mailAccountId === thread.value?.mailAccountId && folder.role !== 'drafts' && folder.role !== 'all')
     .sort((a, b) => a.displayName.localeCompare(b.displayName)),
 )
+// Junk gets no unsubscribe: confirming the address to a spammer only brings more.
+const inSpam = computed(() => {
+  const smartInboxId = thread.value?.smartInboxId
+  return smartInboxId ? mail.smartInboxes.find((s) => s.id === smartInboxId)?.builtin === 'spam' : false
+})
+const unsubscribe = computed(() => (inSpam.value ? null : unsubscribeOffer(messages.value, mail.unsubscriptions)))
 
 async function load(): Promise<void> {
   const threadId = props.threadId
@@ -225,6 +232,7 @@ onBeforeUnmount(() => {
           :disabled="busy"
           @choose="moveTo"
         />
+        <UnsubscribeAction class="unsubscribe" :offer="unsubscribe" />
       </div>
       <div class="classification">
         <ClassificationMenu
@@ -269,6 +277,7 @@ onBeforeUnmount(() => {
 }
 .actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
   margin-bottom: 16px;
@@ -345,6 +354,9 @@ onBeforeUnmount(() => {
 .todo.done .todo-title {
   color: var(--ink-3);
   text-decoration: line-through;
+}
+.unsubscribe {
+  margin-left: auto;
 }
 .tool.on {
   color: var(--delegate);
