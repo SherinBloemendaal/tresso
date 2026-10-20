@@ -47,8 +47,16 @@ jobs:
       MESSENGER_TRANSPORT_DSN: redis://localhost:6379/messages
       MEILISEARCH_URL: http://localhost:7700
       MEILISEARCH_KEY: ci-master-key
+      CLAMAV_HOST: 127.0.0.1
+      CLAMAV_PORT: '3310'
     steps:
       - uses: actions/checkout@v5
+      # ClamdScannerTest scans with a real clamd, configured as the dev stack runs it (docker/clamav/clamd.conf), which
+      # a service container could not mount before the checkout. The image ships signatures and updates them on start;
+      # a step below waits until clamd reports a database.
+      - name: Start clamd
+        working-directory: .
+        run: docker run -d --name clamav -p 3310:3310 -v "$PWD/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" clamav/clamav:1.5-debian13-slim
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
@@ -74,6 +82,11 @@ jobs:
           php bin/console doctrine:schema:validate
       - name: Wait for Meilisearch
         run: timeout 60 bash -c 'until curl -fs http://localhost:7700/health; do sleep 1; done'
+      - name: Wait for clamd
+        # Ready means VERSION names a signature database ("ClamAV 1.5.4/28158/..."), not only that clamd answers.
+        run: |
+          timeout 600 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/3310 && printf "zVERSION\0" >&3 && timeout 5 head -c 200 <&3 | tr -d "\0" | grep -Eq "^ClamAV [^/]+/[0-9]+/") 2>/dev/null; do sleep 5; done'
+          (exec 3<>/dev/tcp/127.0.0.1/3310 && printf "zVERSION\0" >&3 && timeout 5 head -c 200 <&3 | tr -d "\0"; echo)
       - name: PHPUnit
         run: php bin/phpunit
       - name: PHPStan
