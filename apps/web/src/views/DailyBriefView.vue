@@ -6,6 +6,7 @@ import { shortTime } from '@/mail/format'
 import { useBriefActions } from '@/mail/useBriefActions'
 import { shortcutAllowed } from '@/mail/useMessageActions'
 import { useAuthStore } from '@/stores/auth'
+import { useBatchesStore } from '@/stores/batches'
 import { useBriefStore } from '@/stores/brief'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
@@ -15,6 +16,8 @@ import SenderAvatar from '@/components/SenderAvatar.vue'
 
 const auth = useAuthStore()
 const mail = useMailStore()
+// The sidebar names the next batch once the mail view loaded it; the brief does not ask for it again.
+const batches = useBatchesStore()
 const brief = useBriefStore()
 const compose = useComposeStore()
 const route = useRoute()
@@ -160,6 +163,8 @@ function briefLabel(createdAt: string): string {
         :smart-inboxes="mail.smartInboxes"
         :smart-inbox-counts="mail.smartInboxCounts"
         :smart-inbox="null"
+        :batches="false"
+        :next-batch="batches.nextBatchLabel"
         page="brief"
         :live="mail.live"
         @sign-out="auth.signOut()"

@@ -72,6 +72,7 @@ describe('WaitingOnView', () => {
         { path: '/waiting', name: 'waiting', component: WaitingOnView },
         { path: '/drafts', name: 'drafts', component: { template: '<div />' } },
         { path: '/todos', name: 'todos', component: { template: '<div />' } },
+        { path: '/brief', name: 'brief', component: { template: '<div />' } },
         { path: '/cleanup', name: 'cleanup', component: { template: '<div />' } },
         { path: '/outbox', name: 'outbox', component: { template: '<div />' } },
         { path: '/settings/accounts', name: 'settings-accounts', component: { template: '<div />' } },
