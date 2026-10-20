@@ -1277,16 +1277,27 @@ accepted.
   work offline and switching weeks costs no request. The local copy is limited to events whose series touches the
   last 2 years or the future, which the API filters with `series_ends_at`; older history is read through the range
   endpoint. An event changed to end before that window comes as a deletion, so copies drop it.
-- Expansion runs in each series' own zone, on the clock: `ical.js` iterates the rule in wall time (an `UNTIL` in
-  UTC is read as the clock in the series' zone), and every occurrence is turned into an instant through the
-  platform's `Intl` zone data, so a 09:00 meeting stays at 09:00 across DST in its zone and moves for readers in
-  another zone. A time that happens twice is the first one; one that never happens is read with the offset from
-  before the change (RFC 5545). The start always counts as the first occurrence, also when the rule would not
-  give it. Recurrence ids, `EXDATE`s and `RDATE`s compare as the same keys the API uses. All-day occurrences begin
-  and end at midnight in the reader's zone and last as many dates as their event. The rows a range needs are every
-  row of each series that may touch it (an override moved out of the range still takes its occurrence away),
-  found by indexed first starts and series ends (`eventSpan`). The API's range endpoint is the reference: an end
-  to end check against a real API compares both, after creating, moving one, renaming all from a moved
+- Expansion runs in each series' own zone, on the clock, the way the server's `Occurrences` does (the API's range
+  endpoint is the reference): `ical.js` iterates the rule in wall time, hourly rules too, and every occurrence is
+  turned into an instant through the platform's `Intl` zone data, so a 09:00 meeting stays at 09:00 across DST in
+  its zone and moves for readers in another zone. A time that never happens is read with the offset from before the
+  change; one that happens twice is the later one, as PHP reads it on the server (RFC 5545 would take the first),
+  so every device and the server's reminders agree. The start always counts as the first occurrence, also when the
+  rule would not give it or its `UNTIL` comes before it; an `UNTIL` date on a timed series is midnight of that
+  date; a UTC `UNTIL` is compared as an instant, for floating series in the reader's zone. Rules of a fixed period
+  without `COUNT` are jumped to near the range (hours in elapsed time, days and weeks on the clock); a walk that
+  reaches 100,000 steps stops and the views say so. A rule that can never match (`BYMONTH=2;BYMONTHDAY=30`) is only
+  its start: `ical.js` would loop forever on it, and days it normalizes into another month are left out. Recurrence
+  ids, `EXDATE`s and `RDATE`s compare as the same keys the API uses; an override shows also when an `EXDATE` names
+  its occurrence, and an override with `RANGE=THISANDFUTURE` (`thisAndFuture` in the delta) changes every later
+  occurrence, moved as far as it moved its own. All-day occurrences begin and end at midnight in the reader's zone
+  and last as many dates as their event.
+- Finding the rows: every stored row carries the span of its whole series (its earliest start and latest end over
+  the series and its overrides), so one indexed range read returns every row of each series touching the range,
+  an override moved far away included; the views expand again only when a page changed calendar data. Ranges older
+  than the copy (series ending more than 2 years ago are not in the delta) are read from `/calendar-occurrences`;
+  their full event is fetched when one is opened, and an override read that way is edited as "This event". An end
+  to end check against a real API compares device and server, after creating, moving one, renaming all from a moved
   occurrence, splitting and deleting, in four zones.
 - Views (`packages/core/src/calendar`, shared by web and mobile): the time grid places timed events at their clock
   minutes (a DST day has 23 or 25 hours, blocks still sit at the hour their times say) and lets overlapping ones
@@ -1296,13 +1307,19 @@ accepted.
 - Editing: the editor saves the complete event with the occurrence's own times in the event's zone, through the
   series with the scope and the occurrence's `recurrenceId`. It offers "This event", "This and following" and "All
   events", without "This and following" on the first occurrence (it is all of them), without "This event" when the
-  rule changes, and only "All events" for a move to another calendar. A moved occurrence is edited with the
-  series' rule, so "All events" from it never drops the rule. Invitations are answered, not edited.
+  rule changes, and only "All events" for a move to another calendar. The stored rule is saved exactly as stored
+  until the user changes a repeat field (moving one occurrence to Tuesday keeps `BYDAY=MO`, and a rule from Outlook,
+  Apple or Thunderbird keeps its spelling), and rules are compared by meaning, so a save never looks like a new rule
+  that would drop every exception. "All events" or "This and following" from a moved occurrence saves the series'
+  own fields with only what the user changed. Invitations are answered, not edited; an update the calendar has not
+  taken is applied before it is answered.
 - Web client: day, week, month and agenda views, the event editor (vee-validate), the invitation card in the
   reading pane (RSVP, conflicts, "Add to calendar" for `canApply`), and a mini agenda next to mail. Keys: T, J and
-  K, 1 to 4, N, E, Shift J (join), Esc; Y, M and N answer while the invitation card has focus. The grids follow the
-  ARIA grid pattern: one block or day is in the tab order, the arrow keys move between them, and every block reads
-  out title, time, calendar, place and answer. Mobile: an agenda of the next 30 days, a day view with the week
+  K, 1 to 4, N, E, Shift J (join), Esc; Y, M and N answer while the invitation card has focus. The month follows the
+  ARIA grid pattern (rows of day cells, one day in the tab order, the arrow keys between days, Enter into a day's
+  events and "+N more", Escape back). The day and week grid is a group per day with one event in the tab order (an
+  event crossing midnight has one stop) and the arrow keys moving between events. Every event reads out title,
+  time, calendar, place and answer. Mobile: an agenda of the next 30 days, a day view with the week
   strip, and the event detail with RSVP.
 - Reminders are scheduled and sent by the server (next section), so they reach every device, also when no app is
   open.
