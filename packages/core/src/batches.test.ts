@@ -101,5 +101,6 @@ describe('mailNotificationTarget', () => {
     expect(BATCHES_PATH).toBe('/batches')
     expect(mailNotificationTarget({ threadId: 't1' })).toBe('/thread/t1')
     expect(mailNotificationTarget({ threadId: null, summary: false })).toBeNull()
+    expect(mailNotificationTarget({ threadId: 't2', summary: true })).toBe('/thread/t2')
   })
 })

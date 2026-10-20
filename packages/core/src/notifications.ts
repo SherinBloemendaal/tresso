@@ -57,12 +57,15 @@ export function mailNotificationPath(threadId: string): string {
 /** Where a tap on a batch's summary leads, in every client; mirrors MailNotifier::BATCHES_PATH. */
 export const BATCHES_PATH = '/batches'
 
-/** Where a tap on this mail notification leads: the batches for a summary, else its conversation (null when gone). */
+/**
+ * Where a tap on this mail notification leads: its conversation, or the batches for a summary of several (a summary
+ * that only one message still needed carries that one's conversation); null when the conversation is gone.
+ */
 export function mailNotificationTarget(notification: Pick<SyncedMailNotification, 'threadId' | 'summary'>): string | null {
-  if (notification.summary) {
-    return BATCHES_PATH
+  if (notification.threadId !== null) {
+    return mailNotificationPath(notification.threadId)
   }
-  return notification.threadId === null ? null : mailNotificationPath(notification.threadId)
+  return notification.summary ? BATCHES_PATH : null
 }
 
 /** A notification from /api/v1/notifications: delivered in the last week or planned for the coming days. */
