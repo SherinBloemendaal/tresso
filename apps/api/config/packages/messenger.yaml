@@ -51,6 +51,13 @@ framework:
                     max_retries: 5
                     delay: 1000
                     multiplier: 3
+            # Background re-encryption: the lowest priority, consumed after everything else.
+            reencrypt:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%_reencrypt'
+                retry_strategy:
+                    max_retries: 5
+                    delay: 5000
+                    multiplier: 3
             failed: '%env(MESSENGER_TRANSPORT_DSN)%_failed'
             sync: 'sync://'
 
@@ -73,6 +80,7 @@ framework:
             App\HandOver\NotifyOverdueHandOver: push
             App\Bulk\RunBulkAction: bulk
             App\Brief\DeliverDailyBrief: push
+            App\Storage\ReencryptUserData: reencrypt
 
 when@test:
     framework:
@@ -85,4 +93,5 @@ when@test:
                 scan: 'in-memory://'
                 scan_rescan: 'in-memory://'
                 bulk: 'in-memory://'
+                reencrypt: 'in-memory://'
                 failed: 'in-memory://'

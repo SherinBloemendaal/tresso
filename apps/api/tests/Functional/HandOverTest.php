@@ -8,10 +8,10 @@ use App\Entity\MailAccount;
 use App\Entity\OutgoingMessage;
 use App\HandOver\HandOverDue;
 use App\HandOver\HandOverDueHandler;
-use App\HandOver\NotifyOverdueHandOver;
 use App\HandOver\HandOverNotifier;
+use App\HandOver\NotifyOverdueHandOver;
+use App\Storage\BlobVault;
 use App\Sync\Ingest\MessageJanitor;
-use App\Tests\Support\InMemoryObjectStorage;
 use App\Tests\Support\MockHttpRouter;
 use Doctrine\ORM\EntityManagerInterface;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -22,6 +22,7 @@ use Symfony\Component\Uid\Uuid;
 final class HandOverTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private const string EXPO_SEND = 'https://exp.host/--/api/v2/push/send';
 
@@ -301,9 +302,8 @@ final class HandOverTest extends DatabaseTestCase
         $seq = $this->changeSeq($id);
 
         // A message that refers to both conversations makes them one; the older one stays.
-        $sha = hash('sha256', 'both');
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
-            'remoteUid' => '3', 'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha, 'size' => 100, 'receivedAt' => '2026-10-19T10:00:00+00:00',
+            'remoteUid' => '3', 'rawObjectKey' => $this->rawKeyFor($this->accountId, 'both'), 'keyVersion' => 1, 'size' => 100, 'receivedAt' => '2026-10-19T10:00:00+00:00',
             'messageId' => '<both@duinzicht.example>', 'references' => ['<invoice-1@duinzicht.example>', '<other-1@duinzicht.example>'],
             'subject' => 'Both', 'from' => ['address' => 'reservations@duinzicht.example'], 'to' => [['address' => 'kim@company.example']], 'snippet' => '',
         ]]], $this->worker);
@@ -777,10 +777,10 @@ final class HandOverTest extends DatabaseTestCase
      */
     private function ingest(string $uid, string $messageId, ?string $inReplyTo, string $subject, string $from, string $receivedAt, array $extra = [], string $folder = 'INBOX'): void
     {
-        $sha = hash('sha256', $messageId);
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => $folder, 'messages' => [$extra + [
             'remoteUid' => $uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($this->accountId, $messageId),
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => $receivedAt,
             'messageId' => $messageId,
@@ -807,7 +807,9 @@ final class HandOverTest extends DatabaseTestCase
 
     private function raw(string $outgoingId): string
     {
-        return static::getContainer()->get(InMemoryObjectStorage::class)->read($this->outgoing($outgoingId)->getRawObjectKey());
+        $message = $this->outgoing($outgoingId);
+
+        return static::getContainer()->get(BlobVault::class)->read($message->getMailAccount()->getOwner()->getId(), $message->getRawObjectKey());
     }
 
     private function outgoing(string $outgoingId): OutgoingMessage

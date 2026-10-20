@@ -17,6 +17,8 @@ use App\Scan\ScanOutcome;
 use App\Scan\SweepPendingScans;
 use App\Scan\SweepPendingScansHandler;
 use App\Security\Crypto\KeyRing;
+use App\Security\Crypto\UserKeys;
+use App\Storage\BlobFormat;
 use App\Storage\BlobKey;
 use App\Storage\BlobKind;
 use App\Storage\BlobVault;
@@ -511,6 +513,25 @@ final class AttachmentScanTest extends DatabaseTestCase
         /** @var list<string> $cacheKeys */
         $cacheKeys = $this->connection()->fetchFirstColumn('SELECT content_key FROM scan_result');
         self::assertSame([], array_intersect($cacheKeys, [...array_values($rows), hash('sha256', self::MALWARE)]), 'Nothing in the cache matches an attachment or the plain hash.');
+    }
+
+    public function testAnAttachmentThatIsNotWhatItsFingerprintSaysIsNotScannedOrServed(): void
+    {
+        $queued = $this->ingest('2', '<swapped@finance.example>', ['swapped.zip' => 'an innocent file']);
+        // A broken or misbehaving worker stored other content under that file's name, encrypted all the same.
+        $owner = $this->accountOwner($this->accountId);
+        $fingerprint = $this->fingerprintFor($this->accountId, 'an innocent file');
+        $sealed = fopen('php://memory', 'w+b');
+        self::assertIsResource($sealed);
+        BlobFormat::encrypt(UserKeys::blobKey(static::getContainer()->get(UserKeys::class)->current($owner)->key), 1, $owner, $fingerprint, [self::MALWARE], $sealed);
+        rewind($sealed);
+        $this->storage()->put(Attachment::objectKeyFor($fingerprint, $owner), (string) stream_get_contents($sealed));
+
+        $this->runScans($queued);
+
+        $swapped = $this->listed('swapped.zip', '2');
+        self::assertSame(['failed', 'unscannable', null], [$swapped['scanStatus'], $swapped['scanFailure'], $swapped['url']]);
+        self::assertNotContains(self::MALWARE, $this->scanner()->scanned, 'Not handed to the scanner as if it were that file.');
     }
 
     public function testScansContentStoredBeforeEncryption(): void

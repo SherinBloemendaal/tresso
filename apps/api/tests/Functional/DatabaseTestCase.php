@@ -31,7 +31,7 @@ abstract class DatabaseTestCase extends WebTestCase
      *
      * @param array<string, mixed> $parameters
      */
-    protected function rowCount(string $sql, array $parameters = []): int
+    protected function countRows(string $sql, array $parameters = []): int
     {
         $count = $this->connection()->fetchOne($sql, $parameters);
         self::assertIsInt($count);

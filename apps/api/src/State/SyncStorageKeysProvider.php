@@ -30,6 +30,8 @@ final readonly class SyncStorageKeysProvider implements ProviderInterface
     {
         $account = $this->leaseGuard->leasedAccount($uriVariables['accountId'] ?? null, $this->requests->getCurrentRequest()?->query->get('workerId'));
         $owner = $account->getOwner()->getId();
+        // The worker is about to store content: the owner needs keys (users from before get theirs here).
+        $this->keys->ensure($owner);
 
         $blobKeys = [];
         foreach ($this->keys->versions($owner) as $version) {

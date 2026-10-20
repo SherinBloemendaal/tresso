@@ -43,6 +43,17 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     private ?string $wrappedIndexKey = null;
 
+    /**
+     * The key version all of the user's stored data is on, as far as re-encryption knows; null until it has looked.
+     * Behind the current version, or older versions still kept, means the background re-encryption has work.
+     */
+    #[ORM\Column(nullable: true)]
+    private ?int $dataKeyVersion = null;
+
+    /** When the user's keys were shredded (they are being deleted); keys are never created for them again. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $keysShreddedAt = null;
+
     /** @var list<string> */
     #[ORM\Column(type: Types::JSON)]
     private array $roles = [];
@@ -108,6 +119,11 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     public function setPassword(string $hashedPassword): void
     {
         $this->password = $hashedPassword;
+    }
+
+    public function getKeysShreddedAt(): ?\DateTimeImmutable
+    {
+        return $this->keysShreddedAt;
     }
 
     public function getCreatedAt(): \DateTimeImmutable

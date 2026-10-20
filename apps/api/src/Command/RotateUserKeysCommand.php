@@ -5,16 +5,19 @@ declare(strict_types=1);
 namespace App\Command;
 
 use App\Security\Crypto\UserKeys;
+use App\Storage\ReencryptUserData;
 use Doctrine\DBAL\Connection;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Attribute\Option;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Style\SymfonyStyle;
+use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Uid\Uuid;
 
 /**
  * Gives users a new current key version; new content is encrypted with it at once (sync workers within 5 minutes).
- * What is stored keeps its older version until app:crypto:reencrypt moves it on and deletes the older versions.
+ * What is stored keeps its older version until the background re-encryption ({@see ReencryptUserData}, queued here)
+ * moves it on and deletes the older versions.
  */
 #[AsCommand(name: 'app:crypto:rotate-user-keys', description: 'Give users a new current key version')]
 final readonly class RotateUserKeysCommand
@@ -24,6 +27,7 @@ final readonly class RotateUserKeysCommand
     public function __construct(
         private Connection $connection,
         private UserKeys $keys,
+        private MessageBusInterface $bus,
     ) {
     }
 
@@ -49,9 +53,11 @@ final readonly class RotateUserKeysCommand
             $io->writeln(\sprintf('%s: key version %d is current.', $id, $version), SymfonyStyle::VERBOSITY_VERBOSE);
             ++$rotated;
             $this->keys->reset();
+            // Moves their data to the new version in the background (the hourly sweep would too, later).
+            $this->bus->dispatch(new ReencryptUserData($id));
         }
 
-        $io->success(\sprintf('Rotated the keys of %d users. Run app:crypto:reencrypt to move their content to the new keys.', $rotated));
+        $io->success(\sprintf('Rotated the keys of %d users. Their content moves to the new keys in the background; app:crypto:reencrypt --status shows what is left.', $rotated));
 
         return Command::SUCCESS;
     }

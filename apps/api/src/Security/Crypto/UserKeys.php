@@ -14,8 +14,11 @@ use Symfony\Contracts\Service\ResetInterface;
  * KeyRing. Nothing encrypts with a user key directly: {@see blobKey()} and {@see fieldKey()} derive the keys for
  * objects and database fields, so the sync worker can be given the first without being able to open the second.
  *
- * Keys are created on first use, in SQL with ON CONFLICT DO NOTHING, so concurrent first uses agree on one key. A data
- * key from before (user.wrapped_data_key) becomes version 1, which keeps credentials sealed with it opening.
+ * Keys are created only to write something new ({@see current()}, {@see indexKey()}, {@see ensure()}), in SQL under a
+ * lock on the user with ON CONFLICT DO NOTHING, so concurrent first uses agree on one key. Reading never creates keys:
+ * a user without keys has nothing readable. Once a user's keys are shredded they are never created again: writing
+ * fails instead (fail closed). A data key from before (user.wrapped_data_key) becomes version 1, which keeps
+ * credentials sealed with it opening.
  *
  * Unwrapped keys are kept for the rest of the request or message; {@see reset()} wipes them.
  */
@@ -36,9 +39,10 @@ final class UserKeys implements ResetInterface
     ) {
     }
 
+    /** The key new data is written with; creates the owner's keys if they have none yet. */
     public function current(Uuid $owner): KeyVersion
     {
-        $set = $this->load($owner);
+        $set = $this->load($owner, create: true);
 
         return new KeyVersion($set['current'], $set['keys'][$set['current']]);
     }
@@ -59,14 +63,21 @@ final class UserKeys implements ResetInterface
         return array_keys($this->load($owner)['keys']);
     }
 
+    /** Whether the owner has keys, without creating any. */
+    public function hasKeys(Uuid $owner): bool
+    {
+        return isset($this->loaded[$owner->toRfc4122()]) || null !== $this->read($owner);
+    }
+
     public function currentSince(Uuid $owner): \DateTimeImmutable
     {
         return $this->load($owner)['currentSince'];
     }
 
+    /** Names content, also content about to be written; creates the owner's keys if they have none yet. */
     public function indexKey(Uuid $owner): string
     {
-        return $this->load($owner)['index'];
+        return $this->load($owner, create: true)['index'];
     }
 
     /** Names content within one owner: hex(HMAC-SHA256(index key, SHA-256 of the content)). */
@@ -94,7 +105,7 @@ final class UserKeys implements ResetInterface
     /** Creates the owner's keys if they have none yet. */
     public function ensure(Uuid $owner): void
     {
-        $this->load($owner);
+        $this->load($owner, create: true);
     }
 
     /** Adds a new current version; new data uses it at once. Returns the new version. */
@@ -103,7 +114,7 @@ final class UserKeys implements ResetInterface
         $version = $this->connection->transactional(function () use ($owner, $now): int {
             $this->lockOwner($owner);
             $this->forget($owner);
-            $next = $this->load($owner)['current'] + 1;
+            $next = $this->load($owner, create: true)['current'] + 1;
             $key = sodium_crypto_aead_xchacha20poly1305_ietf_keygen();
             $this->insertVersion($owner, $next, $key, $now);
             sodium_memzero($key);
@@ -147,14 +158,21 @@ final class UserKeys implements ResetInterface
     }
 
     /**
-     * Crypto-shredding: deletes every key of the owner. Once this commits, nothing the owner stored can be decrypted
-     * any more, wherever copies of it are.
+     * Crypto-shredding: deletes every key of the owner and marks them, so no keys are created for them again. Once this
+     * commits, what was encrypted with those keys cannot be decrypted any more, also in copies.
      */
     public function shred(Uuid $owner): void
     {
         $this->connection->transactional(function () use ($owner): void {
+            // The same lock creating keys takes: keys created meanwhile are deleted here, and none come after.
+            $this->lockOwner($owner);
+            // Marked first: whatever wants keys after this point is refused, also within this transaction.
+            $this->connection->executeStatement(
+                'UPDATE app_user SET wrapped_index_key = NULL, wrapped_data_key = NULL, keys_shredded_at = :now WHERE id = :owner',
+                ['owner' => $owner->toRfc4122(), 'now' => new \DateTimeImmutable()],
+                ['now' => Types::DATETIME_IMMUTABLE],
+            );
             $this->connection->executeStatement('DELETE FROM user_key WHERE owner_id = :owner', ['owner' => $owner->toRfc4122()]);
-            $this->connection->executeStatement('UPDATE app_user SET wrapped_index_key = NULL, wrapped_data_key = NULL WHERE id = :owner', ['owner' => $owner->toRfc4122()]);
         });
         $this->forget($owner);
     }
@@ -213,14 +231,18 @@ final class UserKeys implements ResetInterface
     /**
      * @return array{keys: array<int, string>, current: int, currentSince: \DateTimeImmutable, index: string}
      */
-    private function load(Uuid $owner): array
+    private function load(Uuid $owner, bool $create = false): array
     {
         $id = $owner->toRfc4122();
         if (isset($this->loaded[$id])) {
             return $this->loaded[$id];
         }
+        $set = $this->read($owner);
+        if (null === $set && !$create) {
+            throw new CryptoException('The user has no keys.');
+        }
 
-        return $this->loaded[$id] = $this->read($owner) ?? $this->create($owner);
+        return $this->loaded[$id] = $set ?? $this->create($owner);
     }
 
     /**
@@ -258,19 +280,27 @@ final class UserKeys implements ResetInterface
      */
     private function create(Uuid $owner): array
     {
-        $legacy = $this->user($owner)['wrapped_data_key'];
-        $first = null === $legacy ? sodium_crypto_aead_xchacha20poly1305_ietf_keygen() : $this->keyRing->unwrap($legacy, self::legacyContext($owner));
-        $this->insertVersion($owner, 1, $first, new \DateTimeImmutable());
-        sodium_memzero($first);
+        return $this->connection->transactional(function () use ($owner): array {
+            // Serialized with shredding: keys are never created for a user whose keys were shredded.
+            $this->lockOwner($owner);
+            $user = $this->user($owner);
+            if (null !== $user['keys_shredded_at']) {
+                throw new CryptoException('The user\'s keys were shredded; nothing is written for them any more.');
+            }
+            $legacy = $user['wrapped_data_key'];
+            $first = null === $legacy ? sodium_crypto_aead_xchacha20poly1305_ietf_keygen() : $this->keyRing->unwrap($legacy, self::legacyContext($owner));
+            $this->insertVersion($owner, 1, $first, new \DateTimeImmutable());
+            sodium_memzero($first);
 
-        $index = random_bytes(32);
-        $this->connection->executeStatement(
-            'UPDATE app_user SET wrapped_index_key = :wrapped WHERE id = :owner AND wrapped_index_key IS NULL',
-            ['wrapped' => $this->keyRing->wrap($index, self::indexKeyContext($owner)), 'owner' => $owner->toRfc4122()],
-        );
-        sodium_memzero($index);
+            $index = random_bytes(32);
+            $this->connection->executeStatement(
+                'UPDATE app_user SET wrapped_index_key = :wrapped WHERE id = :owner AND wrapped_index_key IS NULL',
+                ['wrapped' => $this->keyRing->wrap($index, self::indexKeyContext($owner)), 'owner' => $owner->toRfc4122()],
+            );
+            sodium_memzero($index);
 
-        return $this->read($owner) ?? throw new CryptoException('The user keys could not be created.');
+            return $this->read($owner) ?? throw new CryptoException('The user keys could not be created.');
+        });
     }
 
     private function insertVersion(Uuid $owner, int $version, #[\SensitiveParameter] string $key, \DateTimeImmutable $now): void
@@ -304,12 +334,12 @@ final class UserKeys implements ResetInterface
     }
 
     /**
-     * @return array{wrapped_index_key: ?string, wrapped_data_key: ?string}
+     * @return array{wrapped_index_key: ?string, wrapped_data_key: ?string, keys_shredded_at: ?string}
      */
     private function user(Uuid $owner): array
     {
-        /** @var array{wrapped_index_key: ?string, wrapped_data_key: ?string}|false $user */
-        $user = $this->connection->fetchAssociative('SELECT wrapped_index_key, wrapped_data_key FROM app_user WHERE id = :owner', ['owner' => $owner->toRfc4122()]);
+        /** @var array{wrapped_index_key: ?string, wrapped_data_key: ?string, keys_shredded_at: ?string}|false $user */
+        $user = $this->connection->fetchAssociative('SELECT wrapped_index_key, wrapped_data_key, keys_shredded_at FROM app_user WHERE id = :owner', ['owner' => $owner->toRfc4122()]);
 
         return false === $user ? throw new CryptoException('There is no such user.') : $user;
     }

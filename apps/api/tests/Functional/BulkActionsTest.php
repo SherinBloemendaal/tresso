@@ -34,6 +34,7 @@ use Symfony\Component\Uid\Uuid;
 final class BulkActionsTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private string $accountId;
 
@@ -771,10 +772,10 @@ final class BulkActionsTest extends DatabaseTestCase
         ?string $accountId = null,
     ): void {
         $id = self::header($messageId ?? $subject);
-        $sha = hash('sha256', $id.$folder);
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.($accountId ?? $this->accountId).'/messages', ['workerId' => 'w1', 'folder' => $folder, 'messages' => [array_filter([
             'remoteUid' => (string) ++$this->uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($accountId ?? $this->accountId, $id.$folder),
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => ($receivedAt ?? new \DateTimeImmutable('-1 day'))->format(\DATE_ATOM),
             'messageId' => $id,

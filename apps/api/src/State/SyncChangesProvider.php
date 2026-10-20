@@ -614,19 +614,21 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private function mailNotifications(array $range): array
     {
         $rows = $this->connection->fetchAllAssociative(
-            'SELECT n.id, n.message_id, n.thread_id, n.title, n.body, n.delivered_at, n.channels, n.silent, n.summary
+            'SELECT n.id, n.message_id, n.thread_id, n.title, n.body, n.sealed_body, n.delivered_at, n.channels, n.silent, n.summary
              FROM mail_notification n
              WHERE n.user_id = :user AND n.change_seq > :since AND n.change_seq <= :until AND n.delivered_at > :recent
              ORDER BY n.change_seq',
             [...$range, 'recent' => new \DateTimeImmutable('-7 days')->format('Y-m-d H:i:s')],
         );
 
-        return array_map(static fn (array $r): array => [
+        $owner = Uuid::fromString($range['user']);
+
+        return array_map(fn (array $r): array => [
             'id' => $r['id'],
             'messageId' => $r['message_id'],
             'threadId' => $r['thread_id'],
             'title' => $r['title'],
-            'body' => $r['body'],
+            'body' => $this->fields->notificationBodyOf($owner, Uuid::fromString(self::text($r['id'])), self::nullableText($r['sealed_body']), self::text($r['body'])),
             'deliveredAt' => self::date($r['delivered_at']),
             'channels' => self::json($r['channels'], '[]'),
             'silent' => (bool) $r['silent'],

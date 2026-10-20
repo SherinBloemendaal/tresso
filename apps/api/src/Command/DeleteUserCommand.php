@@ -40,7 +40,7 @@ final readonly class DeleteUserCommand
 
             return Command::FAILURE;
         }
-        if (!$force && !$io->confirm(\sprintf('Delete %s and everything they own? Their data cannot be recovered afterwards, not even from backups.', $email), false)) {
+        if (!$force && !$io->confirm(\sprintf('Delete %s and everything they own? What was encrypted with their keys cannot be decrypted afterwards, also not from copies; plaintext columns, search snapshots and data from before re-encryption stay in backups until those expire.', $email), false)) {
             $io->writeln('Nothing deleted.');
 
             return Command::FAILURE;

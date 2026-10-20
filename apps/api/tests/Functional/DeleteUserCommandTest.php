@@ -48,7 +48,7 @@ final class DeleteUserCommandTest extends DatabaseTestCase
 
         $this->deleteKim()->assertCommandIsSuccessful();
 
-        self::assertSame(0, $this->rowCount('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $this->kim->toRfc4122()]));
+        self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $this->kim->toRfc4122()]));
         self::assertTrue($this->storage()->has($rawKey), 'The object is still there until the purge runs');
         static::getContainer()->get(UserKeys::class)->reset();
         $this->expectException(CryptoException::class);
@@ -60,10 +60,10 @@ final class DeleteUserCommandTest extends DatabaseTestCase
         $this->deleteKim()->assertCommandIsSuccessful();
 
         self::assertFalse($this->connection()->fetchOne("SELECT 1 FROM app_user WHERE email = 'kim@example.test'"));
-        self::assertSame(0, $this->rowCount('SELECT COUNT(*) FROM mail_account WHERE id = :id', ['id' => $this->kimAccount]));
-        self::assertSame(0, $this->rowCount('SELECT COUNT(*) FROM message WHERE mail_account_id = :id', ['id' => $this->kimAccount]));
-        self::assertSame(0, $this->rowCount("SELECT COUNT(*) FROM oauth2_access_token WHERE user_identifier = 'kim@example.test'"));
-        self::assertSame(1, $this->rowCount('SELECT COUNT(*) FROM message WHERE mail_account_id = :id', ['id' => $this->lisaAccount]), 'Lisa keeps her mail.');
+        self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM mail_account WHERE id = :id', ['id' => $this->kimAccount]));
+        self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM message WHERE mail_account_id = :id', ['id' => $this->kimAccount]));
+        self::assertSame(0, $this->countRows("SELECT COUNT(*) FROM oauth2_access_token WHERE user_identifier = 'kim@example.test'"));
+        self::assertSame(1, $this->countRows('SELECT COUNT(*) FROM message WHERE mail_account_id = :id', ['id' => $this->lisaAccount]), 'Lisa keeps her mail.');
     }
 
     public function testPurgesTheObjectsAndSearchDocumentsOfOnlyThatUser(): void
@@ -89,8 +89,8 @@ final class DeleteUserCommandTest extends DatabaseTestCase
         $tester->setInputs(['no']);
         $tester->execute(['email' => 'kim@example.test']);
 
-        self::assertSame(1, $this->rowCount("SELECT COUNT(*) FROM app_user WHERE email = 'kim@example.test'"));
-        self::assertGreaterThan(0, $this->rowCount('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $this->kim->toRfc4122()]));
+        self::assertSame(1, $this->countRows("SELECT COUNT(*) FROM app_user WHERE email = 'kim@example.test'"));
+        self::assertGreaterThan(0, $this->countRows('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $this->kim->toRfc4122()]));
     }
 
     private function deleteKim(): CommandTester

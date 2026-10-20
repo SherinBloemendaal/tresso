@@ -4,15 +4,17 @@ declare(strict_types=1);
 
 namespace App\Mail;
 
+use App\Entity\MailNotification;
 use App\Entity\Message;
 use App\Entity\MessageText;
 use App\Security\Crypto\FieldVault;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * The message fields kept sealed with the owner's field key: the snippet and the body text for search. Both are only
- * read whole, never queried, so the database needs no plaintext of them. Rows from before encryption still hold
- * plaintext until re-encryption seals them; reading takes either.
+ * The mail text kept sealed with the owner's field key: the snippet, the body text for search, and what a mail
+ * notification says (subject and the start of the text). All are only read whole, never queried, so the database
+ * needs no plaintext of them. Rows from before encryption still hold plaintext until re-encryption seals them; reading
+ * takes either.
  */
 final readonly class MessageFields
 {
@@ -74,6 +76,31 @@ final readonly class MessageFields
         return $this->vault->seal($owner, self::textContext($messageId), $this->textOf($owner, $messageId, $sealed, $legacy));
     }
 
+    /** An empty body is stored as none. */
+    public function sealNotificationBody(MailNotification $notification, string $body): void
+    {
+        $notification->sealBody('' === $body ? null : $this->vault->seal($notification->getUser()->getId(), self::notificationContext($notification->getId()), $body));
+    }
+
+    public function notificationBody(MailNotification $notification): string
+    {
+        return $this->notificationBodyOf($notification->getUser()->getId(), $notification->getId(), $notification->getSealedBody(), $notification->getLegacyBody());
+    }
+
+    /** A notification body from a row read in SQL. */
+    public function notificationBodyOf(Uuid $owner, Uuid $notificationId, ?string $sealed, string $legacy): string
+    {
+        return null === $sealed ? $legacy : $this->vault->open($owner, self::notificationContext($notificationId), $sealed);
+    }
+
+    /** Seals a notification body read in SQL (plaintext or sealed with an older key) with the owner's current key. */
+    public function resealNotificationBody(Uuid $owner, Uuid $notificationId, ?string $sealed, string $legacy): ?string
+    {
+        $body = $this->notificationBodyOf($owner, $notificationId, $sealed, $legacy);
+
+        return '' === $body ? null : $this->vault->seal($owner, self::notificationContext($notificationId), $body);
+    }
+
     private static function owner(Message $message): Uuid
     {
         return $message->getMailAccount()->getOwner()->getId();
@@ -82,6 +109,11 @@ final readonly class MessageFields
     private static function snippetContext(Uuid $messageId): string
     {
         return 'tresso:message-snippet:'.$messageId->toRfc4122();
+    }
+
+    private static function notificationContext(Uuid $notificationId): string
+    {
+        return 'tresso:mail-notification-body:'.$notificationId->toRfc4122();
     }
 
     private static function textContext(Uuid $messageId): string

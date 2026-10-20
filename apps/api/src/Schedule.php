@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App;
 
 use App\Scan\SweepPendingScans;
+use App\Storage\SweepReencryption;
 use Symfony\Component\Scheduler\Attribute\AsSchedule;
 use Symfony\Component\Scheduler\RecurringMessage;
 use Symfony\Component\Scheduler\Schedule as SymfonySchedule;
@@ -26,6 +27,7 @@ final readonly class Schedule implements ScheduleProviderInterface
         return new SymfonySchedule()
             ->stateful($this->cache)
             ->processOnlyLastMissedRun(true)
-            ->add(RecurringMessage::every('5 minutes', new SweepPendingScans()));
+            ->add(RecurringMessage::every('5 minutes', new SweepPendingScans()))
+            ->add(RecurringMessage::every('1 hour', new SweepReencryption()));
     }
 }

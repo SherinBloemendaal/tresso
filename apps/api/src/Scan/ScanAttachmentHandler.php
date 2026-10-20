@@ -7,6 +7,7 @@ namespace App\Scan;
 use App\Enum\ScanFailure;
 use App\Enum\ScanStatus;
 use App\Storage\BlobVault;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
 
 /**
@@ -24,6 +25,7 @@ final readonly class ScanAttachmentHandler
         private VirusScanner $scanner,
         private BlobVault $blobs,
         private AttachmentScans $scans,
+        private LoggerInterface $logger,
     ) {
     }
 
@@ -48,7 +50,14 @@ final readonly class ScanAttachmentHandler
         // Also proves clamd has signatures loaded: it refuses to report a version without.
         $engine = $this->scanner->engine();
 
-        $cacheKey = $this->cache->keyFor($subject);
+        try {
+            $cacheKey = $this->cache->keyFor($subject);
+        } catch (ContentMismatch $exception) {
+            $this->logger->error('An attachment is not what its fingerprint says; it is not scanned and not served without confirmation.', ['attachment' => $message->attachmentId, 'exception' => $exception]);
+            $this->scans->record($subject->sha256, ScanOutcome::failed(ScanFailure::Unscannable), false);
+
+            return;
+        }
         $cached = $message->rescan ? null : $this->cache->find($cacheKey);
         if (null !== $cached && $cached->getEngine() === $engine) {
             $this->scans->record($subject->sha256, $cached->outcome(), false);
