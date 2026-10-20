@@ -68,6 +68,7 @@ describe('WaitingOnView', () => {
         { path: '/inbox/:threadId', name: 'unified-thread', component: { template: '<div />' } },
         { path: '/waiting', name: 'waiting', component: WaitingOnView },
         { path: '/drafts', name: 'drafts', component: { template: '<div />' } },
+        { path: '/todos', name: 'todos', component: { template: '<div />' } },
         { path: '/outbox', name: 'outbox', component: { template: '<div />' } },
         { path: '/settings/accounts', name: 'settings-accounts', component: { template: '<div />' } },
         { path: '/settings/accounts/new', name: 'settings-accounts-new', component: { template: '<div />' } },
