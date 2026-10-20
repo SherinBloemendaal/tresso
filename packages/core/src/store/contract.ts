@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MissingFolderError } from '../actions'
-import type { ChangePage, SyncedMessage, SyncedOutgoingMessage, SyncedSmartInbox, SyncedThread } from '../sync/types'
+import type { ChangePage, SyncedMessage, SyncedOutgoingMessage, SyncedSmartInbox, SyncedThread, SyncedTodo } from '../sync/types'
 import type { Draft, MailStore } from './mailStore'
 
 /** Test data for the mail stores. */
 export function page(changes: Partial<ChangePage> & { cursor: number }): ChangePage {
-  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], deleted: [], ...changes }
+  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], deleted: [], ...changes }
 }
 
 export const accounts = [
@@ -28,7 +28,26 @@ export function thread(id: string, mailAccountId: string, classification: Partia
 }
 
 export function smartInbox(id: string, builtin: SyncedSmartInbox['builtin'], position: number, verdict: SyncedSmartInbox['verdict'] = 'know'): SyncedSmartInbox {
-  return { id, builtin, name: id, instructions: '', includeSenders: [], excludeSenders: [], verdict, position }
+  return { id, builtin, name: id, instructions: '', includeSenders: [], excludeSenders: [], verdict, autoCreateTodo: false, position }
+}
+
+export function todo(id: string, extra: Partial<SyncedTodo> = {}): SyncedTodo {
+  return {
+    id,
+    title: `Todo ${id}`,
+    notes: '',
+    dueDate: null,
+    dueTime: null,
+    durationMinutes: null,
+    completedAt: null,
+    position: 0,
+    source: 'manual',
+    messageId: null,
+    threadId: null,
+    createdAt: '2026-10-19T08:00:00+00:00',
+    updatedAt: '2026-10-19T08:00:00+00:00',
+    ...extra,
+  }
 }
 
 export function message(id: string, threadId: string, mailAccountId: string, folderIds: string[], receivedAt: string, extra: Partial<SyncedMessage> = {}): SyncedMessage {
@@ -437,6 +456,68 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
       expect((await db.signatures()).map((s) => s.id)).toEqual(['sig-short'])
       expect((await db.mailAccounts()).find((a) => a.id === 'work')?.defaultSignatureId).toBeNull()
       expect(await db.cursor()).toBe(12)
+    })
+
+    describe('todos', () => {
+      it('lists open todos in order, then done ones, most recently done first', async () => {
+        await db.apply(
+          page({
+            cursor: 30,
+            todos: [
+              todo('done-early', { completedAt: '2026-10-18T08:00:00+00:00' }),
+              todo('second', { position: 2 }),
+              todo('done-late', { completedAt: '2026-10-19T08:00:00+00:00' }),
+              todo('first', { position: 1, dueDate: '2026-10-24', dueTime: '17:00', durationMinutes: 30 }),
+            ],
+          }),
+        )
+
+        expect((await db.todos()).map((t) => t.id)).toEqual(['first', 'second', 'done-late', 'done-early'])
+        expect(await db.todo('first')).toEqual(todo('first', { position: 1, dueDate: '2026-10-24', dueTime: '17:00', durationMinutes: 30 }))
+        expect(await db.todo('gone')).toBeNull()
+        expect(await db.cursor()).toBe(30)
+      })
+
+      it('keeps todos current and drops deleted ones', async () => {
+        await db.apply(page({ cursor: 30, todos: [todo('a'), todo('b', { position: 1 })] }))
+
+        await db.apply(page({ cursor: 31, todos: [todo('a', { title: 'Call Anna', completedAt: '2026-10-20T08:00:00+00:00' })], deleted: [{ type: 'todo', id: 'b' }] }))
+
+        expect((await db.todos()).map((t) => [t.id, t.title, t.completedAt])).toEqual([['a', 'Call Anna', '2026-10-20T08:00:00+00:00']])
+      })
+
+      it('finds the todos of a thread, following a message that moved to another thread', async () => {
+        await db.apply(
+          page({
+            cursor: 30,
+            todos: [
+              todo('from-m1', { messageId: 'm1', threadId: 't1' }),
+              todo('from-m3', { messageId: 'm3', threadId: 't1', position: 1 }),
+              todo('elsewhere', { messageId: 'm4', threadId: 't3' }),
+              todo('email-gone', { messageId: 'm9', threadId: 't1', position: 2 }),
+              todo('own'),
+            ],
+          }),
+        )
+
+        // m3 is in t2 on this device, so its todo goes with t2.
+        expect((await db.todosOfThread('t1')).map((t) => t.id)).toEqual(['from-m1', 'email-gone'])
+        expect((await db.todosOfThread('t2')).map((t) => t.id)).toEqual(['from-m3'])
+        expect(await db.todosOfThread('t9')).toEqual([])
+      })
+
+      it('keeps todos when the account of their email goes', async () => {
+        await db.apply(page({ cursor: 30, todos: [todo('from-m4', { messageId: 'm4', threadId: 't3' })] }))
+
+        await db.apply(page({ cursor: 31, deleted: [{ type: 'mailAccount', id: 'home' }] }))
+
+        expect((await db.todos()).map((t) => t.id)).toEqual(['from-m4'])
+        expect(await db.messages(['m4'])).toEqual([])
+      })
+    })
+
+    it('finds messages by id in the order asked for, leaving out the ones it does not have', async () => {
+      expect((await db.messages(['m3', 'gone', 'm1', 'm3'])).map((m) => m.id)).toEqual(['m3', 'm1', 'm3'])
     })
 
     it('lists accounts by name', async () => {

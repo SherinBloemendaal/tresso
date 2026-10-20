@@ -27,6 +27,7 @@ function page(cursor: number, hasMore = false, ids: string[] = []): ChangePage {
     calendarEvents: [],
     notifications: [],
     eventNotes: [],
+    todos: [],
     deleted: [],
   }
 }

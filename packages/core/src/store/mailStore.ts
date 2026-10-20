@@ -2,7 +2,7 @@ import type { AppliedAction, MessageAction } from '../actions'
 import type { Verdict } from '../domain'
 import type { ConversationSummary, ListScope } from '../sync/conversation'
 import type { SyncStore } from '../sync/engine'
-import type { Address, DraftAttachment, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread } from '../sync/types'
+import type { Address, DraftAttachment, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo } from '../sync/types'
 
 /** Someone the user exchanged mail with, for recipient suggestions. */
 export interface Contact {
@@ -147,6 +147,13 @@ export interface MailStore extends SyncStore {
   deleteDraft(id: string): Promise<void>
   /** A thread with its messages oldest first, or null when it no longer exists. */
   thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null>
+  /** The messages with these ids that this device has, in the order asked for. */
+  messages(ids: string[]): Promise<SyncedMessage[]>
+  /** Open todos in the user's order, then done ones, most recently done first (see `compareTodos`). */
+  todos(): Promise<SyncedTodo[]>
+  todo(id: string): Promise<SyncedTodo | null>
+  /** The todos made from the emails of a thread, in list order. */
+  todosOfThread(threadId: string): Promise<SyncedTodo[]>
   /** Finishes the writes under way and closes the copy; it takes no more writes. */
   close(): Promise<void>
 }
