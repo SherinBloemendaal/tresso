@@ -390,7 +390,10 @@ final class BulkActionsTest extends DatabaseTestCase
         self::assertSame(BulkRun::More, $actions->run(Uuid::fromString($bulk['id']), 1));
         self::assertSame(BulkRun::More, $actions->run(Uuid::fromString($bulk['id']), 1));
         self::assertSame(BulkRun::Wait, $actions->run(Uuid::fromString($bulk['id'])), 'two moves wait for the worker');
-        self::assertSame(2, $this->bulkAction($bulk['id'])['conversations']);
+        $waiting = $this->bulkAction($bulk['id']);
+        self::assertSame(2, $waiting['conversations']);
+        self::assertSame('running', $waiting['status']);
+        self::assertNotNull($waiting['waitingSince']);
 
         $handler = new BulkActionHandler($actions, static::getContainer()->get(MessageBusInterface::class), new NullLogger());
         $handler(new RunBulkAction($bulk['id']));
@@ -403,7 +406,72 @@ final class BulkActionsTest extends DatabaseTestCase
 
         $this->connection()->executeStatement('DELETE FROM mailbox_change');
         self::assertSame(BulkRun::Done, $actions->run(Uuid::fromString($bulk['id'])), 'once the worker caught up, it goes on');
-        self::assertSame(3, $this->bulkAction($bulk['id'])['conversations']);
+        $done = $this->bulkAction($bulk['id']);
+        self::assertSame(3, $done['conversations']);
+        self::assertNull($done['waitingSince']);
+    }
+
+    public function testABacklogOnAnotherAccountHoldsNothingUp(): void
+    {
+        $home = $this->createAccount('kim@home.example', $this->kim);
+        $this->lease();
+        $this->folders($home, [['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1]]);
+        $this->ingest('Stuck', 'anna@finance.example', accountId: $home);
+        // An account whose changes never reach its server (expired password, no worker).
+        $this->client->jsonRequest('POST', '/api/v1/message-actions', ['messageIds' => [$this->messageId('Stuck')], 'action' => 'markRead'], $this->kim);
+        self::assertResponseIsSuccessful();
+        $this->newsletters('Deals', 'news@shop.example', 2);
+        $bulk = $this->start(['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise'), 'action' => 'archive']);
+        $this->takeQueued();
+
+        self::assertSame(BulkRun::Done, $this->bulkActions(maxPendingChanges: 1)->run(Uuid::fromString($bulk['id'])));
+        self::assertSame(['Archive'], $this->foldersOf('Deals 2'));
+    }
+
+    public function testStopsAfterWaitingTooLongAndKeepsTheUndo(): void
+    {
+        $this->newsletters('Deals', 'news@shop.example', 2);
+        $bulk = $this->start(['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise'), 'action' => 'archive']);
+        $this->takeQueued();
+        $actions = $this->bulkActions(conversationsPerBatch: 1, maxPendingChanges: 1, maxWaitSeconds: 3600);
+        $actions->run(Uuid::fromString($bulk['id']), 1);
+        self::assertSame(BulkRun::Wait, $actions->run(Uuid::fromString($bulk['id'])));
+
+        $this->connection()->executeStatement("UPDATE bulk_action SET waiting_since = now() - interval '61 minutes' WHERE id = :id", ['id' => $bulk['id']]);
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+        self::assertSame(BulkRun::Done, $actions->run(Uuid::fromString($bulk['id'])));
+
+        $stopped = $this->bulkAction($bulk['id']);
+        self::assertSame('failed', $stopped['status']);
+        self::assertSame('The mail server of kim@company.example has not taken the changes for an hour. What was done stays done, and can be undone.', $stopped['error']);
+        self::assertSame(1, $stopped['conversations']);
+        self::assertTrue($stopped['canUndo']);
+        $this->client->jsonRequest('POST', '/api/v1/bulk-actions/'.$bulk['id'].'/undo', [], $this->kim);
+        self::assertResponseStatusCodeSame(202, 'the user is not blocked: the undo starts');
+    }
+
+    public function testTheUserCanStopIt(): void
+    {
+        $this->newsletters('Deals', 'news@shop.example', 2);
+        $bulk = $this->start(['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise'), 'action' => 'archive']);
+        $this->takeQueued();
+        $this->bulkActions(conversationsPerBatch: 1)->run(Uuid::fromString($bulk['id']), 1);
+
+        $lisa = $this->userHeaders('lisa@example.test', ['mail:read', 'mail:write']);
+        $this->client->jsonRequest('POST', '/api/v1/bulk-actions/'.$bulk['id'].'/cancel', [], $lisa);
+        self::assertResponseStatusCodeSame(404);
+
+        $this->client->jsonRequest('POST', '/api/v1/bulk-actions/'.$bulk['id'].'/cancel', [], $this->kim);
+        self::assertResponseIsSuccessful();
+        $stopped = $this->decodedResponse();
+        self::assertSame('failed', $stopped['status'] ?? null);
+        self::assertSame('You stopped it. What was done stays done, and can be undone.', $stopped['error'] ?? null);
+        self::assertTrue($stopped['canUndo'] ?? null);
+        self::assertSame(BulkRun::Done, $this->bulkActions()->run(Uuid::fromString($bulk['id'])), 'a run still queued finds it stopped');
+        self::assertSame(['INBOX'], $this->foldersOf('Deals 2'));
+
+        $this->client->jsonRequest('POST', '/api/v1/bulk-actions/'.$bulk['id'].'/cancel', [], $this->kim);
+        self::assertResponseStatusCodeSame(409);
     }
 
     public function testLooksAtEachAccountInSmallWindowsAndTakesEveryMatch(): void
@@ -590,7 +658,7 @@ final class BulkActionsTest extends DatabaseTestCase
     }
 
     /**
-     * @return array{id: string, status: string, conversations: int, changed: int, unrestorable: int, restored: int, canUndo: bool, error: ?string, scope: ?array<string, mixed>}
+     * @return array{id: string, status: string, conversations: int, changed: int, unrestorable: int, restored: int, canUndo: bool, error: ?string, waitingSince: ?string, scope: ?array<string, mixed>}
      */
     private function bulkAction(string $id): array
     {
@@ -598,14 +666,14 @@ final class BulkActionsTest extends DatabaseTestCase
         $this->client->request('GET', '/api/v1/bulk-actions/'.$id, server: $this->kim);
         self::assertResponseIsSuccessful();
 
-        /** @var array{id: string, status: string, conversations: int, changed: int, unrestorable: int, restored: int, canUndo: bool, error: ?string, scope: ?array<string, mixed>} */
+        /** @var array{id: string, status: string, conversations: int, changed: int, unrestorable: int, restored: int, canUndo: bool, error: ?string, waitingSince: ?string, scope: ?array<string, mixed>} */
         return $this->decodedResponse();
     }
 
     /**
      * The service with smaller batches, to see them.
      */
-    private function bulkActions(int $conversationsPerBatch = BulkActions::CONVERSATIONS_PER_BATCH, int $messagesPerBatch = BulkActions::MESSAGES_PER_BATCH, int $maxPendingChanges = BulkActions::MAX_PENDING_CHANGES, int $scanPerBatch = BulkSelection::SCAN_PER_BATCH): BulkActions
+    private function bulkActions(int $conversationsPerBatch = BulkActions::CONVERSATIONS_PER_BATCH, int $messagesPerBatch = BulkActions::MESSAGES_PER_BATCH, int $maxPendingChanges = BulkActions::MAX_PENDING_CHANGES, int $scanPerBatch = BulkSelection::SCAN_PER_BATCH, int $maxWaitSeconds = BulkActions::MAX_WAIT_SECONDS): BulkActions
     {
         $container = static::getContainer();
 
@@ -621,6 +689,7 @@ final class BulkActionsTest extends DatabaseTestCase
             $messagesPerBatch,
             maxPendingChanges: $maxPendingChanges,
             scanPerBatch: $scanPerBatch,
+            maxWaitSeconds: $maxWaitSeconds,
         );
     }
 
