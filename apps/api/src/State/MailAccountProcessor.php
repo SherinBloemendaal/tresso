@@ -21,6 +21,7 @@ use App\ProviderAuth\ProviderAccessTokens;
 use App\ProviderAuth\ProviderClient;
 use App\Repository\MailAccountRepository;
 use App\Repository\ProviderGrantRepository;
+use App\Repository\TodoRepository;
 use App\Security\CurrentUser;
 use App\Security\Crypto\CredentialVault;
 use Doctrine\ORM\EntityManagerInterface;
@@ -45,6 +46,7 @@ final readonly class MailAccountProcessor implements ProcessorInterface
         private ProviderAccessTokens $providerTokens,
         private ProviderClient $providerClient,
         private ProviderGrantRepository $grants,
+        private TodoRepository $todos,
     ) {
     }
 
@@ -96,6 +98,10 @@ final readonly class MailAccountProcessor implements ProcessorInterface
                 if ($draft->isSending()) {
                     $draft->restoreFromSending();
                 }
+            }
+            // Todos outlive the account too; their link to its mail goes here, so every device drops it.
+            foreach ($this->todos->findByMailAccount($account) as $todo) {
+                $todo->detachFromMessage();
             }
             $this->entityManager->remove($account);
             $this->entityManager->flush();

@@ -13,7 +13,8 @@ use Doctrine\DBAL\Connection;
 /**
  * Messages exist as long as they are in at least one folder. After locations were removed, this deletes messages
  * that are nowhere anymore, deletes threads that became empty, recounts the threads that lost messages, and records
- * all of it for client sync (tombstones, new change numbers).
+ * all of it for client sync (tombstones, new change numbers; todos made from a deleted message change too, as they
+ * lose their link).
  *
  * Works in SQL inside the caller's transaction: call it after flushing, and clear the entity manager afterwards.
  */
@@ -30,6 +31,14 @@ final readonly class MessageJanitor
      */
     public function removeOrphans(MailAccount $account): int
     {
+        // Todos keep going without their email; the foreign key drops the link, and they change for clients below.
+        /** @var list<string> $todos */
+        $todos = $this->connection->fetchFirstColumn(
+            'SELECT o.id FROM todo o JOIN message m ON m.id = o.message_id
+             WHERE m.mail_account_id = :account
+               AND NOT EXISTS (SELECT 1 FROM message_location l WHERE l.message_id = m.id)',
+            ['account' => $account->getId()->toRfc4122()],
+        );
         /** @var list<array{id: string, thread_id: string}> $deleted */
         $deleted = $this->connection->fetchAllAssociative(
             'DELETE FROM message m
@@ -45,6 +54,12 @@ final readonly class MessageJanitor
         $owner = $account->getOwner()->getId();
         $seq = $this->sequencer->next($owner);
         $this->sequencer->tombstones($owner, Message::changeType(), array_column($deleted, 'id'), $seq);
+        if ([] !== $todos) {
+            $this->connection->executeStatement(
+                'UPDATE todo SET change_seq = :seq, updated_at = :now WHERE id = ANY(CAST(:todos AS UUID[]))',
+                ['seq' => $seq, 'now' => new \DateTimeImmutable()->format('Y-m-d H:i:s'), 'todos' => '{'.implode(',', $todos).'}'],
+            );
+        }
 
         $threads = '{'.implode(',', array_unique(array_column($deleted, 'thread_id'))).'}';
         /** @var list<string> $emptyThreads */
