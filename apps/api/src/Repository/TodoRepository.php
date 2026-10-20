@@ -165,8 +165,8 @@ class TodoRepository extends ServiceEntityRepository
     }
 
     /**
-     * The owner's open todos without planned time that have what planning needs (a due date and a duration), earliest
-     * deadline first, then in the user's order.
+     * The owner's open todos without planned time that have what planning needs (a due date and a duration), and whose
+     * time the user did not remove, earliest deadline first, then in the user's order.
      *
      * @return list<Todo>
      */
@@ -179,6 +179,7 @@ class TodoRepository extends ServiceEntityRepository
             ->andWhere('t.plannedStart IS NULL')
             ->andWhere('t.dueDate IS NOT NULL')
             ->andWhere('t.durationMinutes IS NOT NULL')
+            ->andWhere('t.planDeclinedAt IS NULL')
             ->setParameter('owner', $owner->getId(), 'uuid')
             ->orderBy('t.dueDate')
             ->addOrderBy('t.dueTime')

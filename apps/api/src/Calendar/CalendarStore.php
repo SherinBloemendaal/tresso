@@ -16,7 +16,7 @@ use App\Notification\PlanCalendarObject;
 use App\Realtime\AfterCommitDispatcher;
 use App\Realtime\RealtimeNotifier;
 use App\Repository\CalendarOperationRepository;
-use App\Todo\ReplanTodos;
+use App\Todo\TodoReplanning;
 use Doctrine\ORM\EntityManagerInterface;
 use Sabre\VObject\Component\VCalendar;
 
@@ -33,6 +33,7 @@ final readonly class CalendarStore
         private CalendarOperationRepository $operations,
         private RealtimeNotifier $notifier,
         private AfterCommitDispatcher $afterCommit,
+        private TodoReplanning $todoReplanning,
     ) {
     }
 
@@ -107,7 +108,7 @@ final readonly class CalendarStore
     {
         $owner = $object->getCalendar()->getOwner()->getId()->toRfc4122();
         $this->afterCommit->dispatch(new PlanCalendarObject($object->getId()->toRfc4122(), $owner));
-        $this->afterCommit->dispatchOnce('replan-todos:'.$owner, new ReplanTodos($owner));
+        $this->todoReplanning->afterCommit($owner);
     }
 
     /** Marks the rows of a resource with the reason its last change did not reach the provider (or clears it). */

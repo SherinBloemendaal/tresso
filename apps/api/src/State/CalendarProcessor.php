@@ -15,6 +15,7 @@ use App\Notification\PlanUserNotifications;
 use App\Realtime\AfterCommitDispatcher;
 use App\Repository\CalendarRepository;
 use App\Security\CurrentUser;
+use App\Todo\TodoReplanning;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
@@ -29,6 +30,7 @@ final readonly class CalendarProcessor implements ProcessorInterface
         private CalendarRepository $calendars,
         private CurrentUser $currentUser,
         private AfterCommitDispatcher $afterCommit,
+        private TodoReplanning $todoReplanning,
     ) {
     }
 
@@ -63,6 +65,8 @@ final readonly class CalendarProcessor implements ProcessorInterface
             }
             $this->entityManager->wrapInTransaction(function () use ($calendar, $owner): void {
                 $wasDefault = $calendar->isDefault();
+                // Its events no longer keep time busy.
+                $this->todoReplanning->afterCommit($owner);
                 $this->entityManager->remove($calendar);
                 $this->entityManager->flush();
                 if ($wasDefault) {
@@ -89,9 +93,10 @@ final readonly class CalendarProcessor implements ProcessorInterface
             }
             $replan = false;
             if (null !== $data->visible && $data->visible !== $calendar->isVisible()) {
-                // Hidden calendars do not notify.
+                // Hidden calendars do not notify, and their events no longer keep time busy for planned todos.
                 $calendar->setVisible($data->visible);
                 $replan = true;
+                $this->todoReplanning->afterCommit($owner);
             }
             if (null !== $data->work && $data->work !== $calendar->isWork()) {
                 // Its notifications now keep to the working hours, or no longer do.

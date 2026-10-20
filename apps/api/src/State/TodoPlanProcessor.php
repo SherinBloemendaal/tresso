@@ -42,7 +42,7 @@ final readonly class TodoPlanProcessor implements ProcessorInterface
                 ?? throw new NotFoundHttpException('Todo not found.');
 
             if ($operation instanceof DeleteOperationInterface) {
-                $todo->unplan();
+                $todo->declinePlan($this->clock->now());
                 $this->entityManager->flush();
 
                 return null;

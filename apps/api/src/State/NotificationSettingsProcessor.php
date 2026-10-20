@@ -18,6 +18,7 @@ use App\Realtime\AfterCommitDispatcher;
 use App\Repository\DailyBriefSettingsRepository;
 use App\Repository\NotificationPreferencesRepository;
 use App\Security\CurrentUser;
+use App\Todo\TodoReplanning;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Clock\ClockInterface;
 use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
@@ -35,6 +36,7 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
         private SelfAddresses $selfAddresses,
         private DailyBriefSettingsRepository $briefSettings,
         private ClockInterface $clock,
+        private TodoReplanning $todoReplanning,
     ) {
     }
 
@@ -66,6 +68,7 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
                 $preferences->setEmailAddress($address);
             }
             $planningBefore = self::planning($preferences);
+            $hoursBefore = [$preferences->getWorkDays(), $preferences->getWorkStart(), $preferences->getWorkEnd()];
             if (null !== $data->workDays || null !== $data->workStart || null !== $data->workEnd) {
                 $preferences->setWorkingHours(
                     null === $data->workDays ? $preferences->getWorkDays() : array_map(intval(...), $data->workDays),
@@ -112,6 +115,10 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
                 // All-day reminders fire at a time of day in the user's zone; planned notifications carry their
                 // channels, early reminders move with the working hours, leave-now with the travel settings.
                 $this->afterCommit->dispatch(new PlanUserNotifications($user->getId()->toRfc4122()));
+            }
+            if ($zoneChanged || $hoursBefore !== [$preferences->getWorkDays(), $preferences->getWorkStart(), $preferences->getWorkEnd()]) {
+                // Planned todos keep to the working hours, and their deadlines are read in the user's zone.
+                $this->todoReplanning->afterCommit($user);
             }
 
             return $preferences;
