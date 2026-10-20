@@ -331,13 +331,15 @@ export class HandOverFlow {
         throw new HandOverError(`The hand-over could not be taken back, so it still stands: ${this.deps.explain(refused).message}`)
       }
     }
-    await this.deps.composer.openDraft(handed.draftId)
-    await this.deps.composer.discard()
+    // The hand-over goes before the draft the forward came back as: when this stops halfway, trying again finds the
+    // forward cancelled and withdraws what is left; a draft left behind is the user's to throw away.
     try {
       await this.deps.api.withdraw(handed.handOver.id)
     } finally {
       await this.deps.sync().catch(() => undefined)
     }
+    await this.deps.composer.openDraft(handed.draftId)
+    await this.deps.composer.discard()
     return 'undone'
   }
 

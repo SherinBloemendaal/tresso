@@ -151,6 +151,7 @@ describe('HandOverFlow', () => {
   let syncs: number
   let createFails: unknown
   let cancelFails: unknown
+  let withdrawFails: unknown
   /** How the copy says the forward stands after a cancel failed; null when it does not have it. */
   let forwardStatus: SyncedOutgoingMessage['status'] | null
   let originalFiles: MessageAttachment[]
@@ -172,6 +173,7 @@ describe('HandOverFlow', () => {
     syncs = 0
     createFails = null
     cancelFails = null
+    withdrawFails = null
     forwardStatus = null
     originalFiles = []
     unscannedRefused = false
@@ -212,6 +214,7 @@ describe('HandOverFlow', () => {
           return handOver(id, 'm1', 'work', { state: request.done === true ? 'done' : 'open' })
         },
         withdraw: async (id) => {
+          if (withdrawFails !== null) throw withdrawFails
           withdrawn.push(id)
         },
         nudge: async (id, request) => {
@@ -327,6 +330,22 @@ describe('HandOverFlow', () => {
     await expect(flow.takeBack(handed)).rejects.toThrow('The hand-over could not be taken back, so it still stands: You are offline.')
 
     expect(withdrawn).toEqual([])
+  })
+
+  it('withdraws the hand-over before throwing the draft away, so an undo that stopped halfway can be tried again', async () => {
+    const handed = await flow.handOver(original, input)
+    withdrawFails = new Error('Try again later.')
+
+    await expect(flow.takeBack(handed)).rejects.toThrow('Try again later.')
+    expect(await store.drafts()).toHaveLength(1)
+
+    // The forward is cancelled now: the second try finds it so and finishes.
+    withdrawFails = null
+    cancelFails = new Error('This message was cancelled already.')
+    forwardStatus = 'cancelled'
+    expect(await flow.takeBack(handed)).toBe('undone')
+    expect(withdrawn).toEqual(['h1'])
+    expect(await store.drafts()).toEqual([])
   })
 
   it('takes everything back when the cancel went through and only its answer was lost', async () => {
