@@ -239,6 +239,38 @@ final class CalendarEventApiTest extends DatabaseTestCase
         self::assertSame(['2026-09-21T07:00:00+00:00', '2026-10-20T07:00:00+00:00', '2026-11-17T08:00:00+00:00', '2026-12-15T08:00:00+00:00'], $starts);
     }
 
+    public function testDeletesTheOccurrenceAtARepeatedTimeOnTheNightClocksGoBack(): void
+    {
+        $series = $this->nightSeries();
+        $key = $this->recurrenceIdOn($series, '2026-10-25');
+        self::assertSame('20261025T013000Z', $key, 'The occurrence is shown at 02:30 CET, the time read back.');
+
+        $this->client->request('DELETE', '/api/v1/calendar-events/'.$series['id'].'?scope=this&recurrenceId='.$key, server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+
+        self::assertSame(['20261023T003000Z', '20261024T003000Z', '20261026T013000Z'], array_column($this->occurrences($this->kim, '2026-10-20T00:00:00+00:00', '2026-10-30T00:00:00+00:00', 'Europe/Amsterdam'), 'recurrenceId'));
+    }
+
+    public function testEditsTheOccurrenceAtARepeatedTimeOnTheNightClocksGoBack(): void
+    {
+        $series = $this->nightSeries();
+        $key = $this->recurrenceIdOn($series, '2026-10-25');
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$series['id'].'?scope=this&recurrenceId='.$key, self::event($this->calendarId, [
+            'summary' => 'Night watch, later',
+            'start' => ['dateTime' => '2026-10-25T05:00:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-25T05:30:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]), $this->kim);
+        self::assertResponseIsSuccessful();
+
+        $occurrences = $this->occurrences($this->kim, '2026-10-20T00:00:00+00:00', '2026-10-30T00:00:00+00:00', 'Europe/Amsterdam');
+        self::assertSame(
+            [['Night watch', '20261023T003000Z'], ['Night watch', '20261024T003000Z'], ['Night watch, later', '20261025T013000Z'], ['Night watch', '20261026T013000Z']],
+            array_map(static fn (array $o): array => [$o['summary'], $o['recurrenceId']], $occurrences),
+        );
+        self::assertSame(['dateTime' => '2026-10-25T04:00:00+00:00'], $occurrences[2]['start']);
+    }
+
     public function testEditingAllOccurrencesMovesTheSeriesAndItsExceptions(): void
     {
         $series = $this->create(['recurrence' => 'FREQ=WEEKLY;COUNT=3']);
@@ -619,6 +651,35 @@ final class CalendarEventApiTest extends DatabaseTestCase
 
         /** @var array{id: string, uid: string, ...} */
         return $event;
+    }
+
+    /**
+     * A daily series at 02:30 in Amsterdam over the night clocks go back, when 02:30 happens twice.
+     *
+     * @return array{id: string, uid: string, ...}
+     */
+    private function nightSeries(): array
+    {
+        return $this->create([
+            'summary' => 'Night watch',
+            'recurrence' => 'FREQ=DAILY;COUNT=4',
+            'start' => ['dateTime' => '2026-10-23T02:30:00', 'timeZone' => 'Europe/Amsterdam'],
+            'end' => ['dateTime' => '2026-10-23T03:00:00', 'timeZone' => 'Europe/Amsterdam'],
+        ]);
+    }
+
+    /**
+     * @param array{id: string, ...} $series
+     */
+    private function recurrenceIdOn(array $series, string $date): string
+    {
+        foreach ($this->occurrences($this->kim, '2026-10-20T00:00:00+00:00', '2026-10-30T00:00:00+00:00', 'Europe/Amsterdam') as $occurrence) {
+            $start = $occurrence['start'];
+            if ($occurrence['eventId'] === $series['id'] && \is_array($start) && \is_string($start['dateTime'] ?? null) && new \DateTimeImmutable($start['dateTime'])->setTimezone(new \DateTimeZone('Europe/Amsterdam'))->format('Y-m-d') === $date) {
+                return self::string($occurrence['recurrenceId']);
+            }
+        }
+        self::fail('No occurrence on '.$date);
     }
 
     private function violationPath(): ?string
