@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { VERDICTS, verdictLabel, type Verdict } from '@tresso/core'
+import { spamOverruleNotice, VERDICTS, verdictLabel, type Verdict } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
+import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import AppIcon from '@/components/AppIcon.vue'
 import VerdictChip from '@/components/VerdictChip.vue'
@@ -20,11 +21,10 @@ const props = defineProps<{
 }>()
 
 const mail = useMailStore()
+const compose = useComposeStore()
 const open = ref(false)
 const busy = ref(false)
 const error = ref<string | null>(null)
-/** Set when the choice is remembered for a sender whose mail fails authentication, so the rule cannot help it. */
-const notice = ref<string | null>(null)
 const menu = ref<HTMLElement | null>(null)
 const button = ref<HTMLButtonElement | null>(null)
 
@@ -52,11 +52,12 @@ async function choose(smartInboxId: string, verdict?: Verdict): Promise<void> {
   open.value = false
   busy.value = true
   error.value = null
-  notice.value = null
   try {
     const result = await mail.classifyThread(props.threadId, smartInboxId, verdict)
-    if (result.senderRule?.failsAuthentication) {
-      notice.value = `Moved. New mail from ${result.senderRule.sender} still goes to Spam: it fails the checks that prove who sent it.`
+    // An app-wide notice: in a smart inbox the row (and this menu with it) leaves the list as soon as it moves.
+    const notice = spamOverruleNotice(result)
+    if (notice !== null) {
+      compose.notify({ text: notice, tone: 'info' }, 12_000)
     }
   } catch (e) {
     error.value = `Could not move it: ${errorMessage(e)}`
@@ -160,10 +161,9 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', outside))
           {{ candidate.name }} <span class="item-verdict">{{ verdictLabel(candidate.verdict) }}</span>
         </button>
       </div>
-      <p class="note">Mail from this sender goes the same way from now on.</p>
+      <p class="note">Tresso remembers this for the sender's next mail.</p>
     </div>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
-    <p v-if="notice" class="notice" role="status">{{ notice }}</p>
   </div>
 </template>
 
@@ -271,11 +271,5 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', outside))
   margin: 4px 0 0;
   font-size: 12px;
   color: var(--danger);
-}
-.notice {
-  max-width: 280px;
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--ink-2);
 }
 </style>
