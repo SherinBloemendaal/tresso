@@ -203,6 +203,32 @@ final class ProviderCredentialsTest extends DatabaseTestCase
         self::assertSame('ms-access-1', self::secrets($this->credentials($account, feature: 'calendar'))['accessToken'] ?? null);
     }
 
+    public function testWithdrawingOnlyTheCalendarConsentAtMicrosoftKeepsTheMail(): void
+    {
+        $account = $this->connectMicrosoft();
+        $this->connection()->executeStatement('UPDATE provider_grant SET scopes = \'["calendars.readwrite","mail.readwrite","mail.send","user.read"]\'');
+        $this->sealTokens($account, accessTokenExpiresAt: time() + 60);
+        $this->lease();
+        $this->router()->respondOnce(self::MICROSOFT_TOKEN, '{"error":"invalid_grant","error_description":"AADSTS65001: The user or administrator has not consented to use the application."}', 400);
+        $this->router()->respondOnce(self::MICROSOFT_TOKEN, (string) json_encode(['access_token' => 'ms-access-2', 'expires_in' => 3600, 'refresh_token' => 'ms-refresh-2', 'scope' => 'https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read', 'token_type' => 'Bearer']));
+
+        self::assertSame('ms-access-2', $this->accessToken($account));
+
+        $refreshes = $this->router()->requestsTo(self::MICROSOFT_TOKEN);
+        self::assertStringContainsString('Calendars.ReadWrite', urldecode($refreshes[\count($refreshes) - 2]['body']));
+        self::assertStringNotContainsString('Calendars.ReadWrite', urldecode($refreshes[\count($refreshes) - 1]['body']), 'The second refresh asks for mail alone.');
+        $this->entityManager()->clear();
+        $account = $this->onlyAccount();
+        self::assertSame('active', $account->getStatus()->value);
+        self::assertSame('not_granted', $account->getCalendarStatus()->value);
+        $grant = $account->getProviderGrant();
+        self::assertInstanceOf(ProviderGrant::class, $grant);
+        self::assertNotContains('calendars.readwrite', $grant->getScopes());
+
+        $this->client->request('GET', $this->credentialsUrl($account, feature: 'calendar'), server: $this->worker);
+        self::assertResponseStatusCodeSame(403);
+    }
+
     public function testAnUnreachableProviderAsksTheWorkerToRetry(): void
     {
         $account = $this->connectGoogle();

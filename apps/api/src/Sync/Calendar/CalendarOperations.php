@@ -53,6 +53,12 @@ final readonly class CalendarOperations
         $calendar = $operation->getCalendar();
         $error = trim((string) $result->error);
 
+        if (OperationResultInput::RETRY === $result->outcome && null !== $object && null !== $result->remoteId && CalendarOperationKind::Put === $operation->getKind()) {
+            // Part of the write reached the provider (Google and Microsoft write a series step by step): the next
+            // attempt is based on the version that made, instead of conflicting with it.
+            $object->stored($result->remoteId, $result->etag);
+        }
+
         if (OperationResultInput::RETRY === $result->outcome && $operation->getAttempts() < self::MAX_ATTEMPTS) {
             $delay = self::RETRY_DELAYS[min($operation->getAttempts(), \count(self::RETRY_DELAYS)) - 1] ?? self::RETRY_DELAYS[0];
             $operation->retryAt($now->add(new \DateInterval($delay)), '' === $error ? 'The calendar server could not be reached.' : $error);
@@ -85,7 +91,11 @@ final readonly class CalendarOperations
                 return 'done';
             }
             if (null !== $remoteId) {
-                $object->stored($remoteId, $result->etag);
+                // Google and Microsoft writes are conditional on an ETag the worker always knows; one it could not read
+                // back keeps the last known, so the next write is still conditional (a stale one is a conflict, and the
+                // next sync brings the provider's current ETag). CalDAV servers may name none at all.
+                $etag = $result->etag ?? ($calendar->getSource()->isProviderApi() ? $object->getEtag() : null);
+                $object->stored($remoteId, $etag);
             }
             $this->store->reportSyncError($object, null);
             if (null !== $result->current && null !== $result->current->ical && $result->current->remoteId === $remoteId) {

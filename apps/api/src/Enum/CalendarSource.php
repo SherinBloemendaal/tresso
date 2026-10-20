@@ -13,4 +13,10 @@ enum CalendarSource: string
     case CalDav = 'caldav';
     case Google = 'google';
     case Microsoft = 'microsoft';
+
+    /** Synced through the provider's own API (Google Calendar, Microsoft Graph), not CalDAV. */
+    public function isProviderApi(): bool
+    {
+        return self::Google === $this || self::Microsoft === $this;
+    }
 }

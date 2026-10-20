@@ -214,6 +214,39 @@ final class ProviderCalendarTest extends DatabaseTestCase
         self::assertStringContainsString('X-TRESSO-CONFERENCE-REQUEST:teams', self::string($operations[0]['ical']));
     }
 
+    public function testARetryAfterPartOfAWriteBasesTheNextAttemptOnIt(): void
+    {
+        $primary = $this->reportCalendars()[0]['id'];
+        $this->storeObject($primary, 'lunch', '"1"', self::object('lunch@google.com', 'Lunch'));
+        $eventId = self::string($this->occurrences($this->user, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($primary, ['summary' => 'Lunch, later']), $this->user);
+        self::assertResponseIsSuccessful();
+        $operations = $this->claim();
+        self::assertSame('"1"', $operations[0]['ifMatch']);
+
+        $this->report($operations[0]['id'], ['outcome' => 'retry', 'error' => 'Google had a problem (HTTP 503).', 'remoteId' => 'lunch', 'etag' => '"2"']);
+        self::assertSame(['status' => 'retry'], $this->decodedResponse());
+
+        $this->client->jsonRequest('POST', $this->base().'/calendars/'.$primary.'/inventory', ['workerId' => 'w1', 'objects' => [['remoteId' => 'lunch', 'etag' => '"2"']]], $this->worker);
+        self::assertSame([], $this->decodedResponse()['fetch'], 'The next attempt is conditional on the version the first part made.');
+        self::assertSame('Lunch, later', $this->getJson('/api/v1/calendar-events/'.$eventId, $this->user)['summary'], 'The edit is kept for the retry.');
+    }
+
+    public function testAWriteTheWorkerCouldNotReadBackKeepsTheLastKnownETag(): void
+    {
+        $primary = $this->reportCalendars()[0]['id'];
+        $this->storeObject($primary, 'lunch', '"1"', self::object('lunch@google.com', 'Lunch'));
+        $eventId = self::string($this->occurrences($this->user, '2026-10-19T00:00:00+00:00', '2026-10-20T00:00:00+00:00')[0]['eventId']);
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($primary, ['summary' => 'Lunch, later']), $this->user);
+        $operations = $this->claim();
+
+        $this->report($operations[0]['id'], ['outcome' => 'done', 'remoteId' => 'lunch']);
+
+        $this->client->jsonRequest('PUT', '/api/v1/calendar-events/'.$eventId, self::event($primary, ['summary' => 'Lunch, much later']), $this->user);
+        self::assertResponseIsSuccessful();
+        self::assertSame('"1"', $this->claim()[0]['ifMatch'], 'The next write stays conditional.');
+    }
+
     public function testCalendarProblemsThePolicyNamesAreReported(): void
     {
         $this->client->jsonRequest('POST', $this->base().'/calendar-status', ['workerId' => 'w1', 'status' => 'not_granted', 'detail' => 'Tresso is not allowed to use the calendars of this account.'], $this->worker);
