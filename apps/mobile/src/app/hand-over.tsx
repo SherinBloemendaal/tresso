@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { dueChoices, firstName, MAX_NOTE, type Address, type DueChoice, type SyncedMessage } from '@tresso/core'
+import { dueChoices, firstName, MAX_NOTE, UnscannedFilesError, type Address, type DueChoice, type SyncedMessage } from '@tresso/core'
 import { RecipientField } from '@/compose/RecipientField'
 import { handOverProblem } from '@/handOver/form'
 import { dueLabel } from '@/handOver/format'
@@ -54,7 +54,10 @@ export default function HandOverScreen() {
   // Set at once, unlike state, so a second tap before the screen updates does not forward the conversation twice.
   const submitting = useRef(false)
 
-  async function submit() {
+  /** The server's question about files of the original that could not be scanned; null when there is none. */
+  const [unscanned, setUnscanned] = useState<string | null>(null)
+
+  async function submit(acceptUnscanned = false) {
     if (submitting.current) {
       return
     }
@@ -67,11 +70,16 @@ export default function HandOverScreen() {
     submitting.current = true
     setBusy(true)
     setProblem(null)
+    setUnscanned(null)
     try {
-      await handOvers.handOver(message, { delegate: person, note, dueAt: choice.at, dueLabel: dueLabel(choice.at.toISOString()) })
+      await handOvers.handOver(message, { delegate: person, note, dueAt: choice.at, dueLabel: dueLabel(choice.at.toISOString()), acceptUnscanned })
       router.back()
     } catch (error) {
-      setProblem(error instanceof Error ? error.message : String(error))
+      if (error instanceof UnscannedFilesError) {
+        setUnscanned(error.message)
+      } else {
+        setProblem(error instanceof Error ? error.message : String(error))
+      }
     } finally {
       submitting.current = false
       setBusy(false)
@@ -132,6 +140,16 @@ export default function HandOverScreen() {
               {problem}
             </Text>
           )}
+          {unscanned !== null && (
+            <View style={styles.unscanned}>
+              <Text style={styles.problem} accessibilityRole="alert">
+                {unscanned}
+              </Text>
+              <Pressable style={({ pressed }) => [styles.anyway, (pressed || busy) && styles.pressed]} onPress={() => void submit(true)} disabled={busy} accessibilityRole="button">
+                <Text style={styles.anywayLabel}>Hand over anyway</Text>
+              </Pressable>
+            </View>
+          )}
           <Pressable style={({ pressed }) => [styles.submit, (pressed || busy || message === null) && styles.pressed]} onPress={() => void submit()} disabled={busy || message === null} accessibilityRole="button">
             <Text style={styles.submitLabel}>{busy ? 'Handing over…' : submitText}</Text>
           </Pressable>
@@ -161,6 +179,9 @@ function makeStyles(theme: Theme) {
     choiceSub: { color: theme.ink2, fontSize: 13 },
     choiceLabelOn: { color: theme.surface },
     problem: { color: theme.danger, fontSize: 14 },
+    unscanned: { gap: 8 },
+    anyway: { minHeight: 44, paddingHorizontal: 14, borderRadius: 999, borderWidth: 1, borderColor: theme.lineStrong, alignItems: 'center', justifyContent: 'center' },
+    anywayLabel: { color: theme.ink, fontSize: 15, fontWeight: '600' },
     submit: { minHeight: 48, borderRadius: 999, backgroundColor: theme.accent, alignItems: 'center', justifyContent: 'center' },
     submitLabel: { color: theme.onAccent, fontSize: 16, fontWeight: '600' },
     pressed: { opacity: 0.5 },
