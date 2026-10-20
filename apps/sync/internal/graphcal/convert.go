@@ -106,6 +106,11 @@ func zone(name string) string {
 		return "UTC"
 	}
 	if _, iana, err := ical.ZoneOf(name); err == nil {
+		switch iana {
+		case "Etc/GMT", "Etc/UTC", "UTC":
+			// Windows' "UTC" is Etc/GMT in the CLDR table: no zone, an instant.
+			return "UTC"
+		}
 		return iana
 	}
 	return "UTC"

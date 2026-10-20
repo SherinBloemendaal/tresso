@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -174,8 +175,22 @@ func sameReminders(a, b []reminder) bool {
 }
 
 // currentFields reads Tresso's view of an event Google has, through the same conversion as the desired one, so
-// differences in how either side spells a value never count as a change.
-func currentFields(e event, info calendarInfo, original *ical.Time) (fields, error) {
+// differences in how either side spells a value never count as a change. A master is read with its series, whose
+// cancelled occurrences are EXDATEs as Tresso stores them.
+func currentFields(e event, info calendarInfo, original *ical.Time, whole series) (fields, error) {
+	if original == nil && whole.master != nil {
+		text, err := whole.toICalendar(info)
+		if err != nil {
+			return fields{}, err
+		}
+		doc, err := ical.Parse(text)
+		if err != nil {
+			return fields{}, err
+		}
+		if master := doc.Master(); master != nil {
+			return fromVEvent(master, info, true)
+		}
+	}
 	v, err := toVEvent(e, info, original)
 	if err != nil {
 		return fields{}, err
@@ -187,6 +202,51 @@ func equal(a, b any) bool {
 	left, _ := json.Marshal(a)
 	right, _ := json.Marshal(b)
 	return string(left) == string(right)
+}
+
+// same compares two events as Tresso writes them. The recurrence is compared by meaning: Google keeps an occurrence
+// the organizer cancelled as an exception of its own, which Tresso reads as an EXDATE, and either side may order the
+// parts of a rule or the values of a date list differently.
+func same(a, b fields) bool {
+	a.Recurrence, b.Recurrence = canonicalRecurrence(a.Recurrence), canonicalRecurrence(b.Recurrence)
+	return equal(a, b)
+}
+
+// canonicalRecurrence is a recurrence as a sorted list: each RRULE with its parts sorted (FREQ first), and every
+// EXDATE and RDATE value as its own recurrence key.
+func canonicalRecurrence(lines []string) []string {
+	out := []string{}
+	for _, line := range lines {
+		prop, err := ical.ParseContentLine(line)
+		if err != nil {
+			out = append(out, line)
+			continue
+		}
+		switch prop.Name {
+		case "RRULE":
+			parts := strings.Split(strings.ToUpper(prop.Value), ";")
+			sort.Slice(parts, func(i, j int) bool {
+				if strings.HasPrefix(parts[i], "FREQ=") != strings.HasPrefix(parts[j], "FREQ=") {
+					return strings.HasPrefix(parts[i], "FREQ=")
+				}
+				return parts[i] < parts[j]
+			})
+			out = append(out, "RRULE:"+strings.Join(parts, ";"))
+		case "EXDATE", "RDATE":
+			times, err := ical.ParseTimes(prop)
+			if err != nil {
+				out = append(out, line)
+				continue
+			}
+			for _, t := range times {
+				out = append(out, prop.Name+":"+ical.RecurrenceKey(t))
+			}
+		default:
+			out = append(out, line)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // eventID is the id a new event gets: derived from its UID, so a create that is retried finds the event it made.
@@ -234,7 +294,7 @@ func (s *session) Write(ctx context.Context, calendar calsync.Calendar, operatio
 	if operation.Notify {
 		notify = "all"
 	}
-	w := &writer{session: s, calendar: calendar, info: info, operation: operation, notify: notify, self: s.self}
+	w := &writer{session: s, calendar: calendar, info: info, operation: operation, notify: notify, self: s.self, series: current}
 	var masterID string
 	if !exists {
 		masterID, err = w.create(ctx, doc)
@@ -250,7 +310,12 @@ func (s *session) Write(ctx context.Context, calendar calsync.Calendar, operatio
 		if providerhttp.IsStatus(err, http.StatusPreconditionFailed) && masterID != "" {
 			return s.reread(ctx, calendar, operation, masterID, true)
 		}
-		return s.failure(ctx, calendar, operation, err)
+		result, accessErr := s.failure(ctx, calendar, operation, err)
+		if w.wrote && result.Outcome == api.OperationRetry && masterID != "" {
+			// Part of the write reached Google: the retry starts from that version, not from a conflict with it.
+			s.progress(ctx, calendar, operation, masterID, &result)
+		}
+		return result, accessErr
 	}
 	return s.reread(ctx, calendar, operation, masterID, false)
 }
@@ -267,6 +332,19 @@ type writer struct {
 	operation api.CalendarOperation
 	notify    string
 	self      string
+	// wrote: some step of this write reached Google, so a failure after it must not lose what it changed.
+	wrote bool
+	// series is the resource as Google has it, for comparing the master with its cancelled occurrences.
+	series series
+}
+
+// send makes one change at Google and remembers that it did.
+func (w *writer) send(ctx context.Context, method, rawURL string, query url.Values, ifMatch string, body any, out any) error {
+	if err := w.session.send(ctx, method, rawURL, query, ifMatch, body, out); err != nil {
+		return err
+	}
+	w.wrote = true
+	return nil
 }
 
 func (w *writer) query(conference bool) url.Values {
@@ -294,7 +372,7 @@ func (w *writer) create(ctx context.Context, doc *ical.Component) (string, error
 		ConferenceData *conferenceData `json:"conferenceData,omitempty"`
 	}{fields: f, ID: id, ICalUID: w.operation.UID, ConferenceData: w.conferenceRequest(master, nil)}
 	var created event
-	err = w.session.send(ctx, http.MethodPost, w.session.calendarURL(w.calendar.RemoteID), w.query(body.ConferenceData != nil), "", body, &created)
+	err = w.send(ctx, http.MethodPost, w.session.calendarURL(w.calendar.RemoteID), w.query(body.ConferenceData != nil), "", body, &created)
 	if providerhttp.IsStatus(err, http.StatusConflict) {
 		// A retried create: the event exists, and the rest of the write is an update of it.
 		current, found, getErr := w.session.series(ctx, w.calendar.RemoteID, id, w.operation.UID)
@@ -304,6 +382,7 @@ func (w *writer) create(ctx context.Context, doc *ical.Component) (string, error
 		if !found {
 			return "", err
 		}
+		w.series = current
 		return id, w.update(ctx, doc, current)
 	}
 	if err != nil {
@@ -313,6 +392,7 @@ func (w *writer) create(ctx context.Context, doc *ical.Component) (string, error
 		id = created.ID
 	}
 	current := series{master: &created}
+	w.series = current
 	return id, w.overrides(ctx, doc, id, current)
 }
 
@@ -383,16 +463,18 @@ func (w *writer) overrides(ctx context.Context, doc *ical.Component, masterID st
 			continue
 		}
 		if !ok {
-			// The occurrence as the series has it: patching it makes it an exception at Google.
+			// The occurrence as Google has it (its own start, end and attendees); patching it makes it an exception.
 			if current.master == nil {
 				continue
 			}
-			existing = *current.master
-			existing.ID = instanceID(masterID, original)
-			existing.Recurrence = nil
-			existing.RecurringEventID = masterID
-			existing.ETag = ""
-			existing.ConferenceData = nil
+			instance, found, err := w.session.instance(ctx, w.calendar.RemoteID, instanceID(masterID, original))
+			if err != nil {
+				return err
+			}
+			if !found || instance.cancelled() {
+				continue
+			}
+			existing = instance
 		}
 		if err := w.patch(ctx, override, existing, &original, organizes); err != nil {
 			return err
@@ -408,7 +490,7 @@ func (w *writer) patch(ctx context.Context, v *ical.Component, current event, or
 	if err != nil {
 		return &refusal{"The event could not be read: " + err.Error()}
 	}
-	have, err := currentFields(current, w.info, original)
+	have, err := currentFields(current, w.info, original, w.series)
 	if err != nil {
 		return err
 	}
@@ -416,7 +498,7 @@ func (w *writer) patch(ctx context.Context, v *ical.Component, current event, or
 	if !organizes {
 		return w.answer(ctx, desired, have, current)
 	}
-	if equal(desired, have) && conference == nil {
+	if same(desired, have) && conference == nil {
 		return nil
 	}
 	if current.ID == "" {
@@ -430,7 +512,7 @@ func (w *writer) patch(ctx context.Context, v *ical.Component, current event, or
 		// An occurrence keeps the series' recurrence.
 		body.Recurrence = nil
 	}
-	return w.session.send(ctx, http.MethodPatch, w.session.calendarURL(w.calendar.RemoteID, current.ID), w.query(conference != nil), current.ETag, patchBody(body, original != nil), nil)
+	return w.send(ctx, http.MethodPatch, w.session.calendarURL(w.calendar.RemoteID, current.ID), w.query(conference != nil), current.ETag, patchBody(body, original != nil), nil)
 }
 
 // patchBody leaves the recurrence out of an occurrence's patch.
@@ -449,7 +531,7 @@ func patchBody(body any, occurrence bool) any {
 func (w *writer) answer(ctx context.Context, desired, have fields, current event) error {
 	other := desired
 	other.Attendees, other.Reminders = have.Attendees, have.Reminders
-	if !equal(other, have) {
+	if !same(other, have) {
 		return &refusal{"Only the organizer can change this event; your change was not saved at Google."}
 	}
 	want := ""
@@ -482,7 +564,7 @@ func (w *writer) answer(ctx context.Context, desired, have fields, current event
 	if len(body) == 0 {
 		return nil
 	}
-	return w.session.send(ctx, http.MethodPatch, w.session.calendarURL(w.calendar.RemoteID, current.ID), w.query(false), current.ETag, body, nil)
+	return w.send(ctx, http.MethodPatch, w.session.calendarURL(w.calendar.RemoteID, current.ID), w.query(false), current.ETag, body, nil)
 }
 
 func (s *session) delete(ctx context.Context, calendar calsync.Calendar, operation api.CalendarOperation) (api.OperationResult, error) {
@@ -545,6 +627,17 @@ func (s *session) reread(ctx context.Context, calendar calsync.Calendar, operati
 	return result, nil
 }
 
+// progress puts Google's id and ETag of a partly written event into a retry, so the API bases the next attempt on
+// that version.
+func (s *session) progress(ctx context.Context, calendar calsync.Calendar, operation api.CalendarOperation, masterID string, result *api.OperationResult) {
+	current, found, err := s.series(ctx, calendar.RemoteID, masterID, operation.UID)
+	if err != nil || !found {
+		return
+	}
+	etag := current.etag()
+	result.RemoteID, result.ETag = &masterID, &etag
+}
+
 func (s *session) conflict(calendar calsync.Calendar, remoteID string, current series) api.OperationResult {
 	etag := current.etag()
 	text, err := current.toICalendar(info(calendar))
@@ -560,8 +653,9 @@ func (s *session) failure(ctx context.Context, calendar calsync.Calendar, operat
 	switch {
 	case errors.Is(err, providerhttp.ErrUnauthorized), errors.Is(err, api.ErrReauthorize), errors.Is(err, api.ErrNotGranted):
 		return api.OperationResult{Outcome: api.OperationRetry, Error: text("Google refused Tresso's access to this calendar.")}, err
-	case errors.As(err, &statusErr) && (&Provider{}).NotGranted(err):
-		return api.OperationResult{Outcome: api.OperationRetry, Error: text("Tresso is not allowed to change this calendar at Google.")}, err
+	case (&Provider{}).NotGranted(err):
+		// The token lacks the calendar scopes: the whole account waits for the user to allow them.
+		return api.OperationResult{Outcome: api.OperationRetry, Error: text("Tresso is not allowed to use the calendars of this account at Google.")}, err
 	case errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusForbidden:
 		return s.refused(ctx, calendar, operation, "Google refused the change: the calendar is read-only for you.")
 	case errors.As(err, &statusErr) && statusErr.StatusCode >= 400 && statusErr.StatusCode < 500 && statusErr.StatusCode != http.StatusTooManyRequests:

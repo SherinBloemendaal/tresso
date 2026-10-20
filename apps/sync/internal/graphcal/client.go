@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -48,21 +49,21 @@ func NewProvider(opts ClientOptions) *Provider {
 func (p *Provider) Name() string   { return "Microsoft" }
 func (p *Provider) Source() string { return "microsoft" }
 
-func (p *Provider) Open(tokens providerhttp.Tokens, httpClient *http.Client, self string) calsync.Session {
-	return &session{http: providerhttp.New(httpClient, tokens, p.opts.HTTP), base: strings.TrimRight(p.opts.BaseURL, "/"), owner: self, zones: map[string]string{}}
+func (p *Provider) Open(tokens providerhttp.Tokens, httpClient *http.Client, self string, logger *slog.Logger) calsync.Session {
+	return &session{http: providerhttp.New(httpClient, tokens, p.opts.HTTP), base: strings.TrimRight(p.opts.BaseURL, "/"), owner: self, logger: logger, zones: map[string]string{}}
 }
 
-// NotGranted: Graph refuses calendar access (403 ErrorAccessDenied) when the token lacks Calendars.ReadWrite.
-func (p *Provider) NotGranted(err error) bool {
-	var statusErr *providerhttp.StatusError
-	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusForbidden &&
-		(statusErr.HasReason("ErrorAccessDenied") || statusErr.HasReason("AccessDenied") || statusErr.HasReason("Authorization_RequestDenied"))
+// NotGranted is never sure for Graph: it answers ErrorAccessDenied alike for a token without Calendars.ReadWrite and
+// for one calendar the user lost access to. Only a refused calendar list (see calsync) speaks for the account.
+func (p *Provider) NotGranted(error) bool {
+	return false
 }
 
 type session struct {
-	http  *providerhttp.Client
-	base  string
-	owner string // the account's address
+	http   *providerhttp.Client
+	base   string
+	owner  string // the account's address
+	logger *slog.Logger
 
 	mu sync.Mutex
 	// zones holds the zone each event was made in, from the last listing: it is read in that zone.
@@ -188,8 +189,10 @@ func eventsPath(calendarID string) string {
 	return "/me/calendars/" + url.PathEscape(calendarID) + "/events"
 }
 
-func eventPath(id string, action ...string) string {
-	path := "/me/events/" + url.PathEscape(id)
+// eventPath is an event within its calendar. /me/events/{id} only finds events of the user's own mailbox; an event of
+// a calendar shared with the user is there only under that calendar.
+func eventPath(calendarID, id string, action ...string) string {
+	path := eventsPath(calendarID) + "/" + url.PathEscape(id)
 	for _, part := range action {
 		path += "/" + part
 	}

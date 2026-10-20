@@ -106,3 +106,16 @@ func TestTheEndOfASeriesIsItsLastDayInItsZone(t *testing.T) {
 		t.Errorf("rule = %s", back)
 	}
 }
+
+func TestNumberedDaysOfDifferentWeeksAreRefused(t *testing.T) {
+	start := ical.Time{T: time.Date(2026, 10, 5, 7, 0, 0, 0, time.UTC), Zone: "Europe/Amsterdam"}
+	// The first Monday and the first Wednesday are two occurrences; Graph's index picks one of the days listed.
+	for _, rule := range []string{"FREQ=MONTHLY;BYDAY=1MO,1WE", "FREQ=YEARLY;BYMONTH=10;BYDAY=1MO,1TU"} {
+		if _, err := fromRRule(rule, start, "Europe/Amsterdam"); err == nil {
+			t.Errorf("%s was taken", rule)
+		}
+	}
+	if pattern, err := fromRRule("FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=1", start, "Europe/Amsterdam"); err != nil || pattern.Pattern.Index != "first" || len(pattern.Pattern.DaysOfWeek) != 5 {
+		t.Errorf("the first weekday of the month is one occurrence: %+v, %v", pattern, err)
+	}
+}

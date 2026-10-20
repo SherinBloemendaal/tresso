@@ -3,6 +3,7 @@ package graphcal
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -71,11 +72,78 @@ func (f *fakeGraph) touch(e *fakeEvent) {
 }
 
 func (f *fakeGraph) put(e event, occurrences ...event) {
+	f.putIn(defaultCalendar, e, occurrences...)
+}
+
+func (f *fakeGraph) putIn(calendarID string, e event, occurrences ...event) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	stored := &fakeEvent{event: e, calendarID: defaultCalendar, occurrences: occurrences}
+	stored := &fakeEvent{event: e, calendarID: calendarID, occurrences: occurrences}
 	f.events[e.ID] = stored
 	f.touch(stored)
+}
+
+// inCalendar: the event, or the series an occurrence belongs to, is in the calendar.
+func (f *fakeGraph) inCalendar(calendarID, id string) bool {
+	e, master, _ := f.lookup(id)
+	if e == nil {
+		e = master
+	}
+	return e != nil && e.calendarID == calendarID
+}
+
+// asRequested gives an event the way the request's Prefer headers ask for it: times in the preferred zone, the body
+// as text.
+func asRequested(e event, prefer []string) event {
+	for _, value := range prefer {
+		if zoneName, ok := strings.CutPrefix(value, "outlook.timezone="); ok {
+			zoneName = strings.Trim(zoneName, `"`)
+			if !e.IsAllDay && e.Start != nil && e.Start.TimeZone != zoneName {
+				e.Start, e.End = inZone(e.Start, zoneName), inZone(e.End, zoneName)
+			}
+		}
+		if value == `outlook.body-content-type="text"` && e.Body != nil && e.Body.ContentType == "html" {
+			e.Body = &itemBody{ContentType: "text", Content: htmlText(e.Body.Content)}
+		}
+	}
+	for i := range e.ExceptionOccurrences {
+		e.ExceptionOccurrences[i] = asRequested(e.ExceptionOccurrences[i], prefer)
+	}
+	return e
+}
+
+// fakeZone places zone names as Exchange does, including a custom zone Tresso does not know.
+func fakeZone(name string) *time.Location {
+	if name == "Customized Time Zone" {
+		name = "America/New_York"
+	}
+	return mustZone(name)
+}
+
+func inZone(t *dateTimeTimeZone, zoneName string) *dateTimeTimeZone {
+	wall, err := time.ParseInLocation("2006-01-02T15:04:05", strings.SplitN(t.DateTime, ".", 2)[0], fakeZone(t.TimeZone))
+	if err != nil {
+		panic(err)
+	}
+	return &dateTimeTimeZone{DateTime: wall.In(fakeZone(zoneName)).Format("2006-01-02T15:04:05") + ".0000000", TimeZone: zoneName}
+}
+
+// htmlText is an HTML body as Graph gives it as text.
+func htmlText(body string) string {
+	body = strings.NewReplacer("<br>", "\n", "</div>", "\n", "</p>", "\n").Replace(body)
+	var out strings.Builder
+	inTag := false
+	for _, r := range body {
+		switch {
+		case r == '<':
+			inTag = true
+		case r == '>':
+			inTag = false
+		case !inTag:
+			out.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(html.UnescapeString(out.String()))
 }
 
 func (f *fakeGraph) remove(id string) {
@@ -159,12 +227,15 @@ func (f *fakeGraph) handle(w http.ResponseWriter, r *http.Request) {
 		f.list(w, r, parts[2])
 	case len(parts) == 4 && parts[1] == "calendars" && parts[3] == "events" && r.Method == http.MethodPost:
 		f.create(w, parts[2], request.Body)
-	case len(parts) == 3 && parts[1] == "events":
-		f.event(w, r, parts[2], request)
-	case len(parts) == 4 && parts[1] == "events" && parts[3] == "instances":
-		f.instances(w, parts[2])
-	case len(parts) == 4 && parts[1] == "events" && r.Method == http.MethodPost:
-		f.respond(w, parts[2], parts[3])
+	case len(parts) >= 5 && parts[1] == "calendars" && parts[3] == "events" && !f.inCalendar(parts[2], parts[4]):
+		// An event is found only under the calendar it is in (also one shared with the user).
+		f.fail(w, http.StatusNotFound, "ErrorItemNotFound")
+	case len(parts) == 5 && parts[1] == "calendars" && parts[3] == "events":
+		f.event(w, r, parts[4], request)
+	case len(parts) == 6 && parts[1] == "calendars" && parts[3] == "events" && parts[5] == "instances":
+		f.instances(w, parts[4])
+	case len(parts) == 6 && parts[1] == "calendars" && parts[3] == "events" && r.Method == http.MethodPost:
+		f.respond(w, parts[4], parts[5])
 	default:
 		f.fail(w, http.StatusNotFound, "ErrorItemNotFound")
 	}
@@ -261,11 +332,15 @@ func (f *fakeGraph) event(w http.ResponseWriter, r *http.Request, id string, req
 			f.reply(w, master.occurrences[index])
 			return
 		}
-		if r.URL.Query().Get("$expand") == "" {
+		switch r.URL.Query().Get("$select") {
+		case "originalStartTimeZone":
 			f.reply(w, map[string]string{"originalStartTimeZone": e.OriginalStartTimeZone})
 			return
+		case "body":
+			f.reply(w, map[string]any{"body": e.Body})
+			return
 		}
-		f.reply(w, f.full(e))
+		f.reply(w, asRequested(f.full(e), request.Prefer))
 	case http.MethodPatch:
 		if e != nil && request.IfMatch != "" && request.IfMatch != e.ODataETag {
 			f.fail(w, http.StatusPreconditionFailed, "ErrorIrresolvableConflict")

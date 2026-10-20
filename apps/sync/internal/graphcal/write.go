@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -180,7 +181,7 @@ func (s *session) Write(ctx context.Context, calendar calsync.Calendar, operatio
 	id := ""
 	if operation.RemoteID != nil {
 		id = *operation.RemoteID
-		current, found, err := s.fetch(ctx, id)
+		current, found, err := s.fetch(ctx, calendar.RemoteID, id)
 		if err != nil {
 			return s.failure(ctx, operation, err)
 		}
@@ -222,7 +223,7 @@ func (w *writer) result(ctx context.Context, id string, writeErr error) (api.Ope
 		case errors.As(writeErr, &unsupported):
 			return s.refused(ctx, w.operation, unsupported.Error())
 		case providerhttp.IsStatus(writeErr, http.StatusPreconditionFailed) && id != "":
-			current, found, err := s.fetch(ctx, id)
+			current, found, err := s.fetch(ctx, w.calendar.RemoteID, id)
 			if err != nil {
 				return s.failure(ctx, w.operation, err)
 			}
@@ -234,7 +235,7 @@ func (w *writer) result(ctx context.Context, id string, writeErr error) (api.Ope
 			return s.failure(ctx, w.operation, writeErr)
 		}
 	}
-	current, found, err := s.fetch(ctx, id)
+	current, found, err := s.fetch(ctx, w.calendar.RemoteID, id)
 	if err != nil || !found {
 		// Written, but not read back: the next sync brings Graph's version.
 		return api.OperationResult{Outcome: api.OperationDone, RemoteID: &id}, nil
@@ -290,7 +291,7 @@ func (w *writer) create(ctx context.Context) (string, error) {
 	if d.cancelled {
 		return created.ID, nil
 	}
-	current, found, err := w.session.fetch(ctx, created.ID)
+	current, found, err := w.session.fetch(ctx, w.calendar.RemoteID, created.ID)
 	if err != nil || !found {
 		return created.ID, err
 	}
@@ -329,7 +330,7 @@ func (w *writer) patch(ctx context.Context, v *ical.Component, current event, re
 		if !current.IsOrganizer && recurrenceID == nil {
 			return w.respond(ctx, current, "DECLINED")
 		}
-		return s.request(ctx, http.MethodDelete, eventPath(current.ID), nil, nil)
+		return s.request(ctx, http.MethodDelete, eventPath(w.calendar.RemoteID, current.ID), nil, nil)
 	}
 	diff := changes(want.fields, have.fields)
 	if recurrenceID != nil {
@@ -358,8 +359,15 @@ func (w *writer) patch(ctx context.Context, v *ical.Component, current event, re
 		}
 		body["isOnlineMeeting"], body["onlineMeetingProvider"] = true, provider
 	}
+	if _, changed := body["body"]; changed {
+		html, err := w.htmlBody(ctx, current.ID, want.Body.Content)
+		if err != nil {
+			return err
+		}
+		body["body"] = html
+	}
 	if len(body) > 0 {
-		req := providerhttp.Request{Method: http.MethodPatch, URL: s.base + eventPath(current.ID), Header: http.Header{}, ContentType: "application/json"}
+		req := providerhttp.Request{Method: http.MethodPatch, URL: s.base + eventPath(w.calendar.RemoteID, current.ID), Header: http.Header{}, ContentType: "application/json"}
 		if req.Body, err = json.Marshal(body); err != nil {
 			return err
 		}
@@ -376,6 +384,54 @@ func (w *writer) patch(ctx context.Context, v *ical.Component, current event, re
 	return nil
 }
 
+// meetingSeparator starts the join block Outlook and Teams put at the end of an online meeting's body.
+const meetingSeparator = "________________"
+
+// htmlBody is the new description as Graph's HTML body. Tresso reads bodies as text; writing that text back would
+// flatten the organizer's formatting and the Teams join block, so the block is kept as Graph has it and only the
+// user's part before it is replaced.
+func (w *writer) htmlBody(ctx context.Context, id, text string) (itemBody, error) {
+	var current struct {
+		Body itemBody `json:"body"`
+	}
+	if err := w.session.request(ctx, http.MethodGet, eventPath(w.calendar.RemoteID, id)+"?$select=body", nil, &current); err != nil {
+		return itemBody{}, err
+	}
+	block := ""
+	if strings.EqualFold(current.Body.ContentType, "html") {
+		block = meetingBlock(current.Body.Content)
+	}
+	if block == "" {
+		return itemBody{ContentType: "text", Content: text}, nil
+	}
+	if i := strings.Index(text, meetingSeparator); i >= 0 {
+		text = text[:i]
+	} else {
+		// The user removed the join block from the description: the meeting stays, its text goes.
+		block = ""
+	}
+	escaped := strings.ReplaceAll(html.EscapeString(strings.TrimRight(text, "\n")), "\n", "<br>")
+	return itemBody{ContentType: "html", Content: "<html><body><div>" + escaped + "</div>" + block + "</body></html>"}, nil
+}
+
+// meetingBlock is the HTML of an online meeting's join block in a body: from the element the separator line is in to
+// the end of the body. Empty when the body has no join block.
+func meetingBlock(body string) string {
+	i := strings.Index(body, meetingSeparator)
+	if i < 0 || !strings.Contains(body[i:], "teams.microsoft.com") {
+		return ""
+	}
+	start := strings.LastIndex(body[:i], "<div")
+	if start < 0 {
+		start = i
+	}
+	block := body[start:]
+	if end := strings.LastIndex(strings.ToLower(block), "</body>"); end >= 0 {
+		block = block[:end]
+	}
+	return block
+}
+
 // respond answers the invitation, telling the organizer unless the user asked not to.
 func (w *writer) respond(ctx context.Context, current event, partstat string) error {
 	action := map[string]string{"ACCEPTED": "accept", "TENTATIVE": "tentativelyAccept", "DECLINED": "decline"}[partstat]
@@ -386,7 +442,7 @@ func (w *writer) respond(ctx context.Context, current event, partstat string) er
 	if w.operation.Comment != nil {
 		body["comment"] = *w.operation.Comment
 	}
-	return w.session.request(ctx, http.MethodPost, eventPath(current.ID, action), body, nil)
+	return w.session.request(ctx, http.MethodPost, eventPath(w.calendar.RemoteID, current.ID, action), body, nil)
 }
 
 // occurrences writes the series' changed and cancelled occurrences.
@@ -446,7 +502,7 @@ func (w *writer) occurrences(ctx context.Context, master event) error {
 					return err
 				}
 				if ok {
-					if err := s.request(ctx, http.MethodDelete, eventPath(instance.ID), nil, nil); err != nil && !gone(err) {
+					if err := s.request(ctx, http.MethodDelete, eventPath(w.calendar.RemoteID, instance.ID), nil, nil); err != nil && !gone(err) {
 						return err
 					}
 				}
@@ -472,7 +528,7 @@ func (w *writer) instance(ctx context.Context, master event, key string, seriesS
 	var page struct {
 		Value []event `json:"value"`
 	}
-	err = w.session.request(ctx, http.MethodGet, eventPath(master.ID, "instances")+"?"+query.Encode(), nil, &page,
+	err = w.session.request(ctx, http.MethodGet, eventPath(w.calendar.RemoteID, master.ID, "instances")+"?"+query.Encode(), nil, &page,
 		`outlook.timezone="`+preferZone(master.OriginalStartTimeZone)+`"`, `outlook.body-content-type="text"`)
 	if err != nil {
 		return event{}, false, err
@@ -493,7 +549,7 @@ func (s *session) delete(ctx context.Context, operation api.CalendarOperation) (
 	if operation.RemoteID == nil {
 		return api.OperationResult{Outcome: api.OperationDone}, nil
 	}
-	current, found, err := s.fetch(ctx, *operation.RemoteID)
+	current, found, err := s.fetch(ctx, operation.CalendarRemoteID, *operation.RemoteID)
 	if err != nil {
 		return s.failure(ctx, operation, err)
 	}
@@ -503,7 +559,7 @@ func (s *session) delete(ctx context.Context, operation api.CalendarOperation) (
 	if operation.IfMatch != nil && *operation.IfMatch != current.ChangeKey {
 		return s.conflict(current), nil
 	}
-	err = s.request(ctx, http.MethodDelete, eventPath(*operation.RemoteID), nil, nil)
+	err = s.request(ctx, http.MethodDelete, eventPath(operation.CalendarRemoteID, *operation.RemoteID), nil, nil)
 	if err == nil || gone(err) {
 		return api.OperationResult{Outcome: api.OperationDone}, nil
 	}
@@ -541,7 +597,7 @@ func (s *session) refused(ctx context.Context, operation api.CalendarOperation, 
 	if operation.RemoteID == nil {
 		return result, nil
 	}
-	current, found, err := s.fetch(ctx, *operation.RemoteID)
+	current, found, err := s.fetch(ctx, operation.CalendarRemoteID, *operation.RemoteID)
 	if err != nil || !found {
 		return result, nil
 	}

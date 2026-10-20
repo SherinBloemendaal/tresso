@@ -104,7 +104,7 @@ func TestSyncsCalendarsSeriesAndTheirChanges(t *testing.T) {
 	if len(overrides) != 1 || overrides[0].Get("RECURRENCE-ID").Value != "20261026T090000" || overrides[0].Text("SUMMARY") != "Standup, moved" || overrides[0].Text("UID") != "uid-ev2" {
 		t.Fatalf("override:\n%s", series.Ical)
 	}
-	for _, request := range graph.gets("/me/events/ev2") {
+	for _, request := range graph.gets("/events/ev2") {
 		if request.Query.Get("$expand") != "" && !strings.Contains(strings.Join(request.Prefer, ","), `outlook.timezone="W. Europe Standard Time"`) {
 			t.Errorf("an event is read in the zone it was made in: %v", request.Prefer)
 		}
@@ -228,7 +228,7 @@ func TestAnInviteeAnswersThroughTheResponseCalls(t *testing.T) {
 	fake.Queue(api.CalendarOperation{ID: "rsvp", Kind: "put", CalendarRemoteID: defaultCalendar, UID: "uid-ev4", RemoteID: &remoteID, IfMatch: &etag, Ical: &answered, Notify: false, Comment: &comment})
 	calsynctest.Eventually(t, "the answer", func() bool { _, ok := fake.Result("rsvp"); return ok })
 	writes := graph.writes()
-	if len(writes) != 1 || !strings.HasSuffix(writes[0].Path, "/me/events/ev4/tentativelyAccept") || writes[0].Body["sendResponse"] != false || writes[0].Body["comment"] != "Might be late" {
+	if len(writes) != 1 || !strings.HasSuffix(writes[0].Path, "/me/calendars/AAMkCal1/events/ev4/tentativelyAccept") || writes[0].Body["sendResponse"] != false || writes[0].Body["comment"] != "Might be late" {
 		t.Fatalf("writes = %+v", writes)
 	}
 	result, _ := fake.Result("rsvp")

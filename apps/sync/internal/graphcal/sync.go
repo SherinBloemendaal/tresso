@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"tresso/sync/internal/calsync"
+	"tresso/sync/internal/ical"
 	"tresso/sync/internal/providerhttp"
 )
 
@@ -137,13 +138,13 @@ const eventFields = "id,changeKey,iCalUId,type,seriesMasterId,originalStart,orig
 
 // fetch reads one event as a resource: a series with its exceptions and cancelled occurrences, times in the zone the
 // event was made in. found is false when it is gone.
-func (s *session) fetch(ctx context.Context, id string) (event, bool, error) {
+func (s *session) fetch(ctx context.Context, calendarID, id string) (event, bool, error) {
 	zoneName, known := s.zoneHint(id)
 	if !known {
 		var probe struct {
 			OriginalStartTimeZone string `json:"originalStartTimeZone"`
 		}
-		err := s.request(ctx, http.MethodGet, eventPath(id)+"?$select=originalStartTimeZone", nil, &probe)
+		err := s.request(ctx, http.MethodGet, eventPath(calendarID, id)+"?$select=originalStartTimeZone", nil, &probe)
 		if gone(err) {
 			return event{}, false, nil
 		}
@@ -158,7 +159,7 @@ func (s *session) fetch(ctx context.Context, id string) (event, bool, error) {
 		"$expand": {"exceptionOccurrences($select=" + eventFields + "),singleValueExtendedProperties($filter=id eq '" + uidProperty + "')"},
 	}
 	var e event
-	err := s.request(ctx, http.MethodGet, eventPath(id)+"?"+query.Encode(), nil, &e,
+	err := s.request(ctx, http.MethodGet, eventPath(calendarID, id)+"?"+query.Encode(), nil, &e,
 		`outlook.timezone="`+preferZone(zoneName)+`"`, `outlook.body-content-type="text"`)
 	if gone(err) {
 		return event{}, false, nil
@@ -169,9 +170,13 @@ func (s *session) fetch(ctx context.Context, id string) (event, bool, error) {
 	return e, true, nil
 }
 
-// preferZone is the zone to read an event in; Graph takes the names it gave.
+// preferZone is the zone to read an event in: the name Graph gave when Tresso knows that zone, else UTC. A time read
+// in a zone Tresso cannot place would be taken for UTC and move the event.
 func preferZone(name string) string {
 	if name == "" || strings.HasPrefix(name, "tzone://") || strings.ContainsAny(name, `"\`) {
+		return "UTC"
+	}
+	if _, _, err := ical.ZoneOf(name); err != nil {
 		return "UTC"
 	}
 	return name
@@ -184,7 +189,7 @@ func gone(err error) bool {
 func (s *session) Fetch(ctx context.Context, calendar calsync.Calendar, remoteIDs []string) ([]calsync.Object, error) {
 	var out []calsync.Object
 	for _, id := range remoteIDs {
-		e, found, err := s.fetch(ctx, id)
+		e, found, err := s.fetch(ctx, calendar.RemoteID, id)
 		if err != nil {
 			return nil, err
 		}

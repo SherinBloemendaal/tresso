@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -45,21 +46,23 @@ func NewProvider(opts ClientOptions) *Provider {
 func (p *Provider) Name() string   { return "Google" }
 func (p *Provider) Source() string { return "google" }
 
-func (p *Provider) Open(tokens providerhttp.Tokens, httpClient *http.Client, self string) calsync.Session {
-	return &session{http: providerhttp.New(httpClient, tokens, p.opts.HTTP), base: strings.TrimRight(p.opts.BaseURL, "/"), self: self}
+func (p *Provider) Open(tokens providerhttp.Tokens, httpClient *http.Client, self string, logger *slog.Logger) calsync.Session {
+	return &session{http: providerhttp.New(httpClient, tokens, p.opts.HTTP), base: strings.TrimRight(p.opts.BaseURL, "/"), self: self, logger: logger}
 }
 
-// NotGranted: the token lacks the calendar scopes (the user unticked them on the consent screen).
+// NotGranted: the token lacks the calendar scopes (the user unticked them, or withdrew them at Google). Other 403s
+// are about one calendar (taken back, read-only) and say nothing about the account.
 func (p *Provider) NotGranted(err error) bool {
 	var statusErr *providerhttp.StatusError
 	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusForbidden &&
-		(statusErr.HasReason("insufficientPermissions") || statusErr.HasReason("ACCESS_TOKEN_SCOPE_INSUFFICIENT") || statusErr.HasReason("PERMISSION_DENIED"))
+		(statusErr.HasReason("insufficientPermissions") || statusErr.HasReason("ACCESS_TOKEN_SCOPE_INSUFFICIENT"))
 }
 
 type session struct {
-	http *providerhttp.Client
-	base string
-	self string // the account's address
+	http   *providerhttp.Client
+	base   string
+	self   string // the account's address
+	logger *slog.Logger
 }
 
 func (s *session) calendarURL(calendarID string, parts ...string) string {
