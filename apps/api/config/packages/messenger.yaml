@@ -57,6 +57,7 @@ framework:
         routing:
             App\Outbox\ReleaseOutgoingMessage: async
             App\Batch\ReleaseBatch: async
+            App\HandOver\HandOverDue: async
             App\Search\IndexUserMail: search
             App\Scan\ScanAttachment: scan
             App\Scan\PlaceContent: scan

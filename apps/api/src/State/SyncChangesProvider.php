@@ -71,6 +71,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 todos: [],
                 mailNotifications: [],
                 unsubscriptions: [],
+                handOvers: [],
                 deleted: [],
             );
         }
@@ -95,6 +96,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             todos: $this->todos($range),
             mailNotifications: $this->mailNotifications($range),
             unsubscriptions: $this->unsubscriptions($range),
+            handOvers: $this->handOvers($range),
             deleted: $this->deleted($range),
         );
     }
@@ -140,6 +142,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 SELECT n.change_seq, COUNT(*) FROM mail_notification n WHERE n.user_id = :user AND n.change_seq > :since GROUP BY n.change_seq
                 UNION ALL
                 SELECT u.change_seq, COUNT(*) FROM unsubscription u JOIN mail_account a ON a.id = u.mail_account_id WHERE a.owner_id = :user AND u.change_seq > :since GROUP BY u.change_seq
+                UNION ALL
+                SELECT h.change_seq, COUNT(*) FROM hand_over h WHERE h.owner_id = :user AND h.change_seq > :since GROUP BY h.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -681,6 +685,43 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private static function json(mixed $value, string $empty): mixed
     {
         return json_decode(\is_string($value) ? $value : $empty, true, flags: \JSON_THROW_ON_ERROR);
+    }
+
+    /**
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function handOvers(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT h.id, h.mail_account_id, h.message_id, m.thread_id, h.subject, h.delegate_address, h.delegate_name, h.note,
+                    h.due_at, h.state, h.forward_id, h.overdue_at, h.nudged_at, h.last_nudge_id, h.reply_id, h.created_at,
+                    h.closed_at, h.updated_at
+             FROM hand_over h LEFT JOIN message m ON m.id = h.message_id
+             WHERE h.owner_id = :user AND h.change_seq > :since AND h.change_seq <= :until ORDER BY h.change_seq',
+            $range,
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'mailAccountId' => $r['mail_account_id'],
+            'messageId' => $r['message_id'],
+            'threadId' => $r['thread_id'],
+            'subject' => $r['subject'],
+            'delegate' => ['address' => $r['delegate_address'], 'name' => $r['delegate_name']],
+            'note' => $r['note'],
+            'dueAt' => self::date($r['due_at']),
+            'state' => $r['state'],
+            'forwardId' => $r['forward_id'],
+            'overdueAt' => self::date($r['overdue_at']),
+            'nudgedAt' => self::date($r['nudged_at']),
+            'lastNudgeId' => $r['last_nudge_id'],
+            'replyMessageId' => $r['reply_id'],
+            'createdAt' => self::date($r['created_at']),
+            'closedAt' => self::date($r['closed_at']),
+            'updatedAt' => self::date($r['updated_at']),
+        ], $rows);
     }
 
     /**
