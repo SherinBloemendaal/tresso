@@ -19,7 +19,7 @@ function smartInbox(id: string, builtin: SyncedSmartInbox['builtin'], name: stri
 const first: ChangePage = {
   cursor: 1,
   hasMore: false,
-  mailAccounts: [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }],
+  mailAccounts: [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown', calendarStatusDetail: null }],
   folders: [{ id: 'junk', mailAccountId: 'work', name: 'Junk', displayName: 'Junk', role: 'spam' }],
   threads: [{ id: 't1', mailAccountId: 'work', subject: 'Statement', messageCount: 1, lastMessageAt: '2026-10-19T08:00:00Z', smartInboxId: 'spam', verdict: 'none', classificationReason: 'server_spam' }],
   messages: [
@@ -39,12 +39,15 @@ const first: ChangePage = {
       smartInboxId: 'spam',
       verdict: 'none',
       summary: null,
+      calendarMethod: null,
     },
   ],
   outgoingMessages: [],
   signatures: [],
   drafts: [],
   smartInboxes: [smartInbox('info', 'informational', 'Informational', 'know', 1), smartInbox('spam', 'spam', 'Spam', 'none', 4)],
+  calendars: [],
+  calendarEvents: [],
   deleted: [],
 }
 
