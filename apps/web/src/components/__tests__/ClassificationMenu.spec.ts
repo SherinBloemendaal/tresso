@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { SyncedSmartInbox } from '@tresso/core'
 import { ApiError } from '@/api/errors'
+import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import ClassificationMenu from '../ClassificationMenu.vue'
 
@@ -86,39 +87,30 @@ describe('ClassificationMenu', () => {
     wrapper.unmount()
   })
 
-  it('says when new mail from the sender will still go to Spam', async () => {
-    classify.mockResolvedValue({
-      threadId: 't1',
-      smartInboxId: 'info',
-      verdict: 'know',
-      reason: 'user',
-      senderRule: { id: 'r1', sender: 'news@bank.example', verdict: null, failsAuthentication: true },
-    })
+  it.each([
+    ['authentication_failed', 'Moved. New mail from news@bank.example still goes to Spam: it fails the checks that prove who sent it.'],
+    ['server_spam', 'Moved. Your mail server marks mail from news@bank.example as spam, so new mail from them still goes to Spam.'],
+  ] as const)('says when new mail from the sender still goes to Spam (%s)', async (spamOverrules, text) => {
+    classify.mockResolvedValue({ threadId: 't1', smartInboxId: 'info', verdict: 'know', reason: 'user', senderRule: { id: 'r1', sender: 'news@bank.example', verdict: null, spamOverrules } })
     const wrapper = mountMenu('todo', 'do')
 
     await wrapper.get('button').trigger('click')
     await wrapper.findAll('[role="menuitemradio"]').find((item) => item.text().startsWith('Informational'))!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.get('[role="status"]').text()).toBe('Moved. New mail from news@bank.example still goes to Spam: it fails the checks that prove who sent it.')
+    expect(useComposeStore().notices.map((notice) => notice.text)).toEqual([text])
     wrapper.unmount()
   })
 
-  it('says nothing more for a sender whose mail passes', async () => {
-    classify.mockResolvedValue({
-      threadId: 't1',
-      smartInboxId: 'info',
-      verdict: 'know',
-      reason: 'user',
-      senderRule: { id: 'r1', sender: 'anna@partner.example', verdict: null, failsAuthentication: false },
-    })
+  it('says nothing more for a sender whose mail the rule takes', async () => {
+    classify.mockResolvedValue({ threadId: 't1', smartInboxId: 'info', verdict: 'know', reason: 'user', senderRule: { id: 'r1', sender: 'anna@partner.example', verdict: null, spamOverrules: null } })
     const wrapper = mountMenu('todo', 'do')
 
     await wrapper.get('button').trigger('click')
     await wrapper.findAll('[role="menuitemradio"]').find((item) => item.text().startsWith('Informational'))!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(useComposeStore().notices).toEqual([])
     wrapper.unmount()
   })
 })
