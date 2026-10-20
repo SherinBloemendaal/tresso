@@ -7,17 +7,26 @@ namespace App\Todo;
 use App\Calendar\Assistant\BusyTime;
 use App\Calendar\Assistant\BusyTimeSource;
 use App\Entity\User;
+use App\Security\Scope;
 use Doctrine\DBAL\Connection;
+use Symfony\Component\Security\Core\Authorization\AuthorizationCheckerInterface;
 
 /**
  * Planned todos as busy time: an open todo planned into the day is not booked over. They are in no calendar, so they
  * count whichever calendars a search looks at. A todo's id is its reference, so planning it again leaves out its own
  * time.
+ *
+ * The label explains slots (`freeFrom`, `freeUntil` of the meeting time finder). Todo titles are the user's own text,
+ * readable with the todos scope only: a caller without it (an app with calendar access) sees a neutral label.
  */
 final readonly class TodoBusyTimes implements BusyTimeSource
 {
-    public function __construct(private Connection $connection)
-    {
+    public const string NEUTRAL_LABEL = 'Planned todo';
+
+    public function __construct(
+        private Connection $connection,
+        private AuthorizationCheckerInterface $authorization,
+    ) {
     }
 
     public function busyTimes(User $user, \DateTimeImmutable $from, \DateTimeImmutable $to, \DateTimeZone $zone, ?array $calendarIds): iterable
@@ -35,9 +44,13 @@ final readonly class TodoBusyTimes implements BusyTimeSource
             ],
         );
 
+        if ([] === $rows) {
+            return [];
+        }
+        $titles = $this->authorization->isGranted(Scope::ROLE_TODOS_READ);
         $busy = [];
         foreach ($rows as $row) {
-            $busy[] = new BusyTime(new \DateTimeImmutable($row['planned_start'], $utc), new \DateTimeImmutable($row['planned_end'], $utc), $row['title'], [$row['id']]);
+            $busy[] = new BusyTime(new \DateTimeImmutable($row['planned_start'], $utc), new \DateTimeImmutable($row['planned_end'], $utc), $titles ? $row['title'] : self::NEUTRAL_LABEL, [$row['id']]);
         }
 
         return $busy;

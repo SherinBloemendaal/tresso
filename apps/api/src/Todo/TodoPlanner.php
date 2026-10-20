@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Todo;
 
-use App\Calendar\Assistant\BusyTimeSource;
 use App\Calendar\Assistant\InvalidMeetingTimeQuery;
 use App\Calendar\Assistant\MeetingTimeFinder;
 use App\Calendar\Assistant\MeetingTimeQuery;
@@ -20,25 +19,26 @@ use App\Repository\SchedulingPreferencesRepository;
 use App\Repository\TodoRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
-use Symfony\Component\DependencyInjection\Attribute\AutowireIterator;
 
 /**
  * Gives todos time in the calendar and keeps that time free. A todo is planned with the meeting time finder: the
  * earliest free stretch of its duration before its deadline, within working hours, around focus blocks, buffers and
  * travel time. Planned time counts as busy ({@see TodoBusyTimes}).
  *
- * Planned time is checked again when the calendar changes, and when the todo's deadline or duration changes: time that
- * no longer fits (something else is busy then, it ends after the deadline, or it is no longer as long as the todo
- * takes) moves to the earliest free time; when there is none it stays and is flagged as a conflict. Time that has
- * started is left alone. The deadline is the due date and time in the user's zone, or the end of the due date.
+ * Planned time is checked again when the todo's deadline or duration changes, and when anything it depends on changes
+ * ({@see TodoReplanning}): the calendar, which calendars count, the zone, working hours or scheduling preferences.
+ * Time that no longer fits (it ends after the deadline, is no longer as long as the todo takes, or the finder would no
+ * longer propose it: busy, outside working hours, too close to busy time or too soon) moves to the earliest free
+ * time; when there is none it stays and is flagged as a conflict. Time that has started is left alone. The deadline is
+ * the due date and time in the user's zone, or the end of the due date.
+ *
+ * With todo planning on, open todos without time are tried again on every check, except those whose time the user
+ * removed: they wait until the todo itself changes.
  *
  * Writes take the user's todo lock, so a re-check after a calendar change and a change by the user take turns.
  */
 final readonly class TodoPlanner
 {
-    /**
-     * @param iterable<BusyTimeSource> $busySources
-     */
     public function __construct(
         private MeetingTimeFinder $finder,
         private NotificationPreferencesRepository $notificationPreferences,
@@ -47,8 +47,6 @@ final readonly class TodoPlanner
         private UserLocks $locks,
         private EntityManagerInterface $entityManager,
         private LoggerInterface $logger,
-        #[AutowireIterator(BusyTimeSource::TAG)]
-        private iterable $busySources,
     ) {
     }
 
@@ -93,17 +91,17 @@ final readonly class TodoPlanner
     }
 
     /**
-     * Checks the user's planned time that has not started, earliest deadline first, after their calendar changed; with
-     * $planOpen also plans the open todos that can be and have no time yet (todo planning was just switched on).
+     * Checks the user's planned time that has not started, earliest deadline first; with todo planning on, then plans
+     * the open todos that can be and have no time yet (unless the user removed it).
      */
-    public function replan(User $user, \DateTimeImmutable $now, bool $planOpen = false): void
+    public function replan(User $user, \DateTimeImmutable $now): void
     {
         $this->locks->todos($user->getId());
         $zone = $this->zone($user);
         foreach ($this->todos->findPlannedFrom($user, $now) as $todo) {
             $this->guarded($todo, fn () => $this->keepOrMove($todo, $zone, $now));
         }
-        if (!$planOpen) {
+        if (!$this->schedulingPreferences->forUser($user)->plansTodos()) {
             return;
         }
         foreach ($this->todos->findPlannable($user) as $todo) {
@@ -157,7 +155,7 @@ final readonly class TodoPlanner
         if (null === $start || null === $end || $start <= $now) {
             return;
         }
-        if ($this->fits($todo, $start, $end, $zone)) {
+        if ($this->fits($todo, $start, $end, $zone, $now)) {
             if (TodoPlanState::Conflict === $todo->getPlanState()) {
                 $todo->planAt($start, $end);
             }
@@ -185,26 +183,27 @@ final readonly class TodoPlanner
     }
 
     /**
-     * Whether the planned time is still right for the todo: as long as it takes, over by its deadline, and with
-     * nothing else busy then.
+     * Whether the planned time is still right for the todo: as long as it takes, over by its deadline, and time the
+     * finder would still propose, by the same rules it was planned with (working hours, busy time, focus blocks,
+     * buffers, travel time, notice). A todo shorter than the finder's shortest search needs that much free time, as
+     * when it was planned.
      */
-    private function fits(Todo $todo, \DateTimeImmutable $start, \DateTimeImmutable $end, \DateTimeZone $zone): bool
+    private function fits(Todo $todo, \DateTimeImmutable $start, \DateTimeImmutable $end, \DateTimeZone $zone, \DateTimeImmutable $now): bool
     {
         $deadline = self::deadline($todo, $zone);
         $minutes = $todo->getDurationMinutes();
         if (null === $deadline || null === $minutes || $end > $deadline || $end->getTimestamp() - $start->getTimestamp() !== $minutes * 60) {
             return false;
         }
-        $own = $todo->getId()->toRfc4122();
-        foreach ($this->busySources as $source) {
-            foreach ($source->busyTimes($todo->getOwner(), $start, $end, $zone, null) as $time) {
-                if ($time->overlaps($start, $end) && !\in_array($own, $time->references, true)) {
-                    return false;
-                }
-            }
+        $searched = max($minutes, MeetingTimeQuery::MIN_DURATION_MINUTES);
+        if ($searched > MeetingTimeQuery::MAX_DURATION_MINUTES) {
+            return false;
         }
+        // Exactly this stretch, on any five minutes, as the earliest proposal of a search over it.
+        $query = new MeetingTimeQuery($start, $start->modify(\sprintf('+%d minutes', $searched)), $searched, stepMinutes: 5, limit: 1, ignore: [$todo->getId()->toRfc4122()], timeZone: $zone);
+        $slot = $this->finder->find($todo->getOwner(), $query, $now)->slots[0] ?? null;
 
-        return true;
+        return null !== $slot && $slot->start == $start;
     }
 
     /**

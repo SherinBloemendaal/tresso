@@ -74,6 +74,13 @@ class Todo implements TracksChanges
     #[ORM\Column(length: 16, nullable: true, enumType: TodoPlanState::class)]
     private ?TodoPlanState $planState = null;
 
+    /**
+     * When the user removed its planned time: automatic planning leaves it without until the todo itself changes (its
+     * due date or duration, or it is reopened) or the user plans it.
+     */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $planDeclinedAt = null;
+
     /** The email this todo came from, if any. */
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(onDelete: 'SET NULL')]
@@ -152,6 +159,7 @@ class Todo implements TracksChanges
         }
         $this->dueDate = $date;
         $this->dueTime = $time;
+        $this->planDeclinedAt = null;
         if (null === $date) {
             $this->unplan();
         }
@@ -167,6 +175,7 @@ class Todo implements TracksChanges
     public function setDurationMinutes(?int $durationMinutes): void
     {
         $this->durationMinutes = $durationMinutes;
+        $this->planDeclinedAt = null;
         if (null === $durationMinutes) {
             $this->unplan();
         }
@@ -203,6 +212,7 @@ class Todo implements TracksChanges
             return;
         }
         $this->completedAt = null;
+        $this->planDeclinedAt = null;
         $this->touch();
     }
 
@@ -237,6 +247,7 @@ class Todo implements TracksChanges
         }
         $start = $start->setTimezone(new \DateTimeZone('UTC'));
         $end = $end->setTimezone(new \DateTimeZone('UTC'));
+        $this->planDeclinedAt = null;
         if ($start == $this->plannedStart && $end == $this->plannedEnd && TodoPlanState::Planned === $this->planState) {
             return;
         }
@@ -257,6 +268,18 @@ class Todo implements TracksChanges
         }
         $this->planState = TodoPlanState::Conflict;
         $this->touch();
+    }
+
+    public function getPlanDeclinedAt(): ?\DateTimeImmutable
+    {
+        return $this->planDeclinedAt;
+    }
+
+    /** The user gives the planned time back: automatic planning leaves the todo alone until it changes. */
+    public function declinePlan(\DateTimeImmutable $at): void
+    {
+        $this->unplan();
+        $this->planDeclinedAt = $at;
     }
 
     public function unplan(): void

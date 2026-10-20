@@ -41,8 +41,7 @@ final class TodoPlanningTest extends DatabaseTestCase
         $this->createUser('lisa@example.test', 'Lisa');
         $this->kim = $this->userHeaders('kim@example.test', self::SCOPES);
         $this->calendarId = $this->localCalendarId($this->kim);
-        $this->client->request('PATCH', '/api/v1/notification-settings', server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['timeZone' => 'Europe/Amsterdam', 'workEnd' => '17:00'], \JSON_THROW_ON_ERROR));
-        self::assertResponseIsSuccessful();
+        $this->notificationSettings(['timeZone' => 'Europe/Amsterdam', 'workEnd' => '17:00']);
         $this->takeReplans();
     }
 
@@ -75,7 +74,7 @@ final class TodoPlanningTest extends DatabaseTestCase
         $slots = $this->decodedResponse()['slots'] ?? null;
         self::assertIsArray($slots);
         self::assertIsArray($slots[0] ?? null);
-        self::assertSame(['at' => '2027-03-22T09:00:00+00:00', 'reason' => 'busy', 'label' => 'Write the report'], $slots[0]['freeFrom'] ?? null, 'A slot after planned time says what it is.');
+        self::assertSame(['at' => '2027-03-22T09:00:00+00:00', 'reason' => 'busy', 'label' => 'Write the report'], $slots[0]['freeFrom'] ?? null, 'With the todos scope, a slot after planned time names the todo.');
         self::assertSame('2027-03-22T08:00:00+00:00', $this->firstMeetingTime(['ignore' => [$todo['id']]]), 'A search can leave the todo out by its id.');
     }
 
@@ -306,15 +305,125 @@ final class TodoPlanningTest extends DatabaseTestCase
         self::assertSame(['2027-03-22T08:00:00+00:00', '2027-03-22T09:00:00+00:00', 'planned'], $this->planOf($todos[0]));
     }
 
-    public function testSwitchingPlanningOnAgainChecksOnlyOnce(): void
+    public function testOnlyAChangeOfTheSchedulingPreferencesChecksThePlannedTimeAgain(): void
     {
         $this->setPlanTodos(true);
         self::assertCount(1, $this->takeReplans());
 
         $this->setPlanTodos(true);
         self::assertSame([], $this->takeReplans(), 'Already on.');
+    }
+
+    public function testSwitchingPlanningOffLeavesPlannedTimeWhereItIs(): void
+    {
+        $this->setPlanTodos(true);
+        $todo = $this->createTodo(['dueDate' => self::TUESDAY, 'durationMinutes' => 60]);
+
         $this->setPlanTodos(false);
-        self::assertSame([], $this->takeReplans(), 'Switching off leaves planned time where it is.');
+        $this->runReplans();
+
+        self::assertSame('2027-03-22T08:00:00+00:00', $this->todo($todo['id'])['plannedStart']);
+    }
+
+    public function testANewZoneMovesTimeThatNoLongerEndsBeforeTheDeadline(): void
+    {
+        $this->notificationSettings(['timeZone' => 'America/New_York']);
+        $this->runReplans();
+        $this->createEvent('Client day', self::MONDAY.'T09:00:00', self::MONDAY.'T16:00:00', 'America/New_York');
+        $todo = $this->createTodo(['dueDate' => self::MONDAY, 'dueTime' => '17:00', 'durationMinutes' => 60]);
+        // 16:00 to 17:00 in New York, on summer time since 14 March.
+        self::assertSame('2027-03-22T20:00:00+00:00', $this->plan($todo['id'])['plannedStart']);
+
+        $this->notificationSettings(['timeZone' => 'Europe/Amsterdam']);
+        self::assertCount(1, $this->runReplans());
+
+        // Due 17:00 in Amsterdam now (16:00 UTC): the first free working hour there, before the client day.
+        self::assertSame(['2027-03-22T08:00:00+00:00', '2027-03-22T09:00:00+00:00', 'planned'], $this->planOf($this->todo($todo['id'])));
+    }
+
+    public function testNewWorkingHoursMoveTimeOutsideThem(): void
+    {
+        $todo = $this->createTodo(['dueDate' => self::TUESDAY, 'durationMinutes' => 60]);
+        $this->plan($todo['id']);
+
+        $this->notificationSettings(['workStart' => '10:00']);
+        self::assertCount(1, $this->runReplans());
+
+        self::assertSame(['2027-03-22T09:00:00+00:00', '2027-03-22T10:00:00+00:00', 'planned'], $this->planOf($this->todo($todo['id'])));
+    }
+
+    public function testABufferMovesTimeRightNextToAnEvent(): void
+    {
+        $this->createEvent('Review', self::MONDAY.'T10:00:00', self::MONDAY.'T11:00:00');
+        $todo = $this->createTodo(['dueDate' => self::TUESDAY, 'durationMinutes' => 60]);
+        $this->plan($todo['id']);
+        $this->runReplans();
+
+        $this->client->request('PATCH', '/api/v1/calendar/scheduling-preferences', server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['bufferMinutes' => 15], \JSON_THROW_ON_ERROR));
+        self::assertResponseIsSuccessful();
+        self::assertCount(1, $this->runReplans());
+
+        // 15 minutes clear of the review, which ends at 11:00.
+        self::assertSame('2027-03-22T10:15:00+00:00', $this->todo($todo['id'])['plannedStart']);
+    }
+
+    public function testShowingAHiddenCalendarMovesTimeItsEventsTake(): void
+    {
+        $this->setCalendarVisible(false);
+        self::assertCount(1, $this->runReplans());
+        $this->createEvent('Standup', self::MONDAY.'T09:00:00', self::MONDAY.'T10:00:00');
+        $this->runReplans();
+        $todo = $this->createTodo(['dueDate' => self::TUESDAY, 'durationMinutes' => 60]);
+        self::assertSame('2027-03-22T08:00:00+00:00', $this->plan($todo['id'])['plannedStart'], 'A hidden calendar keeps no time busy.');
+
+        $this->setCalendarVisible(true);
+        self::assertCount(1, $this->runReplans());
+
+        self::assertSame('2027-03-22T09:00:00+00:00', $this->todo($todo['id'])['plannedStart']);
+    }
+
+    public function testPlannedTimeKeepsItsClockTimeAcrossTheSwitchToSummerTime(): void
+    {
+        // Saturday 27 March; Amsterdam moves to +02:00 on Sunday the 28th.
+        self::mockTime(new \DateTimeImmutable('2027-03-27T12:00:00+00:00'));
+        $todo = $this->createTodo(['dueDate' => '2027-03-30', 'durationMinutes' => 60]);
+        self::assertSame('2027-03-29T07:00:00+00:00', $this->plan($todo['id'])['plannedStart'], '09:00 on summer time.');
+
+        $this->createEvent('Lunch', '2027-03-29T12:00:00', '2027-03-29T13:00:00');
+        $this->runReplans();
+
+        self::assertSame(['2027-03-29T07:00:00+00:00', '2027-03-29T08:00:00+00:00', 'planned'], $this->planOf($this->todo($todo['id'])));
+    }
+
+    public function testWithPlanningOnATodoWithoutTimeIsPlannedOnceTheCalendarFreesUp(): void
+    {
+        $this->setPlanTodos(true);
+        $this->runReplans();
+        $event = $this->createEvent('Offsite', self::MONDAY.'T09:00:00', self::MONDAY.'T17:00:00');
+        $this->runReplans();
+        $todo = $this->createTodo(['dueDate' => self::MONDAY, 'durationMinutes' => 60]);
+        self::assertNull($todo['plannedStart'], 'No free time yet.');
+
+        $this->client->request('DELETE', '/api/v1/calendar-events/'.$event, server: $this->kim);
+        self::assertResponseIsSuccessful();
+        $this->runReplans();
+
+        self::assertSame('2027-03-22T08:00:00+00:00', $this->todo($todo['id'])['plannedStart']);
+    }
+
+    public function testTodoTitlesStayHiddenFromAccessWithoutTheTodosScope(): void
+    {
+        $todo = $this->createTodo(['dueDate' => self::TUESDAY, 'durationMinutes' => 60]);
+        $this->plan($todo['id']);
+        $calendarOnly = $this->userHeaders('kim@example.test', ['calendar:read']);
+
+        $this->client->jsonRequest('POST', '/api/v1/calendar/meeting-times', ['from' => self::MONDAY.'T00:00:00+01:00', 'to' => self::TUESDAY.'T00:00:00+01:00', 'durationMinutes' => 60, 'limit' => 1], $calendarOnly);
+        self::assertResponseIsSuccessful();
+        $slots = $this->decodedResponse()['slots'] ?? null;
+        self::assertIsArray($slots);
+        self::assertIsArray($slots[0] ?? null);
+        self::assertSame(['at' => '2027-03-22T09:00:00+00:00', 'reason' => 'busy', 'label' => 'Planned todo'], $slots[0]['freeFrom'] ?? null);
+        self::assertStringNotContainsString('Write the report', (string) $this->client->getResponse()->getContent());
     }
 
     public function testAnotherUsersTodoCannotBePlanned(): void
@@ -404,6 +513,21 @@ final class TodoPlanningTest extends DatabaseTestCase
         return self::string($this->decodedResponse()['detail'] ?? null);
     }
 
+    /**
+     * @param array<string, mixed> $changes
+     */
+    private function notificationSettings(array $changes): void
+    {
+        $this->client->request('PATCH', '/api/v1/notification-settings', server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode($changes, \JSON_THROW_ON_ERROR));
+        self::assertResponseIsSuccessful();
+    }
+
+    private function setCalendarVisible(bool $visible): void
+    {
+        $this->client->request('PATCH', '/api/v1/calendars/'.$this->calendarId, server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['visible' => $visible], \JSON_THROW_ON_ERROR));
+        self::assertResponseIsSuccessful();
+    }
+
     private function setPlanTodos(bool $on): void
     {
         $this->client->request('PATCH', '/api/v1/calendar/scheduling-preferences', server: [...$this->kim, 'CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['planTodos' => $on], \JSON_THROW_ON_ERROR));
@@ -427,13 +551,13 @@ final class TodoPlanningTest extends DatabaseTestCase
         return self::string($slots[0]['start'] ?? null);
     }
 
-    /** An event in Amsterdam time in the Tresso calendar; returns its id. */
-    private function createEvent(string $summary, string $start, string $end): string
+    /** An event in the Tresso calendar, in Amsterdam time unless another zone is named; returns its id. */
+    private function createEvent(string $summary, string $start, string $end, string $zone = 'Europe/Amsterdam'): string
     {
         $this->client->jsonRequest('POST', '/api/v1/calendar-events', self::event($this->calendarId, [
             'summary' => $summary,
-            'start' => ['dateTime' => $start, 'timeZone' => 'Europe/Amsterdam'],
-            'end' => ['dateTime' => $end, 'timeZone' => 'Europe/Amsterdam'],
+            'start' => ['dateTime' => $start, 'timeZone' => $zone],
+            'end' => ['dateTime' => $end, 'timeZone' => $zone],
         ]), $this->kim);
         self::assertResponseStatusCodeSame(201);
 

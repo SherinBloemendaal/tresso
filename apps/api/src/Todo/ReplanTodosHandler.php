@@ -26,7 +26,7 @@ final readonly class ReplanTodosHandler
         $this->entityManager->wrapInTransaction(function () use ($message): void {
             $user = Uuid::isValid($message->userId) ? $this->entityManager->find(User::class, Uuid::fromString($message->userId)) : null;
             if (null !== $user) {
-                $this->planner->replan($user, $this->clock->now(), $message->planOpen);
+                $this->planner->replan($user, $this->clock->now());
             }
         });
         $this->entityManager->clear();
