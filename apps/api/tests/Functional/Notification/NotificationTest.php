@@ -92,6 +92,9 @@ final class NotificationTest extends DatabaseTestCase
         self::assertSame('Standup', $body['title']);
         self::assertSame('default', $body['sound']);
         self::assertSame('reminders', $body['channelId']);
+        self::assertIsArray($body['data']);
+        $kim = static::getContainer()->get(\App\Repository\UserRepository::class)->findOneBy(['email' => 'kim@example.test']) ?? self::fail('No user.');
+        self::assertSame($kim->getId()->toRfc4122(), $body['data']['userId'], 'A browser shows a push only for the user who turned notifications on there.');
 
         self::assertEmailCount(1);
         self::assertEmailHeaderSame(self::getMailerMessage() ?? self::fail('No email.'), 'Subject', 'Standup');

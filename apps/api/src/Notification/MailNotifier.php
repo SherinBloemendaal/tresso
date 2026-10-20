@@ -23,13 +23,13 @@ use Symfony\Component\Messenger\Stamp\DelayStamp;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * Notifies the user of new mail that needs them: a message judged `do` or `delegate` for the first time, unread, in an
- * inbox, and received recently (an account's history being fetched is not news). Classification calls
+ * Notifies the user of new mail that needs them: a message classified for the first time as `do` or `delegate`, unread,
+ * in an inbox, and received recently (an account's history being fetched is not news). Classification calls
  * {@see consider()} in its own transaction, which keeps one {@see MailNotification} per message, so a message notifies
  * at most once, whatever runs again.
  *
- * Delivery happens after that commit, under a lock on the notification: the message must still need the user (unread,
- * `do` or `delegate`, in an inbox); a focus block (holdDuringFocus) or a meeting (holdMailInMeetings) makes it wait
+ * Delivery happens after that commit, under a lock on the notification: the message must still need the user
+ * ({@see needsTheUser()}); a focus block (holdDuringFocus) or a meeting (holdMailInMeetings) makes it wait
  * for their end, quiet hours and other busy events (focusDuringBusy) make it silent. It goes out on the channels the
  * user chose for mail (channelsByKind, else phone and desktop) through the {@see NotificationDispatcher}, keyed
  * "mail:{notification}", claimed in the transaction that marks it delivered. The sweep delivers what a lost message
@@ -61,45 +61,65 @@ final readonly class MailNotifier
     }
 
     /**
-     * Called by classification, in its transaction, with the messages it just classified and the verdict each had
-     * before. Plans a notification for each that now needs the user and did not before.
+     * Called by classification, in its transaction, with the messages it classified for the first time: new mail.
+     * Classification that runs again (rules or a correction changed) never comes here: that mail is not new, and a
+     * settings change would otherwise push a burst of it. Plans a notification for each message that needs the user
+     * and was received recently. The same mail in two of the user's accounts (one Message-ID) notifies once: the
+     * copies after the first get a notification that is dropped at once, so they never notify later either.
      *
-     * @param list<array{Message, ?Verdict}> $classified
+     * @param list<Message> $classified
      */
     public function consider(User $user, array $classified, \DateTimeImmutable $now): void
     {
-        $candidates = [];
-        foreach ($classified as [$message, $before]) {
-            if (self::needsTheUser($message->getVerdict()) && !self::needsTheUser($before) && !$message->isSeen()
-                && $message->getReceivedAt() >= $now->modify('-'.self::FRESH)) {
-                $candidates[$message->getId()->toRfc4122()] = $message;
-            }
-        }
-        if ([] === $candidates) {
+        $fresh = array_filter($classified, static fn (Message $message): bool => $message->getReceivedAt() >= $now->modify('-'.self::FRESH));
+        if ([] === $fresh) {
             return;
         }
-        $connection = $this->entityManager->getConnection();
-        /** @var list<string> $inInbox */
-        $inInbox = $connection->fetchFirstColumn(
-            "SELECT DISTINCT l.message_id FROM message_location l JOIN folder f ON f.id = l.folder_id
-             WHERE l.message_id = ANY(CAST(:ids AS UUID[])) AND f.role = 'inbox'",
-            ['ids' => '{'.implode(',', array_keys($candidates)).'}'],
-        );
         /** @var list<string> $notified */
-        $notified = $connection->fetchFirstColumn(
+        $notified = $this->entityManager->getConnection()->fetchFirstColumn(
             'SELECT message_id FROM mail_notification WHERE message_id = ANY(CAST(:ids AS UUID[]))',
-            ['ids' => '{'.implode(',', array_keys($candidates)).'}'],
+            ['ids' => '{'.implode(',', array_map(static fn (Message $message): string => $message->getId()->toRfc4122(), $fresh)).'}'],
         );
-        foreach ($candidates as $id => $message) {
+        $headers = [];
+        foreach ($fresh as $message) {
             // Classification holds the user's lock, so no other run plans the same message meanwhile.
-            if (!\in_array($id, $inInbox, true) || \in_array($id, $notified, true)) {
+            if (\in_array($message->getId()->toRfc4122(), $notified, true) || !$this->needsTheUser($message)) {
                 continue;
             }
             $notification = new MailNotification($user, $message, self::title($message), self::body($message), $now);
             $this->entityManager->persist($notification);
+            $header = $message->getMessageIdHeader();
+            if (null !== $header && (isset($headers[$header]) || $this->notifiedRecently($user, $header, $now))) {
+                $notification->drop($now);
+                continue;
+            }
+            if (null !== $header) {
+                $headers[$header] = true;
+            }
             $this->afterCommit->dispatch(new SendMailNotification($notification->getId()->toRfc4122()));
         }
         $this->entityManager->flush();
+    }
+
+    /**
+     * Whether a message needs the user now: judged `do` or `delegate`, unread, in an inbox, and not in a conversation
+     * the user placed themselves elsewhere (their placement wins over the message's own verdict). Checked when a
+     * notification is planned and again when it is delivered.
+     */
+    private function needsTheUser(Message $message): bool
+    {
+        if ($message->isSeen() || !self::isDoOrDelegate($message->getVerdict())) {
+            return false;
+        }
+        $thread = $message->getThread();
+        if ($thread->isClassifiedByUser() && !self::isDoOrDelegate($thread->getVerdict())) {
+            return false;
+        }
+
+        return false !== $this->entityManager->getConnection()->fetchOne(
+            "SELECT 1 FROM message_location l JOIN folder f ON f.id = l.folder_id WHERE l.message_id = :id AND f.role = 'inbox'",
+            ['id' => $message->getId()->toRfc4122()],
+        );
     }
 
     #[AsMessageHandler]
@@ -203,7 +223,7 @@ final readonly class MailNotifier
             return [null, false, null];
         }
         $message = $notification->getMessage();
-        if (null === $message || !$this->stillNeedsTheUser($message) || $notification->getFireAt() < $now->modify('-'.self::MAX_LATE)) {
+        if (null === $message || !$this->needsTheUser($message) || $notification->getFireAt() < $now->modify('-'.self::MAX_LATE)) {
             // Read, archived or judged otherwise meanwhile, or too late after an outage: no news any more.
             return $this->drop($notification, $now);
         }
@@ -230,6 +250,9 @@ final readonly class MailNotifier
         $silent = null !== QuietHours::endOf($preferences, $now)
             || ($preferences->isFocusDuringBusy() && $this->presence->inBusyEvent($user, $now));
 
+        if (!$preferences->isMailPreviews()) {
+            $notification->hideContent('New mail from '.self::accountName($message));
+        }
         $notification->markDelivered($now, $channels->values(), $silent);
         $this->entityManager->flush();
 
@@ -247,22 +270,21 @@ final readonly class MailNotifier
         return [null, false, null];
     }
 
-    private function stillNeedsTheUser(Message $message): bool
+    /** Mail with this Message-ID notified the user lately: the same mail reaching another of their accounts. */
+    private function notifiedRecently(User $user, string $header, \DateTimeImmutable $now): bool
     {
-        if ($message->isSeen() || !self::needsTheUser($message->getVerdict())) {
-            return false;
-        }
-
         return false !== $this->entityManager->getConnection()->fetchOne(
-            "SELECT 1 FROM message_location l JOIN folder f ON f.id = l.folder_id WHERE l.message_id = :id AND f.role = 'inbox'",
-            ['id' => $message->getId()->toRfc4122()],
+            'SELECT 1 FROM mail_notification n JOIN message m ON m.id = n.message_id
+             WHERE n.user_id = :user AND m.message_id_header = :header AND n.created_at > :since',
+            ['user' => $user->getId()->toRfc4122(), 'header' => $header, 'since' => $now->modify('-'.self::FRESH)->format('Y-m-d H:i:s')],
         );
     }
 
     private function pushMessage(MailNotification $notification, \DateTimeImmutable $now): PushMessage
     {
         $threadId = $notification->getThread()?->getId()->toRfc4122();
-        $data = array_filter(['threadId' => $threadId, 'messageId' => $notification->getMessage()?->getId()->toRfc4122()], static fn (?string $value): bool => null !== $value);
+        // The user it is for: a browser shows a push only for the user who turned notifications on there.
+        $data = array_filter(['userId' => $notification->getUser()->getId()->toRfc4122(), 'threadId' => $threadId, 'messageId' => $notification->getMessage()?->getId()->toRfc4122()], static fn (?string $value): bool => null !== $value);
 
         return new PushMessage(
             $notification->getId()->toRfc4122(),
@@ -277,9 +299,18 @@ final readonly class MailNotifier
         );
     }
 
-    private static function needsTheUser(?Verdict $verdict): bool
+    private static function isDoOrDelegate(?Verdict $verdict): bool
     {
         return Verdict::Do === $verdict || Verdict::Delegate === $verdict;
+    }
+
+    /** The account the mail came to, as the user named it, else its address. */
+    private static function accountName(Message $message): string
+    {
+        $account = $message->getMailAccount();
+        $name = trim($account->getDisplayName());
+
+        return '' === $name ? $account->getEmailAddress() : $name;
     }
 
     /** Who it is from: their name, else their address. */

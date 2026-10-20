@@ -57,6 +57,9 @@ final class UpdateNotificationSettings
 
     public ?bool $holdMailInMeetings = null;
 
+    /** Mail notifications show the sender, subject and the start of the text; false: only the account. */
+    public ?bool $mailPreviews = null;
+
     public ?bool $leaveNow = null;
 
     #[Assert\Choice(callback: [TravelMode::class, 'values'])]

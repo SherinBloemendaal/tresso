@@ -73,6 +73,13 @@ class NotificationPreferences
     #[ORM\Column]
     private bool $holdMailInMeetings = true;
 
+    /**
+     * Mail notifications show the sender, subject and the start of the text; without, only "New mail from {account}"
+     * (Expo pushes pass through Expo, Apple and Google unencrypted).
+     */
+    #[ORM\Column(options: ['default' => true])]
+    private bool $mailPreviews = true;
+
     /** Leave-now reminders for events with a place. */
     #[ORM\Column]
     private bool $leaveNow = true;
@@ -266,6 +273,16 @@ class NotificationPreferences
     public function setHoldMailInMeetings(bool $hold): void
     {
         $this->holdMailInMeetings = $hold;
+    }
+
+    public function isMailPreviews(): bool
+    {
+        return $this->mailPreviews;
+    }
+
+    public function setMailPreviews(bool $previews): void
+    {
+        $this->mailPreviews = $previews;
     }
 
     public function isLeaveNow(): bool
