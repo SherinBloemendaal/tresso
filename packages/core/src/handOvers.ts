@@ -224,6 +224,8 @@ export interface HandOverFlowDeps {
   api: HandOverApi
   /** Cancels an outgoing message (undo send). */
   cancel(outgoingId: string): Promise<SyncedOutgoingMessage>
+  /** An outgoing message as the copy has it, or null when it is not there. */
+  outgoing(outgoingId: string): Promise<SyncedOutgoingMessage | null>
   accounts(): SyncedMailAccount[]
   signatures(): SyncedSignature[]
   /** Pulls the delta, so the copy shows what changed. */
@@ -304,15 +306,33 @@ export class HandOverFlow {
 
   /**
    * Takes a hand-over back as far as it still can (triage's undo): the forward and the hand-over while the forward has
-   * not left, only the hand-over once it has (the delegate has the mail; nothing waits on them any more). Returns which.
+   * not left, only the hand-over once it surely has (the delegate has the mail; nothing waits on them any more). Returns
+   * which. When the cancel fails and the forward did not surely leave (offline, say: it may still go out), nothing is
+   * taken back.
+   *
+   * @throws HandOverError saying the hand-over still stands
    */
   async takeBack(handed: HandedOver): Promise<'undone' | 'withdrawn'> {
+    let refused: unknown = null
     try {
-      await this.takeBackForward(handed.forwardId, handed.draftId)
-    } catch {
-      await this.withdraw(handed.handOver)
-      return 'withdrawn'
+      await this.deps.cancel(handed.forwardId)
+    } catch (error) {
+      refused = error
     }
+    if (refused !== null) {
+      // The answer may be lost while the cancel went through: the copy says how the forward stands.
+      await this.deps.sync().catch(() => undefined)
+      const forward = await this.deps.outgoing(handed.forwardId)
+      if (forward?.status === 'sent') {
+        await this.withdraw(handed.handOver)
+        return 'withdrawn'
+      }
+      if (forward?.status !== 'cancelled') {
+        throw new HandOverError(`The hand-over could not be taken back, so it still stands: ${this.deps.explain(refused).message}`)
+      }
+    }
+    await this.deps.composer.openDraft(handed.draftId)
+    await this.deps.composer.discard()
     try {
       await this.deps.api.withdraw(handed.handOver.id)
     } finally {
@@ -373,6 +393,12 @@ export class HandOverFlow {
     await this.deps.composer.openDraft(draftId)
     await this.deps.composer.discard()
   }
+}
+
+/** What triage says when undoing a hand-over could only withdraw it: the forward had left already. */
+export function withdrawnNotice(handed: Pick<HandedOver, 'handOver'>): string {
+  const who = handed.handOver.delegate.name?.trim() || handed.handOver.delegate.address
+  return `${who} has the forward already; the hand-over is withdrawn, so nothing waits on them any more.`
 }
 
 /** A follow-up to write in the composer ("Edit first"): to the delegate, in the conversation that was handed over. */

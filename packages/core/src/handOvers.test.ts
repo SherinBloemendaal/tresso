@@ -151,6 +151,8 @@ describe('HandOverFlow', () => {
   let syncs: number
   let createFails: unknown
   let cancelFails: unknown
+  /** How the copy says the forward stands after a cancel failed; null when it does not have it. */
+  let forwardStatus: SyncedOutgoingMessage['status'] | null
   let originalFiles: MessageAttachment[]
   let unscannedRefused: boolean
   let flow: HandOverFlow
@@ -170,6 +172,7 @@ describe('HandOverFlow', () => {
     syncs = 0
     createFails = null
     cancelFails = null
+    forwardStatus = null
     originalFiles = []
     unscannedRefused = false
     const explain = (error: unknown) => ({ message: error instanceof Error ? error.message : String(error), violations: error instanceof ApiFailure ? error.violations : {} })
@@ -217,6 +220,7 @@ describe('HandOverFlow', () => {
         },
       },
       cancel,
+      outgoing: async (id) => (forwardStatus === null ? null : outgoing(id, forwardStatus)),
       accounts: () => accounts,
       signatures: () => [signature('sig-work', 'Work')],
       sync: async () => {
@@ -305,11 +309,32 @@ describe('HandOverFlow', () => {
     expect(withdrawn).toEqual(['h1'])
   })
 
-  it('withdraws only the hand-over once the forward left', async () => {
+  it('withdraws only the hand-over once the forward surely left', async () => {
     const handed = await flow.handOver(original, input)
     cancelFails = new Error('This message is sent and can no longer be cancelled.')
+    forwardStatus = 'sent'
 
     expect(await flow.takeBack(handed)).toBe('withdrawn')
+
+    expect(withdrawn).toEqual(['h1'])
+  })
+
+  it('keeps the hand-over when the cancel failed and the forward may still go out', async () => {
+    const handed = await flow.handOver(original, input)
+    cancelFails = new Error('You are offline.')
+    forwardStatus = 'scheduled'
+
+    await expect(flow.takeBack(handed)).rejects.toThrow('The hand-over could not be taken back, so it still stands: You are offline.')
+
+    expect(withdrawn).toEqual([])
+  })
+
+  it('takes everything back when the cancel went through and only its answer was lost', async () => {
+    const handed = await flow.handOver(original, input)
+    cancelFails = new Error('The connection was lost.')
+    forwardStatus = 'cancelled'
+
+    expect(await flow.takeBack(handed)).toBe('undone')
 
     expect(withdrawn).toEqual(['h1'])
   })
