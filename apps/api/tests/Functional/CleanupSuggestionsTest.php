@@ -114,6 +114,26 @@ final class CleanupSuggestionsTest extends DatabaseTestCase
         self::assertSame(['conversations' => 0, 'messages' => 0, 'unread' => 0, 'senders' => []], array_diff_key($this->decodedResponse(), ['id' => true]));
     }
 
+    public function testTheSenderListLeavesOutAHeldMessageOfAConversationItShows(): void
+    {
+        $this->mail('Deals', 'news@shop.example', 2, newsletter: true, smartInbox: 'advertise');
+        // The second message joins the first conversation and waits for its batch; the conversation itself is shown.
+        $this->connection()->executeStatement(
+            "UPDATE message SET held_until = now() + interval '1 hour',
+                    thread_id = (SELECT thread_id FROM message WHERE subject = 'Deals 1')
+             WHERE subject = 'Deals 2'",
+        );
+
+        $this->client->request('GET', '/api/v1/smart-inboxes/'.$this->smartInboxId('advertise').'/senders', server: $this->kim);
+        self::assertResponseIsSuccessful();
+        $senders = $this->decodedResponse();
+
+        self::assertSame(['conversations' => 1, 'messages' => 1, 'unread' => 1], array_intersect_key($senders, ['conversations' => true, 'messages' => true, 'unread' => true]));
+        self::assertIsArray($senders['senders']);
+        self::assertIsArray($senders['senders'][0]);
+        self::assertSame(['conversations' => 1, 'messages' => 1, 'unread' => 1], array_intersect_key($senders['senders'][0], ['conversations' => true, 'messages' => true, 'unread' => true]));
+    }
+
     public function testTheUsersOwnAddressIsNeverSuggested(): void
     {
         $this->mail('Note to self', 'kim@company.example', CleanupSuggestions::SENDER_UNREAD);
