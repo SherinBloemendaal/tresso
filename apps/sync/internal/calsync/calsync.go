@@ -79,7 +79,7 @@ type Provider interface {
 	// Source is the calendar source the API stores ("google", "microsoft").
 	Source() string
 	// Open starts a session; self is the account's address, which tells the user's own answer among the attendees.
-	Open(tokens providerhttp.Tokens, httpClient *http.Client, self string) Session
+	Open(tokens providerhttp.Tokens, httpClient *http.Client, self string, logger *slog.Logger) Session
 	// NotGranted reports whether a provider error means the token lacks the calendar scopes.
 	NotGranted(err error) bool
 }
@@ -182,7 +182,7 @@ func (s *Syncer) Run(ctx context.Context, account api.Account) error {
 			logger.Info("calendar access not allowed yet", "retryIn", s.opts.NotGrantedRetry)
 			status.forget()
 			wait = s.opts.NotGrantedRetry
-		case s.provider.NotGranted(err):
+		case s.provider.NotGranted(err), errors.Is(err, errListRefused):
 			logger.Info("the provider refuses calendar access", "error", err, "retryIn", s.opts.NotGrantedRetry)
 			status.report(ctx, api.CalendarNotGranted, fmt.Sprintf("Tresso is not allowed to use the calendars of this account. Allow calendar access by signing in with %s again.", s.provider.Name()))
 			wait = s.opts.NotGrantedRetry
@@ -258,7 +258,7 @@ func (s *Syncer) session(ctx context.Context, account api.Account, wake <-chan s
 	if self == "" {
 		self = account.EmailAddress
 	}
-	r := &run{syncer: s, session: s.provider.Open(tokens, s.http, ical.Address(self)), account: account, logger: logger}
+	r := &run{syncer: s, session: s.provider.Open(tokens, s.http, ical.Address(self), logger), account: account, logger: logger}
 	healthy := false
 	for {
 		if err := r.syncAll(ctx); err != nil {
@@ -291,6 +291,10 @@ type run struct {
 
 func (r *run) syncAll(ctx context.Context) error {
 	calendars, err := r.session.Calendars(ctx)
+	if providerhttp.IsStatus(err, http.StatusForbidden) {
+		// The calendar list is the account's own: refusing it means the account may not use calendars.
+		return fmt.Errorf("%w: %w", errListRefused, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -329,9 +333,13 @@ func (r *run) syncAll(ctx context.Context) error {
 }
 
 // fatal errors end the session instead of skipping one calendar: the account's access as a whole is the problem.
+// A 403 on one calendar (shared and taken back, or read-only) is not fatal: that calendar is skipped.
 func (r *run) fatal(err error) bool {
 	return errors.Is(err, api.ErrReauthorize) || errors.Is(err, api.ErrNotGranted) || errors.Is(err, providerhttp.ErrUnauthorized) || r.syncer.provider.NotGranted(err)
 }
+
+// errListRefused: the provider refused the account's calendar list.
+var errListRefused = errors.New("the provider refused the calendar list")
 
 // acceptable leaves out calendars the API would refuse the whole list for.
 func (r *run) acceptable(calendars []Calendar) []Calendar {

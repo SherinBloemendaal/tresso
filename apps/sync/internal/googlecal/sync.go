@@ -126,11 +126,9 @@ func (s *session) incremental(ctx context.Context, calendar calsync.Calendar, to
 			continue
 		}
 		if item.RecurringEventID == "" && len(item.Recurrence) == 0 {
-			object, err := s.object(calendar, id, series{master: &item})
-			if err != nil {
-				return calsync.Changes{}, err
+			if object, ok := s.object(calendar, id, series{master: &item}); ok {
+				changes.Objects = append(changes.Objects, object)
 			}
-			changes.Objects = append(changes.Objects, object...)
 			continue
 		}
 		current, found, err := s.series(ctx, calendar.RemoteID, id, item.ICalUID)
@@ -141,14 +139,10 @@ func (s *session) incremental(ctx context.Context, calendar calsync.Calendar, to
 			changes.Removed = append(changes.Removed, id)
 			continue
 		}
-		object, err := s.object(calendar, id, current)
-		if err != nil {
-			return calsync.Changes{}, err
+		// An event that cannot be converted keeps its stored copy: neither changed nor removed.
+		if object, ok := s.object(calendar, id, current); ok {
+			changes.Objects = append(changes.Objects, object)
 		}
-		if len(object) == 0 {
-			changes.Removed = append(changes.Removed, id)
-		}
-		changes.Objects = append(changes.Objects, object...)
 	}
 	return changes, nil
 }
@@ -173,29 +167,45 @@ func group(items []event) map[string]*series {
 	return byID
 }
 
+// objects is a full listing. An event that cannot be converted is still listed, without its text, so the API keeps
+// the copy it has instead of removing it; its fetch converts it again and leaves it out once more.
 func (s *session) objects(calendar calsync.Calendar, byID map[string]*series) ([]calsync.Object, error) {
 	var out []calsync.Object
 	for id, entry := range byID {
-		object, err := s.object(calendar, id, *entry)
-		if err != nil {
-			return nil, err
+		if !entry.exists() {
+			continue
 		}
-		out = append(out, object...)
+		if object, ok := s.object(calendar, id, *entry); ok {
+			out = append(out, object)
+			continue
+		}
+		out = append(out, calsync.Object{RemoteID: id, ETag: entry.etag()})
 	}
 	return out, nil
 }
 
-// object converts a resource; a deleted one, or one with only cancelled occurrences, converts to nothing. An event
-// Google cannot describe in iCalendar is left out rather than holding up the calendar.
-func (s *session) object(calendar calsync.Calendar, id string, entry series) ([]calsync.Object, error) {
+// object converts a resource. ok is false for a deleted one, and for one iCalendar cannot describe, which is logged
+// and skipped rather than holding up the calendar.
+func (s *session) object(calendar calsync.Calendar, id string, entry series) (calsync.Object, bool) {
 	if !entry.exists() {
-		return nil, nil
+		return calsync.Object{}, false
 	}
 	text, err := entry.toICalendar(info(calendar))
 	if err != nil {
-		return nil, nil
+		s.logger.Info("skipping a Google event that cannot be converted", "event", id, "error", err)
+		return calsync.Object{}, false
 	}
-	return []calsync.Object{{RemoteID: id, ETag: entry.etag(), Ical: text}}, nil
+	return calsync.Object{RemoteID: id, ETag: entry.etag(), Ical: text}, true
+}
+
+// instance reads one occurrence of a series by its instance id.
+func (s *session) instance(ctx context.Context, calendarID, id string) (event, bool, error) {
+	var instance event
+	err := s.get(ctx, s.calendarURL(calendarID, id), nil, &instance)
+	if providerhttp.IsStatus(err, http.StatusNotFound) || providerhttp.IsStatus(err, http.StatusGone) {
+		return event{}, false, nil
+	}
+	return instance, err == nil, err
 }
 
 // series reads a resource with its exceptions: the master by id, then everything with its iCalendar UID.
@@ -264,11 +274,9 @@ func (s *session) Fetch(ctx context.Context, calendar calsync.Calendar, remoteID
 		if !found {
 			continue
 		}
-		object, err := s.object(calendar, id, entry)
-		if err != nil {
-			return nil, err
+		if object, ok := s.object(calendar, id, entry); ok {
+			out = append(out, object)
 		}
-		out = append(out, object...)
 	}
 	return out, nil
 }

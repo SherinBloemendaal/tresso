@@ -32,6 +32,10 @@ type fakeGoogle struct {
 	requests []fakeRequest
 	// forbidden answers every request with 403 insufficientPermissions.
 	forbidden bool
+	// refusedCalendars answer 403 for their events, as a calendar shared with the user and taken back does.
+	refusedCalendars map[string]bool
+	// failures answers requests whose method and path end like the key with that status, once each.
+	failures map[string]int
 }
 
 type fakeEvent struct {
@@ -47,7 +51,7 @@ type fakeRequest struct {
 }
 
 func newFakeGoogle(t *testing.T) *fakeGoogle {
-	f := &fakeGoogle{t: t, events: map[string]map[string]*fakeEvent{}, pageSize: 250}
+	f := &fakeGoogle{t: t, events: map[string]map[string]*fakeEvent{}, pageSize: 250, refusedCalendars: map[string]bool{}, failures: map[string]int{}}
 	f.addCalendar(calendarListEntry{ID: "kim@example.com", Summary: "Kim", BackgroundColor: "#9FC6E7", TimeZone: "Europe/Amsterdam", AccessRole: "owner", Primary: true,
 		DefaultReminders: []reminder{{Method: "popup", Minutes: 10}},
 		ConferenceProperties: &struct {
@@ -111,10 +115,19 @@ func (f *fakeGoogle) writes() []fakeRequest {
 	return out
 }
 
+// fail answers an error as Google does: every 403 has the status PERMISSION_DENIED, and only a token without the
+// scopes says ACCESS_TOKEN_SCOPE_INSUFFICIENT in its details.
 func (f *fakeGoogle) fail(w http.ResponseWriter, status int, reason string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": status, "errors": []map[string]string{{"reason": reason}}}})
+	body := map[string]any{"code": status, "errors": []map[string]string{{"reason": reason}}}
+	if status == http.StatusForbidden {
+		body["status"] = "PERMISSION_DENIED"
+	}
+	if reason == "insufficientPermissions" {
+		body["details"] = []map[string]string{{"reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": body})
 }
 
 func (f *fakeGoogle) reply(w http.ResponseWriter, v any) {
@@ -142,6 +155,18 @@ func (f *fakeGoogle) handle(w http.ResponseWriter, r *http.Request) {
 		f.fail(w, http.StatusForbidden, "insufficientPermissions")
 		return
 	}
+	for key, status := range f.failures {
+		method, suffix, _ := strings.Cut(key, " ")
+		if r.Method == method && strings.HasSuffix(r.URL.Path, suffix) {
+			delete(f.failures, key)
+			reason := "backendError"
+			if status == http.StatusForbidden {
+				reason = "requiredAccessLevel"
+			}
+			f.fail(w, status, reason)
+			return
+		}
+	}
 
 	path := strings.TrimPrefix(r.URL.Path, "/calendar/v3")
 	if path == "/users/me/calendarList" {
@@ -154,6 +179,10 @@ func (f *fakeGoogle) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	calendarID, rest, _ := strings.Cut(rest, "/events")
+	if f.refusedCalendars[calendarID] {
+		f.fail(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	events, ok := f.events[calendarID]
 	if !ok {
 		f.fail(w, http.StatusNotFound, "notFound")
@@ -168,7 +197,12 @@ func (f *fakeGoogle) handle(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet:
 		e, ok := events[id]
 		if !ok {
-			f.fail(w, http.StatusNotFound, "notFound")
+			instance, found := synthesize(events, id)
+			if !found {
+				f.fail(w, http.StatusNotFound, "notFound")
+				return
+			}
+			f.reply(w, instance)
 			return
 		}
 		f.reply(w, e.event)
@@ -269,19 +303,10 @@ func (f *fakeGoogle) patch(w http.ResponseWriter, r *http.Request, calendarID, i
 	current, ok := events[id]
 	if !ok {
 		// An occurrence of a series becomes an exception.
-		masterID, key, found := strings.Cut(id, "_")
-		master, exists := events[masterID]
-		if !found || !exists {
+		instance, found := synthesize(events, id)
+		if !found {
 			f.fail(w, http.StatusNotFound, "notFound")
 			return
-		}
-		instance := master.event
-		instance.ID, instance.RecurringEventID, instance.Recurrence = id, masterID, nil
-		if t, err := time.Parse("20060102T150405Z", key); err == nil {
-			instance.OriginalStartTime = &eventTime{DateTime: t.Format(time.RFC3339), TimeZone: master.Start.TimeZone}
-		} else {
-			d, _ := time.Parse("20060102", key)
-			instance.OriginalStartTime = &eventTime{Date: d.Format("2006-01-02")}
 		}
 		current = &fakeEvent{event: instance}
 	} else if match := r.Header.Get("If-Match"); match != "" && match != current.ETag {
@@ -309,6 +334,34 @@ func (f *fakeGoogle) patch(w http.ResponseWriter, r *http.Request, calendarID, i
 		f.conference(&updated)
 	}
 	f.reply(w, f.store(calendarID, updated).event)
+}
+
+// synthesize is an occurrence of a series as Google answers for its instance id: the series' fields at the
+// occurrence's own start and end.
+func synthesize(events map[string]*fakeEvent, id string) (event, bool) {
+	masterID, key, found := strings.Cut(id, "_")
+	master, exists := events[masterID]
+	if !found || !exists || len(master.Recurrence) == 0 {
+		return event{}, false
+	}
+	instance := master.event
+	instance.ID, instance.RecurringEventID, instance.Recurrence, instance.ETag = id, masterID, nil, `"i-`+id+`"`
+	if t, err := time.Parse("20060102T150405Z", key); err == nil {
+		start, _ := time.Parse(time.RFC3339, master.Start.DateTime)
+		end, _ := time.Parse(time.RFC3339, master.End.DateTime)
+		loc, _ := time.LoadLocation(master.Start.TimeZone)
+		instance.OriginalStartTime = &eventTime{DateTime: t.In(loc).Format(time.RFC3339), TimeZone: master.Start.TimeZone}
+		instance.Start = &eventTime{DateTime: t.In(loc).Format(time.RFC3339), TimeZone: master.Start.TimeZone}
+		instance.End = &eventTime{DateTime: t.Add(end.Sub(start)).In(loc).Format(time.RFC3339), TimeZone: master.End.TimeZone}
+		return instance, true
+	}
+	d, err := time.Parse("20060102", key)
+	if err != nil {
+		return event{}, false
+	}
+	instance.OriginalStartTime = &eventTime{Date: d.Format("2006-01-02")}
+	instance.Start, instance.End = &eventTime{Date: d.Format("2006-01-02")}, &eventTime{Date: d.AddDate(0, 0, 1).Format("2006-01-02")}
+	return instance, true
 }
 
 // meetingEvent is a timed event in Amsterdam on 19 October 2026.

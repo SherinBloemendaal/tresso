@@ -212,12 +212,14 @@ func fromRRule(rule string, start ical.Time, zone string) (*patternedRecurrence,
 		}
 		return out
 	}
-	// relative reads "the second Monday" from BYDAY=2MO, or from BYDAY=MO;BYSETPOS=2.
+	// relative reads "the second Monday" from BYDAY=2MO, or "the first of Monday to Friday" from
+	// BYDAY=MO,TU,WE,TH,FR;BYSETPOS=1. Graph's index picks one of all the days listed, so BYDAY=1MO,1WE (the first
+	// Monday and the first Wednesday, two occurrences) has no Graph pattern.
 	relative := func() (string, bool) {
 		ordinal := 0
 		for _, d := range byDay {
 			if d.ordinal != 0 {
-				if ordinal != 0 && ordinal != d.ordinal {
+				if len(byDay) > 1 {
 					return "", false
 				}
 				ordinal = d.ordinal
