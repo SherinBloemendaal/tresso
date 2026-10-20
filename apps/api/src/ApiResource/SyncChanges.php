@@ -20,7 +20,8 @@ use Symfony\Component\Validator\Constraints as Assert;
  * events are gone. Calendar events come as stored (series with their rule, overrides with their recurrenceId), for
  * series that end after two years ago. Notifications come once delivered (from the last week), so every device can
  * show and clear them; event notes are the user's private notes. A todo whose email is gone changes too, without
- * the link; clients also treat a link to an email they do not have as no link.
+ * the link; clients also treat a link to an email they do not have as no link. Mail notifications (new mail that
+ * needs the user) come once delivered, from the last week, so the desktop app shows them.
  */
 #[ApiResource(
     shortName: 'SyncChanges',
@@ -63,6 +64,7 @@ final readonly class SyncChanges
      * @param list<array<string, mixed>>                $notifications
      * @param list<array<string, mixed>>                $eventNotes
      * @param list<array<string, mixed>>                $todos
+     * @param list<array<string, mixed>>                $mailNotifications
      * @param list<array{type: string, id: string}> $deleted
      */
     public function __construct(
@@ -81,6 +83,7 @@ final readonly class SyncChanges
         public array $notifications,
         public array $eventNotes,
         public array $todos,
+        public array $mailNotifications,
         public array $deleted,
     ) {
     }
