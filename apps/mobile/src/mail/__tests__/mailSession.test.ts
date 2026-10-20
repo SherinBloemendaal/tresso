@@ -307,8 +307,8 @@ describe('MailSession', () => {
     await expect(mail.unsubscribe('m1')).rejects.toThrow('Your mail is not open on this phone yet.')
   })
 
-  it('tells about hand-overs that become overdue, but not about those the first pull brings', async () => {
-    const handOver = (id: string, overdueAt: string | null): SyncedHandOver => ({
+  it('tells about the overdue notices the server delivers, each once, but not about those the first pull brings', async () => {
+    const handOver = (id: string, notifiedAt: string | null): SyncedHandOver => ({
       id,
       mailAccountId: 'work',
       messageId: null,
@@ -319,7 +319,10 @@ describe('MailSession', () => {
       dueAt: '2026-10-23T15:00:00Z',
       state: 'open',
       forwardId: null,
-      overdueAt,
+      overdueAt: notifiedAt,
+      notifiedAt,
+      notifiedChannels: notifiedAt === null ? [] : ['phone'],
+      notifiedSilently: false,
       nudgedAt: null,
       lastNudgeId: null,
       replyMessageId: null,
@@ -328,6 +331,7 @@ describe('MailSession', () => {
       updatedAt: '2026-10-20T08:00:00Z',
     })
     const told: string[][] = []
+    const delivered = new Date().toISOString()
     const disk = device()
     const { mail, last } = session(
       disk,
@@ -335,8 +339,10 @@ describe('MailSession', () => {
         since === 0
           ? page(1, { mailAccounts: [account], handOvers: [handOver('old', '2026-10-01T15:00:00Z'), handOver('new', null)] })
           : since === 1
-            ? page(2, { handOvers: [handOver('new', '2026-10-23T15:00:00Z')] })
-            : page(since),
+            ? page(2, { handOvers: [handOver('new', delivered)] })
+            : since === 2
+              ? page(3, { handOvers: [{ ...handOver('new', delivered), nudgedAt: delivered }] })
+              : page(since),
       async () => {},
       undefined,
       (handOvers) => told.push(handOvers.map((h) => h.id)),
@@ -348,9 +354,12 @@ describe('MailSession', () => {
     expect(told).toEqual([])
 
     await mail.syncNow()
-
     expect(told).toEqual([['new']])
-    expect((await mail.database!.handOvers()).map((h) => h.id)).toEqual(['new', 'old'])
+
+    // The same notice again, with something else changed on the hand-over: told once.
+    await mail.syncNow()
+    expect(told).toEqual([['new']])
+    expect((await mail.database!.handOvers()).map((h) => h.id).sort()).toEqual(['new', 'old'])
     await mail.switchTo(null)
   })
 })
