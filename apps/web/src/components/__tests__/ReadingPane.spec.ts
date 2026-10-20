@@ -131,6 +131,7 @@ describe('ReadingPane actions', () => {
         { path: '/', name: 'unified', component: { template: '<div />' } },
         { path: '/inbox/:threadId', name: 'unified-thread', component: { template: '<div />' } },
         { path: '/waiting', name: 'waiting', component: { template: '<div />' } },
+        { path: '/triage', name: 'triage', component: { template: '<div />' } },
       ],
     })
     await router.push('/inbox/t1')

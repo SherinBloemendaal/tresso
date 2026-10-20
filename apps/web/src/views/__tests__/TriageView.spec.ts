@@ -67,7 +67,12 @@ const decided = thread('t2', 'Already placed', '2026-10-19T09:00:00Z', 'todo', '
 const lunch = thread('t3', 'Lunch', '2026-10-19T08:00:00Z', null, null)
 
 describe('TriageView', () => {
-  const requests: { method: string; path: string; body: unknown }[] = []
+  type Request = { method: string; path: string; body: unknown }
+  /** This test's requests; a decision of an earlier test that still runs writes to that test's own log. */
+  let requests: Request[]
+  /** Requests made so far, and those still waiting for their answer. */
+  let started = 0
+  let inFlight = 0
   let threads: SyncedThread[]
   /** Later pages of the delta, in order: the first one after cursor 1 has cursor 2, and so on. */
   let later: ChangePage[]
@@ -88,7 +93,8 @@ describe('TriageView', () => {
   beforeEach(async () => {
     sessionStorage.setItem('auth.tokens', JSON.stringify({ accessToken: 'token', refreshToken: null, expiresAt: Date.now() + 3_600_000 }))
     setActivePinia(createPinia())
-    requests.length = 0
+    const log: Request[] = []
+    requests = log
     threads = [invoice, decided, lunch]
     later = []
     mounted = null
@@ -101,64 +107,73 @@ describe('TriageView', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(String(input))
-        const method = init?.method ?? 'GET'
-        const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
-        if (url.pathname === '/api/v1/sync/changes') {
-          const since = Number(url.searchParams.get('since'))
-          if (since === 0) {
-            if (holdFirstPull !== null) {
-              await holdFirstPull
-            }
-            return json(
-              page(1, {
-                mailAccounts: [account],
-                folders,
-                smartInboxes: [smartInbox('todo', 'todo', 'do', 0), smartInbox('spam', 'spam', 'none', 1), smartInbox('invoices', null, 'know', 2)],
-                threads,
-                messages: [message('m1', 't1', 'Charged twice', '2026-10-19T10:00:00Z', false), message('m2', 't2', 'Already placed', '2026-10-19T09:00:00Z', true), message('m3', 't3', 'Lunch', '2026-10-19T08:00:00Z', true)],
-              }),
-            )
-          }
-          if (holdLaterPulls !== null) {
-            await holdLaterPulls
-          }
-          return json(later.find((candidate) => candidate.cursor === since + 1) ?? page(since))
+        started += 1
+        inFlight += 1
+        try {
+          return await answer(input, init)
+        } finally {
+          inFlight -= 1
         }
-        if (method !== 'GET') {
-          requests.push({ method, path: url.pathname + url.search, body: init?.body ? JSON.parse(String(init.body)) : undefined })
-        }
-        if (url.pathname.endsWith('/classification') && method === 'PUT') {
-          const body = JSON.parse(String(init?.body)) as { smartInboxId: string; verdict: string }
-          if (holdPut !== null) {
-            await holdPut
-          }
-          return json({ threadId: url.pathname.split('/')[4], smartInboxId: body.smartInboxId, verdict: body.verdict, reason: 'user', senderRule: null, placementId: `p${++placements}` })
-        }
-        if (url.pathname.endsWith('/classification') && method === 'DELETE') {
-          if (releaseStatus === 409) {
-            return json({ detail: 'This conversation was moved again since; that choice stays.' }, 409)
-          }
-          // The rules place it where it was; the pull after the undo brings that.
-          serverChange({ threads: [invoice] })
-          return new Response(null, { status: 204 })
-        }
-        if (/^\/api\/v1\/messages\/[^/]+\/todo$/.test(url.pathname)) {
-          const messageId = url.pathname.split('/')[4]
-          return json({ ...todo(`todo-${messageId}`, messageId!), made: !todoExists })
-        }
-        if (url.pathname.startsWith('/api/v1/todos/') && method === 'DELETE') {
-          return new Response(null, { status: 204 })
-        }
-        if (url.pathname === '/api/v1/message-actions') {
-          return json({ changed: 1 })
-        }
-        if (url.pathname.endsWith('/body')) {
-          return json({ id: url.pathname.split('/')[4], html: null, text: 'Hello', hasRemoteContent: false, remoteContentLoaded: false, attachments: [] })
-        }
-        return json({ detail: 'unavailable' }, 503)
       }),
     )
+    async function answer(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+      const url = new URL(String(input))
+      const method = init?.method ?? 'GET'
+      const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+      if (url.pathname === '/api/v1/sync/changes') {
+        const since = Number(url.searchParams.get('since'))
+        if (since === 0) {
+          if (holdFirstPull !== null) {
+            await holdFirstPull
+          }
+          return json(
+            page(1, {
+              mailAccounts: [account],
+              folders,
+              smartInboxes: [smartInbox('todo', 'todo', 'do', 0), smartInbox('spam', 'spam', 'none', 1), smartInbox('invoices', null, 'know', 2)],
+              threads,
+              messages: [message('m1', 't1', 'Charged twice', '2026-10-19T10:00:00Z', false), message('m2', 't2', 'Already placed', '2026-10-19T09:00:00Z', true), message('m3', 't3', 'Lunch', '2026-10-19T08:00:00Z', true)],
+            }),
+          )
+        }
+        if (holdLaterPulls !== null) {
+          await holdLaterPulls
+        }
+        return json(later.find((candidate) => candidate.cursor === since + 1) ?? page(since))
+      }
+      if (method !== 'GET') {
+        log.push({ method, path: url.pathname + url.search, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+      }
+      if (url.pathname.endsWith('/classification') && method === 'PUT') {
+        const body = JSON.parse(String(init?.body)) as { smartInboxId: string; verdict: string }
+        if (holdPut !== null) {
+          await holdPut
+        }
+        return json({ threadId: url.pathname.split('/')[4], smartInboxId: body.smartInboxId, verdict: body.verdict, reason: 'user', senderRule: null, placementId: `p${++placements}` })
+      }
+      if (url.pathname.endsWith('/classification') && method === 'DELETE') {
+        if (releaseStatus === 409) {
+          return json({ detail: 'This conversation was moved again since; that choice stays.' }, 409)
+        }
+        // The rules place it where it was; the pull after the undo brings that.
+        serverChange({ threads: [invoice] })
+        return new Response(null, { status: 204 })
+      }
+      if (/^\/api\/v1\/messages\/[^/]+\/todo$/.test(url.pathname)) {
+        const messageId = url.pathname.split('/')[4]
+        return json({ ...todo(`todo-${messageId}`, messageId!), made: !todoExists })
+      }
+      if (url.pathname.startsWith('/api/v1/todos/') && method === 'DELETE') {
+        return new Response(null, { status: 204 })
+      }
+      if (url.pathname === '/api/v1/message-actions') {
+        return json({ changed: 1 })
+      }
+      if (url.pathname.endsWith('/body')) {
+        return json({ id: url.pathname.split('/')[4], html: null, text: 'Hello', hasRemoteContent: false, remoteContentLoaded: false, attachments: [] })
+      }
+      return json({ detail: 'unavailable' }, 503)
+    }
     router = createRouter({
       history: createMemoryHistory(),
       routes: [
@@ -170,6 +185,12 @@ describe('TriageView', () => {
   })
 
   afterEach(async () => {
+    // Decisions and undos a test left running finish first, so none of their requests reach the next test.
+    for (let quiet = 0; quiet < 3; ) {
+      const before = started
+      await settle()
+      quiet = inFlight === 0 && started === before ? quiet + 1 : 0
+    }
     mounted?.unmount()
     await useMailStore().stop()
     await deleteMailDatabase(USER)

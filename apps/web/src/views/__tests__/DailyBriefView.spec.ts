@@ -144,6 +144,7 @@ describe('DailyBriefView', () => {
         { path: '/batches', name: 'batches', component: { template: '<p>batches</p>' } },
         { path: '/cleanup', name: 'cleanup', component: { template: '<p>cleanup</p>' } },
         { path: '/waiting', name: 'waiting', component: { template: '<p>waiting</p>' } },
+        { path: '/triage', name: 'triage', component: { template: '<div />' } },
         { path: '/drafts', name: 'drafts', component: { template: '<p>drafts</p>' } },
         { path: '/outbox', name: 'outbox', component: { template: '<p>outbox</p>' } },
         { path: '/smart/:smartInboxId', name: 'smart-inbox', component: { template: '<p>smart</p>' } },
