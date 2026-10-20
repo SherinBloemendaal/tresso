@@ -111,9 +111,7 @@ final readonly class NotificationDispatcher
             }
         }
         if ($choice->includes(NotificationChannel::Email)) {
-            // The chosen address only while it is still one of the user's own (a mail account may be gone since).
-            $chosen = $this->preferences->forUser($user)->getEmailAddress();
-            $targets[] = ['email', null, null !== $chosen && \in_array($chosen, $this->selfAddresses->of($user), true) ? $chosen : $user->getEmail()];
+            $targets[] = ['email', null, $this->emailAddressFor($user)];
         }
 
         $connection = $this->entityManager->getConnection();
@@ -157,6 +155,17 @@ final readonly class NotificationDispatcher
         }
 
         return $claimed;
+    }
+
+    /**
+     * Where the user's notification email goes: the chosen address only while it is still one of the user's own (a
+     * mail account may be gone since), else the sign-in address.
+     */
+    public function emailAddressFor(User $user): string
+    {
+        $chosen = $this->preferences->forUser($user)->getEmailAddress();
+
+        return null !== $chosen && \in_array($chosen, $this->selfAddresses->of($user), true) ? $chosen : $user->getEmail();
     }
 
     private function record(string $deliveryKey, string $target, ?NotificationDevice $device, PushResult $result): void

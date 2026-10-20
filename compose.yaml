@@ -61,7 +61,7 @@ services:
       context: .
       dockerfile: docker/api/Dockerfile
       target: dev
-    command: ["php", "bin/console", "messenger:consume", "async", "search", "push", "scheduler_notifications", "scheduler_default", "scheduler_batches", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    command: ["php", "bin/console", "messenger:consume", "async", "search", "push", "scheduler_notifications", "scheduler_default", "scheduler_batches", "scheduler_daily_brief", "--time-limit=3600", "--memory-limit=256M", "-vv"]
     environment: *api-env
     volumes:
       - ./apps/api:/app
