@@ -143,6 +143,12 @@ export class IndexedDbMailStore implements MailStore {
 
   static async open(userId: string): Promise<IndexedDbMailStore> {
     const db = await openDB<MailSchema>(databaseName(userId), VERSION, {
+      // Another connection wants the copy gone or upgraded (a sign-out or a newer version in another tab, or a
+      // copy that was never closed here): this one closes, or the delete or upgrade would wait for it forever.
+      blocking(_currentVersion, _blockedVersion, event) {
+        const connection = event.target as IDBDatabase
+        connection.close()
+      },
       async upgrade(database, oldVersion, _newVersion, transaction) {
         if (oldVersion < 1) {
           createVersion1(database)
