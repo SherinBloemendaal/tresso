@@ -1239,11 +1239,12 @@ accepted.
     refused with the reason. A changed description is written to Graph as HTML that keeps the body's Teams join
     block. A write the provider accepted reports the provider's version back as `current`, which replaces the stored
     object unless a newer change of the user's waits; one it could not read back keeps the last known ETag. Both
-    providers write a series step by step (the master, then each occurrence): a write that failed after a first step
-    reports the provider's id, ETag and version with its retry. The API bases the next attempt on them, and when no
+    providers write a series step by step (the master, then each occurrence): every retry of a write to an event the
+    provider has reports the provider's id, ETag and version, because an earlier attempt may have written part of it. The API bases the next attempt on them, and when no
     attempt is left the provider's version replaces Tresso's, so the two never stay apart. A move to another calendar
     of the same Google account (a delete and a create of the same UID in one claim) is Google's `events.move`, which
-    tells no one; it is made only when the event still is the version Tresso moved (else the delete is a conflict),
+    tells no one; it is made only when the event still is the version Tresso moved (else nothing is written: the delete reports the
+    provider's version, which stays in the old calendar, and the create is held back as a conflict),
     and the update after it is conditional on the moved event's ETag. `events.move` makes the target calendar the
     organizer, so the API refuses to move a meeting with guests between calendars of one Google account and says why.
     A 403 means calendars are not allowed only for the calendar list (unless it is a rate limit, which is retried like
