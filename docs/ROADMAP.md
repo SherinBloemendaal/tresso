@@ -116,12 +116,15 @@ Delivered in steps, each its own pull request:
   know, J skip, Z undo) and on the phone (buttons); do and hand over place only that conversation (do makes its todo),
   know archives it
 
+- [x] Todos in the calendar: a todo with a due date and a duration ("takes 30 minutes") is planned with "Plan
+  automatically" at the earliest free time before it is due, with the meeting time finder of C6 (working hours, focus
+  blocks, buffers and travel time respected); that time is busy, so no meeting is booked over it, moves when the
+  calendar or the todo changes, and is flagged when nothing else is free; a setting plans todos on their own; planned
+  todos show in the calendars of web, desktop and mobile, and stay in Tresso (not written to provider calendars)
+
 Still to come in this phase:
 
-- Todos in the calendar: a setting puts todos with a deadline in the calendar as busy time, so nobody books a meeting
-  over them; choosing a deadline or a time shows how busy each day and hour already is; a todo gets a duration
-  ("takes 30 minutes"), and "Plan automatically" picks the best free slot before the deadline with the meeting time
-  finder of C6 (working hours, focus blocks and travel time respected), moving it when the calendar changes
+- Busy hints when picking a due date: choosing a deadline or a time shows how busy each day and hour already is
 
 Tresso Cloud: AI classification with feedback learning, automatic todo extraction, AI summaries in the daily brief.
 
