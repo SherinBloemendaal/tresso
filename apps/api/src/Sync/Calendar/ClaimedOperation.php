@@ -22,6 +22,8 @@ final readonly class ClaimedOperation
         public ?string $ifMatch,
         public ?string $ical,
         public int $attempt,
+        public bool $notify,
+        public ?string $comment,
     ) {
     }
 
@@ -43,6 +45,8 @@ final readonly class ClaimedOperation
             $put ? $object->getEtag() : $operation->getIfMatch(),
             $object?->getIcal(),
             $operation->getAttempts(),
+            $operation->notifies(),
+            $operation->getComment(),
         );
     }
 }

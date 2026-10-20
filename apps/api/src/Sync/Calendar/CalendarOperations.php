@@ -77,7 +77,7 @@ final readonly class CalendarOperations
                     if (null !== $queued) {
                         $queued->becomeDelete($remoteId, $result->etag);
                     } else {
-                        $this->entityManager->persist(CalendarOperation::delete($calendar, $operation->getUid(), $remoteId, $result->etag, $now));
+                        $this->entityManager->persist(CalendarOperation::delete($calendar, $operation->getUid(), $remoteId, $result->etag, $now, $operation->notifies()));
                     }
                     $this->entityManager->flush();
                 }
@@ -88,6 +88,11 @@ final readonly class CalendarOperations
                 $object->stored($remoteId, $result->etag);
             }
             $this->store->reportSyncError($object, null);
+            if (null !== $result->current && null !== $result->current->ical && $result->current->remoteId === $remoteId) {
+                // The provider changed the event while storing it (Google and Microsoft add the meeting they made, and
+                // their own UID spelling): its version replaces Tresso's, unless a newer change of the user's waits.
+                $this->synchronizer->upsert($calendar, $object, $result->current);
+            }
 
             return 'done';
         }

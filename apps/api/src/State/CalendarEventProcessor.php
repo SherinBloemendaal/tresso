@@ -150,6 +150,7 @@ final readonly class CalendarEventProcessor implements ProcessorInterface
             $input->useDefaultReminders,
             $input->travelMinutes,
             $input->important,
+            $input->conferenceProvider,
         );
     }
 

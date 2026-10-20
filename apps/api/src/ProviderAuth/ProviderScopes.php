@@ -13,10 +13,9 @@ use App\Enum\ProviderFeature;
  * Scopes are compared in normalized form: Google's as the token endpoint returns them, Microsoft's lowercased and
  * without the "https://graph.microsoft.com/" resource prefix (the token endpoint returns either form).
  *
- * Adding a feature (for example calendars: Google "https://www.googleapis.com/auth/calendar.events", Microsoft
- * "Calendars.ReadWrite" and "OnlineMeetings.ReadWrite") means adding a {@see ProviderFeature} case and its scopes in
- * {@see self::featureScopes()}. A sign-in for the new feature then asks for the scopes of every feature the grant
- * already covers plus the new ones, so the refresh token keeps working for all of them (incremental consent).
+ * Adding a feature means adding a {@see ProviderFeature} case and its scopes in {@see self::featureScopes()}. A
+ * sign-in for the new feature then asks for the scopes of every feature the grant already covers plus the new ones,
+ * so the refresh token keeps working for all of them (incremental consent).
  */
 final class ProviderScopes
 {
@@ -48,6 +47,12 @@ final class ProviderScopes
             [OAuthProvider::Google, ProviderFeature::Mail] => ['https://www.googleapis.com/auth/gmail.modify'],
             // Read and change mail, send it, and read the signed-in user's address (/me).
             [OAuthProvider::Microsoft, ProviderFeature::Mail] => ['Mail.ReadWrite', 'Mail.Send', 'User.Read'],
+            // Read and change events (Google Meet meetings included) and see the calendar list; nothing broader, such
+            // as sharing settings or other users' calendars.
+            [OAuthProvider::Google, ProviderFeature::Calendar] => ['https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.calendarlist.readonly'],
+            // Read and change the user's calendars and answer invitations. Teams meetings are made through an event's
+            // isOnlineMeeting, which needs no OnlineMeetings permission.
+            [OAuthProvider::Microsoft, ProviderFeature::Calendar] => ['Calendars.ReadWrite'],
         };
     }
 

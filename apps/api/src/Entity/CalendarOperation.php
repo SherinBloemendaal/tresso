@@ -66,10 +66,18 @@ class CalendarOperation
     #[ORM\Column(length: 500, nullable: true)]
     private ?string $lastError = null;
 
+    /** A provider that schedules tells attendees (or the organizer) about the change; false when the user said not to. */
+    #[ORM\Column(options: ['default' => true])]
+    private bool $notify = true;
+
+    /** The user's comment with their answer to an invitation, for providers that send the reply themselves. */
+    #[ORM\Column(length: 500, nullable: true)]
+    private ?string $comment = null;
+
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
-    private function __construct(Calendar $calendar, ?CalendarObject $object, CalendarOperationKind $kind, string $uid, ?string $remoteId, ?string $ifMatch, \DateTimeImmutable $now)
+    private function __construct(Calendar $calendar, ?CalendarObject $object, CalendarOperationKind $kind, string $uid, ?string $remoteId, ?string $ifMatch, \DateTimeImmutable $now, bool $notify, ?string $comment)
     {
         $account = $calendar->getMailAccount() ?? throw new \LogicException('Local calendars are never written to a provider.');
         $this->id = Uuid::v7();
@@ -82,16 +90,38 @@ class CalendarOperation
         $this->ifMatch = $ifMatch;
         $this->notBefore = $now;
         $this->createdAt = $now;
+        $this->notify = $notify;
+        $this->comment = $comment;
     }
 
-    public static function put(CalendarObject $object, \DateTimeImmutable $now): self
+    public static function put(CalendarObject $object, \DateTimeImmutable $now, bool $notify = true, ?string $comment = null): self
     {
-        return new self($object->getCalendar(), $object, CalendarOperationKind::Put, $object->getUid(), $object->getRemoteId(), $object->getEtag(), $now);
+        return new self($object->getCalendar(), $object, CalendarOperationKind::Put, $object->getUid(), $object->getRemoteId(), $object->getEtag(), $now, $notify, $comment);
     }
 
-    public static function delete(Calendar $calendar, string $uid, string $remoteId, ?string $etag, \DateTimeImmutable $now): self
+    public static function delete(Calendar $calendar, string $uid, string $remoteId, ?string $etag, \DateTimeImmutable $now, bool $notify = true): self
     {
-        return new self($calendar, null, CalendarOperationKind::Delete, $uid, $remoteId, $etag, $now);
+        return new self($calendar, null, CalendarOperationKind::Delete, $uid, $remoteId, $etag, $now, $notify, null);
+    }
+
+    /**
+     * A later change folded into this pending write: attendees hear about it when any of the changes says so, and
+     * the latest comment goes with the answer.
+     */
+    public function schedule(bool $notify, ?string $comment): void
+    {
+        $this->notify = $this->notify || $notify;
+        $this->comment = $comment ?? $this->comment;
+    }
+
+    public function notifies(): bool
+    {
+        return $this->notify;
+    }
+
+    public function getComment(): ?string
+    {
+        return $this->comment;
     }
 
     public function getId(): Uuid

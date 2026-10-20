@@ -23,6 +23,9 @@ class Calendar implements TracksChanges
 {
     public const string DEFAULT_COLOR = '#3a6df0';
 
+    /** Online meetings a provider can make for an event: Google Meet, Microsoft Teams. */
+    public const array CONFERENCE_PROVIDERS = ['meet', 'teams'];
+
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
     private Uuid $id;
@@ -78,6 +81,14 @@ class Calendar implements TracksChanges
     /** The provider sends invitations and replies itself (RFC 6638 auto-schedule, Google, Microsoft). */
     #[ORM\Column]
     private bool $providerSchedules = false;
+
+    /**
+     * Online meetings the provider makes for events of this calendar ("meet", "teams").
+     *
+     * @var list<string>
+     */
+    #[ORM\Column(type: Types::JSON, options: ['default' => '[]'])]
+    private array $conferenceProviders = [];
 
     #[ORM\Column]
     private int $position = 0;
@@ -235,6 +246,20 @@ class Calendar implements TracksChanges
         $this->providerSchedules = $providerSchedules;
     }
 
+    /** @return list<string> */
+    public function getConferenceProviders(): array
+    {
+        return $this->conferenceProviders;
+    }
+
+    /**
+     * @param list<string> $conferenceProviders
+     */
+    public function setConferenceProviders(array $conferenceProviders): void
+    {
+        $this->conferenceProviders = $conferenceProviders;
+    }
+
     public function getPosition(): int
     {
         return $this->position;
@@ -267,7 +292,7 @@ class Calendar implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        return ['name', 'color', 'userColor', 'timeZone', 'writable', 'isDefault', 'visible', 'work', 'providerSchedules', 'position'];
+        return ['name', 'color', 'userColor', 'timeZone', 'writable', 'isDefault', 'visible', 'work', 'providerSchedules', 'conferenceProviders', 'position'];
     }
 
     public static function changeType(): string

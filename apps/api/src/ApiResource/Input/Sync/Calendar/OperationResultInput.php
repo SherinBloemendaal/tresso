@@ -30,7 +30,10 @@ final class OperationResultInput extends WorkerRequest
     #[Assert\Length(max: 500)]
     public ?string $error = null;
 
-    /** The provider's current version after a conflict or refusal. */
+    /**
+     * The provider's current version after a conflict or refusal, or after a write the provider changed (a Google
+     * Meet or Teams meeting it added).
+     */
     #[Assert\Valid]
     public ?RemoteObjectInput $current = null;
 }

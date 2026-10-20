@@ -22,6 +22,7 @@ trait ConnectsProviderAccounts
     private const string MICROSOFT_TOKEN = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
     private const string GRAPH_ME = 'https://graph.microsoft.com/v1.0/me';
     private const string GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
+    private const string GOOGLE_CALENDAR_SCOPES = 'https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly';
 
     /** @var array<string, string> */
     private array $user;
@@ -41,11 +42,13 @@ trait ConnectsProviderAccounts
     /**
      * Starts a sign-in and returns the query of the authorization URL.
      *
+     * @param list<string>|null $features null for the API's default
+     *
      * @return array<string, string>
      */
-    private function start(string $provider, ?string $mailAccountId = null): array
+    private function start(string $provider, ?string $mailAccountId = null, ?array $features = null): array
     {
-        $this->client->jsonRequest('POST', '/api/v1/provider-authorizations', ['provider' => $provider] + (null === $mailAccountId ? [] : ['mailAccountId' => $mailAccountId]), $this->user);
+        $this->client->jsonRequest('POST', '/api/v1/provider-authorizations', ['provider' => $provider] + (null === $mailAccountId ? [] : ['mailAccountId' => $mailAccountId]) + (null === $features ? [] : ['features' => $features]), $this->user);
         self::assertResponseStatusCodeSame(201);
         $url = $this->responseString('authorizationUrl');
         self::assertSame($provider, $this->responseString('provider'));

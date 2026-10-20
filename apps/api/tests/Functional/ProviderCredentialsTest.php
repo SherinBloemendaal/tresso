@@ -157,6 +157,52 @@ final class ProviderCredentialsTest extends DatabaseTestCase
         self::assertSame('auth_failed', $this->onlyAccount()->getStatus()->value);
     }
 
+    public function testCalendarTokensWaitForTheUserToAllowCalendarsWhileMailGoesOn(): void
+    {
+        $account = $this->connectGoogle();
+        $this->lease();
+
+        $this->client->request('GET', $this->credentialsUrl($account, feature: 'calendar'), server: $this->worker);
+
+        self::assertResponseStatusCodeSame(403);
+        $this->entityManager()->clear();
+        $account = $this->onlyAccount();
+        self::assertSame('not_granted', $account->getCalendarStatus()->value);
+        self::assertSame('Tresso is not allowed to use the calendars of this account yet. Allow it by signing in with Google again.', $account->getCalendarStatusDetail());
+        self::assertSame('active', $account->getStatus()->value, 'Mail goes on.');
+        self::assertSame('google-access-1', $this->accessToken($account));
+        self::assertCount(1, $this->router()->requestsTo(self::GOOGLE_TOKEN), 'Refusing a feature asks the provider nothing.');
+
+        $this->client->request('GET', $this->credentialsUrl($account, feature: 'contacts'), server: $this->worker);
+        self::assertResponseStatusCodeSame(400);
+    }
+
+    public function testCalendarTokensComeOnceTheGrantCoversCalendars(): void
+    {
+        $query = $this->start('google', features: ['mail', 'calendar']);
+        self::assertSame('openid email profile '.self::GMAIL_SCOPE.' '.self::GOOGLE_CALENDAR_SCOPES, $query['scope']);
+        $this->googleTokens(scope: 'openid https://www.googleapis.com/auth/userinfo.email '.self::GMAIL_SCOPE.' '.self::GOOGLE_CALENDAR_SCOPES);
+        $this->returnFromProvider('google', $query['state']);
+        $account = $this->onlyAccount();
+        $this->lease();
+
+        $credentials = $this->credentials($account, feature: 'calendar');
+
+        self::assertSame('google-access-1', self::secrets($credentials)['accessToken'] ?? null);
+    }
+
+    public function testMicrosoftCalendarsNeedCalendarsReadWrite(): void
+    {
+        $account = $this->connectMicrosoft();
+        $this->lease();
+
+        $this->client->request('GET', $this->credentialsUrl($account, feature: 'calendar'), server: $this->worker);
+        self::assertResponseStatusCodeSame(403);
+
+        $this->connection()->executeStatement('UPDATE provider_grant SET scopes = \'["calendars.readwrite","mail.readwrite","mail.send","user.read"]\'');
+        self::assertSame('ms-access-1', self::secrets($this->credentials($account, feature: 'calendar'))['accessToken'] ?? null);
+    }
+
     public function testAnUnreachableProviderAsksTheWorkerToRetry(): void
     {
         $account = $this->connectGoogle();
@@ -216,9 +262,9 @@ final class ProviderCredentialsTest extends DatabaseTestCase
     /**
      * @return array<string, mixed>
      */
-    private function credentials(MailAccount $account, bool $rejected = false): array
+    private function credentials(MailAccount $account, bool $rejected = false, ?string $feature = null): array
     {
-        $this->client->request('GET', $this->credentialsUrl($account, $rejected), server: $this->worker);
+        $this->client->request('GET', $this->credentialsUrl($account, $rejected, $feature), server: $this->worker);
         self::assertResponseIsSuccessful();
 
         /** @var array<string, mixed> */
@@ -233,8 +279,8 @@ final class ProviderCredentialsTest extends DatabaseTestCase
         return $token;
     }
 
-    private function credentialsUrl(MailAccount $account, bool $rejected = false): string
+    private function credentialsUrl(MailAccount $account, bool $rejected = false, ?string $feature = null): string
     {
-        return '/internal/sync/accounts/'.$account->getId()->toRfc4122().'/credentials?'.http_build_query(['workerId' => 'w1'] + ($rejected ? ['rejected' => '1'] : []));
+        return '/internal/sync/accounts/'.$account->getId()->toRfc4122().'/credentials?'.http_build_query(['workerId' => 'w1'] + ($rejected ? ['rejected' => '1'] : []) + (null === $feature ? [] : ['feature' => $feature]));
     }
 }

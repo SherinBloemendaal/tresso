@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\ApiResource\Input\Sync\Calendar;
 
+use App\Entity\Calendar;
 use Symfony\Component\Validator\Constraints as Assert;
 
 /**
@@ -30,4 +31,13 @@ final class RemoteCalendarInput
 
     /** The provider's default calendar for new events (CalDAV schedule-default-calendar-URL). */
     public bool $isDefault = false;
+
+    /**
+     * Online meetings the provider makes for events of this calendar.
+     *
+     * @var list<string>
+     */
+    #[Assert\All([new Assert\Choice(choices: Calendar::CONFERENCE_PROVIDERS)])]
+    #[Assert\Unique]
+    public array $conferenceProviders = [];
 }

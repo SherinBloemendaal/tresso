@@ -8,9 +8,11 @@ use App\Entity\MailAccount;
 use App\Entity\ProviderAuthorizationRequest;
 use App\Entity\ProviderGrant;
 use App\Entity\User;
+use App\Enum\CalendarSyncStatus;
 use App\Enum\MailAccountStatus;
 use App\Enum\OAuthProvider;
 use App\Enum\ProviderFeature;
+use App\Realtime\RealtimeNotifier;
 use App\Repository\MailAccountRepository;
 use App\Repository\ProviderGrantRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -39,6 +41,7 @@ final readonly class ProviderConnector
         private ProviderAccessTokens $tokens,
         private ProviderGrantRepository $grants,
         private MailAccountRepository $mailAccounts,
+        private RealtimeNotifier $notifier,
         private LoggerInterface $logger,
     ) {
     }
@@ -152,10 +155,15 @@ final readonly class ProviderConnector
         }
 
         $granted = $tokens->scopes ?? ProviderScopes::normalize($provider, implode(' ', $request->getRequestedScopes()));
+        // Mail is what an account is for; calendars the user may leave unticked (Google asks per scope) and allow later.
         foreach ($request->getFeatures() as $feature) {
-            if ([] !== array_diff(ProviderScopes::required($provider, $feature), $granted)) {
+            if ([] === array_diff(ProviderScopes::required($provider, $feature), $granted)) {
+                continue;
+            }
+            if (ProviderFeature::Mail === $feature) {
                 throw new ConnectFailed(ConnectError::ScopesMissing, \sprintf('The %s scopes were not granted.', $feature->value));
             }
+            $this->logger->info('A provider sign-in left out a feature.', ['provider' => $provider->value, 'feature' => $feature->value]);
         }
 
         $owner = $request->getOwner();
@@ -203,6 +211,15 @@ final readonly class ProviderConnector
             if (null !== $previousGrant && $previousGrant !== $grant && [] === $this->mailAccounts->findByProviderGrant($previousGrant)) {
                 $this->entityManager->remove($previousGrant);
                 $this->entityManager->flush();
+            }
+
+            if (\in_array(ProviderFeature::Calendar, ProviderScopes::coveredFeatures($provider, $grant->getScopes()), true)) {
+                if (CalendarSyncStatus::NotGranted === $mailAccount->getCalendarStatus()) {
+                    $mailAccount->setCalendarStatus(CalendarSyncStatus::Unknown);
+                    $this->entityManager->flush();
+                }
+                // The worker holding the account waits for calendar access; this wakes it.
+                $this->notifier->outboxDue($mailAccount->getId());
             }
 
             return ['connected' => $mailAccount->getId()->toRfc4122()];

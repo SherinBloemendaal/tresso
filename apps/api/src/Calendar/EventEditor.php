@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Calendar;
 
 use App\Calendar\ICalendar\CalendarDocument;
+use App\Calendar\ICalendar\ConferenceDetector;
 use App\Calendar\ICalendar\EventReader;
 use App\Calendar\ICalendar\EventTime;
 use App\Calendar\ICalendar\InvalidCalendarData;
@@ -42,6 +43,8 @@ final readonly class EventEditor
     /** Properties whose change makes an update attendees must act on (RFC 5546 2.1.4). */
     private const array SIGNIFICANT = ['DTSTART', 'DTEND', 'RRULE', 'RDATE', 'EXDATE', 'LOCATION', 'STATUS'];
     private const int MAX_RECURRENCES = 100000;
+    /** Asks the provider for an online meeting; the sync worker reads it (see apps/sync googlecal and graphcal). */
+    public const string CONFERENCE_REQUEST = 'X-TRESSO-CONFERENCE-REQUEST';
 
     public function __construct(
         private CalendarStore $store,
@@ -64,10 +67,11 @@ final readonly class EventEditor
         $event = $vcalendar->add('VEVENT', ['UID' => $uid, 'DTSTAMP' => $now, 'CREATED' => $now, 'SEQUENCE' => 0]);
         $this->write($event, $changes, $vcalendar, true, $self);
         self::withOrganizer($vcalendar, $calendar, $organizer);
+        self::requestConference($vcalendar, $calendar, $changes->conferenceProvider);
         // A new event is its own first version.
         Props::set($event, 'SEQUENCE', 0);
 
-        $rows = $this->store->save(new CalendarObject($calendar, $uid, ''), $vcalendar);
+        $rows = $this->store->save(new CalendarObject($calendar, $uid, ''), $vcalendar, notify: $notify);
         $this->schedule($calendar, null, $vcalendar, $notify);
 
         return $rows[''];
@@ -109,14 +113,15 @@ final readonly class EventEditor
         } else {
             $newObject = $this->split($object, $vcalendar, $master, $key, $changes, $self, $notify, $organizer);
             self::withOrganizer($vcalendar, $calendar, $organizer);
-            $this->store->save($object, $vcalendar);
+            $this->store->save($object, $vcalendar, notify: $notify);
             $this->schedule($calendar, $old, $vcalendar, $notify);
 
             return $newObject;
         }
 
         self::withOrganizer($vcalendar, $calendar, $organizer);
-        $rows = $this->store->save($object, $vcalendar);
+        self::requestConference($vcalendar, $calendar, $changes->conferenceProvider);
+        $rows = $this->store->save($object, $vcalendar, notify: $notify);
         $this->schedule($calendar, $old, $vcalendar, $notify);
 
         return $rows[$editedKey] ?? $rows[''] ?? array_values($rows)[0];
@@ -132,7 +137,7 @@ final readonly class EventEditor
         [$master, $key] = $this->target($vcalendar, $row, $recurrenceKey);
 
         if (null === $key || EditScope::All === $scope || (null !== $master && EditScope::Following === $scope && $this->isFirst($master, $key))) {
-            $this->store->remove($object);
+            $this->store->remove($object, notify: $notify);
             $this->schedule($calendar, $old, null, $notify);
 
             return;
@@ -144,7 +149,7 @@ final readonly class EventEditor
                 $vcalendar->remove($override);
             }
             if ([] === CalendarDocument::events($vcalendar)) {
-                $this->store->remove($object);
+                $this->store->remove($object, notify: $notify);
                 $this->schedule($calendar, $old, null, $notify);
 
                 return;
@@ -161,7 +166,7 @@ final readonly class EventEditor
             self::touch($master, true);
         }
 
-        $this->store->save($object, $vcalendar);
+        $this->store->save($object, $vcalendar, notify: $notify);
         $this->schedule($calendar, $old, $vcalendar, $notify);
     }
 
@@ -203,7 +208,8 @@ final readonly class EventEditor
             throw new EditRejected('You are not among the attendees of this event.');
         }
 
-        $rows = $this->store->save($object, $vcalendar);
+        // A provider that schedules sends the reply itself: it gets the comment, and whether to send at all.
+        $rows = $this->store->save($object, $vcalendar, notify: $notify, comment: null === $comment || '' === trim($comment) ? null : mb_substr(trim($comment), 0, 500));
         if ($notify && !$calendar->providerSchedules()) {
             $messages = self::itip(new Broker()->parseEvent(clone $vcalendar, self::hrefs($self), clone $old));
             foreach ($messages as $message) {
@@ -386,6 +392,25 @@ final readonly class EventEditor
         }
     }
 
+    /**
+     * Asks the calendar's provider for an online meeting: the worker makes it when it writes the event, and the
+     * provider's version, with the join link and without this request, then replaces the stored one.
+     */
+    private static function requestConference(VCalendar $vcalendar, Calendar $calendar, ?string $provider): void
+    {
+        $master = CalendarDocument::master($vcalendar);
+        if (null === $provider || null === $master) {
+            return;
+        }
+        if (!\in_array($provider, $calendar->getConferenceProviders(), true)) {
+            throw new EditRejected(\sprintf('This calendar cannot make %s meetings.', 'meet' === $provider ? 'Google Meet' : 'Microsoft Teams'));
+        }
+        if (null !== ConferenceDetector::detect($master)) {
+            return;
+        }
+        Props::set($master, self::CONFERENCE_REQUEST, $provider);
+    }
+
     private static function writeConference(VEvent $event, ?string $url): void
     {
         $existing = null;
@@ -524,8 +549,9 @@ final readonly class EventEditor
             $changes->useDefaultReminders, $changes->travelMinutes, $changes->important,
         ), $next, true, $self);
         self::withOrganizer($next, $object->getCalendar(), $organizer);
+        self::requestConference($next, $object->getCalendar(), $changes->conferenceProvider);
 
-        $rows = $this->store->save(new CalendarObject($object->getCalendar(), $uid, ''), $next);
+        $rows = $this->store->save(new CalendarObject($object->getCalendar(), $uid, ''), $next, notify: $notify);
         $this->schedule($object->getCalendar(), null, $next, $notify);
 
         return $rows[''];
@@ -547,9 +573,10 @@ final readonly class EventEditor
             throw new EditRejected('The other calendar already has this event.');
         }
         self::withOrganizer($vcalendar, $target, $organizer);
+        self::requestConference($vcalendar, $target, $changes->conferenceProvider);
         $source = $object->getCalendar();
-        $this->store->remove($object);
-        $rows = $this->store->save(new CalendarObject($target, $object->getUid(), ''), $vcalendar);
+        $this->store->remove($object, notify: $notify && $source->getMailAccount() !== $target->getMailAccount());
+        $rows = $this->store->save(new CalendarObject($target, $object->getUid(), ''), $vcalendar, notify: $notify);
         $this->schedule($source, $old, null, $notify && $source->getMailAccount() !== $target->getMailAccount());
         $this->schedule($target, $source->getMailAccount() === $target->getMailAccount() ? $old : null, $vcalendar, $notify);
 

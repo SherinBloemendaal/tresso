@@ -7,6 +7,8 @@ namespace App\Tests\Functional;
 use App\Entity\MailAccount;
 use App\Entity\ProviderAuthorizationRequest;
 use App\Entity\ProviderGrant;
+use App\Realtime\MercureTokens;
+use App\Tests\Support\RecordingMercureHub;
 
 /**
  * Connecting Gmail and Microsoft 365 accounts through the providers' OAuth flow, with the token endpoints mocked.
@@ -33,8 +35,8 @@ final class ProviderConnectTest extends DatabaseTestCase
 
         self::assertResponseIsSuccessful();
         self::assertSame([
-            ['id' => 'google', 'name' => 'Google', 'features' => ['mail']],
-            ['id' => 'microsoft', 'name' => 'Microsoft', 'features' => ['mail']],
+            ['id' => 'google', 'name' => 'Google', 'features' => ['mail', 'calendar']],
+            ['id' => 'microsoft', 'name' => 'Microsoft', 'features' => ['mail', 'calendar']],
         ], $this->decodedResponse());
     }
 
@@ -234,6 +236,49 @@ final class ProviderConnectTest extends DatabaseTestCase
         self::assertSame(self::WEB.'/settings/accounts/new?provider=google&connectError=scopes_missing', $this->returnFromProvider('google', $query['state']));
         self::assertSame(0, $this->entityManager()->getRepository(MailAccount::class)->count([]));
         self::assertSame(0, $this->entityManager()->getRepository(ProviderGrant::class)->count([]));
+    }
+
+    public function testCalendarsLeftUntickedStillConnectTheMail(): void
+    {
+        $query = $this->start('google', features: ['mail', 'calendar']);
+        $this->googleTokens();
+
+        self::assertStringContainsString('connected=', $this->returnFromProvider('google', $query['state']));
+        $grant = $this->onlyAccount()->getProviderGrant();
+        self::assertInstanceOf(ProviderGrant::class, $grant);
+        self::assertNotContains('https://www.googleapis.com/auth/calendar.events', $grant->getScopes());
+    }
+
+    public function testAllowingCalendarsLaterKeepsTheMailAndWakesTheWorker(): void
+    {
+        $account = $this->connectGoogle();
+        $id = $account->getId()->toRfc4122();
+        $this->connection()->executeStatement("UPDATE mail_account SET calendar_status = 'not_granted', calendar_status_detail = 'x'");
+
+        $query = $this->start('google', $id, ['calendar']);
+        self::assertSame('openid email profile '.self::GOOGLE_CALENDAR_SCOPES.' '.self::GMAIL_SCOPE, $query['scope'], 'Asks for what the account allows already, so the new token keeps serving mail.');
+        $this->googleTokens(access: 'google-access-2', refresh: null, scope: 'openid '.self::GMAIL_SCOPE.' '.self::GOOGLE_CALENDAR_SCOPES);
+
+        self::assertSame(self::WEB.'/settings/accounts?provider=google&connected='.$id, $this->returnFromProvider('google', $query['state'], 'code-2'));
+        $account = $this->onlyAccount();
+        self::assertSame('unknown', $account->getCalendarStatus()->value);
+        self::assertSame('active', $account->getStatus()->value);
+        $grant = $account->getProviderGrant();
+        self::assertInstanceOf(ProviderGrant::class, $grant);
+        self::assertContains('https://www.googleapis.com/auth/calendar.events', $grant->getScopes());
+        self::assertSame('google-refresh-1', $this->vault()->openGrant($grant)['refreshToken'] ?? null, 'The refresh token Google did not repeat is kept.');
+        $hub = static::getContainer()->get(RecordingMercureHub::class);
+        self::assertInstanceOf(RecordingMercureHub::class, $hub);
+        $woken = array_filter($hub->takePublished(), static fn (array $update): bool => MercureTokens::OUTBOX_TOPIC === $update['body']['topic']);
+        self::assertSame([json_encode(['mailAccountId' => $id])], array_values(array_map(static fn (array $update): string => $update['body']['data'], $woken)));
+    }
+
+    public function testCalendarsAloneNeedAConnectedAccount(): void
+    {
+        $this->client->jsonRequest('POST', '/api/v1/provider-authorizations', ['provider' => 'google', 'features' => ['calendar']], $this->user);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame(['features'], $this->violationPaths());
     }
 
     public function testUnverifiedGoogleAddressIsRefused(): void
