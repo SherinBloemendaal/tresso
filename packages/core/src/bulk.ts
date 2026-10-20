@@ -58,6 +58,8 @@ export interface BulkActionState {
   restored: number
   canUndo: boolean
   error: string | null
+  /** Since when it waits for a mail server that is behind on the user's changes (it stops after an hour). */
+  waitingSince: string | null
   createdAt: string
   finishedAt: string | null
 }
@@ -169,13 +171,14 @@ export function bulkActionLabel(action: BulkAction, conversations: number, folde
 }
 
 /** What to tell the user while an action runs, e.g. "Archiving: 400 conversations done". */
-export function bulkProgressText(state: Pick<BulkActionState, 'action' | 'status' | 'conversations' | 'restored'>): string {
+export function bulkProgressText(state: Pick<BulkActionState, 'action' | 'status' | 'conversations' | 'restored' | 'waitingSince'>): string {
+  const waiting = state.waitingSince === null ? '' : ', waiting for the mail server to catch up'
   if (state.status === 'undoing') {
-    return `Putting back: ${messageCount(state.restored)} so far`
+    return `Putting back: ${messageCount(state.restored)} so far${waiting}`
   }
   const verb = { markRead: 'Marking read', archive: 'Archiving', trash: 'Moving to Trash', move: 'Moving' }[state.action]
 
-  return `${verb}: ${conversationCount(state.conversations)} done`
+  return `${verb}: ${conversationCount(state.conversations)} done${waiting}`
 }
 
 /** What to tell the user once an action or its undo stopped, with what an undo cannot put back. */
