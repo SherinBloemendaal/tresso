@@ -79,6 +79,22 @@ describe('the daily brief', () => {
     expect(threadsToNote(entries)).toEqual(['t1', 't3'])
   })
 
+  it('leaves a conversation moved to another verdict out of the count and out of what is left to note', () => {
+    const { entries } = briefView(dailyBrief('b1', '2026-10-20T08:00:00Z', ['t1', 't2', 't3']), [
+      conversation('t1'),
+      conversation('t2', { verdict: 'do', smartInboxId: 'todo', classificationReason: 'user' }),
+      conversation('t3', { inbox: false }),
+    ])
+
+    expect(entries.map((entry) => [entry.conversation.threadId, entry.noted, entry.moved])).toEqual([
+      ['t1', false, false],
+      ['t2', false, true],
+      ['t3', true, false],
+    ])
+    expect(briefProgress(entries)).toEqual({ noted: 1, total: 2 })
+    expect(threadsToNote(entries)).toEqual(['t1'])
+  })
+
   it('finds the newest brief by the end of its period', () => {
     expect(latestBrief([])).toBeNull()
     expect(latestBrief([dailyBrief('b1', '2026-10-19T08:00:00Z', []), dailyBrief('b2', '2026-10-20T09:00:00+02:00', []), dailyBrief('b0', '2026-10-18T08:00:00Z', [])])?.id).toBe('b2')
