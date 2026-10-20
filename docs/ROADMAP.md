@@ -94,6 +94,10 @@ Delivered in steps, each its own pull request:
   (detected on ingest) or is marked done, the due date is scheduled through Messenger and, when it passes without a
   reply, announced through the notification dispatcher and in the apps, and a one-click nudge replies to the delegate;
   web and mobile clients
+- [x] Daily brief for `know` mail, one-click "Noted": once a day at the user's time in their zone, the conversations
+  judged `know` since the last brief, per smart inbox or sender with subject and snippet, synced to every client;
+  Noted reads and archives through the message actions, with undo; push to phones and desktops and an email digest
+  through the notification preferences (kind `daily_brief`); settings and the brief on the web, the brief on mobile
 - [x] 2.7 Batched delivery and one-click unsubscribe: mail of smart inboxes that deliver in batches (notification and
   advertise by default) held until the user's batch times in their zone and kept out of lists and notifications
   until then, released by a delayed message with a sweep every minute as safety net; for authenticated senders only,
@@ -108,7 +112,6 @@ Still to come in this phase:
   ("takes 30 minutes"), and "Plan automatically" picks the best free slot before the deadline with the meeting time
   finder of C6 (working hours, focus blocks and travel time respected), moving it when the calendar changes
 - Triage mode (one email at a time, D / H / K)
-- Daily brief for `know` mail, one-click "Noted"
 
 Tresso Cloud: AI classification with feedback learning, automatic todo extraction, AI summaries in the daily brief.
 
