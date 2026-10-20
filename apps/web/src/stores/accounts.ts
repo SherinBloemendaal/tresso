@@ -49,10 +49,11 @@ export const useAccountsStore = defineStore('accounts', () => {
 
   /**
    * Starts a sign-in at the provider and returns where to send the browser. With an account id, signs that account in
-   * again (after a failed sign-in), or allows more of it (its calendars). The provider asks for what the account
-   * already allows too, so nothing allowed before is lost.
+   * again (after a failed sign-in), or allows more of it (its calendars). The API also asks for what the account
+   * allows already, so signing in again for mail keeps the calendars, and nothing is asked for that the user did not
+   * choose (a Microsoft tenant may not let its users allow calendars themselves).
    */
-  async function startProviderSignIn(provider: OAuthProviderId, mailAccountId?: string, features: ProviderFeature[] = ['mail', 'calendar']): Promise<string> {
+  async function startProviderSignIn(provider: OAuthProviderId, mailAccountId?: string, features: ProviderFeature[] = ['mail']): Promise<string> {
     const started = await auth.send<ProviderAuthorization>('POST', '/api/v1/provider-authorizations', {
       provider,
       features,
