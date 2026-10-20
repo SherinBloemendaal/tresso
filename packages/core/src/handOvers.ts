@@ -302,6 +302,25 @@ export class HandOverFlow {
     }
   }
 
+  /**
+   * Takes a hand-over back as far as it still can (triage's undo): the forward and the hand-over while the forward has
+   * not left, only the hand-over once it has (the delegate has the mail; nothing waits on them any more). Returns which.
+   */
+  async takeBack(handed: HandedOver): Promise<'undone' | 'withdrawn'> {
+    try {
+      await this.takeBackForward(handed.forwardId, handed.draftId)
+    } catch {
+      await this.withdraw(handed.handOver)
+      return 'withdrawn'
+    }
+    try {
+      await this.deps.api.withdraw(handed.handOver.id)
+    } finally {
+      await this.deps.sync().catch(() => undefined)
+    }
+    return 'undone'
+  }
+
   /** Queues the follow-up (plain text, signed with the account's default signature) as a reply to the delegate. */
   async nudge(handOver: SyncedHandOver, text: string): Promise<Nudged> {
     const signatureId = defaultSignatureOf(this.deps.accounts(), this.deps.signatures(), handOver.mailAccountId)

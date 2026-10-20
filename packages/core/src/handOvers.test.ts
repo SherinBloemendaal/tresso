@@ -296,6 +296,24 @@ describe('HandOverFlow', () => {
     expect(withdrawn).toEqual([])
   })
 
+  it('takes back the forward and the hand-over while the forward has not left', async () => {
+    const handed = await flow.handOver(original, input)
+
+    expect(await flow.takeBack(handed)).toBe('undone')
+
+    expect(cancelled).toEqual(['forward-1'])
+    expect(withdrawn).toEqual(['h1'])
+  })
+
+  it('withdraws only the hand-over once the forward left', async () => {
+    const handed = await flow.handOver(original, input)
+    cancelFails = new Error('This message is sent and can no longer be cancelled.')
+
+    expect(await flow.takeBack(handed)).toBe('withdrawn')
+
+    expect(withdrawn).toEqual(['h1'])
+  })
+
   it('nudges with the signature and an undo window', async () => {
     const open: SyncedHandOver = handOver('h1', 'm1', 'work')
 

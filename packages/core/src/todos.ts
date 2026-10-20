@@ -14,8 +14,14 @@ export interface NewTodo {
   durationMinutes?: number | null
 }
 
-/** A todo made from an email; the title defaults to its subject. Making one again returns the one it has. */
-export type MakeTodoRequest = Partial<NewTodo>
+/**
+ * A todo made from an email; the title defaults to its subject. Making one again returns the one it has. With
+ * `perConversation`, an open todo of another email of the conversation is returned instead of making one (triage).
+ */
+export type MakeTodoRequest = Partial<NewTodo> & { perConversation?: boolean }
+
+/** The answer to making a todo from an email: the todo, and whether this request made it (false: the one there was). */
+export type MadeTodo = Todo & { made: boolean }
 
 /** JSON merge patch: omitted fields stay as they are; null clears the due date, the due time or the duration. */
 export interface TodoUpdate {

@@ -299,6 +299,11 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
     it('finds inbox threads beyond the loaded list, and what a selection holds', async () => {
       expect(await db.listThreadIds({ kind: 'inbox', mailAccountId: null }, () => true)).toEqual(['t1', 't3'])
       expect(await db.listThreadIds({ kind: 'inbox', mailAccountId: 'work' }, (c) => c.unreadCount > 0)).toEqual(['t1'])
+      expect(await db.listThreadIds({ kind: 'inbox', mailAccountId: null }, () => true, 1)).toEqual(['t1'])
+      expect((await db.summaries(['t3', 'gone', 't2'])).map((c) => [c.threadId, c.inbox]).sort()).toEqual([
+        ['t2', false],
+        ['t3', true],
+      ])
 
       expect(await db.describeThreads({ kind: 'inbox', mailAccountId: null }, ['t1', 't2', 't3', 'gone'])).toEqual({
         present: ['t1', 't3'],

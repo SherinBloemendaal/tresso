@@ -20,10 +20,14 @@ export interface NewSmartInbox {
 /** JSON merge patch: omitted fields stay as they are; the lists are replaced as a whole. */
 export type SmartInboxUpdate = Partial<NewSmartInbox>
 
-/** Where the user puts a conversation. Without `verdict` it gets the smart inbox's. */
+/**
+ * Where the user puts a conversation. Without `verdict` it gets the smart inbox's. With `remember: false` only this
+ * conversation moves: no sender rule is made (triage decides one email at a time).
+ */
 export interface ThreadClassificationRequest {
   smartInboxId: string
   verdict?: Verdict
+  remember?: boolean
 }
 
 export interface ThreadClassification {
@@ -43,6 +47,8 @@ export interface ThreadClassification {
      */
     spamOverrules: SpamOverrule | null
   } | null
+  /** This placement; taking it back (`DELETE /threads/{id}/classification?placementId=`) names it. */
+  placementId: string
 }
 
 /** What keeps sending a sender's mail to Spam whatever the user remembered for them. */
