@@ -191,6 +191,7 @@ func (s *session) Write(ctx context.Context, calendar calsync.Calendar, operatio
 		if operation.IfMatch != nil && *operation.IfMatch != current.ChangeKey {
 			return s.conflict(current), nil
 		}
+		w.masterID, w.known = id, current.ChangeKey
 		err = w.update(ctx, current)
 		if err != nil {
 			return w.result(ctx, id, err)
@@ -209,6 +210,26 @@ type writer struct {
 	calendar  calsync.Calendar
 	operation api.CalendarOperation
 	doc       *ical.Component
+	// masterID and known: the series and its changeKey as this attempt read it or as its own last step left it. Any
+	// other changeKey is someone else's change (Exchange changes the master's with every change to the series).
+	masterID string
+	known    string
+}
+
+// settle reads the series' changeKey after a step of this write. One that cannot be read is unknown, and a retry
+// then reports a conflict rather than adopt a version nobody checked.
+func (w *writer) settle(ctx context.Context, err error) error {
+	if err != nil || w.masterID == "" {
+		return err
+	}
+	var key struct {
+		ChangeKey string `json:"changeKey"`
+	}
+	w.known = ""
+	if readErr := w.session.request(ctx, http.MethodGet, eventPath(w.calendar.RemoteID, w.masterID)+"?$select=changeKey", nil, &key); readErr == nil {
+		w.known = key.ChangeKey
+	}
+	return nil
 }
 
 // result reports the write with the event as Graph now has it (with the Teams meeting Graph added).
@@ -237,7 +258,7 @@ func (w *writer) result(ctx context.Context, id string, writeErr error) (api.Ope
 				// Graph writes a series step by step (the master, then each occurrence), and an earlier attempt may
 				// have written part of it: every retry carries Graph's version, so the next attempt resumes from it
 				// instead of conflicting with it, and when none is left Tresso keeps it.
-				s.progress(ctx, w.calendar.RemoteID, id, &result)
+				s.progress(ctx, w.calendar.RemoteID, id, &result, w.known)
 			}
 			return result, accessErr
 		}
@@ -294,6 +315,7 @@ func (w *writer) create(ctx context.Context) (string, error) {
 	if created.ID == "" {
 		return "", errors.New("graph: the new event has no id")
 	}
+	w.masterID, w.known = created.ID, created.ChangeKey
 	w.session.remember(created.ID, d.Start.TimeZone)
 	if d.cancelled {
 		return created.ID, nil
@@ -337,7 +359,7 @@ func (w *writer) patch(ctx context.Context, v *ical.Component, current event, re
 		if !current.IsOrganizer && recurrenceID == nil {
 			return w.respond(ctx, current, "DECLINED")
 		}
-		return s.request(ctx, http.MethodDelete, eventPath(w.calendar.RemoteID, current.ID), nil, nil)
+		return w.settle(ctx, s.request(ctx, http.MethodDelete, eventPath(w.calendar.RemoteID, current.ID), nil, nil))
 	}
 	diff := changes(want.fields, have.fields)
 	if recurrenceID != nil {
@@ -381,7 +403,7 @@ func (w *writer) patch(ctx context.Context, v *ical.Component, current event, re
 		if current.ODataETag != "" {
 			req.Header.Set("If-Match", current.ODataETag)
 		}
-		if err := s.http.JSON(ctx, req, nil); err != nil {
+		if err := w.settle(ctx, s.http.JSON(ctx, req, nil)); err != nil {
 			return err
 		}
 	}
@@ -449,7 +471,7 @@ func (w *writer) respond(ctx context.Context, current event, partstat string) er
 	if w.operation.Comment != nil {
 		body["comment"] = *w.operation.Comment
 	}
-	return w.session.request(ctx, http.MethodPost, eventPath(w.calendar.RemoteID, current.ID, action), body, nil)
+	return w.settle(ctx, w.session.request(ctx, http.MethodPost, eventPath(w.calendar.RemoteID, current.ID, action), body, nil))
 }
 
 // occurrences writes the series' changed and cancelled occurrences.
@@ -509,7 +531,7 @@ func (w *writer) occurrences(ctx context.Context, master event) error {
 					return err
 				}
 				if ok {
-					if err := s.request(ctx, http.MethodDelete, eventPath(w.calendar.RemoteID, instance.ID), nil, nil); err != nil && !gone(err) {
+					if err := w.settle(ctx, s.request(ctx, http.MethodDelete, eventPath(w.calendar.RemoteID, instance.ID), nil, nil)); err != nil && !gone(err) {
 						return err
 					}
 				}
@@ -574,9 +596,15 @@ func (s *session) delete(ctx context.Context, operation api.CalendarOperation) (
 }
 
 // progress puts Graph's id, changeKey and version of the event into a retry.
-func (s *session) progress(ctx context.Context, calendarID, id string, result *api.OperationResult) {
+// A changeKey other than known means someone else changed the event meanwhile (Graph may answer a write that
+// conflicts with a 5xx instead of a 412): that is a conflict, not a version to adopt and overwrite.
+func (s *session) progress(ctx context.Context, calendarID, id string, result *api.OperationResult, known string) {
 	current, found, err := s.fetch(ctx, calendarID, id)
 	if err != nil || !found {
+		return
+	}
+	if known == "" || current.ChangeKey != known {
+		*result = s.conflict(current)
 		return
 	}
 	etag := current.ChangeKey

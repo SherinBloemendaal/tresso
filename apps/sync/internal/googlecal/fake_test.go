@@ -38,6 +38,8 @@ type fakeGoogle struct {
 	failures map[string]int
 	// beforeGet runs, with the fake locked, before every GET, as a change someone makes at Google meanwhile.
 	beforeGet func(path string)
+	// beforeWrite does the same before every other request.
+	beforeWrite func(method, path string)
 }
 
 type fakeEvent struct {
@@ -159,6 +161,9 @@ func (f *fakeGoogle) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if f.beforeGet != nil && r.Method == http.MethodGet {
 		f.beforeGet(r.URL.Path)
+	}
+	if f.beforeWrite != nil && r.Method != http.MethodGet {
+		f.beforeWrite(r.Method, r.URL.Path)
 	}
 	for key, status := range f.failures {
 		method, suffix, _ := strings.Cut(key, " ")

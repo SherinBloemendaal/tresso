@@ -34,6 +34,9 @@ type fakeGraph struct {
 	forbidden bool
 	// failures answers requests whose method and path end like the key with that status, once each.
 	failures map[string]int
+	// beforeWrite runs, with the fake locked, before every request other than a GET, as a change someone makes at
+	// Microsoft meanwhile.
+	beforeWrite func(method, path string)
 	// transactions maps a create's transactionId to the event it made.
 	transactions map[string]string
 }
@@ -217,6 +220,9 @@ func (f *fakeGraph) handle(w http.ResponseWriter, r *http.Request) {
 	if f.forbidden {
 		f.fail(w, http.StatusForbidden, "ErrorAccessDenied")
 		return
+	}
+	if f.beforeWrite != nil && r.Method != http.MethodGet {
+		f.beforeWrite(r.Method, r.URL.Path)
 	}
 	for key, status := range f.failures {
 		method, suffix, _ := strings.Cut(key, " ")

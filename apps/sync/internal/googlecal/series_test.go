@@ -257,7 +257,8 @@ func TestAnEventChangedAtGoogleBeforeItsMoveIsNotMovedOver(t *testing.T) {
 	fake.Queue(api.CalendarOperation{ID: "in", Kind: "put", CalendarRemoteID: "team@group.calendar.google.com", UID: "lunch@google.com", Ical: &text, Notify: true})
 	result(t, fake, "in")
 
-	if out, _ := fake.Result("out"); out.Outcome != api.OperationConflict || out.Current == nil || !strings.Contains(*out.Current.Ical, "Lisa") {
+	// The create is answered by the move, the delete after it.
+	if out := result(t, fake, "out"); out.Outcome != api.OperationConflict || out.Current == nil || !strings.Contains(*out.Current.Ical, "Lisa") {
 		t.Fatalf("the delete is a conflict with Lisa's version: %+v", out)
 	}
 	for _, write := range google.writes() {
@@ -334,5 +335,34 @@ func TestAnOccurrenceThatKeepsFailingStillReportsGooglesVersion(t *testing.T) {
 			t.Fatalf("attempt %d reports Google's version, which Tresso keeps when no attempt is left: %+v", attempt, r)
 		}
 		etag = *r.ETag
+	}
+}
+
+func TestAnEditAtGoogleBeforeAFailedWriteIsAConflictNotAnOverwrite(t *testing.T) {
+	google := newFakeGoogle(t)
+	google.put(calendarID, meetingEvent("lunch", "Lunch"))
+	fake, object := synced(t, google, "lunch")
+	// Lisa edits the event after the worker read it; Google then answers the worker's write with a 503, not a 412.
+	google.mu.Lock()
+	google.beforeWrite = func(method, path string) {
+		if method != http.MethodPatch || !strings.HasSuffix(path, "/events/lunch") || google.beforeWrite == nil {
+			return
+		}
+		e := google.events[calendarID]["lunch"].event
+		e.Summary = "Lunch, Lisa's version"
+		google.store(calendarID, e)
+		google.beforeWrite = nil
+	}
+	google.failures["PATCH /events/lunch"] = http.StatusServiceUnavailable
+	google.mu.Unlock()
+
+	queue(fake, "rename", "lunch", object.ETag, strings.Replace(object.Ical, "SUMMARY:Lunch", "SUMMARY:Brunch", 1), true)
+
+	r := result(t, fake, "rename")
+	if r.Outcome != api.OperationConflict || r.Current == nil || !strings.Contains(*r.Current.Ical, "Lisa's version") {
+		t.Fatalf("a retry would pass the If-Match and overwrite Lisa's edit; it is a conflict: %+v", r)
+	}
+	if e, _ := google.get(calendarID, "lunch"); e.Summary != "Lunch, Lisa's version" {
+		t.Fatalf("summary = %q", e.Summary)
 	}
 }
