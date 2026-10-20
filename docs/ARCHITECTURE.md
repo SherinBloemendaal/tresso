@@ -958,8 +958,9 @@ are there, so a new browser or a phone that was offline starts from what the ser
 Do (D) and hand over (H) place the conversation with that verdict, for this conversation only (`remember: false`): it
 keeps its smart inbox, or goes to Todo when it has none. Know (K) archives it. Each marks the conversation read. Skip
 (J) leaves it as it is. Decisions and undos run one after another in the order the keys were pressed; none is dropped,
-one that fails is reported and the next still runs, and the screen moves on at once (a key pressed while the next
-email loads is for that email). Hooks plug in other features and return how to take back what they did: `afterDo`
+one that fails is reported and the next still runs, and the screen moves on at once. A decision acts on the
+conversation as it was on screen: only the messages shown are archived and read (a reply that arrives meanwhile waits
+for the next round), and deciding keys wait while the next email still loads. Hooks plug in other features and return how to take back what they did: `afterDo`
 (by default `todoOnDo`: do makes the conversation's todo from its newest email someone else sent, with
 `perConversation`, so a conversation that has an open todo gets none) and `handOver` (by default the hand-over dialog
 on the web and the hand-over screen on the phone, opened for triage with `handOverAndWait`, which settles when it
@@ -969,10 +970,13 @@ only once the hook says it was handed over; cancelled, nothing is placed and the
 
 Undo (Z, or the notice's button) takes back one decision, by its id, once that decision is done, and exactly. Do and
 hand over first mark unread what the decision read and take back what the hook did (the todo, only when do made it;
-the hand-over through `HandOverFlow.takeBack`: the forward too while it has not left, only the hand-over once it has),
+the hand-over through `HandOverFlow.takeBack`: the forward too while it has not left, only the hand-over once the copy
+says the forward was sent, and the user is told the delegate has it; when the cancel fails and the forward may still go
+out, the hand-over stays). When that fails, the placement stays too, the mail is read again, and the undo can be tried
+again;
 then `DELETE /threads/{id}/classification?placementId=`: the rules place the conversation again and, as classification
 does for new mail, a smart inbox that asks for todos gives it its automatic todo (unread, recent, `do`, no open todo in
-the conversation). A choice made again elsewhere since stays, and the user is told; a step that failed is tried again
+the conversation, and not one the user deleted before). A choice made again elsewhere since stays, and the user is told; a step that failed is tried again
 from there on the next undo. Know goes back by the archive's undo plan (messages that were in several folders cannot be
 put back, and the notice says how many; what failed to go back is tried again on the next undo), and what it marked
 read is unread again. An undone conversation shows again; when the copy has not synced the undo
@@ -1660,7 +1664,8 @@ planned again. A deadline that has passed, or a duration outside 5 minutes to 24
   judged `do`, unread, and received in the last 7 days (a first sync brings years of old mail). A conversation gets one
   open automatic todo: replies to a conversation with an open todo make none, and once it is done the next reply
   makes a new one. Classifying again (after a rule change or a correction) makes none, and a todo the user deleted
-  does not come back.
+  does not come back: deleting an automatic todo marks its email (`todoDeclinedAt`), and no automatic todo is made for
+  it again, also not when triage's undo lets the rules place the conversation again.
 - Clients: the shared stores keep todos (`todos()`, `todo(id)`, `todosOfThread(threadId)`), and `@tresso/core`
   groups them into Overdue, Today, This week (to Sunday), Later (also those without a date) and Done, labels due dates
   ("Today 17:00", "Fri 23 Oct") and reads a day and time from a quick-add line ("Call Anna friday", "tomorrow 9:00",
