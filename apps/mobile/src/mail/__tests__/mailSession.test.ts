@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { MAX_MESSAGES_PER_ACTION, PartialActionError, type ChangePage, type MessageActionRequest, type SyncedMessage, type SyncedUnsubscription, type UnsubscribeRequest } from '@tresso/core'
+import { MAX_MESSAGES_PER_ACTION, PartialActionError, type ChangePage, type MessageActionRequest, type SyncedHandOver, type SyncedMessage, type SyncedUnsubscription, type UnsubscribeRequest } from '@tresso/core'
 import { databaseName, MailSession, type MailState } from '../mailSession'
 import type { Sql } from '../sql'
 import { memorySql } from '@tresso/core/testing/sql'
@@ -51,6 +51,7 @@ function session(
   fetchPage = async (since: number) => page(since === 0 ? 1 : since, since === 0 ? { mailAccounts: [account] } : {}),
   postAction: (request: MessageActionRequest) => Promise<void> = async () => {},
   postUnsubscribe: (request: UnsubscribeRequest) => Promise<SyncedUnsubscription> = () => Promise.reject(new Error('no unsubscribe in this test')),
+  onOverdue?: (handOvers: SyncedHandOver[]) => void,
 ) {
   const states: MailState[] = []
   const mail = new MailSession({
@@ -71,6 +72,7 @@ function session(
       unscannedLink: () => Promise.reject(new Error('no drafts in this test')),
     },
     onState: (state) => states.push(state),
+    onOverdue,
   })
   return { mail, states, last: () => states[states.length - 1]! }
 }
@@ -303,5 +305,52 @@ describe('MailSession', () => {
     const { mail } = session(device())
 
     await expect(mail.unsubscribe('m1')).rejects.toThrow('Your mail is not open on this phone yet.')
+  })
+
+  it('tells about hand-overs that become overdue, but not about those the first pull brings', async () => {
+    const handOver = (id: string, overdueAt: string | null): SyncedHandOver => ({
+      id,
+      mailAccountId: 'work',
+      messageId: null,
+      threadId: null,
+      subject: `Subject ${id}`,
+      delegate: { address: 'lisa@company.example', name: null },
+      note: '',
+      dueAt: '2026-10-23T15:00:00Z',
+      state: 'open',
+      forwardId: null,
+      overdueAt,
+      nudgedAt: null,
+      lastNudgeId: null,
+      replyMessageId: null,
+      createdAt: '2026-10-20T08:00:00Z',
+      closedAt: null,
+      updatedAt: '2026-10-20T08:00:00Z',
+    })
+    const told: string[][] = []
+    const disk = device()
+    const { mail, last } = session(
+      disk,
+      async (since) =>
+        since === 0
+          ? page(1, { mailAccounts: [account], handOvers: [handOver('old', '2026-10-01T15:00:00Z'), handOver('new', null)] })
+          : since === 1
+            ? page(2, { handOvers: [handOver('new', '2026-10-23T15:00:00Z')] })
+            : page(since),
+      async () => {},
+      undefined,
+      (handOvers) => told.push(handOvers.map((h) => h.id)),
+    )
+
+    await mail.switchTo('kim')
+    await vi.waitFor(async () => expect((await mail.database?.handOvers())?.length).toBe(2))
+    await vi.waitFor(() => expect(last().syncState).toBe('idle'))
+    expect(told).toEqual([])
+
+    await mail.syncNow()
+
+    expect(told).toEqual([['new']])
+    expect((await mail.database!.handOvers()).map((h) => h.id)).toEqual(['new', 'old'])
+    await mail.switchTo(null)
   })
 })

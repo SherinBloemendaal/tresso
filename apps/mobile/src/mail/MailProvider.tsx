@@ -8,6 +8,8 @@ import {
   type Contact,
   type DraftAttachmentLink,
   type DraftSync,
+  type HandOverApi,
+  type SyncedHandOver,
   type SendMessageRequest,
   type SqliteMailStore,
   type SyncedDraft,
@@ -71,6 +73,15 @@ interface Mail extends MailState {
   makeTodo(messageId: string): Promise<Todo>
   /** Checks a todo off or opens it again; the copy is pulled right after. */
   setTodoDone(id: string, done: boolean): Promise<void>
+  /** Every hand-over, in "Waiting on" order. */
+  handOvers(): Promise<SyncedHandOver[]>
+  outgoing(id: string): Promise<SyncedOutgoingMessage | null>
+  /** /api/v1/hand-overs */
+  handOverApi: HandOverApi
+  /** Hand-overs that became overdue and were not told about yet. */
+  overdue: SyncedHandOver[]
+  /** These were told about. */
+  clearOverdue(ids: string[]): void
 }
 
 function json(method: string, body?: unknown): RequestInit {
@@ -87,6 +98,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
   const auth = useAuth()
   const [state, setState] = useState<MailState>({ userId: null, ready: false, version: 0, syncState: 'idle', syncError: null, live: false, pulls: 0 })
   const [lookupError, setLookupError] = useState<string | null>(null)
+  const [overdue, setOverdue] = useState<SyncedHandOver[]>([])
   const session = useMemo(
     () =>
       new MailSession({
@@ -118,6 +130,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
         // expo/fetch streams response bodies, which the realtime connection reads.
         fetch: streamingFetch as unknown as typeof fetch,
         onState: setState,
+        onOverdue: (handOvers) => setOverdue((told) => [...told, ...handOvers]),
         foreground: AppState.currentState === 'active',
       }),
     [auth.session],
@@ -224,6 +237,20 @@ export function MailProvider({ children }: { children: ReactNode }) {
     },
     [todosApi, session],
   )
+  const handOvers = useCallback(async () => (await session.database?.handOvers()) ?? [], [session])
+  const outgoing = useCallback(async (id: string) => (await session.database?.outgoing(id)) ?? null, [session])
+  const handOverApi = useMemo<HandOverApi>(
+    () => ({
+      create: (request) => auth.session.api<SyncedHandOver>('/api/v1/hand-overs', json('POST', request)),
+      update: (id, request) => auth.session.api<SyncedHandOver>(`/api/v1/hand-overs/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/merge-patch+json' }, body: JSON.stringify(request) }),
+      withdraw: async (id) => {
+        await auth.session.api(`/api/v1/hand-overs/${encodeURIComponent(id)}`, json('DELETE'))
+      },
+      nudge: (id, request) => auth.session.api<SyncedHandOver>(`/api/v1/hand-overs/${encodeURIComponent(id)}/nudge`, json('POST', request)),
+    }),
+    [auth.session],
+  )
+  const clearOverdue = useCallback((ids: string[]) => setOverdue((waiting) => waiting.filter((handOver) => !ids.includes(handOver.id))), [])
   const { userId, ready, version, syncState, syncError, live, pulls } = state
   const mail = useMemo<Mail>(
     () => ({
@@ -254,8 +281,13 @@ export function MailProvider({ children }: { children: ReactNode }) {
       messages,
       makeTodo,
       setTodoDone,
+      handOvers,
+      outgoing,
+      handOverApi,
+      overdue,
+      clearOverdue,
     }),
-    [userId, touch, ready, version, syncState, syncError, lookupError, live, pulls, mailAccounts, folders, act, inbox, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, setTodoDone],
+    [userId, touch, ready, version, syncState, syncError, lookupError, live, pulls, mailAccounts, folders, act, inbox, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, setTodoDone, handOvers, outgoing, handOverApi, overdue, clearOverdue],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>
