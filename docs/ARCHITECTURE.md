@@ -425,7 +425,7 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   allocator refuses to run outside one. Different users never wait on each other.
 - `GET /api/v1/sync/changes?since=N&limit=500` (scope `mail:read`) returns mail accounts, folders (with role),
   threads (with their smart inbox, verdict and classification reason), messages (metadata, flags, folder ids, smart
-  inbox and verdict, never bodies), smart inboxes, todos, hand-overs and `deleted` entries above N, plus the new `cursor` and
+  inbox and verdict, never bodies), smart inboxes, todos, hand-overs, daily briefs and `deleted` entries above N, plus the new `cursor` and
   `hasMore`. Threads and messages also carry `heldUntil` and `batchedAt` (batched delivery, 3.7), messages the
   `unsubscribe` method they offer (`oneClick`, `mailto` or null) and the `unsubscribeMailto` address, smart inboxes
   `batchDelivery`, and the page the user's `unsubscriptions` (one per account and sender). A page never splits one
@@ -608,6 +608,46 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
   (`unsubscribeOffer` in `packages/core`) and drop it while a request is pending or once it is done; the answer to
   the request is stored in the local copy at once (`noteUnsubscription`), unless the delta already brought that
   request.
+
+#### Daily brief
+
+Mail judged `know` asks nothing of the user, so it does not interrupt: once a day it comes together in a brief.
+
+- **Settings** (`daily_brief_settings`, one row per user, made with the user; users from before briefs existed get
+  theirs from an hourly backfill or when they first read them): on or off and a delivery time (HH:MM), read in the
+  user's notification time zone (`notification_preferences.time_zone`, which devices keep current). Where the brief
+  goes besides the app, which always shows it, is the notification preferences' channels for kind `daily_brief`
+  (`phone`, `desktop`, `email`; none by default). `GET` and `PUT /api/v1/daily-brief-settings` (scopes
+  `settings:read`, `settings:write`) read and replace the time, on or off, and those channels; the answer adds the
+  zone, the digest address (the notification address) and `nextBriefAt`. `PATCH /api/v1/notification-settings` with
+  `channelsByKind.daily_brief` changes the same channels, and a changed zone moves the next brief. New users get it
+  on, at 08:00, in the app only.
+- **Making it:** Symfony Scheduler sends `SweepDailyBriefs` every minute (transport `scheduler_daily_brief`, consumed
+  by the messenger worker). The sweep claims users whose `next_run_at` passed (`FOR UPDATE SKIP LOCKED`, so sweeps
+  side by side never make the same brief), at most 100 per minute, each in its own transaction. A brief holds the
+  user's conversations whose verdict is `know`, with a message judged `know` in the period, received in the last 7
+  days, and still in an inbox; at most 200, newest first. The period runs from the previous brief's end (the first
+  covers a day, a long pause at most 7 days) to the second before the sweep: the sweep takes the user's
+  classification lock first, so every classification stamped earlier has committed, and times are stored in whole
+  seconds. An empty period makes no brief but still counts as covered. The next run is the next delivery time in the
+  user's zone (a time the clock skips moves on as PHP moves it).
+- **Storage and sync:** `daily_brief` (owner, period, thread ids, made at) is a synced entity: the delta carries
+  `dailyBriefs` and tombstones of type `dailyBrief`. Each user keeps the newest 14. Clients show a brief from their
+  own copy (subject, newest sender and snippet, smart inbox, account), so it needs no endpoint of its own; a
+  conversation of the brief is noted once the inboxes no longer list it.
+- **Noted:** one click marks a conversation read and archives it through the message actions (`POST
+  /api/v1/message-actions`, `markRead` then `archive`); "Mark all noted" (Shift K on the web) does the whole brief.
+  The undo moves the messages back and marks unread what was unread. "Needs me" corrects the conversation to the To
+  do smart inbox with verdict `do`, which is remembered for the sender.
+- **Delivery:** a brief made for a user with channels queues `DeliverDailyBrief` after the commit (transport `push`),
+  which reads the channels again when it runs. Phones and desktops get a push through the `NotificationDispatcher`
+  (delivery key `daily_brief:{id}`, so a retry never notifies a device twice; Android channel `mail`; silent during
+  quiet hours; it opens `/brief`). Email gets a digest instead of the generic notification email: the conversations
+  per smart inbox with sender, snippet and a link, from the system sender (`NOTIFICATIONS_FROM`) with
+  `Auto-Submitted: auto-generated`, to the notification address (the sign-in address or one of the user's mail
+  accounts' addresses, the sign-in address when the chosen account is gone). It goes out once (`emailed_at`, under a
+  row lock).
+- Tresso Cloud adds AI summaries of the brief's conversations; the open edition shows subject and snippet.
 
 ### 3.8 Virus scanning
 
