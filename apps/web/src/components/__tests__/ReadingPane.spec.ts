@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import type { ChangePage, SyncedMessage, SyncedUnsubscription, SyncedHandOver } from '@tresso/core'
@@ -143,6 +143,9 @@ describe('ReadingPane actions', () => {
     sessionStorage.clear()
   })
 
+  // Registered after the teardown above, so it runs first: a pane left mounted would take the next test's shortcuts.
+  enableAutoUnmount(afterEach)
+
   function mountPane() {
     return mount(ReadingPane, { props: { threadId: 't1', backTo: '/' }, global: { plugins: [router] }, attachTo: document.body })
   }
@@ -179,7 +182,6 @@ describe('ReadingPane actions', () => {
     release()
     await vi.waitFor(() => expect(wrapper.text()).toContain('Budget review'))
     expect(wrapper.text()).not.toContain('Loading the conversation')
-    wrapper.unmount()
   })
 
   it('says a conversation could not be loaded when the pull fails, and opens it once a pull works again', async () => {
@@ -197,14 +199,12 @@ describe('ReadingPane actions', () => {
     offline = false
     await wrapper.get('[role="alert"] button').trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('Budget review'))
-    wrapper.unmount()
   })
 
   it('says a conversation is gone once a pull after opening did not bring it', async () => {
     const wrapper = mount(ReadingPane, { props: { threadId: 't9', backTo: '/' }, global: { plugins: [router] }, attachTo: document.body })
 
     await vi.waitFor(() => expect(wrapper.text()).toContain('This conversation no longer exists.'))
-    wrapper.unmount()
   })
 
   it('reads the conversation when it opens', async () => {
@@ -472,7 +472,6 @@ describe('ReadingPane actions', () => {
 
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'h' }))
       await vi.waitFor(() => expect(handOvers.handingOver?.id).toBe('m2'))
-      wrapper.unmount()
     })
 
     it('says who it is handed over to, with a nudge and mark done at hand', async () => {
@@ -489,7 +488,6 @@ describe('ReadingPane actions', () => {
       expect(wrapper.get('.handed a').attributes('href')).toBe('/waiting?nudge=h1')
       await wrapper.get('.handed button').trigger('click')
       expect(markDone).toHaveBeenCalledWith(expect.objectContaining({ id: 'h1' }))
-      wrapper.unmount()
     })
   })
 })
