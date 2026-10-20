@@ -31,6 +31,7 @@ import {
   type SyncedMessage,
   type SyncedOutgoingMessage,
   type SyncedSignature,
+  type SyncedCalendar,
   type SyncedSmartInbox,
   type SyncedThread,
   type SyncedTodo,
@@ -96,6 +97,9 @@ export const useMailStore = defineStore('mail', () => {
 
     return smartInbox.value === null ? { kind: 'inbox', mailAccountId: mailbox.value } : { kind: 'smartInbox', smartInboxId: smartInbox.value }
   })
+  const calendars = ref<SyncedCalendar[]>([])
+  /** Raised whenever the copy may have changed, so views that read more of it (the calendar) read again. */
+  const revision = ref(0)
   const listLimit = ref(LIST_STEP)
   const hasMore = ref(false)
   const syncState = ref<SyncState>('idle')
@@ -343,6 +347,7 @@ export const useMailStore = defineStore('mail', () => {
     conversations.value = []
     unreadCounts.value = new Map()
     smartInboxes.value = []
+    calendars.value = []
     smartInboxCounts.value = new Map()
     todos.value = []
     unsubscriptions.value = []
@@ -371,7 +376,7 @@ export const useMailStore = defineStore('mail', () => {
     if (database === null) {
       return
     }
-    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts, nextTodos, nextUnsubscriptions, nextHandOvers, nextBriefs] = await Promise.all([
+    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts, nextTodos, nextUnsubscriptions, nextHandOvers, nextBriefs, nextCalendars] = await Promise.all([
       database.mailAccounts(),
       database.folders(),
       database.signatures(),
@@ -384,12 +389,15 @@ export const useMailStore = defineStore('mail', () => {
       database.unsubscriptions(),
       database.handOvers(),
       database.dailyBriefs(),
+      database.calendars(),
     ])
     todos.value = nextTodos
     handOvers.value = nextHandOvers
     const newest = nextBriefs[0]
     latestBrief.value = newest === undefined ? null : briefView(newest, await database.conversations(newest.threadIds))
     dailyBriefs.value = nextBriefs
+    calendars.value = nextCalendars
+    revision.value += 1
     smartInboxes.value = nextSmartInboxes
     smartInboxCounts.value = nextSmartCounts
     outbox.value = nextOutbox
@@ -698,6 +706,8 @@ export const useMailStore = defineStore('mail', () => {
     takeOverdue,
     dailyBriefs,
     latestBrief,
+    calendars,
+    revision,
     hasMore,
     syncState,
     pulls,

@@ -12,6 +12,7 @@ import MailboxSidebar from '@/components/MailboxSidebar.vue'
 import ReadingPane from '@/components/ReadingPane.vue'
 import SmartInboxManage from '@/components/SmartInboxManage.vue'
 import UnsubscribeAction from '@/components/UnsubscribeAction.vue'
+import MiniAgenda from '@/components/calendar/MiniAgenda.vue'
 
 const auth = useAuthStore()
 const mail = useMailStore()
@@ -164,7 +165,7 @@ function signOut(): void {
 
       <ReadingPane v-if="threadId" :key="threadId" class="reading-pane" :thread-id="threadId" :back-to="backTo" />
       <div v-else class="reading-pane placeholder">
-        <p>Select a conversation to read it.</p>
+        <MiniAgenda />
       </div>
     </template>
   </div>
@@ -206,10 +207,10 @@ function signOut(): void {
 }
 .placeholder {
   display: flex;
-  align-items: center;
   justify-content: center;
+  overflow-y: auto;
   background: var(--surface);
-  color: var(--ink-3);
+  color: var(--ink);
 }
 
 @media (max-width: 1100px) {

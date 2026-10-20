@@ -22,6 +22,7 @@ const router = createRouter({
     { path: '/todos/:todoId', name: 'todo', component: () => import('@/views/TodosView.vue'), meta: { requiresAuth: true } },
     { path: '/brief', name: 'brief', component: () => import('@/views/DailyBriefView.vue'), meta: { requiresAuth: true } },
     { path: '/brief/:briefId', name: 'brief-edition', component: () => import('@/views/DailyBriefView.vue'), meta: { requiresAuth: true } },
+    { path: '/calendar/:view(day|week|month|agenda)?/:date(\\d{4}-\\d{2}-\\d{2})?', name: 'calendar', component: () => import('@/views/CalendarView.vue'), meta: { requiresAuth: true } },
     { path: '/drafts', name: 'drafts', component: () => import('@/views/DraftsView.vue'), meta: { requiresAuth: true } },
     { path: '/outbox', name: 'outbox', component: () => import('@/views/OutboxView.vue'), meta: { requiresAuth: true } },
     { path: '/waiting', name: 'waiting', component: () => import('@/views/WaitingOnView.vue'), meta: { requiresAuth: true } },

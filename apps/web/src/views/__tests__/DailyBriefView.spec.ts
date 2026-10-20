@@ -140,6 +140,7 @@ describe('DailyBriefView', () => {
         { path: '/brief', name: 'brief', component: DailyBriefView },
         { path: '/brief/:briefId', name: 'brief-edition', component: DailyBriefView },
         { path: '/todos', name: 'todos', component: { template: '<p>todos</p>' } },
+        { path: '/calendar', name: 'calendar', component: { template: '<div />' } },
         { path: '/batches', name: 'batches', component: { template: '<p>batches</p>' } },
         { path: '/cleanup', name: 'cleanup', component: { template: '<p>cleanup</p>' } },
         { path: '/waiting', name: 'waiting', component: { template: '<p>waiting</p>' } },
