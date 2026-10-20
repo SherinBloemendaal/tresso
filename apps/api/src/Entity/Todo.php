@@ -5,31 +5,56 @@ declare(strict_types=1);
 namespace App\Entity;
 
 use App\Enum\TodoSource;
+use App\Repository\TodoRepository;
+use App\Sync\Change\TracksChanges;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
 use Symfony\Component\Uid\Uuid;
 
-#[ORM\Entity]
-#[ORM\Index(columns: ['owner_id', 'completed_at', 'due_at'])]
-class Todo
+/**
+ * Something the user has to do, synced to every device. It may come from an email (made by hand or automatically by a
+ * smart inbox); one email has at most one todo. The due date and time are wall-clock values in the user's own time
+ * zone, like a paper diary: "Friday 17:00" stays Friday 17:00 when the user travels.
+ */
+#[ORM\Entity(repositoryClass: TodoRepository::class)]
+#[ORM\Index(columns: ['owner_id', 'completed_at', 'due_date'])]
+#[ORM\Index(columns: ['owner_id', 'change_seq'])]
+#[ORM\UniqueConstraint(columns: ['message_id'])]
+class Todo implements TracksChanges
 {
+    public const int TITLE_MAX_LENGTH = 500;
+    public const int NOTES_MAX_LENGTH = 10000;
+    /** A todo takes at most a week. */
+    public const int DURATION_MAX_MINUTES = 7 * 24 * 60;
+
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
     private Uuid $id;
+
+    #[ORM\Column(type: Types::BIGINT, options: ['default' => 0])]
+    private int $changeSeq = 0;
 
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(nullable: false, onDelete: 'CASCADE')]
     private User $owner;
 
-    #[ORM\Column(length: 500)]
+    #[ORM\Column(length: self::TITLE_MAX_LENGTH)]
     private string $title;
 
     #[ORM\Column(type: Types::TEXT)]
     private string $notes = '';
 
+    #[ORM\Column(type: Types::DATE_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $dueDate = null;
+
+    /** Only with a due date; null means some time that day. */
+    #[ORM\Column(type: Types::TIME_IMMUTABLE, nullable: true)]
+    private ?\DateTimeImmutable $dueTime = null;
+
+    /** How long it takes, for planning it in the calendar. */
     #[ORM\Column(nullable: true)]
-    private ?\DateTimeImmutable $dueAt = null;
+    private ?int $durationMinutes = null;
 
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $completedAt = null;
@@ -37,7 +62,7 @@ class Todo
     /** The email this todo came from, if any. */
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(onDelete: 'SET NULL')]
-    private ?Message $message = null;
+    private ?Message $message;
 
     #[ORM\Column(length: 16, enumType: TodoSource::class)]
     private TodoSource $source;
@@ -94,14 +119,35 @@ class Todo
         $this->touch();
     }
 
-    public function getDueAt(): ?\DateTimeImmutable
+    public function getDueDate(): ?\DateTimeImmutable
     {
-        return $this->dueAt;
+        return $this->dueDate;
     }
 
-    public function setDueAt(?\DateTimeImmutable $dueAt): void
+    public function getDueTime(): ?\DateTimeImmutable
     {
-        $this->dueAt = $dueAt;
+        return $this->dueTime;
+    }
+
+    /** A time needs a date: without one there is nothing to be due on. */
+    public function setDue(?\DateTimeImmutable $date, ?\DateTimeImmutable $time): void
+    {
+        if (null === $date && null !== $time) {
+            throw new \InvalidArgumentException('A due time needs a due date.');
+        }
+        $this->dueDate = $date;
+        $this->dueTime = $time;
+        $this->touch();
+    }
+
+    public function getDurationMinutes(): ?int
+    {
+        return $this->durationMinutes;
+    }
+
+    public function setDurationMinutes(?int $durationMinutes): void
+    {
+        $this->durationMinutes = $durationMinutes;
         $this->touch();
     }
 
@@ -110,14 +156,26 @@ class Todo
         return $this->completedAt;
     }
 
+    public function isDone(): bool
+    {
+        return null !== $this->completedAt;
+    }
+
+    /** Completing a todo that is done already keeps the moment it was first completed. */
     public function complete(\DateTimeImmutable $at): void
     {
+        if (null !== $this->completedAt) {
+            return;
+        }
         $this->completedAt = $at;
         $this->touch();
     }
 
     public function reopen(): void
     {
+        if (null === $this->completedAt) {
+            return;
+        }
         $this->completedAt = null;
         $this->touch();
     }
@@ -151,6 +209,31 @@ class Todo
     public function getUpdatedAt(): \DateTimeImmutable
     {
         return $this->updatedAt;
+    }
+
+    public function getChangeOwner(): User
+    {
+        return $this->owner;
+    }
+
+    public static function clientFields(): ?array
+    {
+        return null;
+    }
+
+    public static function changeType(): string
+    {
+        return 'todo';
+    }
+
+    public function getChangeSeq(): int
+    {
+        return $this->changeSeq;
+    }
+
+    public function setChangeSeq(int $changeSeq): void
+    {
+        $this->changeSeq = $changeSeq;
     }
 
     private function touch(): void

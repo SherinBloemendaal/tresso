@@ -33,4 +33,7 @@ final class UpdateSmartInbox
 
     #[Assert\Choice(callback: [Verdict::class, 'values'])]
     public ?string $verdict = null;
+
+    /** Only with the `do` verdict; another verdict switches it off. */
+    public ?bool $autoCreateTodo = null;
 }

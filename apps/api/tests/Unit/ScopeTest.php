@@ -28,6 +28,8 @@ final class ScopeTest extends TestCase
         self::assertSame(Scope::MailSend->role(), Scope::ROLE_MAIL_SEND);
         self::assertSame(Scope::CalendarRead->role(), Scope::ROLE_CALENDAR_READ);
         self::assertSame(Scope::CalendarWrite->role(), Scope::ROLE_CALENDAR_WRITE);
+        self::assertSame(Scope::TodosRead->role(), Scope::ROLE_TODOS_READ);
+        self::assertSame(Scope::TodosWrite->role(), Scope::ROLE_TODOS_WRITE);
         self::assertSame(Scope::SettingsRead->role(), Scope::ROLE_SETTINGS_READ);
         self::assertSame(Scope::SettingsWrite->role(), Scope::ROLE_SETTINGS_WRITE);
         self::assertSame(Scope::SignaturesRead->role(), Scope::ROLE_SIGNATURES_READ);

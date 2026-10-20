@@ -74,6 +74,7 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
 
             $smartInbox = new Category($owner, $name, trim($data->instructions), Verdict::from($data->verdict));
             $this->applyLists($data, $smartInbox, $data->includeSenders, $data->excludeSenders);
+            $this->applyAutoCreateTodo($data, $smartInbox, $data->autoCreateTodo);
             $smartInbox->setPosition(max(array_map(static fn (Category $c): int => $c->getPosition(), $existing) ?: [-1]) + 1);
             $this->entityManager->persist($smartInbox);
             $this->entityManager->flush();
@@ -113,6 +114,7 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
         if (null !== $data->verdict) {
             $smartInbox->setVerdict(Verdict::from($data->verdict));
         }
+        $this->applyAutoCreateTodo($data, $smartInbox, $data->autoCreateTodo ?? (Verdict::Do === $smartInbox->getVerdict() && $smartInbox->isAutoCreateTodo()));
         $this->applyLists($data, $smartInbox, $data->includeSenders ?? $smartInbox->getIncludeSenders(), $data->excludeSenders ?? $smartInbox->getExcludeSenders());
         $this->entityManager->flush();
         $this->classification->rulesChanged($owner->getId());
@@ -134,6 +136,15 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
         }
         $smartInbox->setIncludeSenders($include);
         $smartInbox->setExcludeSenders($exclude);
+    }
+
+    /** Todos come from mail to do: the switch needs the `do` verdict. */
+    private function applyAutoCreateTodo(object $input, Category $smartInbox, bool $autoCreateTodo): void
+    {
+        if ($autoCreateTodo && Verdict::Do !== $smartInbox->getVerdict()) {
+            throw self::invalid($input, 'autoCreateTodo', 'Only smart inboxes with the Do verdict can create todos.', $autoCreateTodo);
+        }
+        $smartInbox->setAutoCreateTodo($autoCreateTodo);
     }
 
     /**
