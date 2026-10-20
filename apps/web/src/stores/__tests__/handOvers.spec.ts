@@ -24,6 +24,7 @@ function message(id: string, from: string): SyncedMessage {
     smartInboxId: null,
     verdict: null,
     summary: null,
+    calendarMethod: null,
   }
 }
 
@@ -53,7 +54,7 @@ describe('hand-overs store', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     mail = useMailStore()
-    mail.accounts = [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }]
+    mail.accounts = [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown', calendarStatusDetail: null }]
   })
 
   it("hands over a conversation's newest message from someone else", async () => {

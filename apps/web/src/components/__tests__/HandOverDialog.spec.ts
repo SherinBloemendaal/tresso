@@ -21,6 +21,7 @@ const message: SyncedMessage = {
   smartInboxId: null,
   verdict: 'delegate',
   summary: null,
+  calendarMethod: null,
 }
 
 /** Form validation runs asynchronously; let it finish. */
@@ -123,7 +124,7 @@ describe('HandOverDialog', () => {
     await settle()
 
     expect(wrapper.get('[role="alert"]').text()).toBe('The forward could not be sent.')
-    expect(wrapper.get('textarea').exists()).toBe(true)
+    expect(wrapper.find('textarea').exists()).toBe(true)
     wrapper.unmount()
   })
 

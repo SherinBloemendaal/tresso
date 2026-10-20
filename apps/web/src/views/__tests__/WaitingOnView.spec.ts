@@ -50,7 +50,7 @@ describe('WaitingOnView', () => {
     setActivePinia(createPinia())
     mail = useMailStore()
     handOvers = useHandOversStore()
-    mail.accounts = [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null }]
+    mail.accounts = [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown', calendarStatusDetail: null }]
     mail.handOvers = [
       handOver('late', { dueAt: '2026-10-23T15:00:00Z', subject: 'Invoice question' }),
       handOver('nudged', { dueAt: '2026-10-28T15:00:00Z', nudgedAt: '2026-10-22T10:00:00Z', lastNudgeId: 'n1' }),
