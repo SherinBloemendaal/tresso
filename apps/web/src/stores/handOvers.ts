@@ -60,30 +60,74 @@ export const useHandOversStore = defineStore('handOvers', () => {
 
   /** The message being handed over in the dialog; null while it is closed. */
   const handingOver = ref<SyncedMessage | null>(null)
+  /** Who waits for the dialog's outcome (triage), and gives the notice itself; null when the dialog was opened plainly. */
+  let waiter: ((handed: HandedOver | null) => void) | null = null
 
   function open(message: SyncedMessage): void {
     handingOver.value = message
   }
 
-  /** Opens the dialog for a conversation: its newest message from someone else, or its newest at all. */
-  async function openForThread(threadId: string): Promise<void> {
+  /** The message a conversation is handed over by: its newest from someone else, or its newest at all. */
+  async function messageOf(threadId: string): Promise<SyncedMessage | null> {
     const found = await mail.thread(threadId)
     if (found === null || found.messages.length === 0) {
-      compose.notify({ text: 'This conversation no longer exists.', tone: 'error' })
-      return
+      return null
     }
     const own = new Set(mail.accounts.map((account) => account.emailAddress.toLowerCase()))
     const incoming = found.messages.filter((message) => !own.has(message.from.address.toLowerCase()))
-    open(incoming[incoming.length - 1] ?? found.messages[found.messages.length - 1]!)
+    return incoming[incoming.length - 1] ?? found.messages[found.messages.length - 1]!
+  }
+
+  /** Opens the dialog for a conversation. */
+  async function openForThread(threadId: string): Promise<void> {
+    const message = await messageOf(threadId)
+    if (message === null) {
+      compose.notify({ text: 'This conversation no longer exists.', tone: 'error' })
+      return
+    }
+    open(message)
+  }
+
+  /**
+   * Opens the dialog for a conversation and settles once it closes: with the hand-over, or null when the user closed
+   * it without handing over. The caller gives the notice (and its undo, see {@link takeBack}).
+   */
+  async function handOverAndWait(threadId: string): Promise<HandedOver | null> {
+    const message = await messageOf(threadId)
+    if (message === null) {
+      throw new Error('This conversation no longer exists.')
+    }
+    settle(null)
+    return new Promise((resolve) => {
+      waiter = resolve
+      open(message)
+    })
+  }
+
+  function settle(handed: HandedOver | null): void {
+    const waiting = waiter
+    waiter = null
+    waiting?.(handed)
   }
 
   function close(): void {
     handingOver.value = null
+    settle(null)
+  }
+
+  /** Takes a hand-over back as far as it still can (see HandOverFlow.takeBack). */
+  function takeBack(handed: HandedOver): Promise<'undone' | 'withdrawn'> {
+    return flow.takeBack(handed)
   }
 
   /** Forwards and records it; the notice offers Undo until the forward leaves. Throws when it did not work. */
   async function handOver(message: SyncedMessage, input: HandOverInput): Promise<void> {
     const handed = await flow.handOver(message, input)
+    if (waiter !== null) {
+      handingOver.value = null
+      settle(handed)
+      return
+    }
     close()
     const who = input.delegate.name?.trim() || input.delegate.address
     compose.notify({ text: `Handed over to ${who}.`, tone: 'info', action: { label: 'Undo', run: () => void undo(handed) } }, Math.max(1000, handed.until - Date.now()))
@@ -173,5 +217,5 @@ export const useHandOversStore = defineStore('handOvers', () => {
     },
   )
 
-  return { handingOver, open, openForThread, close, handOver, nudge, editFollowUp, markDone, reopen, reschedule }
+  return { handingOver, open, openForThread, handOverAndWait, takeBack, close, handOver, nudge, editFollowUp, markDone, reopen, reschedule }
 })

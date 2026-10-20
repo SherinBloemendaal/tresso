@@ -85,7 +85,7 @@ describe('classifying a conversation', () => {
         if (refuse) {
           return new Response(JSON.stringify({ detail: 'This smart inbox does not exist.' }), { status: 422 })
         }
-        return new Response(JSON.stringify({ threadId: 't1', smartInboxId: 'todo', verdict: 'delegate', reason: 'user', senderRule: null }))
+        return new Response(JSON.stringify({ threadId: 't1', smartInboxId: 'todo', verdict: 'delegate', reason: 'user', senderRule: null, placementId: 'p1' }))
       }),
     )
     await useMailStore().start(USER)

@@ -80,23 +80,26 @@ export function useMessageActions(busy: Ref<boolean> = ref(false)) {
     return applied
   }
 
-  async function undo(moves: UndoMove[]): Promise<void> {
-    let failed = 0
+  /** Puts back what an undo plan moves; says what could not be. Returns the moves that failed, to try again. */
+  async function undo(moves: UndoMove[]): Promise<UndoMove[]> {
+    const failed: UndoMove[] = []
     let reason = ''
     for (const move of moves) {
       try {
         await mail.act(move.messageIds, 'move', { folderId: move.folderId, fromFolderId: move.fromFolderId })
       } catch (error) {
-        failed += move.messageIds.length
+        failed.push(move)
         reason = errorMessage(error)
       }
     }
-    if (failed > 0) {
-      compose.notify({ text: `${failed === 1 ? 'One message' : `${failed} messages`} could not be put back: ${reason}`, tone: 'error' })
+    const count = failed.reduce((sum, move) => sum + move.messageIds.length, 0)
+    if (count > 0) {
+      compose.notify({ text: `${count === 1 ? 'One message' : `${count} messages`} could not be put back: ${reason}`, tone: 'error' })
     }
+    return failed
   }
 
-  return { busy, after, run, exclusive, relocate }
+  return { busy, after, run, exclusive, relocate, undo }
 }
 
 /** Whether a key press is meant for shortcuts: not typing, not writing, not in a menu, not held, no modifiers. */

@@ -72,7 +72,7 @@ describe('classifying from the conversation list', () => {
           return new Response(JSON.stringify(since === 0 ? first : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [], smartInboxes: [], handOvers: [] }))
         }
         if (url.pathname === '/api/v1/threads/t1/classification') {
-          return new Response(JSON.stringify({ threadId: 't1', smartInboxId: 'info', verdict: 'know', reason: 'user', senderRule: { id: 'r1', sender: 'news@bank.example', verdict: null, spamOverrules: 'server_spam' } }))
+          return new Response(JSON.stringify({ threadId: 't1', smartInboxId: 'info', verdict: 'know', reason: 'user', senderRule: { id: 'r1', sender: 'news@bank.example', verdict: null, spamOverrules: 'server_spam' }, placementId: 'p1' }))
         }
         return new Response('{}', { status: 404 })
       }),

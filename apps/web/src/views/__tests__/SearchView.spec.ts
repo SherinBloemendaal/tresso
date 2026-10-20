@@ -100,6 +100,7 @@ describe('SearchView', () => {
         { path: '/waiting', name: 'waiting', component: { template: '<div />' } },
         { path: '/brief', name: 'brief', component: { template: '<div />' } },
         { path: '/calendar', name: 'calendar', component: { template: '<div />' } },
+        { path: '/triage', name: 'triage', component: { template: '<div />' } },
         { path: '/accounts/:accountId', name: 'account', component: { template: '<div />' } },
         { path: '/settings/accounts', name: 'settings-accounts', component: { template: '<div />' } },
         { path: '/settings/accounts/new', name: 'settings-accounts-new', component: { template: '<div />' } },

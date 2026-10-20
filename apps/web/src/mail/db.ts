@@ -597,16 +597,29 @@ export class IndexedDbMailStore implements MailStore {
    * Threads of a list matching a test, newest first, however many there are: for selecting beyond the part of the list
    * that is loaded.
    */
-  async listThreadIds(scope: ListScope, matches: (conversation: ConversationSummary) => boolean): Promise<string[]> {
+  async listThreadIds(scope: ListScope, matches: (conversation: ConversationSummary) => boolean, limit?: number): Promise<string[]> {
     const tx = this.db.transaction('conversations')
     const ids: string[] = []
-    for (let cursor = await openList(tx.store, scope); cursor !== null; cursor = await cursor.continue()) {
+    for (let cursor = await openList(tx.store, scope); cursor !== null && (limit === undefined || ids.length < limit); cursor = await cursor.continue()) {
       if (matches(toSummary(cursor.value))) {
         ids.push(cursor.value.threadId)
       }
     }
 
     return ids
+  }
+
+  async summaries(threadIds: string[]): Promise<ConversationSummary[]> {
+    const tx = this.db.transaction('conversations')
+    const found: ConversationSummary[] = []
+    for (const threadId of threadIds) {
+      const stored = await tx.store.get(threadId)
+      if (stored !== undefined) {
+        found.push(toSummary(stored))
+      }
+    }
+
+    return found
   }
 
   /**

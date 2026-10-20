@@ -38,6 +38,7 @@ const paths = {
   bell: ['M6 9a6 6 0 1112 0c0 6 3 7 3 7H3s3-1 3-7', 'M10 20a2 2 0 004 0'],
   plus: ['M12 5v14', 'M5 12h14'],
   next: ['M9 6l6 6-6 6'],
+  triage: ['M4 6h16', 'M4 12h9', 'M4 18h9', 'M15 15l2.5 2.5L21 13'],
 } as const
 
 defineProps<{ name: keyof typeof paths; size?: number; label?: string }>()
