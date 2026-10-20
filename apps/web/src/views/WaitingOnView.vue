@@ -6,7 +6,7 @@ import { toTypedSchema } from '@vee-validate/zod'
 import { z } from 'zod'
 import { firstName, handOverStatus, nudgeStands, nudgeText, type HandOverStatus, type SyncedHandOver, type SyncedOutgoingMessage } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
-import { pickedDue } from '@/forms/handOver'
+import { dayValue, pickedDue } from '@/forms/handOver'
 import { provideRequiredFields } from '@/forms/required'
 import { dueLabel, senderName, shortDue } from '@/mail/format'
 import { useAuthStore } from '@/stores/auth'
@@ -106,12 +106,14 @@ const dueSchema = z.object({
     .refine((day) => (pickedDue(day)?.getTime() ?? 0) > Date.now(), 'Pick a day that is still ahead.'),
 })
 provideRequiredFields(followUpSchema, dueSchema)
-const { defineField, handleSubmit, errors, resetForm } = useForm<z.infer<typeof followUpSchema>>({
+const { defineField, handleSubmit, errors, resetForm, isSubmitting } = useForm<z.infer<typeof followUpSchema>>({
   validationSchema: toTypedSchema(followUpSchema),
   initialValues: { text: '' },
 })
 const [text] = defineField('text')
 const ui = reactive({ busy: false, error: null as string | null })
+/** A follow-up is under way: from the first press on, while the form validates, until the server answered. */
+const sending = computed(() => isSubmitting.value || ui.busy)
 const account = computed(() => mail.accounts.find((candidate) => candidate.id === nudging.value?.mailAccountId) ?? null)
 
 // Each hand-over gets a fresh suggestion when its panel opens.
@@ -158,7 +160,10 @@ async function noLongerWaiting(handOver: SyncedHandOver): Promise<void> {
 function keydown(event: KeyboardEvent): void {
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault()
-    void send()
+    // A second press while the first is on its way would nudge the delegate twice.
+    if (!sending.value) {
+      void send()
+    }
   }
 }
 
@@ -171,7 +176,8 @@ const moveDue = dueForm.handleSubmit(async (values) => {
     dueForm.resetForm()
   }
 })
-const minDay = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
+// Today in the user's own calendar; a day whose due time passed already is refused by the schema.
+const minDay = dayValue(new Date())
 </script>
 
 <template>
@@ -253,7 +259,7 @@ const minDay = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
             <span><strong>About</strong> {{ nudging.subject || '(no subject)' }}</span>
             <span><strong>Due</strong> {{ dueLabel(nudging.dueAt) }}</span>
           </div>
-          <form class="draft" novalidate @submit.prevent="send" @keydown="keydown">
+          <form class="draft" novalidate @submit.prevent="!sending && send()" @keydown="keydown">
             <label class="suggested">
               <FieldLabel name="text" class="suggested-label">Suggested follow-up for {{ firstName(nudging.delegate) }}</FieldLabel>
               <textarea v-model="text" rows="8" :aria-invalid="errors.text ? 'true' : undefined" />
@@ -261,9 +267,9 @@ const minDay = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
             <small v-if="errors.text" class="error">{{ errors.text }}</small>
             <p v-if="ui.error" class="error" role="alert">{{ ui.error }}</p>
             <div class="buttons">
-              <button type="submit" class="button button-primary" :disabled="ui.busy">{{ ui.busy ? 'Sending…' : 'Send follow-up' }} <kbd>Cmd Enter</kbd></button>
-              <button type="button" class="button button-quiet" :disabled="ui.busy" @click="editFirst">Edit first</button>
-              <button type="button" class="button button-quiet" :disabled="ui.busy" @click="noLongerWaiting(nudging)">No longer waiting</button>
+              <button type="submit" class="button button-primary" :disabled="sending">{{ sending ? 'Sending…' : 'Send follow-up' }} <kbd>Cmd Enter</kbd></button>
+              <button type="button" class="button button-quiet" :disabled="sending" @click="editFirst">Edit first</button>
+              <button type="button" class="button button-quiet" :disabled="sending" @click="noLongerWaiting(nudging)">No longer waiting</button>
             </div>
           </form>
           <p class="fine">

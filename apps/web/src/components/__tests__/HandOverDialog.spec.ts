@@ -128,6 +128,32 @@ describe('HandOverDialog', () => {
     wrapper.unmount()
   })
 
+  it('forwards once when Cmd+Enter is pressed again while the first is on its way', async () => {
+    let finish!: () => void
+    handOver.mockImplementation(() => new Promise<void>((resolve) => (finish = resolve)))
+    const wrapper = mountDialog()
+    await chooseLisa(wrapper)
+
+    await wrapper.get('[role="dialog"]').trigger('keydown', { key: 'Enter', metaKey: true })
+    await wrapper.get('[role="dialog"]').trigger('keydown', { key: 'Enter', metaKey: true })
+    await settle()
+    await wrapper.get('[role="dialog"]').trigger('keydown', { key: 'Enter', ctrlKey: true })
+    await settle()
+
+    expect(handOver).toHaveBeenCalledTimes(1)
+    finish()
+    wrapper.unmount()
+  })
+
+  it('lets a day be picked from today on, in the local calendar', () => {
+    const wrapper = mountDialog()
+
+    return wrapper.findAll('input[name="due"]')[3]!.setValue(true).then(() => {
+      expect(wrapper.get('input[type="date"]').attributes('min')).toBe('2026-10-20')
+      wrapper.unmount()
+    })
+  })
+
   it('closes on Escape', async () => {
     const close = vi.spyOn(handOvers, 'close')
     const wrapper = mountDialog()
