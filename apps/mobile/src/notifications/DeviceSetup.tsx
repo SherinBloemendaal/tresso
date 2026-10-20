@@ -3,7 +3,7 @@ import { AppState, Platform } from 'react-native'
 import { useAuth } from '@/auth/AuthProvider'
 import { useNotices } from '@/components/Notices'
 import { createReminderChannels } from './channels'
-import { startTimeZoneSync } from './timeZone'
+import { startTimeZoneSync, storedSentZone } from './timeZone'
 
 /**
  * What the phone sets up for reminders: the Android channels the API's pushes name, at launch, and, once signed in,
@@ -24,11 +24,22 @@ export function DeviceSetup() {
     if (!signedIn) {
       return
     }
-    return startTimeZoneSync(
-      (path, init) => auth.session.api(path, init),
-      AppState,
-      (error) => notices.notify({ text: `Reminders may come at the wrong time: your time zone could not be saved (${error instanceof Error ? error.message : String(error)}).`, tone: 'error' }),
-    )
+    const report = (error: unknown) => notices.notify({ text: `Reminders may come at the wrong time: your time zone could not be saved (${error instanceof Error ? error.message : String(error)}).`, tone: 'error' })
+    let stop: (() => void) | null = null
+    let current = true
+    // The zone this phone sent is remembered per user, so a restart (or another user here) decides right.
+    auth.session
+      .me()
+      .then((me) => {
+        if (current) {
+          stop = startTimeZoneSync((path, init) => auth.session.api(path, init), storedSentZone(me.id), AppState, report)
+        }
+      })
+      .catch(report)
+    return () => {
+      current = false
+      stop?.()
+    }
   }, [signedIn, auth.session, notices])
 
   return null

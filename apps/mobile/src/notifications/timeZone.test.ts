@@ -1,37 +1,62 @@
-import { describe, expect, it } from 'vitest'
-import { startTimeZoneSync } from './timeZone'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const items = vi.hoisted(() => new Map<string, string>())
+
+vi.mock('expo-secure-store', () => ({
+  getItemAsync: async (key: string) => items.get(key) ?? null,
+  setItemAsync: async (key: string, value: string) => {
+    items.set(key, value)
+  },
+}))
+
+const { startTimeZoneSync, storedSentZone } = await import('./timeZone')
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-describe('startTimeZoneSync', () => {
-  it('sends the phone zone once signed in and again when the app comes back in another zone', async () => {
-    let serverZone = 'UTC'
-    const patches: unknown[] = []
-    const api = async <T>(_path: string, init: RequestInit = {}): Promise<T> => {
-      if (init.method === 'PATCH') {
-        const body = JSON.parse(String(init.body)) as { timeZone: string }
-        patches.push(body)
-        serverZone = body.timeZone
-      }
-      return { timeZone: serverZone } as T
-    }
-    const listeners: ((state: string) => void)[] = []
-    const appState = { addEventListener: (_type: 'change', listener: (state: string) => void) => (listeners.push(listener), { remove: () => listeners.splice(listeners.indexOf(listener), 1) }) }
-    let zone = 'Europe/Amsterdam'
+function fakeApi() {
+  const patches: unknown[] = []
+  const api = async <T>(_path: string, init: RequestInit = {}): Promise<T> => {
+    patches.push(JSON.parse(String(init.body)))
+    return {} as T
+  }
+  return { api, patches }
+}
 
-    const stop = startTimeZoneSync(api, appState, (error) => { throw error }, () => zone)
+function fakeAppState() {
+  const listeners: ((state: string) => void)[] = []
+  return {
+    listeners,
+    addEventListener: (_type: 'change', listener: (state: string) => void) => (listeners.push(listener), { remove: () => listeners.splice(listeners.indexOf(listener), 1) }),
+    emit: (state: string) => listeners.forEach((listener) => listener(state)),
+  }
+}
+
+describe('startTimeZoneSync', () => {
+  beforeEach(() => items.clear())
+
+  it('sends the zone once, not again after a restart, and again when the app comes back in another zone', async () => {
+    const first = fakeApi()
+    let zone = 'Europe/Amsterdam'
+    const stopFirst = startTimeZoneSync(first.api, storedSentZone('kim'), fakeAppState(), (error) => { throw error }, () => zone)
     await settle()
-    expect(patches).toEqual([{ timeZone: 'Europe/Amsterdam' }])
+    expect(first.patches).toEqual([{ timeZone: 'Europe/Amsterdam' }])
+    stopFirst()
+
+    const restarted = fakeApi()
+    const appState = fakeAppState()
+    const stop = startTimeZoneSync(restarted.api, storedSentZone('kim'), appState, (error) => { throw error }, () => zone)
+    await settle()
+    expect(restarted.patches).toEqual([])
 
     zone = 'Asia/Tokyo'
-    listeners.forEach((listener) => listener('background'))
+    appState.emit('background')
     await settle()
-    expect(patches).toHaveLength(1)
-    listeners.forEach((listener) => listener('active'))
+    expect(restarted.patches).toEqual([])
+    appState.emit('active')
     await settle()
-    expect(patches).toEqual([{ timeZone: 'Europe/Amsterdam' }, { timeZone: 'Asia/Tokyo' }])
+    expect(restarted.patches).toEqual([{ timeZone: 'Asia/Tokyo' }])
 
     stop()
-    expect(listeners).toHaveLength(0)
+    expect(appState.listeners).toHaveLength(0)
   })
 })

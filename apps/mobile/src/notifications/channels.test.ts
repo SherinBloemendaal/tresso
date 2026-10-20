@@ -15,11 +15,11 @@ const { createReminderChannels } = await import('./channels')
 describe('createReminderChannels', () => {
   beforeEach(() => created.clear())
 
-  it('creates the channels the API sends reminders on, the silent one without sound', async () => {
+  it('creates the channels the API sends reminders on: a banner with sound, and a silent one', async () => {
     await createReminderChannels('android')
 
     expect([...created.keys()]).toEqual(['reminders', 'reminders_silent'])
-    expect(created.get('reminders')).toMatchObject({ importance: 3, sound: 'default' })
+    expect(created.get('reminders')).toMatchObject({ importance: 4, sound: 'default' })
     expect(created.get('reminders_silent')).toMatchObject({ importance: 2, sound: null, enableVibrate: false })
   })
 
