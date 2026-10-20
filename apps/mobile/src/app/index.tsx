@@ -99,9 +99,12 @@ function SignedIn({ styles }: { styles: Styles }) {
     let current = true
     void mailAccounts().then((list) => current && setAccounts(list.length))
     void (store()?.drafts() ?? Promise.resolve([])).then((list) => current && setDrafts(list.filter((draft) => draft.outgoingId === null).length))
-  const [openTodos, setOpenTodos] = useState(0)
-  const [waiting, setWaiting] = useState(0)
-  const { mailAccounts, store, todos, version, handOvers } = mail
+    void todos().then((list) => current && setOpenTodos(list.filter((todo) => todo.completedAt === null).length))
+    void handOvers().then((list) => current && setWaiting(list.filter((handOver) => handOver.state === 'open').length))
+    return () => {
+      current = false
+    }
+  }, [mailAccounts, store, todos, version, handOvers])
 
   return (
     <View style={styles.fill}>
