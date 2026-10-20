@@ -66,6 +66,7 @@ function session(
       attach: () => Promise.reject(new Error('no drafts in this test')),
       forward: () => Promise.reject(new Error('no drafts in this test')),
       detach: () => Promise.reject(new Error('no drafts in this test')),
+      unscannedLink: () => Promise.reject(new Error('no drafts in this test')),
     },
     onState: (state) => states.push(state),
   })
@@ -162,6 +163,7 @@ describe('MailSession', () => {
       receivedAt: '2026-10-19T08:00:00Z',
       flags: { seen: false, flagged: false, answered: false, draft: false },
       hasAttachments: false,
+      attachmentScan: null,
       smartInboxId: null,
       verdict: null,
       summary: null,

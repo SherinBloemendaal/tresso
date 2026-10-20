@@ -38,6 +38,7 @@ function message(id: string, receivedAt: string, verdict: SyncedMessage['verdict
     receivedAt,
     flags: { seen: false, flagged: false, answered: false, draft: false },
     hasAttachments: false,
+    attachmentScan: null,
     smartInboxId: null,
     verdict,
     summary: null,

@@ -1,5 +1,7 @@
 /** Wire format of GET /api/v1/search, and helpers for the search box syntax. */
 
+import type { ScanStatus } from './sync/types'
+
 /** A piece of result text; `match` marks what matched the query. Render as text, never as HTML. */
 export interface HighlightSegment {
   text: string
@@ -13,6 +15,8 @@ export interface SearchAttachment {
   size: number
   /** Whether the filename matched the query. */
   matched: boolean
+  /** What the virus scan said; null for messages not indexed again since scanning came. */
+  scanStatus: ScanStatus | null
 }
 
 export interface SearchHit {

@@ -68,6 +68,7 @@ function toSummary(stored: StoredConversation): ConversationSummary {
     unreadCount: stored.unreadCount,
     flagged: stored.flagged,
     hasAttachments: stored.hasAttachments,
+    attachmentsBlocked: stored.attachmentsBlocked,
     senders: stored.senders,
     inbox: stored.inbox === 1,
     active: stored.active === 1,

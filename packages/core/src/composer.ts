@@ -1,7 +1,7 @@
 import { isPlausibleAddress, quotedInlineImages, quoteWithContentId, withInlineLinks, type SendMessageRequest } from './compose'
 import { AttachmentsNeedTheServer, defaultSignatureOf, newDraft, reopenedDraft, replyDraft, sendRequest, sentOutcome, withEdits, withoutLink, type AttachmentFile, type DraftSync } from './drafts'
 import { CopyClosingError, type Draft, type MailStore } from './store/mailStore'
-import type { Address, DraftAttachment, MessageAttachment, MessageBody, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature } from './sync/types'
+import type { Address, AttachmentAccess, DraftAttachment, MessageAttachment, MessageBody, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature } from './sync/types'
 
 /** Seconds a sent message waits before it goes out, so "Undo" can still stop it. */
 export const UNDO_SECONDS = 5
@@ -20,7 +20,7 @@ export interface ComposerNotice {
 export interface ComposerDeps {
   store(): MailStore | null
   /** The parts of DraftSync writing mail uses. */
-  drafts: Pick<DraftSync, 'upload' | 'resolveConflict' | 'deleteEverywhere' | 'uploadForSending' | 'attach' | 'forward' | 'detach' | 'links'>
+  drafts: Pick<DraftSync, 'upload' | 'resolveConflict' | 'deleteEverywhere' | 'uploadForSending' | 'attach' | 'forward' | 'detach' | 'links' | 'unscannedLink'>
   accounts(): SyncedMailAccount[]
   signatures(): SyncedSignature[]
   /** The account a new message is written from: the one on screen, or the first. */
@@ -54,6 +54,12 @@ export interface ComposerState {
   undoable: { outgoingId: string; draftId: string; until: number } | null
   /** Files being attached to the open draft right now, by name. */
   attaching: string[]
+  /**
+   * The server would only send the draft once the user confirms its files that could not be scanned for malware:
+   * the reason to show, and the send time asked for (null: right away). `sendAnyway()` confirms, `keepEditing()`
+   * does not.
+   */
+  unscannedToConfirm: { message: string; sendAt: number | null } | null
 }
 
 /**
@@ -62,7 +68,7 @@ export interface ComposerState {
  * "Undo" can stop it. Screens read `state` and are told of changes through `subscribe`.
  */
 export class Composer {
-  private current: ComposerState = { draft: null, revision: 0, savedAt: null, sending: false, error: null, violations: {}, conflict: false, undoable: null, attaching: [] }
+  private current: ComposerState = { draft: null, revision: 0, savedAt: null, sending: false, error: null, violations: {}, conflict: false, undoable: null, attaching: [], unscannedToConfirm: null }
   private readonly listeners = new Set<() => void>()
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private undoTimer: ReturnType<typeof setTimeout> | null = null
@@ -208,12 +214,22 @@ export class Composer {
   }
 
   /** A fresh link to open one of the open draft's files, or null when it is quarantined or gone. */
-  async attachmentLink(attachmentId: string): Promise<string | null> {
+  /**
+   * A fresh link to one of the open draft's files, with what the scan allows: `url` only for a clean file; for one
+   * that could not be scanned (`confirm`) ask the user, then call `unscannedAttachmentLink()`.
+   */
+  async attachmentLink(attachmentId: string): Promise<{ url: string | null; access: AttachmentAccess } | null> {
     const draft = this.current.draft
     if (draft === null) {
       return null
     }
-    return (await this.deps.drafts.links(draft.id)).find((link) => link.id === attachmentId)?.url ?? null
+    const link = (await this.deps.drafts.links(draft.id)).find((file) => file.id === attachmentId)
+    return link === undefined ? null : { url: link.url, access: link.access }
+  }
+
+  /** A link to a file that could not be scanned, for a user who confirmed they accept that. */
+  async unscannedAttachmentLink(attachmentId: string): Promise<string> {
+    return (await this.deps.drafts.unscannedLink(attachmentId)).url
   }
 
   /**
@@ -452,8 +468,11 @@ export class Composer {
     return draft.html.length > MAX_HTML ? 'The message is too long.' : null
   }
 
-  /** Sends now (after the undo window) or at a chosen time. */
-  async send(sendAt?: Date): Promise<void> {
+  /**
+   * Sends now (after the undo window) or at a chosen time. Files that could not be scanned only go along once the
+   * user confirmed them: without `acceptUnscanned`, the server's question ends up in `unscannedToConfirm`.
+   */
+  async send(sendAt?: Date, acceptUnscanned = false): Promise<void> {
     const draft = this.current.draft
     if (draft === null || this.current.sending) {
       return
@@ -472,7 +491,7 @@ export class Composer {
       this.set({ error: problem })
       return
     }
-    this.set({ sending: true, error: null, violations: {} })
+    this.set({ sending: true, error: null, violations: {}, unscannedToConfirm: null })
     // The draft goes up first, so the server can take it (and its Drafts folder copy) away when the message is queued.
     this.clearSaveTimer()
     try {
@@ -483,7 +502,7 @@ export class Composer {
       }
       // Worked out after the upload: the undo window is the time between queueing and sending.
       const at = sendAt ?? new Date(Date.now() + this.undoSeconds * 1000)
-      const outgoing = await this.deps.send(sendRequest(draft, this.deps.signatures(), at, onServer))
+      const outgoing = await this.deps.send(sendRequest(draft, this.deps.signatures(), at, onServer, acceptUnscanned))
       await store.changeDraft(draft.id, (stored) => ({ ...(stored ?? draft), outgoingId: outgoing.id, pendingSave: false, updatedAt: Date.now() }))
       this.deps.changed?.()
       if (this.current.draft?.id === draft.id) {
@@ -497,7 +516,10 @@ export class Composer {
       }
     } catch (error) {
       const { message, violations } = this.deps.explain(error)
-      if (this.current.draft?.id === draft.id) {
+      const unscanned = violations.acceptUnscanned
+      if (unscanned !== undefined && this.current.draft?.id === draft.id) {
+        this.set({ unscannedToConfirm: { message: unscanned, sendAt: sendAt?.getTime() ?? null } })
+      } else if (this.current.draft?.id === draft.id) {
         this.set({ error: message, violations })
       } else {
         // Another draft took the screen meanwhile: this one is in Drafts, offered for another try.
@@ -509,6 +531,21 @@ export class Composer {
     } finally {
       this.set({ sending: false })
     }
+  }
+
+  /** The user confirmed sending the files that could not be scanned. */
+  async sendAnyway(): Promise<void> {
+    const asked = this.current.unscannedToConfirm
+    if (asked === null) {
+      return
+    }
+    this.set({ unscannedToConfirm: null })
+    await this.send(asked.sendAt === null ? undefined : new Date(asked.sendAt), true)
+  }
+
+  /** The user would rather not send files that could not be scanned. */
+  keepEditing(): void {
+    this.set({ unscannedToConfirm: null })
   }
 
   /** Undo is offered until the message's send time, when it leaves. */

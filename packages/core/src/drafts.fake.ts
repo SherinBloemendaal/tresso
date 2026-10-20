@@ -1,6 +1,6 @@
 import type { DraftRequest } from './compose'
 import type { AttachmentFile, DraftApi } from './drafts'
-import type { DraftAttachmentLink, SyncedDraft } from './sync/types'
+import type { DraftAttachment, DraftAttachmentLink, ScanStatus, SyncedDraft } from './sync/types'
 
 /** An API failure with its HTTP status, as both clients' API errors carry it. */
 export class ApiFailure extends Error {
@@ -27,6 +27,8 @@ export class FakeDraftApi implements DraftApi {
   offline = false
   /** Files of received messages that can be forwarded, by id; others come out as a PDF named after the id. */
   readonly received = new Map<string, { filename: string; contentType: string; inline: boolean; contentId: string | null }>()
+  /** The scan result a file with this name gets; clean otherwise, as a quick scan would leave it. */
+  readonly scanOf = new Map<string, ScanStatus>()
   private nextFile = 1
 
   async create(id: string, request: DraftRequest): Promise<SyncedDraft> {
@@ -51,7 +53,7 @@ export class FakeDraftApi implements DraftApi {
     this.reachable()
     const current = this.drafts.get(id)
     if (current === undefined) throw new ApiFailure(404)
-    return { ...current, attachments: current.attachments.map((attachment) => ({ ...attachment, url: attachment.scanStatus === 'infected' ? null : `https://api.example.test/content/draft-attachments/${attachment.id}?signed` })) }
+    return { ...current, attachments: current.attachments.map((attachment) => withAccess(attachment)) }
   }
 
   async remove(id: string): Promise<void> {
@@ -70,10 +72,18 @@ export class FakeDraftApi implements DraftApi {
     const current = this.drafts.get(id)
     const existing = current?.attachments.find((attachment) => attachment.id === `forwarded-${attachmentId}`)
     if (current !== undefined && existing !== undefined) {
-      return { ...existing, url: null, draftVersion: current.version }
+      return { ...withAccess(existing), draftVersion: current.version }
     }
     const source = this.received.get(attachmentId) ?? { filename: `${attachmentId}.pdf`, contentType: 'application/pdf', inline: false, contentId: null }
     return this.addFile(id, source.filename, source.contentType, 100, `forwarded-${attachmentId}`, source.inline, source.contentId)
+  }
+
+  async unscannedLink(attachmentId: string): Promise<{ url: string }> {
+    this.calls.push(`unscanned-link ${attachmentId}`)
+    const attachment = [...this.drafts.values()].flatMap((draft) => draft.attachments).find((file) => file.id === attachmentId)
+    if (attachment === undefined) throw new ApiFailure(404)
+    if (attachment.scanStatus !== 'failed') throw new ApiFailure(attachment.scanStatus === 'pending' ? 409 : 403)
+    return { url: `https://api.example.test/content/draft-attachments/${attachmentId}?unscanned=1&signed` }
   }
 
   async detach(id: string, attachmentId: string): Promise<{ draftVersion: number }> {
@@ -91,11 +101,11 @@ export class FakeDraftApi implements DraftApi {
     this.reachable()
     const current = this.drafts.get(id)
     if (current === undefined) throw new ApiFailure(404)
-    const attachment = { id: fileId, filename, contentType, size, scanStatus: 'pending' as const, inline, contentId }
+    const attachment: DraftAttachment = { id: fileId, filename, contentType, size, scanStatus: this.scanOf.get(filename) ?? 'clean', inline, contentId }
     // Files are part of the draft: a change to them raises its version, as on the server.
     const version = current.version + 1
     this.drafts.set(id, { ...current, attachments: [...current.attachments, attachment], version })
-    return { ...attachment, url: `https://api.example.test/content/draft-attachments/${fileId}?signed`, draftVersion: version }
+    return { ...withAccess(attachment), draftVersion: version }
   }
 
   private reachable(): void {
@@ -122,4 +132,10 @@ export class FakeDraftApi implements DraftApi {
     this.drafts.set(id, saved)
     return saved
   }
+}
+
+/** Links as the server gives them: only for clean files. */
+function withAccess(attachment: DraftAttachment): DraftAttachmentLink {
+  const access = ({ clean: 'allowed', pending: 'scanning', infected: 'blocked', failed: 'confirm' } as const)[attachment.scanStatus]
+  return { ...attachment, access, url: access === 'allowed' ? `https://api.example.test/content/draft-attachments/${attachment.id}?signed` : null }
 }

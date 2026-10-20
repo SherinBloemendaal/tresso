@@ -25,6 +25,7 @@ function message(id: string, folderIds: string[]): SyncedMessage {
     receivedAt: '2026-10-19T08:00:00Z',
     flags: { seen: true, flagged: false, answered: false, draft: false },
     hasAttachments: false,
+    attachmentScan: null,
     smartInboxId: null,
     verdict: null,
     summary: null,

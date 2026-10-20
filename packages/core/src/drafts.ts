@@ -26,6 +26,11 @@ export interface DraftApi {
   forward(id: string, attachmentId: string): Promise<DraftAttachmentLink>
   /** DELETE /api/v1/drafts/{id}/attachments/{attachmentId}: answers with the draft's version without the file. */
   detach(id: string, attachmentId: string): Promise<{ draftVersion: number }>
+  /**
+   * POST /api/v1/draft-attachments/{attachmentId}/unscanned-link with `{ confirmed: true }`: a link for a file that
+   * could not be scanned, once the user accepted that.
+   */
+  unscannedLink(attachmentId: string): Promise<{ url: string }>
 }
 
 /** Files are kept with the server's copy of a draft: without a connection there is nowhere to put them. */
@@ -101,7 +106,7 @@ export function replyDraft(
 }
 
 /** What the API needs to send a draft: the text with its signature and quote, at a time (with the undo window ahead). */
-export function sendRequest(draft: Draft, signatures: SyncedSignature[], sendAt: Date, onServer: boolean): SendMessageRequest {
+export function sendRequest(draft: Draft, signatures: SyncedSignature[], sendAt: Date, onServer: boolean, acceptUnscanned = false): SendMessageRequest {
   if (draft.mailAccountId === null) {
     throw new Error('Choose the account to send from.')
   }
@@ -115,6 +120,7 @@ export function sendRequest(draft: Draft, signatures: SyncedSignature[], sendAt:
     sendAt: sendAt.toISOString(),
     ...(draft.inReplyToMessageId ? { inReplyToMessageId: draft.inReplyToMessageId } : {}),
     ...(onServer ? { draftId: draft.id } : {}),
+    ...(acceptUnscanned ? { acceptUnscanned: true } : {}),
   }
 }
 
@@ -371,6 +377,11 @@ export class DraftSync {
   /** Fresh download links for the draft's files (the copy here keeps none: they expire). */
   async links(id: string): Promise<DraftAttachmentLink[]> {
     return (await this.api.get(id)).attachments ?? []
+  }
+
+  /** A link to a file that could not be scanned, for a user who confirmed they accept that. */
+  async unscannedLink(attachmentId: string): Promise<{ url: string }> {
+    return this.api.unscannedLink(attachmentId)
   }
 
   private async ensureOnServer(id: string): Promise<void> {

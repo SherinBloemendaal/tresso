@@ -33,6 +33,7 @@ function message(id: string, folderIds: string[], receivedAt: string, seen: bool
     receivedAt,
     flags: { seen, flagged: false, answered: false, draft: false },
     hasAttachments: false,
+    attachmentScan: null,
     smartInboxId: null,
     verdict: null,
     summary: null,
