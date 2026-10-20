@@ -20,6 +20,7 @@ use App\Scan\SweepPendingScansHandler;
 use App\Tests\Support\FakeVirusScanner;
 use App\Tests\Support\InMemoryObjectStorage;
 use App\Tests\Support\RecordingMercureHub;
+use App\Tests\Support\StatementHook;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\DBAL\DriverManager;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
@@ -36,6 +37,7 @@ use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Messenger\Stamp\ReceivedStamp;
 use Symfony\Component\Messenger\Stamp\RedeliveryStamp;
 use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * Attachments are scanned by a Messenger job queued after the ingest commits. The tests run that queue themselves,
@@ -87,6 +89,12 @@ final class AttachmentScanTest extends DatabaseTestCase
         self::assertResponseIsSuccessful();
 
         $this->queued = $this->ingest('1', '<invoice-42@finance.example>', ['invoice.pdf' => self::INVOICE, 'invoice.zip' => self::MALWARE]);
+    }
+
+    protected function tearDown(): void
+    {
+        StatementHook::reset();
+        parent::tearDown();
     }
 
     public function testEveryNewAttachmentIsQueuedForAScan(): void
@@ -539,6 +547,31 @@ final class AttachmentScanTest extends DatabaseTestCase
         $this->runScans($queued);
 
         self::assertSame([$this->syncedMessage('2')['id']], array_column($this->changedMessages($cursor), 'id'), 'The earlier message with the same file is not touched.');
+    }
+
+    public function testSameFileStoredDuringAVerdictIsSettledByItsOwnScan(): void
+    {
+        $this->ingest('2', '<later@finance.example>', []);
+        $laterMessage = $this->syncedMessage('2')['id'];
+        self::assertIsString($laterMessage);
+        $lateRow = Uuid::v7()->toRfc4122();
+        // Between locking the affected messages and writing the verdict, the same file arrives in another message.
+        StatementHook::before('UPDATE attachment SET scan_status', function () use ($laterMessage, $lateRow): void {
+            $this->connection()->executeStatement(
+                "INSERT INTO attachment (id, mail_account_id, message_id, filename, content_type, size, sha256, inline, scan_status, scan_requested_at)
+                 VALUES (:id, :account, :message, 'copy.pdf', 'application/pdf', :size, :sha, false, 'pending', NOW())",
+                ['id' => $lateRow, 'account' => $this->accountId, 'message' => $laterMessage, 'size' => \strlen(self::INVOICE), 'sha' => hash('sha256', self::INVOICE)],
+            );
+            $this->connection()->executeStatement("UPDATE message SET attachment_scan = 'pending', has_attachments = true WHERE id = :id", ['id' => $laterMessage]);
+        });
+
+        $this->runScans([$this->queued[0]]);
+        self::assertSame('pending', $this->connection()->fetchOne('SELECT scan_status FROM attachment WHERE id = :id', ['id' => $lateRow]), 'Left for its own scan.');
+
+        $this->runScans([new Envelope(new ScanAttachment($lateRow))]);
+
+        self::assertSame('clean', $this->connection()->fetchOne('SELECT scan_status FROM attachment WHERE id = :id', ['id' => $lateRow]));
+        self::assertSame('clean', $this->syncedMessage('2')['attachmentScan'], 'Its message is not stuck at scanning.');
     }
 
     public function testRescanWithTheSameVerdictsChangesNothing(): void

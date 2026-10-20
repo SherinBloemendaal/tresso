@@ -71,14 +71,22 @@ final readonly class AttachmentScans
                 $this->connection->executeStatement('SELECT id FROM message WHERE id = ANY(CAST(:ids AS UUID[])) ORDER BY id FOR UPDATE', ['ids' => self::array($batch)]);
             }
 
-            $this->connection->executeStatement(
-                'UPDATE draft_attachment SET scan_status = :status, scan_signature = :signature, scan_failure = :failure, scanned_at = :now WHERE sha256 = :sha AND '.$changed,
-                $values,
-            );
-            $this->connection->executeStatement(
-                'UPDATE attachment SET scan_status = :status, scan_signature = :signature, scan_failure = :failure, scanned_at = :now WHERE sha256 = :sha AND '.$changed,
-                $values,
-            );
+            // Only the rows of the drafts and messages locked above: one stored meanwhile (the same file in new mail) is
+            // left pending for its own scan job, which records it, summarizes its message and tells its clients.
+            foreach (array_chunk($draftIds, self::BATCH) as $batch) {
+                $this->connection->executeStatement(
+                    'UPDATE draft_attachment SET scan_status = :status, scan_signature = :signature, scan_failure = :failure, scanned_at = :now
+                     WHERE sha256 = :sha AND draft_id = ANY(CAST(:ids AS UUID[])) AND '.$changed,
+                    $values + ['ids' => self::array($batch)],
+                );
+            }
+            foreach (array_chunk($messageIds, self::BATCH) as $batch) {
+                $this->connection->executeStatement(
+                    'UPDATE attachment SET scan_status = :status, scan_signature = :signature, scan_failure = :failure, scanned_at = :now
+                     WHERE sha256 = :sha AND message_id = ANY(CAST(:ids AS UUID[])) AND '.$changed,
+                    $values + ['ids' => self::array($batch)],
+                );
+            }
             foreach (array_chunk($messageIds, self::BATCH) as $batch) {
                 $this->summarize($batch);
             }
