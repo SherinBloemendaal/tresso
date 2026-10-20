@@ -39,6 +39,13 @@ final readonly class MessageJanitor
                AND NOT EXISTS (SELECT 1 FROM message_location l WHERE l.message_id = m.id)',
             ['account' => $account->getId()->toRfc4122()],
         );
+        // Hand-overs lose the link to these messages (SET NULL): they reach clients as changed.
+        /** @var list<string> $handOvers */
+        $handOvers = $this->connection->fetchFirstColumn(
+            'SELECT h.id FROM hand_over h JOIN message m ON m.id = h.message_id OR m.id = h.reply_id
+             WHERE m.mail_account_id = :account AND NOT EXISTS (SELECT 1 FROM message_location l WHERE l.message_id = m.id)',
+            ['account' => $account->getId()->toRfc4122()],
+        );
         /** @var list<array{id: string, thread_id: string}> $deleted */
         $deleted = $this->connection->fetchAllAssociative(
             'DELETE FROM message m
@@ -58,6 +65,12 @@ final readonly class MessageJanitor
             $this->connection->executeStatement(
                 'UPDATE todo SET change_seq = :seq, updated_at = :now WHERE id = ANY(CAST(:todos AS UUID[]))',
                 ['seq' => $seq, 'now' => new \DateTimeImmutable()->format('Y-m-d H:i:s'), 'todos' => '{'.implode(',', $todos).'}'],
+            );
+        }
+        if ([] !== $handOvers) {
+            $this->connection->executeStatement(
+                'UPDATE hand_over SET change_seq = :seq WHERE id = ANY(CAST(:ids AS UUID[]))',
+                ['seq' => $seq, 'ids' => '{'.implode(',', array_unique($handOvers)).'}'],
             );
         }
 

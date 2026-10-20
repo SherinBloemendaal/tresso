@@ -695,7 +695,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private function handOvers(array $range): array
     {
         $rows = $this->connection->fetchAllAssociative(
-            'SELECT h.id, h.mail_account_id, h.message_id, m.thread_id, h.subject, h.delegate_address, h.delegate_name, h.note,
+            'SELECT h.id, h.mail_account_id, h.message_id, COALESCE(m.thread_id, h.thread_id) AS thread_id, h.subject, h.delegate_address, h.delegate_name, h.note,
                     h.due_at, h.state, h.forward_id, h.overdue_at, h.nudged_at, h.last_nudge_id, h.reply_id, h.created_at,
                     h.closed_at, h.updated_at
              FROM hand_over h LEFT JOIN message m ON m.id = h.message_id

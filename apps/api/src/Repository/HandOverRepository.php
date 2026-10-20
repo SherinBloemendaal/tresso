@@ -6,6 +6,7 @@ namespace App\Repository;
 
 use App\Entity\HandOver;
 use App\Entity\Message;
+use App\Entity\OutgoingMessage;
 use App\Entity\User;
 use App\Enum\HandOverState;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
@@ -57,28 +58,80 @@ class HandOverRepository extends ServiceEntityRepository
     }
 
     /**
-     * Open hand-overs a newly stored message answers: in the same conversation, from the delegate, and received after
-     * the conversation was handed over.
+     * Open hand-overs a newly stored message answers: from the delegate, received after the conversation was handed
+     * over, and in that conversation (the one of the message handed over, or the one it was handed over in, which
+     * still counts once that message is gone) or referring to the forward.
+     *
+     * @param list<string> $references the Message-IDs the message refers to, stored form
      *
      * @return list<HandOver>
      */
-    public function findAnsweredBy(Message $message): array
+    public function findAnsweredBy(Message $message, array $references): array
     {
-        /** @var list<HandOver> */
-        return $this->createQueryBuilder('h')
-            ->join('h.message', 'm')
+        $query = $this->createQueryBuilder('h')
+            ->leftJoin('h.message', 'm')
             ->where('h.mailAccount = :account')
             ->andWhere('h.state = :open')
             ->andWhere('h.delegateAddress = :from')
-            ->andWhere('m.thread = :thread')
             ->andWhere('h.createdAt <= :receivedAt')
             ->setParameter('account', $message->getMailAccount()->getId(), 'uuid')
             ->setParameter('open', HandOverState::Open)
             ->setParameter('from', mb_strtolower($message->getFromAddress()))
             ->setParameter('thread', $message->getThread()->getId(), 'uuid')
-            ->setParameter('receivedAt', $message->getReceivedAt())
-            ->getQuery()
-            ->getResult();
+            ->setParameter('receivedAt', $message->getReceivedAt());
+        if ([] === $references) {
+            $query->andWhere('(m.thread = :thread OR h.thread = :thread)');
+        } else {
+            $query->andWhere('(m.thread = :thread OR h.thread = :thread OR h.forwardMessageId IN (:references))')->setParameter('references', $references);
+        }
+
+        /** @var list<HandOver> */
+        return $query->getQuery()->getResult();
+    }
+
+    /**
+     * Open hand-overs a message the user is sending follows up: to the delegate, as a reply in the handed-over
+     * conversation or to the forward.
+     *
+     * @return list<HandOver>
+     */
+    public function findFollowedUpBy(OutgoingMessage $outgoing): array
+    {
+        $replyTo = $outgoing->getInReplyTo();
+        $recipients = $outgoing->getRecipients();
+        $addresses = array_values(array_unique(array_map(
+            static fn (array $recipient): string => mb_strtolower($recipient['address']),
+            [...$recipients['to'], ...$recipients['cc'], ...$recipients['bcc']],
+        )));
+        if (null === $replyTo || [] === $addresses) {
+            return [];
+        }
+        $query = $this->createQueryBuilder('h')
+            ->leftJoin('h.message', 'm')
+            ->where('h.mailAccount = :account')
+            ->andWhere('h.state = :open')
+            ->andWhere('h.delegateAddress IN (:addresses)')
+            ->andWhere('(h.forward IS NULL OR h.forward <> :outgoing)')
+            ->setParameter('account', $outgoing->getMailAccount()->getId(), 'uuid')
+            ->setParameter('open', HandOverState::Open)
+            ->setParameter('addresses', $addresses)
+            ->setParameter('outgoing', $outgoing->getId(), 'uuid')
+            ->setParameter('thread', $replyTo->getThread()->getId(), 'uuid');
+        $messageId = $replyTo->getMessageIdHeader();
+        if (null === $messageId) {
+            $query->andWhere('(m.thread = :thread OR h.thread = :thread)');
+        } else {
+            $query->andWhere('(m.thread = :thread OR h.thread = :thread OR h.forwardMessageId = :messageId)')->setParameter('messageId', $messageId);
+        }
+
+        /** @var list<HandOver> */
+        return $query->getQuery()->getResult();
+    }
+
+    /** Whether another hand-over was made with this forward already. */
+    public function isForwardUsed(OutgoingMessage $forward): bool
+    {
+        return null !== $this->findOneBy(['forward' => $forward]);
     }
 
     /**

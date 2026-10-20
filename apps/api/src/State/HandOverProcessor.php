@@ -71,6 +71,9 @@ final readonly class HandOverProcessor implements ProcessorInterface
                 if (!$handOver->isOpen()) {
                     throw new ConflictHttpException('This hand-over is closed: there is nobody to nudge.');
                 }
+                if (HandOvers::nudgeUnderWay($handOver)) {
+                    throw new ConflictHttpException('The last nudge is still on its way.');
+                }
                 $this->handOvers->nudge($handOver, $data->html, null === $data->sendAt || $data->sendAt < $now ? $now : $data->sendAt, $now);
 
                 return HandOverResource::fromEntity($handOver);
@@ -109,6 +112,14 @@ final readonly class HandOverProcessor implements ProcessorInterface
         }
         if (\in_array($forward->getStatus(), [OutgoingStatus::Cancelled, OutgoingStatus::Failed], true)) {
             throw self::invalid('forwardId', 'This forward was not sent.', $data->forwardId);
+        }
+        // Two requests with one forward take turns, so the second sees the first and is refused.
+        $this->entityManager->lock($forward, LockMode::PESSIMISTIC_WRITE);
+        if ($forward->getInReplyTo() !== $message) {
+            throw self::invalid('forwardId', 'This is not a forward of that message.', $data->forwardId);
+        }
+        if ($this->repository->isForwardUsed($forward)) {
+            throw self::invalid('forwardId', 'This forward handed over something already.', $data->forwardId);
         }
         if (!self::isRecipient($forward, $recipient['address'])) {
             throw self::invalid('delegate.address', 'The forward did not go to this address.', $recipient['address']);

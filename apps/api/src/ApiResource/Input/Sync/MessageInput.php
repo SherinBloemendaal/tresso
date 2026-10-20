@@ -86,8 +86,8 @@ final class MessageInput
 
     /**
      * Headers that tell automated, bulk and junk mail apart, by lower-cased name: list-unsubscribe,
-     * list-unsubscribe-post, list-id, precedence, auto-submitted, feedback-id, x-spam-flag, x-spam-status and
-     * authentication-results. Missing headers are left out.
+     * list-unsubscribe-post, list-id, precedence, auto-submitted, feedback-id, x-spam-flag, x-spam-status,
+     * authentication-results, x-autoreply and x-autorespond. Missing headers are left out.
      *
      * @var array<string, string>
      */

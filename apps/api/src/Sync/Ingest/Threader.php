@@ -7,6 +7,7 @@ namespace App\Sync\Ingest;
 use App\Entity\MailAccount;
 use App\Entity\Message;
 use App\Entity\Thread;
+use App\HandOver\HandOvers;
 use App\Mail\SubjectNormalizer;
 use Doctrine\ORM\EntityManagerInterface;
 
@@ -25,7 +26,10 @@ final readonly class Threader
     private const string SUBJECT_WINDOW = 'P14D';
     private const int SUBJECT_CANDIDATES = 5;
 
-    public function __construct(private EntityManagerInterface $entityManager)
+    public function __construct(
+        private EntityManagerInterface $entityManager,
+        private HandOvers $handOvers,
+    )
     {
     }
 
@@ -145,6 +149,7 @@ final readonly class Threader
             $message->moveToThread($target);
             $target->recordMessage($message->getReceivedAt());
         }
+        $this->handOvers->threadsMerged($other, $target);
         $this->entityManager->remove($other);
     }
 }

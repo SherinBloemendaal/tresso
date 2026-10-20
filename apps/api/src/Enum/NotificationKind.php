@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Enum;
 
-use App\HandOver\HandOvers;
 use App\Notification\NotificationChannelChoice;
 
 /**
@@ -23,6 +22,8 @@ enum NotificationKind: string
     case FollowUp = 'follow_up';
     /** New mail judged `do` or `delegate`, unread in an inbox. */
     case Mail = 'mail';
+    /** Nobody replied to a hand-over by its due date (not a calendar notification; sent by the hand-overs). */
+    case HandOver = 'hand_over';
 
     /**
      * The kinds whose channels the user chooses per kind (channelsByKind). Reminders carry their own channels, so they
@@ -32,7 +33,7 @@ enum NotificationKind: string
      */
     public static function withChosenChannels(): array
     {
-        return [self::LeaveNow->value, self::Brief->value, self::FollowUp->value, self::Mail->value, HandOvers::NOTIFICATION_KIND];
+        return [self::LeaveNow->value, self::Brief->value, self::FollowUp->value, self::Mail->value, self::HandOver->value];
     }
 
     /** Where this kind goes unless the user chose otherwise. Reminders carry their own channels. */
@@ -42,6 +43,7 @@ enum NotificationKind: string
             self::Reminder, self::Mail => new NotificationChannelChoice(NotificationChannel::Phone, NotificationChannel::Desktop),
             self::LeaveNow => new NotificationChannelChoice(NotificationChannel::Phone),
             self::Brief, self::FollowUp => new NotificationChannelChoice(NotificationChannel::Desktop),
+            self::HandOver => new NotificationChannelChoice(NotificationChannel::Phone, NotificationChannel::Desktop),
         };
     }
 }

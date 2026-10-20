@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\HandOver;
 
 use App\Entity\HandOver;
-use App\Enum\NotificationChannel;
+use App\Enum\NotificationKind;
 use App\Notification\Channel\PushMessage;
 use App\Notification\NotificationChannelChoice;
 use App\Notification\NotificationDispatcher;
@@ -45,7 +45,7 @@ final readonly class NotifyOverdueHandOverHandler
         }
         $owner = $handOver->getOwner();
         $now = new \DateTimeImmutable();
-        $channels = $this->entityManager->wrapInTransaction(fn (): NotificationChannelChoice => $this->preferences->forUser($owner)->channelsFor(HandOvers::NOTIFICATION_KIND, self::defaultChannels()));
+        $channels = $this->entityManager->wrapInTransaction(fn (): NotificationChannelChoice => $this->preferences->forUser($owner)->channelsFor(NotificationKind::HandOver->value, NotificationKind::HandOver->defaultChannels()));
         $id = $handOver->getId()->toRfc4122();
         $who = $handOver->getDelegateName() ?? $handOver->getDelegateAddress();
 
@@ -53,7 +53,7 @@ final readonly class NotifyOverdueHandOverHandler
             $owner,
             new PushMessage(
                 $id,
-                HandOvers::NOTIFICATION_KIND,
+                NotificationKind::HandOver->value,
                 \sprintf('No reply from %s yet', $who),
                 \sprintf('%s is past its due date. Nudge from Waiting on.', '' === $handOver->getSubject() ? '(no subject)' : $handOver->getSubject()),
                 '/waiting?nudge='.$id,
@@ -65,10 +65,5 @@ final readonly class NotifyOverdueHandOverHandler
             $channels,
             $now,
         );
-    }
-
-    public static function defaultChannels(): NotificationChannelChoice
-    {
-        return new NotificationChannelChoice(NotificationChannel::Phone, NotificationChannel::Desktop);
     }
 }

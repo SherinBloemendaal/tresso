@@ -146,7 +146,7 @@ final readonly class MessageIngestor
         $this->entityManager->flush();
 
         // The delegate's reply closes the hand-over of this conversation.
-        $this->handOvers->messageArrived($message, new \DateTimeImmutable());
+        $this->handOvers->messageArrived($message, $references, $input->headers, $input->junk, $folder->getRole(), new \DateTimeImmutable());
     }
 
     private function findExisting(MailAccount $account, ?string $messageId, string $rawObjectKey): ?Message
