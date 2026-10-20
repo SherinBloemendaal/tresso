@@ -1,6 +1,6 @@
 import { actionResult, type AppliedAction, type MessageAction } from '../actions'
 import type { Verdict } from '../domain'
-import { becameOverdue, compareHandOvers } from '../handOvers'
+import { compareHandOvers } from '../handOvers'
 import { sortSmartInboxes } from '../smartInboxes'
 import { compareTodos } from '../todos'
 import { inList, summarizeConversation, type ConversationSummary, type ListFolders, type ListScope } from '../sync/conversation'
@@ -86,8 +86,6 @@ export class SqliteMailStore implements MailStore {
    * connection without a busy timeout, so a second write while one is open would fail with "database is locked".
    */
   private queue: Promise<void> = Promise.resolve()
-  /** Collected by {@link apply}, handed out by {@link takeOverdueHandOvers}. */
-  private overdue: SyncedHandOver[] = []
   /** Threads classified on this device whose server version has not arrived yet; see {@link restoreThread}. */
   private readonly unconfirmed = new Set<string>()
   /** Set while the copy must sync from the start (see resyncFromStart); kept in the database too, so it holds after a restart. */
@@ -192,7 +190,6 @@ export class SqliteMailStore implements MailStore {
 
   private async store(page: ChangePage): Promise<void> {
     let finished: number | null = null
-    const overdue: SyncedHandOver[] = []
     await this.sql.transaction(async (tx) => {
       const affected = new Set<string>()
 
@@ -305,10 +302,6 @@ export class SqliteMailStore implements MailStore {
         await tx.run('INSERT OR REPLACE INTO todos (id, message_id, thread_id, json) VALUES (?, ?, ?, ?)', [todo.id, todo.messageId, todo.threadId, JSON.stringify(todo)])
       }
       for (const handOver of page.handOvers) {
-        const row = await tx.first<JsonRow>('SELECT json FROM hand_overs WHERE id = ?', [handOver.id])
-        if (becameOverdue(row === null ? null : parse<SyncedHandOver>(row), handOver)) {
-          overdue.push(handOver)
-        }
         await tx.run('INSERT OR REPLACE INTO hand_overs (id, mail_account_id, message_id, thread_id, json) VALUES (?, ?, ?, ?, ?)', [handOver.id, handOver.mailAccountId, handOver.messageId, handOver.threadId, JSON.stringify(handOver)])
       }
 
@@ -324,7 +317,6 @@ export class SqliteMailStore implements MailStore {
         finished = this.resyncsAsked
       }
     })
-    this.overdue.push(...overdue)
     // A resync asked for while this page was being stored still stands: the next pull begins from the start again.
     if (finished !== null && finished === this.resyncsAsked) {
       this.resyncing = false
@@ -366,13 +358,6 @@ export class SqliteMailStore implements MailStore {
         await rewrite(tx, restore)
       }),
     )
-  }
-
-
-  takeOverdueHandOvers(): SyncedHandOver[] {
-    const taken = this.overdue
-    this.overdue = []
-    return taken
   }
 
   async handOvers(): Promise<SyncedHandOver[]> {

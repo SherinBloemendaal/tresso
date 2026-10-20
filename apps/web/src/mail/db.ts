@@ -1,7 +1,6 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb'
 import {
   actionResult,
-  becameOverdue,
   classifiedByUser,
   compareTodos,
   compareHandOvers,
@@ -137,8 +136,6 @@ export function deleteMailDatabase(userId: string): Promise<void> {
 
 /** The signed-in user's mail in the browser's IndexedDB. The desktop app keeps it in SQLite instead (SqliteMailStore). */
 export class IndexedDbMailStore implements MailStore {
-  /** Collected by {@link apply}, handed out by {@link takeOverdueHandOvers}. */
-  private overdue: SyncedHandOver[] = []
   /** Threads classified on this device whose server version has not arrived yet; see {@link restoreThread}. */
   private readonly unconfirmed = new Set<string>()
 
@@ -335,11 +332,7 @@ export class IndexedDbMailStore implements MailStore {
     for (const todo of page.todos) {
       await tx.objectStore('todos').put(todo)
     }
-    const overdue: SyncedHandOver[] = []
     for (const handOver of page.handOvers) {
-      if (becameOverdue(await tx.objectStore('handOvers').get(handOver.id), handOver)) {
-        overdue.push(handOver)
-      }
       await tx.objectStore('handOvers').put(handOver)
     }
 
@@ -350,7 +343,6 @@ export class IndexedDbMailStore implements MailStore {
 
     await tx.objectStore('meta').put(page.cursor, 'cursor')
     await tx.done
-    this.overdue.push(...overdue)
   }
 
   /**
@@ -407,13 +399,6 @@ export class IndexedDbMailStore implements MailStore {
       await refreshConversation(tx, threadId, lists)
     }
     await tx.done
-  }
-
-
-  takeOverdueHandOvers(): SyncedHandOver[] {
-    const taken = this.overdue
-    this.overdue = []
-    return taken
   }
 
   async handOvers(): Promise<SyncedHandOver[]> {

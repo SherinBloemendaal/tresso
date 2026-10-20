@@ -90,6 +90,9 @@ export function handOver(id: string, messageId: string | null, mailAccountId: st
     state: 'open',
     forwardId: `forward-${id}`,
     overdueAt: null,
+    notifiedAt: null,
+    notifiedChannels: [],
+    notifiedSilently: false,
     nudgedAt: null,
     lastNudgeId: null,
     replyMessageId: null,
@@ -741,32 +744,6 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
         await db.apply(page({ cursor: 12, deleted: [{ type: 'mailAccount', id: 'work' }] }))
 
         expect((await db.handOvers()).map((h) => h.id)).toEqual(['h2'])
-      })
-
-      it('hands out a hand-over that became overdue, once', async () => {
-        await db.apply(page({ cursor: 11, handOvers: [handOver('h1', 'm1', 'work'), handOver('h2', 'm3', 'work')] }))
-        expect(db.takeOverdueHandOvers()).toEqual([])
-
-        await db.apply(
-          page({
-            cursor: 12,
-            handOvers: [
-              handOver('h1', 'm1', 'work', { overdueAt: '2026-10-24T15:00:00+00:00' }),
-              handOver('h2', 'm3', 'work', { state: 'replied', overdueAt: '2026-10-24T15:00:00+00:00' }),
-            ],
-          }),
-        )
-        expect(db.takeOverdueHandOvers().map((h) => h.id)).toEqual(['h1'])
-        expect(db.takeOverdueHandOvers()).toEqual([])
-
-        // A nudge changes it again; it was overdue already, so the user is not told twice.
-        await db.apply(page({ cursor: 13, handOvers: [handOver('h1', 'm1', 'work', { overdueAt: '2026-10-24T15:00:00+00:00', nudgedAt: '2026-10-24T16:00:00+00:00' })] }))
-        expect(db.takeOverdueHandOvers()).toEqual([])
-
-        // A new due date clears it; passing that one tells again.
-        await db.apply(page({ cursor: 14, handOvers: [handOver('h1', 'm1', 'work', { dueAt: '2026-10-28T15:00:00+00:00' })] }))
-        await db.apply(page({ cursor: 15, handOvers: [handOver('h1', 'm1', 'work', { dueAt: '2026-10-28T15:00:00+00:00', overdueAt: '2026-10-28T15:00:00+00:00' })] }))
-        expect(db.takeOverdueHandOvers().map((h) => h.id)).toEqual(['h1'])
       })
     })
   })

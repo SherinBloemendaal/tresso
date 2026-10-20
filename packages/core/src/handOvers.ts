@@ -44,11 +44,37 @@ export interface HandOverApi {
 }
 
 /**
- * Whether a stored hand-over just became overdue, which is when the user is told: open, past its due date without a
- * reply, and not overdue in the copy before. A new due date clears `overdueAt`, so passing that one tells again.
+ * Notices delivered longer ago than this before a device started telling are old news reaching it late (a copy
+ * rebuilt, a device that was offline), not news.
  */
-export function becameOverdue(previous: SyncedHandOver | null | undefined, next: SyncedHandOver): boolean {
-  return next.state === 'open' && next.overdueAt !== null && (previous?.overdueAt ?? null) === null
+export const NOTICE_FRESHNESS_MS = 15 * 60_000
+
+/** One per round: a new due date that passes tells again. */
+export function noticeKey(handOver: SyncedHandOver): string {
+  return `${handOver.id}:${handOver.notifiedAt ?? ''}`
+}
+
+/**
+ * The overdue notices the server delivered that are news on this device, from the hand-overs of the pages applied: still
+ * open, delivered on some channel (on `channel` when given), no longer than {@link NOTICE_FRESHNESS_MS} before this
+ * device started telling, and not shown before (see {@link noticeKey}). The server decided when and how (channels,
+ * focus holds, quiet hours); clients only show what it delivered.
+ */
+export function deliveredNotices(handOvers: SyncedHandOver[], notifyingSince: number, shown: ReadonlySet<string>, channel?: string): SyncedHandOver[] {
+  const due = new Map<string, SyncedHandOver>()
+  for (const handOver of handOvers) {
+    if (
+      handOver.state === 'open' &&
+      handOver.notifiedAt !== null &&
+      handOver.notifiedChannels.length > 0 &&
+      (channel === undefined || handOver.notifiedChannels.includes(channel)) &&
+      Date.parse(handOver.notifiedAt) >= notifyingSince - NOTICE_FRESHNESS_MS &&
+      !shown.has(noticeKey(handOver))
+    ) {
+      due.set(noticeKey(handOver), handOver)
+    }
+  }
+  return [...due.values()]
 }
 
 /** "Waiting on" order: open hand-overs by due date first, then closed ones, most recently closed first. */
