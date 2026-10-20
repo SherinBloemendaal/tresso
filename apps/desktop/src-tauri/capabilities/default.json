@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: core APIs, the link the app was opened with, opening web pages in the default browser, and notifications",
+  "description": "The main window: core APIs, the link the app was opened with, opening web pages in the default browser, and notifications whose click brings the window to the front",
   "windows": [
     "main"
   ],
@@ -12,6 +12,9 @@
     "opener:allow-default-urls",
     "notification:allow-is-permission-granted",
     "notification:allow-request-permission",
-    "notification:allow-notify"
+    "notification:allow-notify",
+    "notification:allow-register-listener",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-focus"
   ]
 }
