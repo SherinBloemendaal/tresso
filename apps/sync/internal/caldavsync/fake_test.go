@@ -33,6 +33,10 @@ type fakeServer struct {
 	etagStatus int
 	// shared adds a second calendar that refuses the login, as one shared with the user and taken back does.
 	shared bool
+	// noETag leaves the getetag out of the answer to a PROPFIND for one resource.
+	noETag bool
+	// afterSync runs after each sync-collection answer, with the server locked.
+	afterSync func()
 }
 
 const sharedPath = "/dav/calendars/kim/shared/"
@@ -122,6 +126,8 @@ END:VCALENDAR</c:calendar-timezone>`+
 		f.multistatus(w, responses)
 	case r.Method == "PROPFIND" && f.etagStatus != 0:
 		w.WriteHeader(f.etagStatus)
+	case r.Method == "PROPFIND" && f.noETag && r.URL.Path != calendarPath:
+		f.multistatus(w, `<d:response><d:href>`+r.URL.Path+`</d:href><d:propstat><d:prop><d:getetag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>`)
 	case r.Method == "PROPFIND":
 		object, ok := f.objects[r.URL.Path]
 		if !ok {
@@ -139,6 +145,9 @@ END:VCALENDAR</c:calendar-timezone>`+
 			return
 		}
 		f.syncCollection(w, string(body))
+		if f.afterSync != nil {
+			f.afterSync()
+		}
 	case r.Method == "REPORT" && strings.Contains(string(body), "calendar-multiget"):
 		var request struct {
 			Hrefs []string `xml:"DAV: href"`

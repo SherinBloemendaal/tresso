@@ -337,3 +337,36 @@ func TestADiscoveryAnswerIsLimited(t *testing.T) {
 		t.Fatalf("want the oversized answer refused, got %v", err)
 	}
 }
+
+func TestDiscoveryOffersAServerToConfirmEvenWhenAnotherCouldNotAnswer(t *testing.T) {
+	h := newHostServer(t)
+	h.open["company.example"] = true
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(failing.Close)
+	client := New(routes{"imap.company.example": failing.Listener.Addr().String(), "": h.server.Listener.Addr().String()}, "kim@company.example", "app-password", true, NewTrust("imap.company.example", ""))
+
+	_, err := client.discover(context.Background(), []string{"http://imap.company.example/.well-known/caldav", "http://company.example/dav/"})
+
+	var confirm *ConfirmError
+	if !errors.As(err, &confirm) || confirm.URL != "http://company.example/dav/" {
+		t.Fatalf("want the user asked to confirm the server that answered, got %v", err)
+	}
+}
+
+// routes dials a host to its own test server ("" for any other host).
+type routes map[string]string
+
+func (r routes) DialContext(ctx context.Context, address string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	target, ok := r[host]
+	if !ok {
+		target = r[""]
+	}
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, "tcp", target)
+}

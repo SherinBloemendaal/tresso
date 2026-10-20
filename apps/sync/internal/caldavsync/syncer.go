@@ -376,16 +376,35 @@ func (r *run) syncChanges(ctx context.Context, calendar caldav.Calendar, state a
 
 // syncListing collects a complete listing through sync-collection, following the pages of a cut-short answer. Only
 // the last page's token stands for the whole listing; a page alone would make the API remove what later pages list.
+// The pages are folded in order: a later page's entry for a resource replaces an earlier one, and a removal there
+// drops it.
 func (r *run) syncListing(ctx context.Context, calendarURL string) ([]caldav.Member, string, error) {
-	var all []caldav.Member
+	var order []string
+	byHref := map[string]caldav.Member{}
 	token := ""
 	for range maxSyncPages {
 		members, next, truncated, err := r.client.SyncCollection(ctx, calendarURL, token)
 		if err != nil {
 			return nil, "", err
 		}
-		all = append(all, members...)
+		for _, member := range members {
+			if member.Removed {
+				delete(byHref, member.Href)
+				continue
+			}
+			if _, ok := byHref[member.Href]; !ok {
+				order = append(order, member.Href)
+			}
+			byHref[member.Href] = member
+		}
 		if !truncated || next == "" || next == token {
+			all := make([]caldav.Member, 0, len(byHref))
+			for _, href := range order {
+				if member, ok := byHref[href]; ok {
+					all = append(all, member)
+					delete(byHref, href)
+				}
+			}
 			return all, next, nil
 		}
 		token = next
@@ -564,6 +583,11 @@ func (r *run) write(ctx context.Context, operation api.CalendarOperation) api.Op
 		if err != nil {
 			// Without it the PUT would overwrite whatever the server has now.
 			return r.failure(ctx, href, err)
+		}
+		if current == "" {
+			// The server names no ETag, so nothing guards the write: treated as a conflict, the server's version
+			// wins and the user sees their change was not saved.
+			return r.failure(ctx, href, &caldav.StatusError{Method: "PROPFIND", URL: href, Status: 412})
 		}
 		ifMatch = current
 	}

@@ -452,3 +452,63 @@ func TestStatusDetailsAreShortAndShowNoLogin(t *testing.T) {
 		t.Fatalf("displayURL = %s", got)
 	}
 }
+
+func TestAResourceALaterPageReportsRemovedIsNotListed(t *testing.T) {
+	server := newFakeServer(t, true)
+	server.pageSize = 1
+	server.put(calendarPath+"gone.ics", event("gone", "Gone"))
+	server.put(calendarPath+"a.ics", event("a", "A"))
+	server.put(calendarPath+"b.ics", event("b", "B"))
+	pages := 0
+	server.afterSync = func() {
+		pages++
+		if pages == 1 {
+			// Removed while the listing is under way: a later page reports it gone.
+			server.version++
+			delete(server.objects, calendarPath+"gone.ics")
+			server.changes = append(server.changes, fakeChange{version: server.version, path: calendarPath + "gone.ics"})
+		}
+	}
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+
+	if err := r.syncAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.inventory) != 1 {
+		t.Fatalf("want one listing, got %d", len(fake.inventory))
+	}
+	for _, object := range fake.inventory[0] {
+		if strings.HasSuffix(object.RemoteID, "gone.ics") {
+			t.Fatalf("a resource reported gone on a later page is listed: %v", fake.inventory[0])
+		}
+	}
+	if len(fake.inventory[0]) != 2 {
+		t.Fatalf("inventory = %v", fake.inventory[0])
+	}
+}
+
+func TestAnUpdateIsNotSentWhenTheServerNamesNoETag(t *testing.T) {
+	server := newFakeServer(t, true)
+	server.put(calendarPath+"standup.ics", event("standup", "Standup"))
+	fake := newFakeAPI(server.server.URL + "/dav/")
+	r := openRun(t, server, fake)
+	server.noETag = true
+	existing := server.server.URL + calendarPath + "standup.ics"
+	updated := event("standup", "Standup, moved")
+	fake.operations = []api.CalendarOperation{
+		{ID: "update", Kind: "put", CalendarRemoteID: server.server.URL + calendarPath, UID: "standup", RemoteID: &existing, Ical: &updated},
+	}
+
+	if err := r.writeAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if result := fake.results["update"]; result.Outcome != api.OperationConflict || result.Current == nil {
+		t.Fatalf("update = %+v", result)
+	}
+	if strings.Contains(server.objects[calendarPath+"standup.ics"].data, "moved") {
+		t.Fatal("the update went out without a precondition")
+	}
+}
