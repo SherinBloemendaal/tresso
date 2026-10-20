@@ -3,7 +3,7 @@ import { Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from '
 import { Stack, useLocalSearchParams } from 'expo-router'
 import { attendeeSummary, canWrite, DAY, describeRule, occurrenceTimes, occurrenceWhen, RESPONSE_WORDS, toWall, zoneLabel, type ParticipationStatus } from '@tresso/core'
 import { tint } from '@/calendar/colors'
-import { useOccurrences, zone } from '@/calendar/useOccurrences'
+import { useOccurrences, useReaderZone } from '@/calendar/useOccurrences'
 import { useMail } from '@/mail/MailProvider'
 import { useTheme, type Theme } from '@/theme'
 
@@ -24,7 +24,9 @@ export default function EventScreen() {
   const params = useLocalSearchParams<{ key: string; start: string }>()
   const mail = useMail()
   const start = Number(params.start)
-  const { occurrences, calendars, loaded } = useOccurrences(start - DAY, start + DAY)
+  const zone = useReaderZone()
+  // Declined ones too: the event stays on screen after the user declines it, with the answer to change.
+  const { occurrences, calendars, loaded } = useOccurrences(start - DAY, start + DAY, zone, { includeDeclined: true })
   const occurrence = occurrences.find((candidate) => candidate.key === params.key) ?? null
   const [onlyThis, setOnlyThis] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -107,6 +109,7 @@ export default function EventScreen() {
       {response !== null && canWrite(calendar) && (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Going? {RESPONSE_WORDS[response]}</Text>
+          {response === 'declined' && <Text style={styles.muted}>You declined. The event no longer shows in your calendar; you can still change your answer here.</Text>}
           {occurrence.recurring && (
             <View style={styles.person}>
               <Text style={styles.name}>Only this event</Text>

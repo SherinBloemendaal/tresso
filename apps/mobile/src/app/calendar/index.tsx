@@ -19,7 +19,7 @@ import {
 } from '@tresso/core'
 import { agendaDays, occurrenceParams, weekStrip } from '@/calendar/agenda'
 import { tint } from '@/calendar/colors'
-import { useOccurrences, zone } from '@/calendar/useOccurrences'
+import { useOccurrences, useReaderZone } from '@/calendar/useOccurrences'
 import { useTheme, type Theme } from '@/theme'
 
 /** 64 px per hour in the day view, as the mobile design has it. */
@@ -33,6 +33,7 @@ export default function CalendarScreen() {
   const router = useRouter()
   const [mode, setMode] = useState<'agenda' | 'day'>('agenda')
   const [now, setNow] = useState(() => Date.now())
+  const zone = useReaderZone()
   const today = startOfWallDay(toWall(now, zone))
   const [day, setDay] = useState(today)
 
@@ -41,8 +42,8 @@ export default function CalendarScreen() {
     return () => clearInterval(timer)
   }, [])
 
-  const range = useMemo(() => (mode === 'agenda' ? daysFrom(today, AGENDA_DAYS, zone) : daysFrom(day, 1, zone)), [mode, today, day])
-  const { occurrences, calendars, loaded } = useOccurrences(range[0]!.start, range[range.length - 1]!.end)
+  const range = useMemo(() => (mode === 'agenda' ? daysFrom(today, AGENDA_DAYS, zone) : daysFrom(day, 1, zone)), [mode, today, day, zone])
+  const { occurrences, calendars, loaded } = useOccurrences(range[0]!.start, range[range.length - 1]!.end, zone)
 
   const open = (occurrence: Occurrence) => router.push({ pathname: '/calendar/event', params: occurrenceParams(occurrence) })
 
@@ -68,9 +69,9 @@ export default function CalendarScreen() {
         )}
       </View>
       {mode === 'agenda' ? (
-        <Agenda occurrences={occurrences} days={range} today={today} now={now} calendars={calendars} loaded={loaded} styles={styles} onOpen={open} />
+        <Agenda zone={zone} occurrences={occurrences} days={range} today={today} now={now} calendars={calendars} loaded={loaded} styles={styles} onOpen={open} />
       ) : (
-        <DayView day={day} today={today} now={now} occurrences={occurrences} calendars={calendars} styles={styles} theme={theme} onDay={setDay} onOpen={open} />
+        <DayView zone={zone} day={day} today={today} now={now} occurrences={occurrences} calendars={calendars} styles={styles} theme={theme} onDay={setDay} onOpen={open} />
       )}
     </View>
   )
@@ -78,7 +79,7 @@ export default function CalendarScreen() {
 
 type Styles = ReturnType<typeof makeStyles>
 
-function Agenda(props: { occurrences: Occurrence[]; days: ReturnType<typeof daysFrom>; today: number; now: number; calendars: Map<string, SyncedCalendar>; loaded: boolean; styles: Styles; onOpen: (o: Occurrence) => void }) {
+function Agenda(props: { zone: string; occurrences: Occurrence[]; days: ReturnType<typeof daysFrom>; today: number; now: number; calendars: Map<string, SyncedCalendar>; loaded: boolean; styles: Styles; onOpen: (o: Occurrence) => void }) {
   const { styles } = props
   const sections = agendaDays(props.days, props.occurrences, props.today).map((group) => ({ key: String(group.day.wall), title: group.title, subtitle: group.subtitle, data: group.items }))
   return (
@@ -95,12 +96,12 @@ function Agenda(props: { occurrences: Occurrence[]; days: ReturnType<typeof days
           {section.subtitle !== '' && <Text style={styles.muted}>{section.subtitle}</Text>}
         </View>
       )}
-      renderItem={({ item }) => <AgendaRow occurrence={item} calendar={props.calendars.get(item.event.calendarId)} now={props.now} styles={styles} onOpen={props.onOpen} />}
+      renderItem={({ item }) => <AgendaRow zone={props.zone} occurrence={item} calendar={props.calendars.get(item.event.calendarId)} now={props.now} styles={styles} onOpen={props.onOpen} />}
     />
   )
 }
 
-function AgendaRow({ occurrence, calendar, now, styles, onOpen }: { occurrence: Occurrence; calendar: SyncedCalendar | undefined; now: number; styles: Styles; onOpen: (o: Occurrence) => void }) {
+function AgendaRow({ zone, occurrence, calendar, now, styles, onOpen }: { zone: string; occurrence: Occurrence; calendar: SyncedCalendar | undefined; now: number; styles: Styles; onOpen: (o: Occurrence) => void }) {
   const color = calendar?.color ?? '#6E56CF'
   const response = occurrence.event.selfResponse
   const times = occurrenceTimes(occurrence, zone)
@@ -130,6 +131,7 @@ function AgendaRow({ occurrence, calendar, now, styles, onOpen }: { occurrence: 
 }
 
 function DayView(props: {
+  zone: string
   day: number
   today: number
   now: number
@@ -140,7 +142,7 @@ function DayView(props: {
   onDay: (day: number) => void
   onOpen: (o: Occurrence) => void
 }) {
-  const { styles, day } = props
+  const { styles, day, zone } = props
   const [calendarDay] = daysFrom(day, 1, zone)
   const blocks = layoutDay(props.occurrences, calendarDay!, zone)
   const allDay = props.occurrences.filter(inAllDayRow)
