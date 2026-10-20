@@ -495,6 +495,10 @@ func (r *run) writeAll(ctx context.Context) error {
 		if len(operations) == 0 {
 			return nil
 		}
+		operations, err = r.moves(ctx, operations)
+		if err != nil {
+			return err
+		}
 		for _, operation := range operations {
 			result, writeErr := r.write(ctx, operation)
 			result.WorkerID = r.syncer.workerID
@@ -509,6 +513,61 @@ func (r *run) writeAll(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// Mover is a session that can move an event to another calendar of the account, so attendees see no cancellation
+// and new invitation (Google's events.move; Graph has no move for events).
+type Mover interface {
+	// Move moves the resource and returns its id in the target calendar.
+	Move(ctx context.Context, from, to Calendar, remoteID string) (string, error)
+}
+
+// moves turns a delete in one calendar and the create of the same event in another, which is how the API queues a
+// move, into a move at the provider. The delete is reported done and the create becomes an update of the moved
+// event. A move the provider refuses leaves both as they were.
+func (r *run) moves(ctx context.Context, operations []api.CalendarOperation) ([]api.CalendarOperation, error) {
+	mover, ok := r.session.(Mover)
+	if !ok {
+		return operations, nil
+	}
+	creates := map[string]int{}
+	for i, operation := range operations {
+		if operation.Kind != "delete" && operation.RemoteID == nil {
+			creates[operation.UID] = i
+		}
+	}
+	movedDeletes := map[string]bool{}
+	for _, operation := range operations {
+		i, paired := creates[operation.UID]
+		if operation.Kind != "delete" || operation.RemoteID == nil || !paired || operations[i].CalendarRemoteID == operation.CalendarRemoteID {
+			continue
+		}
+		from, fromOK := r.calendars[operation.CalendarRemoteID]
+		to, toOK := r.calendars[operations[i].CalendarRemoteID]
+		if !fromOK || !toOK {
+			continue
+		}
+		moved, err := mover.Move(ctx, from, to, *operation.RemoteID)
+		if err != nil {
+			if r.fatal(err) {
+				return nil, err
+			}
+			r.logger.Info("the provider did not move the event; it is deleted and created instead", "error", err)
+			continue
+		}
+		if err := r.syncer.api.ReportCalendarOperation(ctx, r.account.ID, operation.ID, api.OperationResult{WorkerID: r.syncer.workerID, Outcome: api.OperationDone}); err != nil {
+			return nil, err
+		}
+		movedDeletes[operation.ID] = true
+		operations[i].RemoteID, operations[i].IfMatch = &moved, nil
+	}
+	kept := make([]api.CalendarOperation, 0, len(operations))
+	for _, operation := range operations {
+		if !movedDeletes[operation.ID] {
+			kept = append(kept, operation)
+		}
+	}
+	return kept, nil
 }
 
 func (r *run) write(ctx context.Context, operation api.CalendarOperation) (api.OperationResult, error) {

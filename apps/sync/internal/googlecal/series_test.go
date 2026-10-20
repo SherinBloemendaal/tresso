@@ -214,3 +214,29 @@ func TestAWriteToACalendarTheUserMayOnlyReadIsRefusedNotRetried(t *testing.T) {
 		t.Fatalf("statuses = %v", statuses)
 	}
 }
+
+func TestMovingAnEventToAnotherCalendarUsesGooglesMove(t *testing.T) {
+	google := newFakeGoogle(t)
+	google.addCalendar(calendarListEntry{ID: "team@group.calendar.google.com", Summary: "Team", AccessRole: "writer", TimeZone: "Europe/Amsterdam", DefaultReminders: []reminder{{Method: "popup", Minutes: 10}}})
+	lunch := meetingEvent("lunch", "Lunch")
+	lunch.Attendees = []person{{Email: "lisa@example.org", ResponseStatus: "accepted"}}
+	google.put(calendarID, lunch)
+	fake, object := synced(t, google, "lunch")
+
+	// The API queues a move as a delete in the old calendar and a create in the new one.
+	remoteID, etag, text := "lunch", object.ETag, object.Ical
+	fake.Queue(api.CalendarOperation{ID: "out", Kind: "delete", CalendarRemoteID: calendarID, UID: "lunch@google.com", RemoteID: &remoteID, IfMatch: &etag, Notify: true})
+	fake.Queue(api.CalendarOperation{ID: "in", Kind: "put", CalendarRemoteID: "team@group.calendar.google.com", UID: "lunch@google.com", Ical: &text, Notify: true})
+
+	in := result(t, fake, "in")
+	if out, _ := fake.Result("out"); out.Outcome != api.OperationDone || in.Outcome != api.OperationDone || in.RemoteID == nil || *in.RemoteID != "lunch" {
+		t.Fatalf("out = %+v, in = %+v", out, in)
+	}
+	writes := google.writes()
+	if len(writes) != 1 || !strings.HasSuffix(writes[0].Path, "/events/lunch/move") || writes[0].Query["destination"] != "team@group.calendar.google.com" || writes[0].Query["sendUpdates"] != "none" {
+		t.Fatalf("one move, no delete and no new invitation: %+v", writes)
+	}
+	if e, ok := google.get("team@group.calendar.google.com", "lunch"); !ok || e.cancelled() {
+		t.Fatal("the event is in the team calendar")
+	}
+}

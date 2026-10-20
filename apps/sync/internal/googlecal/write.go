@@ -684,3 +684,17 @@ func (s *session) refused(ctx context.Context, calendar calsync.Calendar, operat
 func text(s string) *string {
 	return &s
 }
+
+// Move moves an event to another calendar of the account (events.move), telling no one: for attendees nothing
+// changed. The id stays the same.
+func (s *session) Move(ctx context.Context, from, to calsync.Calendar, remoteID string) (string, error) {
+	var moved event
+	err := s.send(ctx, http.MethodPost, s.calendarURL(from.RemoteID, remoteID, "move"), url.Values{"destination": {to.RemoteID}, "sendUpdates": {"none"}}, "", nil, &moved)
+	if err != nil {
+		return "", err
+	}
+	if moved.ID == "" {
+		return remoteID, nil
+	}
+	return moved.ID, nil
+}

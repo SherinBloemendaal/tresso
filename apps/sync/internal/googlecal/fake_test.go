@@ -194,6 +194,8 @@ func (f *fakeGoogle) handle(w http.ResponseWriter, r *http.Request) {
 		f.list(w, r, events)
 	case id == "" && r.Method == http.MethodPost:
 		f.insert(w, calendarID, body)
+	case strings.HasSuffix(id, "/move") && r.Method == http.MethodPost:
+		f.move(w, calendarID, strings.TrimSuffix(id, "/move"), r.URL.Query().Get("destination"))
 	case r.Method == http.MethodGet:
 		e, ok := events[id]
 		if !ok {
@@ -280,6 +282,21 @@ func (f *fakeGoogle) insert(w http.ResponseWriter, calendarID string, body []byt
 		e.Organizer = &person{Email: calendarID, Self: true}
 	}
 	f.reply(w, f.store(calendarID, e).event)
+}
+
+// move takes an event to another calendar under the same id; the old calendar sees it deleted.
+func (f *fakeGoogle) move(w http.ResponseWriter, from, id, to string) {
+	e, ok := f.events[from][id]
+	target, known := f.events[to]
+	if !ok || e.cancelled() || !known {
+		f.fail(w, http.StatusNotFound, "notFound")
+		return
+	}
+	gone := e.event
+	gone.Status = "cancelled"
+	f.store(from, gone)
+	f.reply(w, f.store(to, e.event).event)
+	_ = target
 }
 
 // conference answers a Meet create request the way Google does: the meeting is there right away.
