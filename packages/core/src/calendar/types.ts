@@ -5,6 +5,9 @@ import type { Address } from '../sync/types'
 
 export type CalendarSource = 'local' | 'caldav' | 'google' | 'microsoft'
 
+/** Online meetings a calendar's provider makes for its events. */
+export type ConferenceProvider = 'meet' | 'teams'
+
 /** A calendar of the user: at the provider of a mail account, or local to Tresso (`mailAccountId` null). */
 export interface SyncedCalendar {
   id: string
@@ -21,6 +24,8 @@ export interface SyncedCalendar {
   work: boolean
   /** The provider sends invitations and replies itself. */
   providerSchedules: boolean
+  /** Online meetings events of this calendar can get; ask for one with `conferenceProvider` when saving an event. */
+  conferenceProviders: ConferenceProvider[]
   position: number
 }
 

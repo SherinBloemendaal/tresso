@@ -77,8 +77,8 @@ export function defaultPort(protocol: 'imap' | 'smtp', security: ConnectionSecur
 /** Identity providers a mail account can sign in with instead of a password. */
 export type OAuthProviderId = 'google' | 'microsoft'
 
-/** What a provider sign-in is for; the calendar adds its own feature later. */
-export type ProviderFeature = 'mail'
+/** What a provider sign-in is for. Calendars can also be allowed later, for an account that has mail already. */
+export type ProviderFeature = 'mail' | 'calendar'
 
 /** A provider this server can sign in with (GET /api/v1/oauth-providers). */
 export interface OAuthProviderInfo {

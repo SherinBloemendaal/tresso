@@ -9,7 +9,7 @@ export type FolderRole = 'inbox' | 'sent' | 'drafts' | 'trash' | 'spam' | 'archi
 export type MailAccountStatus = 'active' | 'paused' | 'auth_failed' | 'error'
 
 /** How syncing an account's calendars goes, apart from its mail. */
-export type CalendarSyncStatus = 'unknown' | 'active' | 'unsupported' | 'auth_failed' | 'unconfirmed' | 'error'
+export type CalendarSyncStatus = 'unknown' | 'active' | 'unsupported' | 'auth_failed' | 'unconfirmed' | 'not_granted' | 'error'
 
 export interface Address {
   address: string
