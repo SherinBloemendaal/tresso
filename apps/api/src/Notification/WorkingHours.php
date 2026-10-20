@@ -26,7 +26,8 @@ final class WorkingHours
     }
 
     /**
-     * The next start of working hours at or after the moment, or null without working hours.
+     * The next start of working hours at or after the moment, or null when none starts in the next week: without
+     * working hours, or with hours around the clock (which are never left, so contains() holds).
      */
     public static function nextStart(NotificationPreferences $preferences, \DateTimeImmutable $moment): ?\DateTimeImmutable
     {

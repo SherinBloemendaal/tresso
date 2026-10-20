@@ -60,6 +60,21 @@ final class WorkingHoursTest extends TestCase
         self::assertSame('Wed 2026-10-21 06:00', WorkingHours::shiftEarly($preferences, new \DateTimeImmutable('2026-10-21T19:50:00+00:00'), new \DateTimeImmutable('2026-10-21T19:55:00+00:00'))?->format('D Y-m-d H:i'));
     }
 
+    public function testWorkingHoursThatStartWhenTheyEndLastADay(): void
+    {
+        $preferences = self::preferences();
+        $preferences->setWorkingHours([1, 2, 3, 4, 5, 6, 7], '00:00', '00:00');
+
+        self::assertTrue(WorkingHours::contains($preferences, new \DateTimeImmutable('2026-10-24T22:30:00+00:00')));
+        self::assertTrue(WorkingHours::contains($preferences, new \DateTimeImmutable('2026-10-25T01:30:00+00:00')), 'Through the change from summer time.');
+        self::assertNull(WorkingHours::shiftEarly($preferences, new \DateTimeImmutable('2026-10-21T03:50:00+00:00'), new \DateTimeImmutable('2026-10-21T04:00:00+00:00')));
+
+        // A shift from 09:00 on Monday to 09:00 on Tuesday.
+        $preferences->setWorkingHours([1], '09:00', '09:00');
+        self::assertTrue(WorkingHours::contains($preferences, new \DateTimeImmutable('2026-10-20T06:30:00+00:00')));
+        self::assertFalse(WorkingHours::contains($preferences, new \DateTimeImmutable('2026-10-20T07:30:00+00:00')));
+    }
+
     public function testWorkingHoursUntilMidnightEndAtMidnight(): void
     {
         $preferences = self::preferences();
