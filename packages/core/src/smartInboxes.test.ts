@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { classificationReasonText, isSenderPattern, normalizeSenderPattern, smartInboxMark, sortSmartInboxes, verdictLabel } from './smartInboxes'
+import { classificationReasonText, isSenderPattern, normalizeSenderPattern, smartInboxMark, sortSmartInboxes, spamOverruleNotice, verdictLabel } from './smartInboxes'
 
 describe('sender patterns', () => {
   it.each([
@@ -45,5 +45,16 @@ describe('labels', () => {
     expect(classificationReasonText('user')).toBe('You put it here.')
     expect(classificationReasonText('ai')).toBe('Classified automatically.')
     expect(classificationReasonText(null)).toBeNull()
+  })
+})
+
+describe('spamOverruleNotice', () => {
+  it('explains why new mail from the sender still goes to Spam', () => {
+    const rule = { id: 'r1', sender: 'news@bank.example', verdict: null }
+
+    expect(spamOverruleNotice({ senderRule: { ...rule, spamOverrules: 'authentication_failed' } })).toContain('fails the checks')
+    expect(spamOverruleNotice({ senderRule: { ...rule, spamOverrules: 'server_spam' } })).toContain('Your mail server marks mail from news@bank.example as spam')
+    expect(spamOverruleNotice({ senderRule: { ...rule, spamOverrules: null } })).toBeNull()
+    expect(spamOverruleNotice({ senderRule: null })).toBeNull()
   })
 })

@@ -33,12 +33,28 @@ export interface ThreadClassification {
     sender: string
     verdict: Verdict | null
     /**
-     * The sender's mail fails authentication (DMARC with a reject or quarantine policy), so the rule does not apply to
-     * it: such mail keeps going to Spam, because anyone could have written that From address. This conversation stays
-     * where the user put it.
+     * Why new mail like this keeps going to Spam despite the rule, or null when the rule applies: it fails
+     * authentication (DMARC with a reject or quarantine policy), or the mail server marks it as spam and its sender is
+     * not authenticated in a header Tresso can trust. This conversation stays where the user put it either way.
      */
-    failsAuthentication: boolean
+    spamOverrules: SpamOverrule | null
   } | null
+}
+
+/** What keeps sending a sender's mail to Spam whatever the user remembered for them. */
+export type SpamOverrule = 'authentication_failed' | 'server_spam'
+
+/** What to tell the user after a correction whose rule cannot help new mail from the sender, or null. */
+export function spamOverruleNotice(result: Pick<ThreadClassification, 'senderRule'>): string | null {
+  const rule = result.senderRule
+  switch (rule?.spamOverrules ?? null) {
+    case 'authentication_failed':
+      return `Moved. New mail from ${rule!.sender} still goes to Spam: it fails the checks that prove who sent it.`
+    case 'server_spam':
+      return `Moved. Your mail server marks mail from ${rule!.sender} as spam, so new mail from them still goes to Spam.`
+    default:
+      return null
+  }
 }
 
 /** A correction remembered for a sender: their mail goes to the smart inbox, with the verdict when set. */
