@@ -7,10 +7,12 @@ namespace App\Outbox;
 use App\Entity\MailAccount;
 use App\Entity\OutgoingMessage;
 use App\Enum\OutgoingStatus;
+use App\Enum\ScanStatus;
 use App\Realtime\AfterCommitDispatcher;
 use App\Realtime\RealtimeNotifier;
 use App\Repository\DraftRepository;
 use App\Repository\OutgoingMessageRepository;
+use App\Scan\DownloadPolicy;
 use App\Storage\ObjectStorage;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Messenger\Stamp\DelayStamp;
@@ -36,6 +38,7 @@ final readonly class Outbox
         private OutgoingMessageRepository $messages,
         private DraftRepository $drafts,
         private DraftFiling $filing,
+        private DownloadPolicy $downloads,
     ) {
     }
 
@@ -101,14 +104,42 @@ final readonly class Outbox
      */
     public function claim(MailAccount $account, string $workerId, \DateTimeImmutable $now): array
     {
-        $claimed = $this->messages->lockClaimable($account, $now, self::CLAIM_BATCH);
         $until = $now->add(new \DateInterval(self::CLAIM_TTL));
-        foreach ($claimed as $message) {
+        $claimed = [];
+        foreach ($this->messages->lockClaimable($account, $now, self::CLAIM_BATCH) as $message) {
+            if (!$this->attachmentsMayGo($message)) {
+                continue;
+            }
             $message->claim($workerId, $until);
+            $claimed[] = $message;
         }
         $this->entityManager->flush();
 
         return $claimed;
+    }
+
+    /**
+     * The files were checked when the message was queued, but a rescan may have found malware since: such a message
+     * fails, and its draft comes back. One that is somehow waiting for a scan stays queued until the scan is done.
+     */
+    private function attachmentsMayGo(OutgoingMessage $message): bool
+    {
+        $draft = $this->drafts->findSendingAs($message);
+        foreach ($draft?->getAttachments() ?? [] as $attachment) {
+            if (ScanStatus::Pending === $attachment->getScanStatus()) {
+                return false;
+            }
+            // Files that could not be scanned were confirmed when the message was queued; a verdict never turns a file
+            // into one later.
+            $refusal = $this->downloads->sendingRefusal($attachment->getScanStatus(), $attachment->getFilename(), acceptUnscanned: true);
+            if (null !== $refusal) {
+                $this->reportFailed($message, $refusal);
+
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public function reportSent(OutgoingMessage $message, \DateTimeImmutable $now, bool $copiedToSent): void

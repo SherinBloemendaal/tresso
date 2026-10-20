@@ -11,6 +11,7 @@ use App\ApiResource\SearchResults;
 use App\Entity\MailAccount;
 use App\Entity\User;
 use App\Enum\FolderRole;
+use App\Enum\ScanStatus;
 use App\Repository\MailAccountRepository;
 use App\Search\Query\Scope;
 use App\Search\Query\SearchFilter;
@@ -144,6 +145,8 @@ final readonly class MessageSearch
                 self::string($attachment['contentType'] ?? ''),
                 self::int($attachment['size'] ?? 0),
                 Highlights::hasMatch($filename),
+                // Documents indexed before scanning existed have none until they are indexed again.
+                ScanStatus::tryFrom(self::string($attachment['scanStatus'] ?? '')),
             );
         }
 

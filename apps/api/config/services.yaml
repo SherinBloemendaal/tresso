@@ -42,6 +42,10 @@ when@test:
         App\Tests\Support\InMemoryObjectStorage:
             public: true
         App\Storage\ObjectStorage: '@App\Tests\Support\InMemoryObjectStorage'
+        # Scans run against a stand-in; ClamdScannerTest talks to a real clamd.
+        App\Tests\Support\FakeVirusScanner:
+            public: true
+        App\Scan\VirusScanner: '@App\Tests\Support\FakeVirusScanner'
         # Test hosts do not resolve; the mocked client answers instead.
         mail_autoconfig.http_client: '@http_client'
         notification.push_http_client: '@http_client'

@@ -103,7 +103,7 @@ final readonly class DraftResource
             $draft->getInReplyTo()?->getId()->toRfc4122(),
             $draft->getVersion(),
             $draft->getUpdatedAt(),
-            array_map(static fn (DraftAttachment $attachment): DraftAttachmentOutput => DraftAttachmentOutput::fromEntity($attachment, $urls->forDraft($attachment)), $draft->getAttachments()),
+            array_map(static fn (DraftAttachment $attachment): DraftAttachmentOutput => DraftAttachmentOutput::fromEntity($attachment, $urls->forDraft($attachment), $urls->access($attachment->getScanStatus())), $draft->getAttachments()),
         );
     }
 }

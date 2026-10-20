@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Storage;
 
 /**
- * Read access to the object storage the sync workers write raw messages and attachments to.
+ * Access to the object storage the sync workers write raw messages and attachments to.
  */
 interface ObjectStorage
 {
@@ -25,6 +25,20 @@ interface ObjectStorage
 
     /** Stores the object; content-addressed keys make writing it twice harmless. */
     public function write(string $key, string $content, string $contentType): void;
+
+    /**
+     * Copies an object to another key, replacing what is there.
+     *
+     * @throws ObjectNotFound when there is nothing at $from
+     */
+    public function copy(string $from, string $to): void;
+
+    /**
+     * Moves an object to another key, replacing what is there.
+     *
+     * @throws ObjectNotFound when there is nothing at $from
+     */
+    public function move(string $from, string $to): void;
 
     /** Removes the object; one that is gone already is fine. */
     public function delete(string $key): void;

@@ -15,7 +15,7 @@ final class HealthTest extends WebTestCase
 
         self::assertResponseIsSuccessful();
         self::assertJsonStringEqualsJsonString(
-            '{"status":"ok","checks":{"database":"ok","redis":"ok"}}',
+            '{"status":"ok","checks":{"database":"ok","redis":"ok","scanner":"ok"}}',
             (string) $client->getResponse()->getContent(),
         );
     }

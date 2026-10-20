@@ -81,4 +81,20 @@ final readonly class ChangeSequencer
             ['seq' => $this->next($userId), 'ids' => '{'.implode(',', array_unique($messageIds)).'}'],
         );
     }
+
+    /**
+     * Marks drafts changed whose files changed in bulk SQL (a scan verdict), so clients fetch their attachments again.
+     *
+     * @param list<string> $draftIds
+     */
+    public function touchDrafts(Uuid $userId, array $draftIds): void
+    {
+        if ([] === $draftIds) {
+            return;
+        }
+        $this->connection->executeStatement(
+            'UPDATE draft SET change_seq = :seq WHERE id = ANY(CAST(:ids AS UUID[]))',
+            ['seq' => $this->next($userId), 'ids' => '{'.implode(',', array_unique($draftIds)).'}'],
+        );
+    }
 }

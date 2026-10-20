@@ -56,7 +56,7 @@ final readonly class MessageBodyProvider implements ProviderInterface
         $contentIdUrls = [];
         foreach ($this->attachments->findByMessage($message) as $attachment) {
             $url = $this->attachmentUrls->for($attachment);
-            $attachments[] = MessageAttachment::fromEntity($attachment, $url);
+            $attachments[] = MessageAttachment::fromEntity($attachment, $url, $this->attachmentUrls->access($attachment->getScanStatus()));
             $contentId = $attachment->getContentId();
             if (null !== $url && null !== $contentId) {
                 $contentIdUrls[MediaUrlPolicy::normalizeContentId($contentId)] = $url;

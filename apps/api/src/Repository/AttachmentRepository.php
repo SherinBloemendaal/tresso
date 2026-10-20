@@ -41,4 +41,20 @@ class AttachmentRepository extends ServiceEntityRepository
 
         return $this->find(Uuid::fromString($id));
     }
+
+    /**
+     * Every attachment with this content, across all users.
+     *
+     * @return list<Attachment>
+     */
+    public function findBySha256(string $sha256): array
+    {
+        /** @var list<Attachment> */
+        return $this->createQueryBuilder('a')
+            ->where('a.sha256 = :sha256')
+            ->setParameter('sha256', $sha256)
+            ->orderBy('a.id')
+            ->getQuery()
+            ->getResult();
+    }
 }

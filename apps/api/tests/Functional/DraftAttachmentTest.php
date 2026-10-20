@@ -23,6 +23,7 @@ use Symfony\Component\Uid\Uuid;
 final class DraftAttachmentTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use RunsScans;
 
     private const string NOTES = "Q4 notes\nTravel stays, hiring moves to January.\n";
 
@@ -69,7 +70,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
 
         $attachment = $this->upload($id, 'Q4 notes.txt', self::NOTES);
 
-        self::assertSame(['filename' => 'Q4 notes.txt', 'contentType' => 'text/plain', 'size' => \strlen(self::NOTES), 'scanStatus' => 'pending'], array_intersect_key($attachment, ['filename' => 0, 'contentType' => 0, 'size' => 0, 'scanStatus' => 0]));
+        self::assertSame(['filename' => 'Q4 notes.txt', 'contentType' => 'text/plain', 'size' => \strlen(self::NOTES), 'scanStatus' => 'clean'], array_intersect_key($attachment, ['filename' => 0, 'contentType' => 0, 'size' => 0, 'scanStatus' => 0]));
         $sha = hash('sha256', self::NOTES);
         self::assertSame(self::NOTES, $this->storage()->read('uploads/'.substr($sha, 0, 2).'/'.$sha));
 
@@ -85,7 +86,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $drafts = $this->decodedResponse()['drafts'] ?? null;
         self::assertIsArray($drafts);
         self::assertIsArray($drafts[0] ?? null);
-        self::assertSame([['id' => $attachment['id'], 'filename' => 'Q4 notes.txt', 'contentType' => 'text/plain', 'size' => \strlen(self::NOTES), 'scanStatus' => 'pending', 'inline' => false, 'contentId' => null]], $drafts[0]['attachments'], 'The delta has the files without links, which would expire on the device.');
+        self::assertSame([['id' => $attachment['id'], 'filename' => 'Q4 notes.txt', 'contentType' => 'text/plain', 'size' => \strlen(self::NOTES), 'scanStatus' => 'clean', 'inline' => false, 'contentId' => null]], $drafts[0]['attachments'], 'The delta has the files without links, which would expire on the device.');
     }
 
     public function testDownloadsAnAttachmentOnlyThroughItsSignedLink(): void
@@ -571,16 +572,28 @@ final class DraftAttachmentTest extends DatabaseTestCase
     {
         $this->uploadRaw($draftId, $filename, $content);
         self::assertResponseStatusCodeSame(201);
-        $response = $this->decodedResponse();
-        self::assertIsString($response['id'] ?? null);
-        self::assertIsString($response['filename'] ?? null);
-        self::assertIsString($response['contentType'] ?? null);
-        self::assertIsInt($response['size'] ?? null);
-        self::assertIsString($response['scanStatus'] ?? null);
-        $url = $response['url'] ?? null;
-        self::assertTrue(null === $url || \is_string($url));
+        $id = $this->decodedResponse()['id'] ?? null;
+        self::assertIsString($id);
+        // The upload is scanned first; only then does it get a link.
+        $this->runQueuedScans();
 
-        return ['id' => $response['id'], 'url' => $url, 'filename' => $response['filename'], 'contentType' => $response['contentType'], 'size' => $response['size'], 'scanStatus' => $response['scanStatus']];
+        $this->client->request('GET', '/api/v1/drafts/'.$draftId, server: $this->kim);
+        self::assertResponseIsSuccessful();
+        foreach ((array) ($this->decodedResponse()['attachments'] ?? []) as $response) {
+            self::assertIsArray($response);
+            if (($response['id'] ?? null) !== $id) {
+                continue;
+            }
+            self::assertIsString($response['filename'] ?? null);
+            self::assertIsString($response['contentType'] ?? null);
+            self::assertIsInt($response['size'] ?? null);
+            self::assertIsString($response['scanStatus'] ?? null);
+            $url = $response['url'] ?? null;
+            self::assertTrue(null === $url || \is_string($url));
+
+            return ['id' => $id, 'url' => $url, 'filename' => $response['filename'], 'contentType' => $response['contentType'], 'size' => $response['size'], 'scanStatus' => $response['scanStatus']];
+        }
+        self::fail('The draft does not list the upload.');
     }
 
     private function send(string $draftId, ?string $at = null, string $html = '<p>See attached.</p>'): string
@@ -691,6 +704,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
             ],
         ]]], $this->worker);
         self::assertResponseIsSuccessful();
+        $this->runQueuedScans();
 
         $id = $this->connection()->fetchOne('SELECT id FROM attachment LIMIT 1');
         self::assertIsString($id);
@@ -732,6 +746,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
             ],
         ]]], $this->worker);
         self::assertResponseIsSuccessful();
+        $this->runQueuedScans();
 
         $id = $this->connection()->fetchOne("SELECT id FROM attachment WHERE filename = 'logo.png'");
         self::assertIsString($id);

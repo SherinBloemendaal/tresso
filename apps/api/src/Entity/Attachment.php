@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace App\Entity;
 
+use App\Enum\ScanFailure;
 use App\Enum\ScanStatus;
 use App\Repository\AttachmentRepository;
+use App\Scan\ScanOutcome;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
@@ -17,6 +19,7 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Entity(repositoryClass: AttachmentRepository::class)]
 #[ORM\Index(columns: ['message_id'])]
 #[ORM\Index(columns: ['sha256'])]
+#[ORM\Index(columns: ['scan_status', 'scan_requested_at'])]
 class Attachment
 {
     #[ORM\Id]
@@ -55,6 +58,16 @@ class Attachment
     #[ORM\Column(length: 255, nullable: true)]
     private ?string $scanSignature = null;
 
+    #[ORM\Column(length: 16, nullable: true, enumType: ScanFailure::class)]
+    private ?ScanFailure $scanFailure = null;
+
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $scannedAt = null;
+
+    /** When a scan was last queued; the sweeper queues one again for content still pending long after. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $scanRequestedAt = null;
+
     /**
      * @param ?string $contentId the part's Content-ID, by which the HTML body can reference it (cid:), whatever its
      *                           disposition
@@ -69,6 +82,7 @@ class Attachment
         $this->size = $size;
         $this->sha256 = $sha256;
         $this->contentId = '' === $contentId ? null : $contentId;
+        $this->scanRequestedAt = new \DateTimeImmutable();
     }
 
     public function getId(): Uuid
@@ -109,7 +123,23 @@ class Attachment
     /** Object storage key; content-addressed so identical files are stored once. */
     public function getObjectKey(): string
     {
-        return 'attachments/'.substr($this->sha256, 0, 2).'/'.$this->sha256;
+        return self::objectKeyFor($this->sha256);
+    }
+
+    /** Where infected content is moved to, out of reach of downloads but kept for review. */
+    public function getQuarantineKey(): string
+    {
+        return self::quarantineKey($this->sha256);
+    }
+
+    public static function quarantineKey(string $sha256): string
+    {
+        return 'quarantine/'.substr($sha256, 0, 2).'/'.$sha256;
+    }
+
+    public static function objectKeyFor(string $sha256): string
+    {
+        return 'attachments/'.substr($sha256, 0, 2).'/'.$sha256;
     }
 
     public function getContentId(): ?string
@@ -143,9 +173,21 @@ class Attachment
         return $this->scanSignature;
     }
 
-    public function recordScan(ScanStatus $status, ?string $signature = null): void
+    public function getScanFailure(): ?ScanFailure
     {
-        $this->scanStatus = $status;
-        $this->scanSignature = $signature;
+        return $this->scanFailure;
+    }
+
+    public function getScannedAt(): ?\DateTimeImmutable
+    {
+        return $this->scannedAt;
+    }
+
+    public function recordScan(ScanOutcome $outcome, \DateTimeImmutable $scannedAt): void
+    {
+        $this->scanStatus = $outcome->status;
+        $this->scanSignature = $outcome->signature;
+        $this->scanFailure = $outcome->failure;
+        $this->scannedAt = $scannedAt;
     }
 }

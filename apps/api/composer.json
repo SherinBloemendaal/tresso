@@ -54,7 +54,8 @@
         "phpunit/phpunit": "^13.4",
         "symfony/browser-kit": "8.1.*",
         "symfony/css-selector": "8.1.*",
-        "symfony/maker-bundle": "^1.68"
+        "symfony/maker-bundle": "^1.68",
+        "symfony/process": "8.1.*"
     },
     "config": {
         "allow-plugins": {

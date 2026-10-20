@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Storage;
 
+use AsyncAws\Core\Exception\Http\ClientException;
 use AsyncAws\S3\Exception\NoSuchKeyException;
 use AsyncAws\S3\Result\GetObjectOutput;
 use AsyncAws\S3\S3Client;
@@ -54,6 +55,24 @@ final readonly class S3ObjectStorage implements ObjectStorage
     public function write(string $key, string $content, string $contentType): void
     {
         $this->client->putObject(['Bucket' => $this->bucket, 'Key' => $key, 'Body' => $content, 'ContentType' => $contentType])->resolve();
+    }
+
+    public function move(string $from, string $to): void
+    {
+        $this->copy($from, $to);
+        $this->client->deleteObject(['Bucket' => $this->bucket, 'Key' => $from])->resolve();
+    }
+
+    public function copy(string $from, string $to): void
+    {
+        try {
+            $this->client->copyObject(['Bucket' => $this->bucket, 'Key' => $to, 'CopySource' => rawurlencode($this->bucket).'/'.str_replace('%2F', '/', rawurlencode($from))])->resolve();
+        } catch (ClientException $exception) {
+            if ('NoSuchKey' === $exception->getAwsCode() || 404 === $exception->getCode()) {
+                throw ObjectNotFound::forKey($from, $exception);
+            }
+            throw $exception;
+        }
     }
 
     public function delete(string $key): void

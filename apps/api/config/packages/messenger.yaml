@@ -29,12 +29,29 @@ framework:
                     max_retries: 3
                     delay: 2000
                     multiplier: 3
+            # Attachment scans wait for clamd, which can be slow or restarting (signature reloads), so they get their own
+            # queue and a patient retry: about ten minutes in all before an attachment is marked failed.
+            scan:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%_scan'
+                retry_strategy:
+                    max_retries: 5
+                    delay: 5000
+                    multiplier: 3
+            # Rescans (app:attachments:rescan) wait behind first scans; a worker consumes it after `scan`.
+            scan_rescan:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%_scan_rescan'
+                retry_strategy:
+                    max_retries: 5
+                    delay: 5000
+                    multiplier: 3
             failed: '%env(MESSENGER_TRANSPORT_DSN)%_failed'
             sync: 'sync://'
 
         routing:
             App\Outbox\ReleaseOutgoingMessage: async
             App\Search\IndexUserMail: search
+            App\Scan\ScanAttachment: scan
+            App\Scan\PlaceContent: scan
             App\Outbox\CollectUpload: async
             App\Classification\ClassifyNewMail: classify
             App\Classification\ReclassifyMail: classify
@@ -51,4 +68,6 @@ when@test:
                 search: 'in-memory://'
                 classify: 'in-memory://'
                 push: 'in-memory://'
+                scan: 'in-memory://'
+                scan_rescan: 'in-memory://'
                 failed: 'in-memory://'

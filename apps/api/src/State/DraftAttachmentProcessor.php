@@ -24,6 +24,8 @@ use App\Outbox\UploadCollector;
 use App\Repository\AttachmentRepository;
 use App\Repository\DraftAttachmentRepository;
 use App\Repository\DraftRepository;
+use App\Scan\AttachmentAccess;
+use App\Scan\DownloadPolicy;
 use App\Security\CurrentUser;
 use App\Storage\ObjectStorage;
 use Doctrine\DBAL\LockMode;
@@ -55,6 +57,7 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
         private UploadCollector $uploads,
         private AttachmentLimits $limits,
         private AttachmentUrls $urls,
+        private DownloadPolicy $downloads,
         private RequestStack $requests,
         private MessageBusInterface $bus,
     ) {
@@ -90,7 +93,7 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
 
         $attachment = $data instanceof ForwardAttachmentInput ? $this->forward($user, $draftId, $data) : $this->upload($user, $draftId);
 
-        return DraftAttachmentOutput::fromEntity($attachment, $this->urls->forDraft($attachment), $attachment->getDraft()->getVersion());
+        return DraftAttachmentOutput::fromEntity($attachment, $this->urls->forDraft($attachment), $this->urls->access($attachment->getScanStatus()), $attachment->getDraft()->getVersion());
     }
 
     private function upload(User $user, string $draftId): DraftAttachment
@@ -151,6 +154,11 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
         }
         if (ScanStatus::Infected === $source->getScanStatus()) {
             throw self::invalid('attachmentId', \sprintf('"%s" contains malware and cannot be forwarded.', $source->getFilename()));
+        }
+        // A file still being scanned may come along (the copy takes the verdict, and sending waits for it), and so may
+        // one that could not be scanned: sending asks the user to confirm it.
+        if (ScanStatus::Failed === $source->getScanStatus() && AttachmentAccess::Blocked === $this->downloads->access(ScanStatus::Failed)) {
+            throw self::invalid('attachmentId', \sprintf('"%s" could not be scanned for malware and cannot be forwarded.', $source->getFilename()));
         }
 
         return $this->entityManager->wrapInTransaction(function () use ($user, $draftId, $source): DraftAttachment {
