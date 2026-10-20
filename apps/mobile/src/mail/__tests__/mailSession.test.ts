@@ -362,4 +362,42 @@ describe('MailSession', () => {
     expect((await mail.database!.handOvers()).map((h) => h.id).sort()).toEqual(['new', 'old'])
     await mail.switchTo(null)
   })
+
+  it('keeps the daily brief on the phone with its conversations as they are now', async () => {
+    const thread = { id: 't1', mailAccountId: 'work', subject: 'Release notes', messageCount: 1, lastMessageAt: '2026-10-20T07:00:00Z', smartInboxId: 'info', verdict: 'know' as const, classificationReason: 'mailing_list' }
+    const message: SyncedMessage = {
+      id: 'm1',
+      mailAccountId: 'work',
+      threadId: 't1',
+      folderIds: ['inbox'],
+      subject: 'Release notes',
+      from: { address: 'news@lists.example', name: null },
+      recipients: { to: [], cc: [], bcc: [], replyTo: [] },
+      snippet: 'Version 2 is out',
+      sentAt: null,
+      receivedAt: '2026-10-20T07:00:00Z',
+      flags: { seen: false, flagged: false, answered: false, draft: false },
+      hasAttachments: false,
+      smartInboxId: 'info',
+      verdict: 'know',
+      summary: null,
+      calendarMethod: null,
+      attachmentScan: null,
+    }
+    const brief = { id: 'b1', coversFrom: '2026-10-19T08:00:00Z', coversUntil: '2026-10-20T07:59:59Z', threadIds: ['t1'], createdAt: '2026-10-20T08:00:00Z' }
+    const { mail, last } = session(device(), async (since) =>
+      since === 0
+        ? page(1, { mailAccounts: [account], folders: [{ id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' }], threads: [thread], messages: [message], dailyBriefs: [brief] })
+        : page(since),
+    )
+
+    await mail.switchTo('kim')
+    await vi.waitFor(() => expect(last().syncState).toBe('idle'))
+
+    const database = mail.database!
+    expect(await database.dailyBriefs()).toEqual([brief])
+    const conversations = await database.conversations(brief.threadIds)
+    expect(conversations.map((conversation) => [conversation.subject, conversation.snippet, conversation.inbox])).toEqual([['Release notes', 'Version 2 is out', true]])
+    await mail.switchTo(null)
+  })
 })

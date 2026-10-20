@@ -3,6 +3,7 @@ import { useRouter } from 'expo-router'
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useAuth } from '@/auth/AuthProvider'
+import { useLatestBrief } from '@/brief/useDailyBrief'
 import { useNotices } from '@/components/Notices'
 import { Icon } from '@/components/Icon'
 import { InboxList } from '@/components/InboxList'
@@ -93,6 +94,7 @@ function SignedIn({ styles }: { styles: Styles }) {
   const [drafts, setDrafts] = useState(0)
   const [openTodos, setOpenTodos] = useState(0)
   const [waiting, setWaiting] = useState(0)
+  const brief = useLatestBrief()
   const { mailAccounts, store, todos, version, handOvers } = mail
 
   useEffect(() => {
@@ -120,6 +122,11 @@ function SignedIn({ styles }: { styles: Styles }) {
                 {mail.live ? '' : ' · not live'}
               </Text>
             </View>
+            {brief.left > 0 && (
+              <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => router.push('/brief')} accessibilityRole="button" accessibilityLabel={`Daily brief, ${brief.left} to note`}>
+                <Text style={styles.secondaryLabel}>Brief {brief.left}</Text>
+              </Pressable>
+            )}
             <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => router.push('/todos')} accessibilityRole="button" accessibilityLabel={`Todos, ${openTodos} open`}>
               <Text style={styles.secondaryLabel}>Todos{openTodos > 0 ? ` ${openTodos}` : ''}</Text>
             </Pressable>
