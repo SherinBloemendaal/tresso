@@ -195,8 +195,8 @@ final readonly class HandOverNotifier
             '/waiting?nudge='.$id,
             $handOver->isNotifiedSilently(),
             $now->modify(self::EXPIRES),
-            // The user it is for: a browser shows a push only for the user who turned notifications on there.
-            ['userId' => $handOver->getOwner()->getId()->toRfc4122(), 'handOverId' => $id],
+            // The dispatcher adds the user it is for (userId), which a browser needs to show it.
+            ['handOverId' => $id],
         );
     }
 

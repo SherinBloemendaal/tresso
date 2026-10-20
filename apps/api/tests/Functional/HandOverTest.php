@@ -360,7 +360,7 @@ final class HandOverTest extends DatabaseTestCase
 
         $sends = $this->expoSends();
         self::assertCount(1, $sends, 'A retried message never notifies twice.');
-        self::assertSame(['userId' => $this->kimsId(), 'handOverId' => $id, 'id' => $id, 'kind' => 'hand_over', 'title' => 'No reply from Lisa Bakker yet', 'body' => 'Invoice question is past its due date. Nudge from Waiting on.', 'path' => '/waiting?nudge='.$id, 'silent' => false], $sends[0]['data'] ?? null);
+        self::assertSame(['handOverId' => $id, 'userId' => $this->kimsId(), 'id' => $id, 'kind' => 'hand_over', 'title' => 'No reply from Lisa Bakker yet', 'body' => 'Invoice question is past its due date. Nudge from Waiting on.', 'path' => '/waiting?nudge='.$id, 'silent' => false], $sends[0]['data'] ?? null);
     }
 
     public function testRecordsTheNoticeForTheDesktopAppInTheDelta(): void
