@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -51,13 +51,20 @@ export default function HandOverScreen() {
   const person = delegate[0]
   const submitText = person === undefined ? 'Hand over' : `Hand over to ${firstName(person)}`
 
+  // Set at once, unlike state, so a second tap before the screen updates does not forward the conversation twice.
+  const submitting = useRef(false)
+
   async function submit() {
+    if (submitting.current) {
+      return
+    }
     const wrong = handOverProblem(delegate, note)
     const choice = choices.find((candidate) => candidate.key === due)
     if (wrong !== null || message === null || choice === undefined || person === undefined) {
       setProblem(wrong)
       return
     }
+    submitting.current = true
     setBusy(true)
     setProblem(null)
     try {
@@ -66,6 +73,7 @@ export default function HandOverScreen() {
     } catch (error) {
       setProblem(error instanceof Error ? error.message : String(error))
     } finally {
+      submitting.current = false
       setBusy(false)
     }
   }
