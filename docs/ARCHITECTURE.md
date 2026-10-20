@@ -79,8 +79,8 @@ rule-based classification); an add-on may provide a richer one. Anyone can build
 ### 3.1 API (`apps/api`)
 
 - Symfony 8.1, PHP 8.5, FrankenPHP worker mode, Doctrine ORM, PostgreSQL 18.
-- Symfony Messenger with Redis transport for async jobs. Transports are split by priority (`ingest`, `scan`,
-  `push`, `low`, and more from add-ons) so slow jobs never block ingest.
+- Symfony Messenger with Redis transport for async jobs. Transports are split so slow jobs never block others:
+  `async` (outgoing mail), `search` (indexing) and `scan` (attachment scans), and more from add-ons.
 - Mercure (bundled in FrankenPHP) pushes realtime updates to web and desktop clients.
 - Identifiers: UUIDv7 everywhere (time ordered, index friendly, safe to expose).
 
@@ -400,7 +400,8 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   - Attachments are listed with a signed URL (`/content/attachments/{id}`, valid for an hour, no access token,
     because images inside rendered mail cannot send one). Only plain image types are served inline; everything else
     downloads as `application/octet-stream`. Every response carries `nosniff` and `Content-Security-Policy:
-    default-src 'none'; sandbox`. Quarantined (infected) attachments have no URL and are never served.
+    default-src 'none'; sandbox`. Attachments that are still being scanned or are quarantined have no URL and are
+    never served (see 3.8).
   - A part counts as inline when the HTML references its Content-ID; the worker decides this, because mail clients
     disagree on the disposition of embedded images. The Content-ID is kept for every part.
 
@@ -479,8 +480,82 @@ Add-ons can hook into each step (Tresso Cloud adds AI classification, assignment
 
 ### 3.8 Virus scanning
 
-ClamAV daemon (`clamd`) scans every attachment via a Messenger job before it is downloadable. Infected
-attachments are quarantined and the message is flagged; results are cached by attachment hash.
+ClamAV's daemon (`clamd`) scans every attachment before it can be downloaded, forwarded or sent: received files and
+files attached to drafts (uploads, and files a forward or reply takes along).
+
+- **Queueing.** Every new `Attachment` and `DraftAttachment` queues a `ScanAttachment` job (naming which kind) once its
+  transaction commits. Scans have their own Messenger transport (`scan`), and in the dev stack their own worker
+  (`scanner`), so a backlog never delays outgoing mail or search. A dispatch can still get lost (the queue down at the
+  wrong moment), and attachments stored before scanning existed have none: a sweeper (`SweepPendingScans`, every 5
+  minutes on the `scheduler_default` transport) claims attachments never queued, then those still pending 15 minutes
+  after their scan was queued, and queues one scan per distinct content. Claims are batches of `UPDATE ... SKIP
+  LOCKED` along the `(scan_status, scan_requested_at)` index, repeated for up to 20 seconds per run, so several workers
+  never queue the same ones and a backlog moves on every run.
+- **Scanning.** `ClamdScanner` streams the content from object storage straight to clamd with `INSTREAM` over TCP
+  (`CLAMAV_HOST`, `CLAMAV_PORT`), with a connect timeout (`CLAMAV_CONNECT_TIMEOUT`) and a read/write timeout
+  (`CLAMAV_TIMEOUT`). Nothing touches the API's disk. Every scan first asks clamd for `VERSION`; a clamd that reports
+  no signature database counts as unavailable, so a scanner without signatures never hands out a clean verdict.
+- **States.** An attachment starts `pending` and ends `clean`, `infected` (with the matching signature) or `failed`
+  (with a reason: `too_large`, `unscannable`, `unavailable`, `disabled`).
+- **clamd configuration.** `docker/clamav/clamd.conf` sets `StreamMaxLength 25M`, equal to `CLAMAV_MAX_SIZE`, and turns
+  on `AlertEncrypted` and `AlertExceedsMax`: clamd otherwise answers OK for encrypted archives and for content past its
+  scan limits. Those alerts (`Heuristics.Encrypted.*`, `Heuristics.Limits.Exceeded.*`) are recorded as `failed`
+  (`unscannable`), not as malware and never as clean. The dev stack and CI run clamd with this file, and CI tests both
+  alerts against it.
+- **Failures and retries.** An unreachable clamd, a timeout, an error reply such as out of memory, or content that is
+  not in object storage makes the job fail and Messenger retry it (five times, from 5 seconds up to about 7 minutes
+  apart). Once it gives up, the attachment is `failed`: `unscannable` when clamd kept answering with an error,
+  `unavailable` otherwise. Only clamd's own size limit is final at once (`too_large`), as is content larger than
+  `CLAMAV_MAX_SIZE`, which is not sent. `messenger:failed:retry` scans a failed attachment again. An empty
+  `CLAMAV_HOST` turns scanning off: attachments become `failed` (`disabled`).
+- **Recording a verdict.** A verdict applies to every attachment with that content (by SHA-256), for every user,
+  received or in a draft. It is written in bulk SQL under a lock per content, and only to rows it changes: a first scan
+  or a cached verdict only settles attachments still `pending` or `failed`, a rescan changes only rows whose verdict
+  differs, and a failure never replaces `clean` or `infected`. Only messages and drafts with a changed file become a
+  change in the delta sync (and ping their owner's realtime channel); messages also get their summary updated. Locks
+  are taken in the order every other writer uses: the drafts and messages (by id), then their attachment rows, then
+  each owner's change counter (owners by id, drafts before messages), so verdicts and edits cannot deadlock in a
+  circle. A deadlock or other database error makes Messenger retry the job; a rescan that gives up stays in the
+  `failed` transport for `messenger:failed:retry` rather than being dropped.
+- **Cache.** Clean and infected verdicts are stored per SHA-256 in `scan_result` with the clamd engine and signature
+  version (`ClamAV 1.5.4/28158/...`). A cached verdict is only reused while clamd reports that same version, so new
+  signatures scan content again the first time it shows up, and mailing a file early cannot keep it clean later.
+- **Quarantine.** The verdict is committed first; moving content follows in its own job (`PlaceContent`), which retries
+  on storage errors while downloads already follow the committed verdict. It holds the same lock per content as
+  recording a verdict while it decides and moves, so a quarantine and a release of the same file never interleave. Infected content moves from every live key
+  (`attachments/<ab>/<sha256>`, `uploads/<ab>/<sha256>`) to `quarantine/<ab>/<sha256>` in the same bucket: out of
+  reach but kept, so it can be reviewed or released. When a rescan clears it, it is copied back to every key an
+  attachment still refers to. The upload collector only ever removes `uploads/` keys. The raw MIME stays under `raw/`
+  because the body needs it, but it is only ever parsed, never served.
+- **The message flag.** Each message carries `attachmentScan`, the state of all its attachments together (inline
+  images included): `infected` as soon as one is, then `pending`, then `failed`, else `clean`; null without
+  attachments. Search results carry each attachment's `scanStatus` too.
+- **Downloads.** Each attachment carries `access`: `allowed`, `scanning`, `confirm` or `blocked`. `clean` attachments
+  are served, with `Cache-Control: no-store` so a later verdict takes effect on the next request. `pending` ones get no
+  link, and an older signed link answers 409 with `Retry-After` until the scan is done: content is never served
+  unscanned, also not right after deploying this (the sweeper scans what is stored; run `app:attachments:rescan --all
+  --status=pending` to get through a large backlog faster). `infected` ones never: no link, 403.
+- **Files that could not be scanned.** Password-protected PDFs and ZIPs, files over 25 MiB and archives past clamd's
+  limits cannot be checked, but people still need them. They are neither silently served nor silently blocked:
+  `access` is `confirm`, the listing has no link, and the clients show a warning with "Download anyway". Only that
+  confirmed request (`POST /api/v1/attachments/{id}/unscanned-link` or `/api/v1/draft-attachments/{id}/unscanned-link`
+  with `{"confirmed": true}`) issues a signed link, which carries the confirmation (`unscanned=1`, covered by the
+  signature); the plain link answers 403. `ATTACHMENTS_REQUIRE_SCAN` decides whether this override exists at all: 0,
+  the default, allows it; 1 makes such files `blocked` everywhere, for deployments that accept no unchecked file.
+- **Fail fast.** `/health` reports `scanner`: `ok`, `off` (no `CLAMAV_HOST`), `unreachable`, or `unconfigured`:
+  `ATTACHMENTS_REQUIRE_SCAN=1` without a scanner, where no attachment could ever be opened. That last one answers 503,
+  so a misconfigured deployment fails its health check instead of quietly marking every file as not scanned.
+- **Drafts and sending.** A forward may take along a file that is still being scanned (the copy takes the verdict when
+  it comes) or one that could not be scanned; an infected one is not forwarded, and neither is an unscanned one while
+  scans are required. Sending waits until every file is clean: a pending one answers "still being scanned", an
+  infected one is refused, and one that could not be scanned goes only with `acceptUnscanned: true`, which clients send
+  after the user confirmed a warning (the refusal names the field, so clients know to ask). When the worker claims the
+  message, the files are checked again: one found infected since (a rescan) fails the message and brings the draft
+  back.
+- **Rescans.** `bin/console app:attachments:rescan --all` (or `--user=<email>`, repeatable, optionally `--status=...`)
+  queues one rescan per distinct content that skips the cache, in batches in content-hash order on a lower priority
+  transport (`scan_rescan`), and prints how far it got; `--after=<hash>` continues an interrupted run. Current
+  verdicts stay in force until the new one is in.
 
 ### 3.9 Tresso Cloud features
 

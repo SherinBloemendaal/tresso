@@ -114,7 +114,9 @@ Tresso Cloud: teams, shared inboxes, assignments, internal comments, delegation 
 
 ## Phase 4: Safety and housekeeping
 
-- [ ] 4.1 ClamAV attachment scanning and quarantine
+- [x] 4.1 ClamAV attachment scanning and quarantine: clamd over INSTREAM in a Messenger job per attachment, verdicts
+  cached by content hash, infected content moved to quarantine, the message flagged through the delta sync and
+  realtime, no downloads before a scan, rescans from the console, scan states on the web client's attachments
 - [x] 4.2 Bulk actions in the web client: select conversations (checkboxes, shift for a range), act on all of them,
   select everything from their senders or older than an age
 - [ ] 4.3 Bulk management by smart inbox, cleanup suggestions (after 2.1)
