@@ -5,6 +5,10 @@ import { MAX_MESSAGES_PER_ACTION, type ChangePage, type SyncedMessage } from '@t
 import { deleteMailDatabase } from '@/mail/db'
 import { useMailStore } from '../mail'
 
+// Batches of two: what batching does is the same at any size, and a few messages through the local copy are quick
+// where the real limit's 500 are slow.
+vi.mock('@tresso/core', async (importOriginal) => ({ ...(await importOriginal<typeof import('@tresso/core')>()), MAX_MESSAGES_PER_ACTION: 2 }))
+
 const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 'Work', provider: 'imap', status: 'active' as const, statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }
 
 function message(id: string): SyncedMessage {
