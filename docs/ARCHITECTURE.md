@@ -1200,7 +1200,8 @@ after. Everything lives in `apps/api/src/Notification`.
   the address in the settings (or the sign-in address) from the system sender `NOTIFICATIONS_FROM`. Reminders carry
   their own channels; other kinds use the user's choice per kind (`channelsByKind` in the notification settings,
   keyed by kind name so other features add their own), else the kind's default: leave-now on the phone, briefs and
-  follow-ups on the desktop, new mail on the phone and the desktop. Devices register with `POST /api/v1/notification-devices`:
+  follow-ups on the desktop, new mail and hand-overs past their due date (`hand_over`, 3.15) on the phone and the
+  desktop. Devices register with `POST /api/v1/notification-devices`:
   - Web push (`web_push`): the browser's subscription. Messages are encrypted per RFC 8291 (aes128gcm) and signed
     with VAPID (RFC 8292, ES256) on ext-openssl, checked against the RFC's own example. Endpoints come from clients,
     so they must be https and requests refuse private networks. Keys come from `WEB_PUSH_PUBLIC_KEY` and
@@ -1467,9 +1468,14 @@ edition hands over by mail.
 - **Due dates:** recording (or a new `dueAt` in a `PATCH`) dispatches `HandOverDue` after the commit with
   `DelayStamp::delayUntil(dueAt)` on the `async` transport, like the release of scheduled mail. Its handler locks the
   hand-over and, when it is still open without a reply, sets `overdueAt` once; every worker heartbeat marks overdue
-  hand-overs of the leased accounts too, in case a message got lost. A new due date clears `overdueAt`. Clients tell
-  the user when a hand-over becomes overdue in a page they apply (`takeOverdueHandOvers` of the mail stores, not for
-  the first pull of a copy), offering the nudge.
+  hand-overs of the leased accounts too, in case a message got lost. A new due date clears `overdueAt`. Becoming
+  overdue dispatches `NotifyOverdueHandOver` after the commit (transport `push`), which sends "No reply from {delegate}
+  yet" through the `NotificationDispatcher` (kind `hand_over`, path `/waiting?nudge={id}`, the phone's `reminders`
+  channel) on the channels the user chose for `hand_over` in `channelsByKind`, else the phone and the desktop. Its
+  delivery key `handOver:{id}:{due date}` makes a retried message notify no device twice, while a new due date that
+  passes tells again. The clients also tell the user when a hand-over becomes overdue in a page they apply
+  (`takeOverdueHandOvers` of the mail stores, not for the first pull of a copy): natively on the desktop app, whose
+  delivery comes through the delta, and as a notice with the nudge one click away in every app.
 - **Nudges:** `POST /api/v1/hand-overs/{id}/nudge` (scope `mail:send`, `html` and an optional `sendAt` a few seconds
   ahead for undo) queues a reply to the delegate through the outbox, in the same conversation: to the forward's copy
   in Sent when it was synced, else to the message handed over, with "Re:" and the forward's subject. Clients suggest

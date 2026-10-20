@@ -91,9 +91,9 @@ Delivered in steps, each its own pull request:
   and a todo list on mobile
 - [x] 2.4 Hand over by forwarding with a note and due date, tracked in "Waiting on" with nudges: the conversation is
   forwarded through the shared compose flow with its files, a synced hand-over closes when the delegate replies in it
-  (detected on ingest) or is marked done, the due date is scheduled through Messenger and announced in the app (and
-  natively on the desktop) when it passes without a reply, and a one-click nudge replies to the delegate; web and
-  mobile clients
+  (detected on ingest) or is marked done, the due date is scheduled through Messenger and, when it passes without a
+  reply, announced through the notification dispatcher and in the apps, and a one-click nudge replies to the delegate;
+  web and mobile clients
 - [x] 2.7 Batched delivery and one-click unsubscribe: mail of smart inboxes that deliver in batches (notification and
   advertise by default) held until the user's batch times in their zone and kept out of lists and notifications
   until then, released by a delayed message with a sweep every minute as safety net; for authenticated senders only,

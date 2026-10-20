@@ -7,6 +7,9 @@ namespace App\Tests\Functional;
 use App\Entity\OutgoingMessage;
 use App\HandOver\HandOverDue;
 use App\HandOver\HandOverDueHandler;
+use App\HandOver\NotifyOverdueHandOver;
+use App\HandOver\NotifyOverdueHandOverHandler;
+use App\Tests\Support\MockHttpRouter;
 use App\Tests\Support\InMemoryObjectStorage;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Messenger\Stamp\DelayStamp;
@@ -16,6 +19,8 @@ use Symfony\Component\Uid\Uuid;
 final class HandOverTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+
+    private const string EXPO_SEND = 'https://exp.host/--/api/v2/push/send';
 
     private string $accountId;
 
@@ -203,14 +208,66 @@ final class HandOverTest extends DatabaseTestCase
         static::getContainer()->get(EntityManagerInterface::class)->clear();
 
         static::getContainer()->get(HandOverDueHandler::class)(new HandOverDue($id));
-        $first = $this->get($id);
         $seq = $this->changeSeq($id);
         static::getContainer()->get(HandOverDueHandler::class)(new HandOverDue($id));
+        $told = array_map(static fn (NotifyOverdueHandOver $notify): string => $notify->handOverId, $this->notifications());
+        $handOver = $this->get($id);
 
-        self::assertNotNull($first['overdueAt']);
-        self::assertSame('open', $first['state']);
-        self::assertSame($first['overdueAt'], $this->get($id)['overdueAt']);
+        self::assertNotNull($handOver['overdueAt']);
+        self::assertSame('open', $handOver['state']);
         self::assertSame($seq, $this->changeSeq($id), 'It is marked overdue once, so clients tell the user once.');
+        self::assertSame([$id], $told, 'The user is told once.');
+    }
+
+    public function testTellsTheUserOnTheirDevicesOnce(): void
+    {
+        $id = $this->overdueHandOver();
+        $this->registerPhone();
+
+        $this->notifyOverdue($id);
+        $this->notifyOverdue($id);
+
+        $sends = $this->expoSends();
+        self::assertCount(1, $sends, 'A retried message never notifies twice.');
+        self::assertSame(['handOverId' => $id, 'id' => $id, 'kind' => 'hand_over', 'title' => 'No reply from Lisa Bakker yet', 'body' => 'Invoice question is past its due date. Nudge from Waiting on.', 'path' => '/waiting?nudge='.$id, 'silent' => false], $sends[0]['data'] ?? null);
+    }
+
+    public function testTellsAgainWhenANewDueDatePasses(): void
+    {
+        $id = $this->overdueHandOver();
+        $this->registerPhone();
+        $this->notifyOverdue($id);
+
+        $this->patch($id, ['dueAt' => new \DateTimeImmutable('+1 day')->format(\DATE_ATOM)]);
+        $this->connection()->executeStatement("UPDATE hand_over SET due_at = now() - interval '5 minutes' WHERE id = :id", ['id' => $id]);
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+        static::getContainer()->get(HandOverDueHandler::class)(new HandOverDue($id));
+        $this->notifyOverdue($id);
+
+        self::assertCount(2, $this->expoSends());
+    }
+
+    public function testTellsNothingOnceItIsClosed(): void
+    {
+        $id = $this->overdueHandOver();
+        $this->registerPhone();
+        $this->patch($id, ['done' => true]);
+
+        $this->notifyOverdue($id);
+
+        self::assertSame([], $this->expoSends());
+    }
+
+    public function testFollowsTheChannelsChosenForHandOvers(): void
+    {
+        $id = $this->overdueHandOver();
+        $this->registerPhone();
+        $this->client->request('PATCH', '/api/v1/notification-settings', server: $this->settings() + ['CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['channelsByKind' => ['hand_over' => []]], \JSON_THROW_ON_ERROR));
+        self::assertResponseIsSuccessful();
+
+        $this->notifyOverdue($id);
+
+        self::assertSame([], $this->expoSends());
     }
 
     public function testIsNotOverdueBeforeTheDueDate(): void
@@ -472,6 +529,68 @@ final class HandOverTest extends DatabaseTestCase
         }
 
         return $checks;
+    }
+
+    private function overdueHandOver(): string
+    {
+        $id = $this->handOverId();
+        $this->connection()->executeStatement("UPDATE hand_over SET due_at = now() - interval '1 minute' WHERE id = :id", ['id' => $id]);
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+        static::getContainer()->get(HandOverDueHandler::class)(new HandOverDue($id));
+
+        return $id;
+    }
+
+    private function notifyOverdue(string $id): void
+    {
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+        static::getContainer()->get(NotifyOverdueHandOverHandler::class)(new NotifyOverdueHandOver($id));
+    }
+
+    /** @return array<string, string> */
+    private function settings(): array
+    {
+        return $this->userHeaders('kim@example.test', ['settings:read', 'settings:write']);
+    }
+
+    private function registerPhone(): void
+    {
+        $this->http()->respond(self::EXPO_SEND, json_encode(['data' => [['status' => 'ok', 'id' => 'ticket-1']]], \JSON_THROW_ON_ERROR));
+        $this->client->jsonRequest('POST', '/api/v1/notification-devices', ['kind' => 'expo', 'endpoint' => 'ExponentPushToken[abc123]', 'name' => 'Phone'], $this->settings());
+        self::assertResponseIsSuccessful();
+    }
+
+    /**
+     * What was sent to Expo, one entry per push.
+     *
+     * @return list<array<mixed>>
+     */
+    private function expoSends(): array
+    {
+        $sends = [];
+        foreach ($this->http()->calls() as $call) {
+            if (self::EXPO_SEND === $call['url']) {
+                $body = json_decode($call['body'], true, flags: \JSON_THROW_ON_ERROR);
+                self::assertIsArray($body);
+                $sends[] = $body;
+            }
+        }
+
+        return $sends;
+    }
+
+    /** @return list<NotifyOverdueHandOver> */
+    private function notifications(): array
+    {
+        $transport = static::getContainer()->get('messenger.transport.push');
+        self::assertInstanceOf(InMemoryTransport::class, $transport);
+
+        return array_values(array_filter(array_map(static fn ($envelope): object => $envelope->getMessage(), [...$transport->getSent()]), static fn (object $message): bool => $message instanceof NotifyOverdueHandOver));
+    }
+
+    private function http(): MockHttpRouter
+    {
+        return static::getContainer()->get(MockHttpRouter::class);
     }
 
     /** @return list<string> */

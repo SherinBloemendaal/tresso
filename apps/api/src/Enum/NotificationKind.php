@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Enum;
 
+use App\HandOver\HandOvers;
 use App\Notification\NotificationChannelChoice;
 
 /**
@@ -31,7 +32,7 @@ enum NotificationKind: string
      */
     public static function withChosenChannels(): array
     {
-        return [self::LeaveNow->value, self::Brief->value, self::FollowUp->value, self::Mail->value];
+        return [self::LeaveNow->value, self::Brief->value, self::FollowUp->value, self::Mail->value, HandOvers::NOTIFICATION_KIND];
     }
 
     /** Where this kind goes unless the user chose otherwise. Reminders carry their own channels. */
