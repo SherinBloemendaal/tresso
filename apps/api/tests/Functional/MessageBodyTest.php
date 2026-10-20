@@ -5,11 +5,14 @@ declare(strict_types=1);
 namespace App\Tests\Functional;
 
 use App\Entity\Attachment;
-use App\Enum\ScanStatus;
 use App\Repository\AttachmentRepository;
+use App\Scan\ScanOutcome;
 use App\Tests\Support\InMemoryObjectStorage;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\UriSigner;
+use Symfony\Component\Messenger\MessageBusInterface;
+use Symfony\Component\Messenger\Stamp\ReceivedStamp;
+use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 
 final class MessageBodyTest extends DatabaseTestCase
 {
@@ -72,6 +75,7 @@ final class MessageBodyTest extends DatabaseTestCase
             ],
         ]]], $worker);
         self::assertResponseIsSuccessful();
+        $this->runScans();
 
         $this->client->request('GET', '/api/v1/sync/changes', server: $this->kim);
         $messages = $this->decodedResponse()['messages'] ?? null;
@@ -126,7 +130,7 @@ final class MessageBodyTest extends DatabaseTestCase
         self::assertSame(\strlen(self::INVOICE), $invoice['size']);
         self::assertFalse($invoice['inline']);
         self::assertNull($invoice['contentId']);
-        self::assertSame('pending', $invoice['scanStatus']);
+        self::assertSame('clean', $invoice['scanStatus']);
     }
 
     public function testServesInlineImagesThroughTheSignedUrl(): void
@@ -154,6 +158,7 @@ final class MessageBodyTest extends DatabaseTestCase
         self::assertResponseIsSuccessful();
         self::assertSame(self::INVOICE, $this->streamedContent());
         self::assertResponseHeaderSame('Content-Type', 'application/octet-stream');
+        self::assertResponseHeaderSame('Cache-Control', 'no-store, private', 'A later verdict takes effect on the next request.');
         self::assertResponseHeaderSame('Content-Disposition', "attachment; filename=\"Factuur 42 _ oktober.pdf\"; filename*=utf-8''Factuur%2042%20%E2%80%93%20oktober.pdf");
     }
 
@@ -253,8 +258,22 @@ final class MessageBodyTest extends DatabaseTestCase
     {
         $attachment = static::getContainer()->get(AttachmentRepository::class)->findOneBy(['filename' => $filename]);
         self::assertInstanceOf(Attachment::class, $attachment);
-        $attachment->recordScan(ScanStatus::Infected, 'Eicar-Test-Signature');
+        $attachment->recordScan(ScanOutcome::infected('Eicar-Test-Signature'), new \DateTimeImmutable());
         static::getContainer()->get(EntityManagerInterface::class)->flush();
+    }
+
+    /**
+     * Scans what the ingest queued, so the attachments are clean (AttachmentScanTest covers scanning itself).
+     */
+    private function runScans(): void
+    {
+        $transport = static::getContainer()->get('messenger.transport.scan');
+        self::assertInstanceOf(InMemoryTransport::class, $transport);
+        $envelopes = [...$transport->getSent()];
+        $transport->reset();
+        foreach ($envelopes as $envelope) {
+            static::getContainer()->get(MessageBusInterface::class)->dispatch($envelope->with(new ReceivedStamp('scan')));
+        }
     }
 
     private function streamedContent(): string

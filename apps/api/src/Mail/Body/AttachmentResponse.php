@@ -39,8 +39,8 @@ final class AttachmentResponse
         $response->headers->set('Content-Security-Policy', "default-src 'none'; sandbox");
         $response->headers->set('Cross-Origin-Resource-Policy', 'cross-origin');
         $response->headers->set('Referrer-Policy', 'no-referrer');
-        $response->setPrivate();
-        $response->setMaxAge(3600);
+        // Never cached: a later verdict (malware found by a rescan) must take effect on the next request.
+        $response->headers->set('Cache-Control', 'no-store, private');
         $response->setEtag($sha256);
 
         return $response;

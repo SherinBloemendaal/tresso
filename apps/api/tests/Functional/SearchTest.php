@@ -122,6 +122,7 @@ final class SearchTest extends DatabaseTestCase
         self::assertIsArray($attachments);
         self::assertIsArray($attachments[0]);
         self::assertTrue($attachments[0]['matched']);
+        self::assertSame('pending', $attachments[0]['scanStatus'], 'Results show what the scan said, so blocked files stand out.');
         self::assertSame([['text' => 'factuur', 'match' => true], ['text' => '-42.pdf', 'match' => false]], $attachments[0]['filename']);
         self::assertSame(212000, $attachments[0]['size']);
     }

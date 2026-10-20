@@ -15,6 +15,8 @@
         <ini name="error_reporting" value="-1" />
         <server name="APP_ENV" value="test" force="true" />
         <server name="SHELL_VERBOSITY" value="-1" />
+        <!-- The shipped default, also where an environment sets it otherwise; DownloadPolicyTest covers strict mode. -->
+        <server name="ATTACHMENTS_REQUIRE_SCAN" value="0" force="true" />
     </php>
 
     <testsuites>

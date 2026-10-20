@@ -15,7 +15,6 @@ use App\Entity\MailAccount;
 use App\Entity\Message;
 use App\Entity\OutgoingMessage;
 use App\Enum\OutgoingStatus;
-use App\Enum\ScanStatus;
 use App\Outbox\AttachmentLimits;
 use App\Outbox\Composition;
 use App\Outbox\DraftFiling;
@@ -26,6 +25,8 @@ use App\Repository\DraftRepository;
 use App\Repository\MailAccountRepository;
 use App\Repository\MessageRepository;
 use App\Repository\OutgoingMessageRepository;
+use App\Scan\AttachmentAccess;
+use App\Scan\DownloadPolicy;
 use App\Security\CurrentUser;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
@@ -49,6 +50,7 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
         private DraftRepository $drafts,
         private DraftFiling $filing,
         private AttachmentLimits $limits,
+        private DownloadPolicy $downloads,
     ) {
     }
 
@@ -81,11 +83,12 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
             );
 
             $draftId = $data->draftId;
+            $acceptUnscanned = $data->acceptUnscanned;
             if (null !== $draftId && !$this->drafts->findOneOwnedBy($user, $draftId) instanceof Draft) {
                 throw self::invalid('draftId', 'No draft with that id.', $draftId);
             }
 
-            return OutgoingMessageResource::fromEntity($this->entityManager->wrapInTransaction(function () use ($composition, $now, $draftId, $user): OutgoingMessage {
+            return OutgoingMessageResource::fromEntity($this->entityManager->wrapInTransaction(function () use ($composition, $now, $draftId, $user, $acceptUnscanned): OutgoingMessage {
                 // Locked before anything is built, so its attachments cannot change and it is sent once.
                 $draft = null;
                 if (null !== $draftId) {
@@ -94,7 +97,7 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
                     if (!$draft instanceof Draft || $draft->isSending()) {
                         throw new ConflictHttpException('This draft is being sent already.');
                     }
-                    $composition = $this->withAttachments($composition, $draft);
+                    $composition = $this->withAttachments($composition, $draft, $acceptUnscanned);
                 }
                 try {
                     $queued = $this->outbox->queue($composition, $now);
@@ -130,15 +133,19 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
     }
 
     /**
-     * The draft's attachments go with the message: none may be infected, and together they must fit the size a mail
-     * server takes.
+     * The draft's attachments go with the message: each must have passed the scan, or have been confirmed by the user
+     * when it could not be scanned (see {@see DownloadPolicy}), and together they must fit the size a mail server
+     * takes.
      */
-    private function withAttachments(Composition $composition, Draft $draft): Composition
+    private function withAttachments(Composition $composition, Draft $draft, bool $acceptUnscanned): Composition
     {
         $total = 0;
         foreach ($draft->getAttachments() as $attachment) {
-            if (ScanStatus::Infected === $attachment->getScanStatus()) {
-                throw self::invalid('draftId', \sprintf('"%s" contains malware. Remove it to send this message.', $attachment->getFilename()), $draft->getId()->toRfc4122());
+            $refusal = $this->downloads->sendingRefusal($attachment->getScanStatus(), $attachment->getFilename(), $acceptUnscanned);
+            if (null !== $refusal) {
+                // A file that only needs the user's confirmation is answered on `acceptUnscanned`, so clients can ask.
+                $confirmable = AttachmentAccess::Confirm === $this->downloads->access($attachment->getScanStatus());
+                throw $confirmable ? self::invalid('acceptUnscanned', $refusal, '') : self::invalid('draftId', $refusal, $draft->getId()->toRfc4122());
             }
             $total += $attachment->getSize();
         }

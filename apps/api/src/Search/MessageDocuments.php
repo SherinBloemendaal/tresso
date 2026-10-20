@@ -38,7 +38,7 @@ final readonly class MessageDocuments
                 "SELECT m.id, m.thread_id, m.mail_account_id, m.subject, m.from_address, m.from_name, m.recipients, m.snippet,
                         m.received_at, m.seen, m.flagged, m.has_attachments, m.change_seq, t.text AS body_text,
                         COALESCE((SELECT json_agg(l.folder_id ORDER BY l.folder_id) FROM message_location l WHERE l.message_id = m.id), '[]') AS folder_ids,
-                        COALESCE((SELECT json_agg(json_build_object('id', a.id, 'filename', a.filename, 'contentType', a.content_type, 'size', a.size) ORDER BY a.id)
+                        COALESCE((SELECT json_agg(json_build_object('id', a.id, 'filename', a.filename, 'contentType', a.content_type, 'size', a.size, 'scanStatus', a.scan_status) ORDER BY a.id)
                                   FROM attachment a WHERE a.message_id = m.id AND NOT a.inline), '[]') AS attachments
                  FROM message m
                  JOIN mail_account ma ON ma.id = m.mail_account_id
@@ -74,7 +74,7 @@ final readonly class MessageDocuments
         $recipients = self::json($row['recipients']);
         /** @var list<string> $folderIds */
         $folderIds = self::json($row['folder_ids']);
-        /** @var list<array{id: string, filename: string, contentType: string, size: int}> $attachments */
+        /** @var list<array{id: string, filename: string, contentType: string, size: int, scanStatus: string}> $attachments */
         $attachments = self::json($row['attachments']);
 
         $fromAddress = self::string($row['from_address']);

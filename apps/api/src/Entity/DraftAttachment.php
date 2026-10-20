@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace App\Entity;
 
+use App\Enum\ScanFailure;
 use App\Enum\ScanStatus;
 use App\Repository\DraftAttachmentRepository;
+use App\Scan\ScanOutcome;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
@@ -18,6 +20,8 @@ use Symfony\Component\Uid\Uuid;
  */
 #[ORM\Entity(repositoryClass: DraftAttachmentRepository::class)]
 #[ORM\Index(columns: ['object_key'])]
+#[ORM\Index(columns: ['sha256'])]
+#[ORM\Index(columns: ['scan_status', 'scan_requested_at'])]
 class DraftAttachment
 {
     /** Uploads live under this prefix; files taken from received mail keep their own key. */
@@ -53,6 +57,16 @@ class DraftAttachment
     #[ORM\Column(length: 255, nullable: true)]
     private ?string $scanSignature = null;
 
+    #[ORM\Column(length: 16, nullable: true, enumType: ScanFailure::class)]
+    private ?ScanFailure $scanFailure = null;
+
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $scannedAt = null;
+
+    /** When a scan was last queued; the sweeper queues one again for content still pending long after. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $scanRequestedAt = null;
+
     /**
      * Shown inside the text (an image of the original a reply or forward quotes), referred to as cid:{contentId},
      * rather than listed as a file.
@@ -84,6 +98,7 @@ class DraftAttachment
         $this->objectKey = $objectKey;
         $this->position = $position;
         $this->createdAt = $now;
+        $this->scanRequestedAt = $now;
     }
 
     /** Where an uploaded file with this content is stored. */
@@ -142,17 +157,35 @@ class DraftAttachment
         return $this->scanSignature;
     }
 
-    /** Takes the scanner's verdict (the same as for a received attachment with this content). */
-    public function recordScan(ScanStatus $status, ?string $signature): void
+    public function getScanFailure(): ?ScanFailure
     {
-        $this->scanStatus = $status;
-        $this->scanSignature = ScanStatus::Infected === $status ? $signature : null;
+        return $this->scanFailure;
     }
 
-    /** Taken from a received attachment, whose scan applies to this copy too, and which stays inline if it was. */
+    public function getScannedAt(): ?\DateTimeImmutable
+    {
+        return $this->scannedAt;
+    }
+
+    /** Takes the scanner's verdict (the same as for a received attachment with this content). */
+    public function recordScan(ScanOutcome $outcome, \DateTimeImmutable $scannedAt): void
+    {
+        $this->scanStatus = $outcome->status;
+        $this->scanSignature = $outcome->signature;
+        $this->scanFailure = $outcome->failure;
+        $this->scannedAt = $scannedAt;
+    }
+
+    /**
+     * Taken from a received attachment, whose scan applies to this copy too (also a verdict that arrives later), and
+     * which stays inline if it was.
+     */
     public function takeFrom(Attachment $attachment): void
     {
-        $this->recordScan($attachment->getScanStatus(), $attachment->getScanSignature());
+        $this->scanStatus = $attachment->getScanStatus();
+        $this->scanSignature = $attachment->getScanSignature();
+        $this->scanFailure = $attachment->getScanFailure();
+        $this->scannedAt = $attachment->getScannedAt();
         $contentId = $attachment->getContentId();
         if ($attachment->isInline() && null !== $contentId && '' !== $contentId) {
             $this->inline = true;

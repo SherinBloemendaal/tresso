@@ -218,7 +218,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     {
         $rows = $this->connection->fetchAllAssociative(
             "SELECT m.id, m.mail_account_id, m.thread_id, m.subject, m.from_address, m.from_name, m.recipients, m.snippet,
-                    m.sent_at, m.received_at, m.seen, m.flagged, m.answered, m.draft, m.has_attachments,
+                    m.sent_at, m.received_at, m.seen, m.flagged, m.answered, m.draft, m.has_attachments, m.attachment_scan,
                     m.category_id, m.verdict, m.summary,
                     (SELECT i.method FROM calendar_invitation i WHERE i.message_id = m.id ORDER BY i.id LIMIT 1) AS calendar_method,
                     COALESCE((SELECT json_agg(l.folder_id ORDER BY l.folder_id) FROM message_location l WHERE l.message_id = m.id), '[]') AS folder_ids
@@ -240,6 +240,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'receivedAt' => self::date($r['received_at']),
             'flags' => ['seen' => (bool) $r['seen'], 'flagged' => (bool) $r['flagged'], 'answered' => (bool) $r['answered'], 'draft' => (bool) $r['draft']],
             'hasAttachments' => (bool) $r['has_attachments'],
+            'attachmentScan' => $r['attachment_scan'],
             'smartInboxId' => $r['category_id'],
             'verdict' => $r['verdict'],
             'summary' => $r['summary'],

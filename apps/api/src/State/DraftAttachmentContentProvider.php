@@ -7,9 +7,10 @@ namespace App\State;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProviderInterface;
 use App\Entity\DraftAttachment;
-use App\Enum\ScanStatus;
 use App\Mail\Body\AttachmentResponse;
+use App\Mail\Body\AttachmentUrls;
 use App\Repository\DraftAttachmentRepository;
+use App\Scan\DownloadPolicy;
 use App\Storage\ObjectNotFound;
 use App\Storage\ObjectStorage;
 use Symfony\Component\HttpFoundation\Exception\SignedUriException;
@@ -30,6 +31,7 @@ final readonly class DraftAttachmentContentProvider implements ProviderInterface
         private ObjectStorage $storage,
         private UriSigner $signer,
         private RequestStack $requests,
+        private DownloadPolicy $downloads,
     ) {
     }
 
@@ -47,8 +49,9 @@ final readonly class DraftAttachmentContentProvider implements ProviderInterface
         if (!$attachment instanceof DraftAttachment) {
             throw new NotFoundHttpException('Attachment not found.');
         }
-        if (ScanStatus::Infected === $attachment->getScanStatus()) {
-            throw new AccessDeniedHttpException('This attachment is quarantined because it contains malware.');
+        $refusal = $this->downloads->refusal($attachment->getScanStatus(), AttachmentUrls::isConfirmedUnscanned($request));
+        if (null !== $refusal) {
+            throw $refusal;
         }
 
         try {

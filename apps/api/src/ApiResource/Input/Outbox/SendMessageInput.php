@@ -48,6 +48,9 @@ final class SendMessageInput
     #[Assert\Uuid]
     public ?string $draftId = null;
 
+    /** The user confirmed sending the draft's files that could not be scanned for malware. */
+    public bool $acceptUnscanned = false;
+
     #[Assert\Callback]
     public function validateRecipients(ExecutionContextInterface $context): void
     {

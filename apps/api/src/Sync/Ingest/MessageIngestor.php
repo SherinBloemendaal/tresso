@@ -122,6 +122,7 @@ final readonly class MessageIngestor
         }
 
         $hasAttachments = false;
+        $scanStatuses = [];
         foreach ($input->attachments as $attachmentInput) {
             $attachment = new Attachment($message, $attachmentInput->filename, $attachmentInput->contentType, $attachmentInput->size, $attachmentInput->sha256, $attachmentInput->contentId);
             if ($attachmentInput->inline && null !== $attachment->getContentId()) {
@@ -130,8 +131,10 @@ final readonly class MessageIngestor
                 $hasAttachments = true;
             }
             $this->entityManager->persist($attachment);
+            $scanStatuses[] = $attachment->getScanStatus();
         }
         $message->setHasAttachments($hasAttachments);
+        $message->summarizeAttachmentScans($scanStatuses);
 
         $this->invitations->arrived($message, $folder->getRole(), $input->calendarParts);
 

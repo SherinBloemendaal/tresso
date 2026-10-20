@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Entity;
 
+use App\Enum\ScanStatus;
 use App\Enum\Verdict;
 use App\Repository\MessageRepository;
 use Doctrine\DBAL\Types\Types;
@@ -86,6 +87,13 @@ class Message implements TracksChanges
 
     #[ORM\Column]
     private bool $hasAttachments = false;
+
+    /**
+     * The scan state of all attachments together (inline ones included): infected as soon as one is, then pending
+     * while any is still waiting, then failed, else clean. Null without attachments.
+     */
+    #[ORM\Column(length: 16, nullable: true, enumType: ScanStatus::class)]
+    private ?ScanStatus $attachmentScan = null;
 
     #[ORM\Column(type: Types::BIGINT)]
     private int $size = 0;
@@ -253,6 +261,19 @@ class Message implements TracksChanges
     public function setHasAttachments(bool $hasAttachments): void
     {
         $this->hasAttachments = $hasAttachments;
+    }
+
+    public function getAttachmentScan(): ?ScanStatus
+    {
+        return $this->attachmentScan;
+    }
+
+    /**
+     * @param list<ScanStatus> $attachmentStatuses the scan status of every attachment of the message
+     */
+    public function summarizeAttachmentScans(array $attachmentStatuses): void
+    {
+        $this->attachmentScan = ScanStatus::summarize($attachmentStatuses);
     }
 
     public function getSize(): int
