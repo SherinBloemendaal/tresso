@@ -195,24 +195,23 @@ export function describeRule(rule: string): string {
 }
 
 /**
- * Whether two rules give the same series, however they are written: the order of parts, letter case, INTERVAL=1
- * and WKST=MO (the defaults) make no difference. Rules from Outlook, Apple and Thunderbird keep their own spelling
- * through the editor, and only a rule the user changed counts as a new one.
+ * Whether two rules are the same rule, compared the way the server compares them (EventEditor::normalizeRule):
+ * letter case, spaces around it and the order of parts make no difference. The server starts a series fresh, without
+ * its exceptions, when they differ, so the editor offers "This event" exactly when the server would keep them.
  */
 export function sameRule(a: string | null, b: string | null): boolean {
-  if (a === null || b === null) {
-    return a === b
+  return normalizeRule(a) === normalizeRule(b)
+}
+
+function normalizeRule(rule: string | null): string | null {
+  if (rule === null || rule.trim() === '') {
+    return null
   }
-  const canonical = (rule: string): string =>
-    rule
-      .toUpperCase()
-      .split(';')
-      .filter((part) => part !== '' && part !== 'INTERVAL=1' && part !== 'WKST=MO')
-      .map((part) => {
-        const [name, value = ''] = part.split('=')
-        return name === 'BYDAY' || name === 'BYMONTH' || name === 'BYMONTHDAY' ? `${name}=${value.split(',').sort().join(',')}` : part
-      })
-      .sort()
-      .join(';')
-  return canonical(a) === canonical(b)
+  return rule
+    .trim()
+    .toUpperCase()
+    .split(';')
+    .filter((part) => part !== '')
+    .sort()
+    .join(';')
 }

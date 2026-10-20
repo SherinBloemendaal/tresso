@@ -32,11 +32,14 @@ describe('repeat presets', () => {
     expect(endOf('FREQ=DAILY;UNTIL=20261231T225959Z')).toEqual({ kind: 'until', date: '2026-12-31' })
   })
 
-  it('compares rules however they are written', () => {
-    expect(sameRule('FREQ=WEEKLY;INTERVAL=1;BYDAY=TH,MO;WKST=MO', 'freq=weekly;byday=MO,TH')).toBe(true)
-    expect(sameRule('FREQ=WEEKLY;BYDAY=MO;WKST=SU', 'FREQ=WEEKLY;BYDAY=MO')).toBe(false)
+  it('compares rules the way the server does', () => {
+    expect(sameRule('FREQ=WEEKLY;BYDAY=MO;INTERVAL=2', ' freq=weekly;interval=2;byday=MO ')).toBe(true)
+    // The server tells these apart, so the editor does too.
+    expect(sameRule('FREQ=WEEKLY;INTERVAL=1;BYDAY=MO', 'FREQ=WEEKLY;BYDAY=MO')).toBe(false)
+    expect(sameRule('FREQ=WEEKLY;BYDAY=TH,MO', 'FREQ=WEEKLY;BYDAY=MO,TH')).toBe(false)
     expect(sameRule('FREQ=WEEKLY;UNTIL=20261231T080000Z', 'FREQ=WEEKLY;UNTIL=20261231T225959Z')).toBe(false)
     expect(sameRule(null, null)).toBe(true)
+    expect(sameRule(null, '')).toBe(true)
     expect(sameRule(null, 'FREQ=DAILY')).toBe(false)
   })
 

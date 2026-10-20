@@ -208,7 +208,7 @@ function keepsTo(parts: Map<string, string>, wall: number): boolean {
   return monthDays.some((wanted) => (wanted > 0 ? wanted === day.day : length + 1 + wanted === day.day))
 }
 
-/** The fixed periods the server jumps over (Occurrences::jump): hours in elapsed time, days and weeks on the clock. */
+/** The fixed periods the server jumps over (Occurrences::jump), on the clock. */
 const PERIODS: Record<string, number> = { HOURLY: 3_600_000, DAILY: DAY, WEEKLY: 7 * DAY }
 
 interface RuleWalk {
@@ -225,8 +225,8 @@ interface RuleWalk {
  *   before it (RFC 5545 counts DTSTART, and COUNT includes it);
  * - an UNTIL date on a timed series is midnight of that date; a UTC UNTIL is compared as an instant, also for a
  *   floating series, which is read in the reader's zone;
- * - a rule of a fixed period without COUNT is jumped to two periods before `from` (hours in elapsed time, days and
- *   weeks on the clock), so old series cost no more.
+ * - a rule of a fixed period without COUNT is jumped on the clock to two periods before `from`, so old series cost
+ *   no more.
  */
 function walkRule(rule: string, start: number, date: boolean, readingZone: string, from: number, until: number): RuleWalk {
   const parts = ruleParts(rule)
@@ -248,9 +248,7 @@ function walkRule(rule: string, start: number, date: boolean, readingZone: strin
       limit = wallOfIcal(end)
     }
     if (date) limit = Math.floor(limit / DAY) * DAY
-    if (limit < start) {
-      return { starts: result, truncated: false }
-    }
+    // An UNTIL before the start leaves only the start: the walk below keeps nothing at or before it.
     recur.until = icalTime(limit, date)
   }
   const count = recur.count ?? null
@@ -264,14 +262,10 @@ function walkRule(rule: string, start: number, date: boolean, readingZone: strin
   const period = PERIODS[freq]
   if (period !== undefined && count === null) {
     const interval = Math.max(1, Number(parts.get('INTERVAL') ?? 1))
-    if (freq === 'HOURLY' && !date) {
-      const first = toInstant(start, readingZone)
-      const periods = Math.floor((toInstant(from, readingZone) - first) / (period * interval)) - 2
-      if (periods > 0) origin = toWall(first + periods * interval * period, readingZone)
-    } else {
-      const periods = Math.floor((from - start) / (period * interval)) - 2
-      if (periods > 0) origin = start + periods * interval * period
-    }
+    // On the clock, as the server's modify('+N hours') and modify('+N days') do: an hourly series every 2 hours
+    // from summer is still on the even hours in winter.
+    const periods = Math.floor((from - start) / (period * interval)) - 2
+    if (periods > 0) origin = start + periods * interval * period
   }
   const iterator = recur.iterator(icalTime(origin, date))
   let produced = 1

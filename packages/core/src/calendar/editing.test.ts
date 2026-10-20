@@ -31,6 +31,11 @@ describe('edit scopes', () => {
     expect(editScopes(single!)).toEqual([])
   })
 
+  it('offers only "this event" for an occurrence read from the server without its series', () => {
+    const lone = { ...third!, series: null, fromServer: true }
+    expect(editScopes(lone)).toEqual(['this'])
+  })
+
   it('offers "this and following" only after the first occurrence', () => {
     expect(editScopes(first!)).toEqual(['this', 'all'])
     expect(editScopes(third!)).toEqual(['this', 'following', 'all'])
@@ -53,7 +58,7 @@ describe('editor values', () => {
     expect(inputFromOccurrence(override!, AMS)).toMatchObject({ start: { dateTime: '2026-10-13T14:00:00', timeZone: AMS }, recurrence: 'FREQ=WEEKLY;BYDAY=MO' })
     // A rule written another way is the same rule: "This event" stays on offer.
     const before = inputFromOccurrence(override!, AMS)
-    expect(editScopes(override!, { before, after: { ...before, recurrence: 'freq=weekly;wkst=MO;byday=MO;INTERVAL=1' } })).toEqual(['this', 'following', 'all'])
+    expect(editScopes(override!, { before, after: { ...before, recurrence: ' freq=weekly;byday=MO ' } })).toEqual(['this', 'following', 'all'])
     expect(editScopes(override!, { before, after: { ...before, recurrence: 'FREQ=WEEKLY;BYDAY=TU' } })).toEqual(['following', 'all'])
   })
 
