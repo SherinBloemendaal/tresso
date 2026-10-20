@@ -720,7 +720,7 @@ Scopes `calendar:read` and `calendar:write`, in the user scopes of the first-par
 | Call | Purpose |
 |---|---|
 | `GET /api/v1/calendars` | The user's calendars. `PATCH` changes the user's color, visibility and the default calendar, and the name of local calendars (provider calendars are renamed at the provider). `POST`/`DELETE` only for local calendars. |
-| `GET /api/v1/calendar-occurrences?from&to&timeZone&calendarId[]` | Occurrences in a range (at most 400 days), recurrence expanded: per occurrence the event id, the `recurrenceId`, start, end and the event's fields, overrides applied and exceptions removed. Series are expanded one occurrence at a time, at most 10,000 per answer (more is a 422 asking for a shorter range, never a silently shortened series; an hourly series fits the longest range). A series is the union of its `RRULE` and `RDATE`s (each in its own `TZID`) less its `EXDATE`s; an override with `RANGE=THISANDFUTURE` changes the later occurrences too. Floating and all-day events are read in `timeZone`. Series that repeat more often than hourly are refused when stored, from the editor and from providers alike. |
+| `GET /api/v1/calendar-occurrences?from&to&timeZone&calendarId[]` | Occurrences in a range (at most 400 days), recurrence expanded: per occurrence the event id, the `recurrenceId`, start, end and the event's fields, overrides applied and exceptions removed. Series are expanded one occurrence at a time, at most 10,000 per answer (more is a 422 asking for a shorter range, never a silently shortened series; an hourly series fits the longest range). A series is the union of its `RRULE` and `RDATE`s (each in its own `TZID`) less its `EXDATE`s; an override with `RANGE=THISANDFUTURE` changes the later occurrences too, and an override whose occurrence the series no longer has still shows. An all-day occurrence lasts as many calendar days as its event, also on a 23-hour day. A rule repeating every so many hours, days or weeks (without `COUNT`) is jumped to near the range; any other walk through a rule stops after 100,000 steps, so an old dense series costs no more than a new one. Floating and all-day events are read in `timeZone`. Series that repeat more often than hourly are refused when stored, from the editor and from providers alike. |
 | `GET /api/v1/calendar-events/{id}` | One event as stored (series or override). |
 | `POST /api/v1/calendar-events` | Create in a writable calendar. |
 | `PUT /api/v1/calendar-events/{id}?scope=&recurrenceId=&notify=` | Save the editor's complete event; for a series `scope` is `this`, `following` or `all`, and `recurrenceId` the occurrence the user edited. A different `calendarId` moves the event (whole series only). |
@@ -777,7 +777,8 @@ accepted.
     `current-user-principal`, `calendar-home-set` and the calendars with their name, color, supported components
     (only `VEVENT` calendars are synced), privileges, `getctag` and `sync-token`. The URL that worked is reported
     back and stored with the account; a server without CalDAV is reported as `unsupported` and looked for again
-    daily; a timeout or server error during discovery is retried with backoff instead. Discovery answers are read up
+    daily; a timeout or server error during discovery is retried with backoff instead, unless another candidate
+    answered and can be confirmed: then the user is asked to confirm it. Discovery answers are read up
     to 1 MiB. Guessed candidates (the web host of the mail domain, hosts named in DNS) are not trusted: they never get
     the login and are never used or stored, also when they answer without asking for it. When one answers and no
     trusted one works, the status becomes `unconfirmed` with that address, and the user confirms it by entering it
@@ -791,7 +792,8 @@ accepted.
     `POST .../calendars/{calendarId}/inventory` (every href with its etag), which removes what is gone and answers
     which hrefs to fetch. A listing over 50,000 resources goes in `partial` pages, which remove nothing. Removals go
     in batches of 5,000, the cursor with the last one. Calendars, hrefs and etags longer than the API takes are left
-    out (and logged), so one cannot block a calendar for good. A calendar that refuses the login (a share taken back)
+    out (and logged), so one cannot block a calendar for good. The pages of a listing are folded in order: a later
+    page's entry replaces an earlier one, and a removal reported there drops the resource. A calendar that refuses the login (a share taken back)
     is skipped; only when every calendar refuses is the account's status `auth_failed`. Status details are cut to 500
     characters and name server addresses without login or query.
   - Ingest: `POST /internal/sync/accounts/{id}/calendars` (the complete calendar list, answers each calendar's
@@ -804,7 +806,8 @@ accepted.
     (`done`, `conflict` with the server's current version, `failed`, or `retry` up to 6 attempts), the same claim and
     report cycle as the outbox, announced on the Mercure topic `urn:tresso:sync:outbox` and in every heartbeat
     together with mail. New events are written with `If-None-Match: *` to `<calendar>/<uid>.ics`, updates and
-    deletes with `If-Match`. Writes of one event are handed out one at a time and in order; a put carries the
+    deletes with `If-Match`; an update whose current ETag cannot be read, or that the server does not name, is not
+    sent (a conflict: the server's version wins). Writes of one event are handed out one at a time and in order; a put carries the
     event's text, resource and etag as they are when it is claimed, so a quick second edit uses the etag the first
     one got back.
   - Scheduling: servers that implement RFC 6638 (`calendar-auto-schedule` in the `DAV` header) send invitations and
@@ -839,13 +842,20 @@ accepted.
     does not have. Applying locks the invitation and the stored event, so the worker and the user's apply action, or
     an edit made meanwhile, never overwrite each other. Of several stored events with the `UID`, the one in a calendar
     of the receiving account is used, else the Tresso one.
+  - A same-`SEQUENCE` change to one occurrence keeps the answer the user gave the series, and a reply updates a guest
+    however an occurrence spells their address.
+  - Known limit (left on purpose): the first stored event with a `UID` owns it. Someone who sends the user a
+    self-organized invitation with the `UID` of a meeting they have not received yet holds that `UID`, and the real
+    organizer's invitation is then ignored as not coming from the stored organizer. No rule fixes this: whoever stores
+    a `UID` first wins under any rule. The user sees the real invitation in the mail and can still answer it there.
   - The sender is the message's `From` address as the mail server delivered it. Tresso does not check SPF, DKIM or
     DMARC for this yet, so a forged `From` that the receiving server let through passes these checks; they keep
     strangers from acting for someone else, not a forger from acting for the organizer. Checking the
     `Authentication-Results` the receiving server adds is a later step.
   - Calendar mail (`REQUEST`, `CANCEL` or `REPLY`) the calendar did not take by itself (outside the inbox, or from
     before the account was connected) shows `canApply`; `POST /api/v1/messages/{id}/invitation/apply` applies it on
-    the user's word, with the same checks, and a second apply changes nothing. Mail moved into the inbox later, or
+    the user's word, with the same checks, and a second apply changes nothing. `canApply` is false while the calendar
+    it would change cannot take it (read-only, or scheduled by its provider), for a stored event as for a new one. Mail moved into the inbox later, or
     rescued from Spam, is recorded and applied then. When there is no calendar to write to (the account's default is
     read-only, or its provider schedules by itself) the apply is a 422 saying so, and the invitation stays to apply
     later.
