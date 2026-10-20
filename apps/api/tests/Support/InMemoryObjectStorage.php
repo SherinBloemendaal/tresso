@@ -18,6 +18,9 @@ final class InMemoryObjectStorage implements ObjectStorage
     /** Called at every copy and move, to look at what holds while content moves. */
     public ?\Closure $whileMoving = null;
 
+    /** Called at every write before the content is read, to look at what holds while content is written. */
+    public ?\Closure $whileWriting = null;
+
     public function put(string $key, string $content): void
     {
         $this->objects[$key] = $content;
@@ -33,6 +36,9 @@ final class InMemoryObjectStorage implements ObjectStorage
 
     public function write(string $key, mixed $content, string $contentType, array $metadata = []): void
     {
+        if (null !== $this->whileWriting) {
+            ($this->whileWriting)($key);
+        }
         if (\is_resource($content)) {
             $content = stream_get_contents($content);
         }

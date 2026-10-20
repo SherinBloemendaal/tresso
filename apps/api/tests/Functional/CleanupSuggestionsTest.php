@@ -17,6 +17,7 @@ use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 final class CleanupSuggestionsTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private string $accountId;
 
@@ -256,10 +257,10 @@ final class CleanupSuggestionsTest extends DatabaseTestCase
         $messages = [];
         for ($i = 1; $i <= $count; ++$i) {
             $id = '<'.hash('sha256', $subject.$i).'@test.example>';
-            $sha = hash('sha256', $id);
             $messages[] = [
                 'remoteUid' => (string) ++$this->uid,
-                'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+                'rawObjectKey' => $this->rawKeyFor($accountId ?? $this->accountId, $id),
+                'keyVersion' => 1,
                 'size' => $size,
                 'receivedAt' => ($receivedAt ?? new \DateTimeImmutable('-1 day'))->format(\DATE_ATOM),
                 'messageId' => $id,

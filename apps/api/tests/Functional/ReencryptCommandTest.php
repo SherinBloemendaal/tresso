@@ -12,6 +12,10 @@ use App\Security\Crypto\UserKeys;
 use App\Storage\BlobKey;
 use App\Storage\BlobKind;
 use App\Storage\BlobVault;
+use App\Storage\ReencryptUserData;
+use App\Storage\ReencryptUserDataHandler;
+use App\Storage\Reencryption;
+use App\Storage\SweepReencryption;
 use App\Tests\Support\InMemoryObjectStorage;
 use App\Tests\Support\StatementHook;
 use Doctrine\DBAL\DriverManager;
@@ -19,6 +23,9 @@ use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
+use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\Stamp\DelayStamp;
+use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 use Symfony\Component\Uid\Uuid;
 
 /**
@@ -255,6 +262,58 @@ final class ReencryptCommandTest extends DatabaseTestCase
         $other->close();
     }
 
+    public function testPurgingDeletesWhatReencryptionRecordedWithoutListingTheBucket(): void
+    {
+        $stray = BlobKey::legacy(BlobKind::Raw, hash('sha256', 'a stray upload no row knew of'));
+        $this->storage()->put($stray, 'a stray upload no row knew of');
+        $this->reencrypt(['--all' => true])->assertCommandIsSuccessful();
+        self::assertSame(8, $this->countRows('SELECT COUNT(*) FROM legacy_object'), 'Every old name the rows had: the raw message, both places of each attachment and of the upload, and the outgoing message.');
+
+        $this->reencrypt(['--purge-legacy' => true])->assertCommandIsSuccessful();
+
+        self::assertTrue($this->storage()->has($stray), 'Only listed with --scan-bucket.');
+        self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM legacy_object'));
+        $this->reencrypt(['--purge-legacy' => true, '--scan-bucket' => true])->assertCommandIsSuccessful();
+        self::assertFalse($this->storage()->has($stray));
+    }
+
+    public function testRunsInTheBackgroundUntilNothingIsLeft(): void
+    {
+        $this->connection()->executeStatement('UPDATE app_user SET data_key_version = NULL');
+        $handler = static::getContainer()->get(ReencryptUserDataHandler::class);
+
+        $handler->onSweep(new SweepReencryption());
+        $queued = $this->takeQueued();
+        self::assertEquals([new ReencryptUserData($this->owner->toRfc4122())], $queued, 'The sweep finds the user after a deploy.');
+        self::assertInstanceOf(ReencryptUserData::class, $queued[0]);
+        $handler($queued[0]);
+
+        self::assertSame(0, static::getContainer()->get(Reencryption::class)->legacyContentLeft());
+        self::assertSame(1, $this->connection()->fetchOne('SELECT data_key_version FROM app_user WHERE id = :id', ['id' => $this->owner->toRfc4122()]));
+        self::assertSame([], $this->takeQueued(), 'Done: it does not queue itself again.');
+        $handler->onSweep(new SweepReencryption());
+        self::assertSame([], $this->takeQueued(), 'Nor does the sweep.');
+    }
+
+    public function testRotatingQueuesTheBackgroundReencryption(): void
+    {
+        $this->reencrypt(['--all' => true])->assertCommandIsSuccessful();
+        $this->takeQueued();
+
+        $tester = new CommandTester(new Application($this->client->getKernel())->find('app:crypto:rotate-user-keys'));
+        $tester->execute(['--user' => ['kim@example.test']]);
+
+        $queued = $this->takeQueued();
+        self::assertEquals([new ReencryptUserData($this->owner->toRfc4122())], $queued);
+        static::getContainer()->get(UserKeys::class)->reset();
+        self::assertInstanceOf(ReencryptUserData::class, $queued[0]);
+        static::getContainer()->get(ReencryptUserDataHandler::class)($queued[0]);
+        self::assertSame(2, $this->connection()->fetchOne('SELECT raw_key_version FROM message'));
+        $later = $this->takeQueuedEnvelopes();
+        self::assertCount(1, $later, 'It comes back to retire the old key once the new one is old enough.');
+        self::assertNotNull($later[0]->last(DelayStamp::class));
+    }
+
     public function testNeedsUsersOrAll(): void
     {
         self::assertSame(Command::INVALID, $this->reencrypt([])->getStatusCode());
@@ -305,6 +364,27 @@ final class ReencryptCommandTest extends DatabaseTestCase
         $tester->execute($input);
 
         return $tester;
+    }
+
+    /**
+     * @return list<object>
+     */
+    private function takeQueued(): array
+    {
+        return array_map(static fn (Envelope $envelope): object => $envelope->getMessage(), $this->takeQueuedEnvelopes());
+    }
+
+    /**
+     * @return list<Envelope>
+     */
+    private function takeQueuedEnvelopes(): array
+    {
+        $transport = static::getContainer()->get('messenger.transport.reencrypt');
+        self::assertInstanceOf(InMemoryTransport::class, $transport);
+        $envelopes = array_values([...$transport->getSent()]);
+        $transport->reset();
+
+        return $envelopes;
     }
 
     private function plaintext(string $key): string

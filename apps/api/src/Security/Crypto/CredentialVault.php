@@ -111,6 +111,10 @@ final readonly class CredentialVault
             throw new CryptoException('Unsupported credential format.');
         }
 
+        // The data key from before becomes key version 1 when the owner's keys are set up; until re-encryption has
+        // sealed these credentials again, that key is used here directly, as it was before.
+        $this->keys->ensure($owner->getId());
+
         return Aead::decrypt($payload, $context, $this->keys->version($owner->getId(), 1));
     }
 

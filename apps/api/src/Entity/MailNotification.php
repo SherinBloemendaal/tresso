@@ -44,8 +44,16 @@ class MailNotification implements SyncedOnlyWhenSeen
     #[ORM\Column(length: 255)]
     private string $title;
 
+    /** The text from before encryption; new rows keep it sealed in $sealedBody, see {@see \App\Mail\MessageFields}. */
     #[ORM\Column(type: Types::TEXT)]
-    private string $body;
+    private string $body = '';
+
+    /**
+     * The subject and the start of the text, sealed with the user's field key. Cleared with the title once clients no
+     * longer get the notification ({@see \App\Notification\ScrubMailNotifications}).
+     */
+    #[ORM\Column(type: Types::TEXT, nullable: true)]
+    private ?string $sealedBody = null;
 
     #[ORM\Column]
     private \DateTimeImmutable $fireAt;
@@ -77,14 +85,16 @@ class MailNotification implements SyncedOnlyWhenSeen
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
-    public function __construct(User $user, Message $message, string $title, string $body, \DateTimeImmutable $fireAt)
+    /**
+     * Without a body: {@see \App\Mail\MessageFields::sealNotificationBody()} seals it once the row has its id.
+     */
+    public function __construct(User $user, Message $message, string $title, \DateTimeImmutable $fireAt)
     {
         $this->id = Uuid::v7();
         $this->user = $user;
         $this->message = $message;
         $this->thread = $message->getThread();
         $this->title = mb_substr($title, 0, 255);
-        $this->body = $body;
         $this->fireAt = self::utc($fireAt);
         $this->createdAt = new \DateTimeImmutable();
     }
@@ -114,9 +124,22 @@ class MailNotification implements SyncedOnlyWhenSeen
         return $this->title;
     }
 
-    public function getBody(): string
+    /** The body from before encryption; empty once it is sealed. */
+    public function getLegacyBody(): string
     {
         return $this->body;
+    }
+
+    public function getSealedBody(): ?string
+    {
+        return $this->sealedBody;
+    }
+
+    /** @param ?string $sealed null for no body at all */
+    public function sealBody(?string $sealed): void
+    {
+        $this->sealedBody = $sealed;
+        $this->body = '';
     }
 
     public function getFireAt(): \DateTimeImmutable
@@ -131,6 +154,7 @@ class MailNotification implements SyncedOnlyWhenSeen
     public function hideContent(string $title): void
     {
         $this->body = '';
+        $this->sealedBody = null;
         if (!$this->summary) {
             $this->title = mb_substr($title, 0, 255);
         }
@@ -151,24 +175,23 @@ class MailNotification implements SyncedOnlyWhenSeen
 
     /**
      * Stands for several messages at once (a batch that delivered many): it says how many, and opens the batches
-     * rather than a single conversation.
+     * rather than a single conversation. Its body (who sent them) is sealed separately.
      */
-    public function summarize(string $title, string $body): void
+    public function summarize(string $title): void
     {
         $this->summary = true;
         $this->title = mb_substr($title, 0, 255);
-        $this->body = $body;
         $this->thread = null;
     }
 
     /**
      * A summary that only one message still needs the user for: it says what that one says and opens its
-     * conversation. It stays a summary, so a later delivery (after a focus block) counts again.
+     * conversation. It stays a summary, so a later delivery (after a focus block) counts again. Its body is sealed
+     * separately.
      */
-    public function narrowTo(Thread $thread, string $title, string $body): void
+    public function narrowTo(Thread $thread, string $title): void
     {
         $this->title = mb_substr($title, 0, 255);
-        $this->body = $body;
         $this->thread = $thread;
     }
 

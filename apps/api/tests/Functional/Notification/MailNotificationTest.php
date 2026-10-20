@@ -11,11 +11,13 @@ use App\Entity\Category;
 use App\Entity\Message;
 use App\Entity\User;
 use App\Enum\Verdict;
+use App\Notification\MailNotificationRetention;
 use App\Notification\MailNotifier;
 use App\Notification\NotificationHandlers;
 use App\Notification\PlanCalendarObject;
 use App\Notification\SendMailNotification;
 use App\Repository\UserRepository;
+use App\Storage\Reencryption;
 use App\Tests\Functional\AuthenticatesUsers;
 use App\Tests\Functional\Calendar\CalendarTestHelpers;
 use App\Tests\Functional\DatabaseTestCase;
@@ -113,6 +115,55 @@ final class MailNotificationTest extends DatabaseTestCase
         self::assertSame(['phone', 'desktop'], $notifications[0]['channels']);
         self::assertFalse($notifications[0]['silent']);
         self::assertNotNull($notifications[0]['deliveredAt']);
+    }
+
+    public function testWhatANotificationSaysIsSealedInTheDatabase(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review', ['snippet' => 'Can you check the numbers?'])]]);
+        $this->classifyAndSend();
+
+        $row = $this->connection()->fetchAssociative('SELECT title, body, sealed_body FROM mail_notification');
+        self::assertIsArray($row);
+        self::assertSame('', $row['body']);
+        self::assertIsString($row['sealed_body']);
+        self::assertStringStartsWith('f1.1.', $row['sealed_body']);
+        self::assertStringNotContainsString('numbers', (string) base64_decode(explode('.', $row['sealed_body'], 3)[2], true));
+        self::assertSame("Budget review\nCan you check the numbers?", $this->changes()['mailNotifications'][0]['body'], 'Clients still get what it says.');
+    }
+
+    public function testWhatOldNotificationsSaidIsClearedOnceClientsNoLongerGetThem(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Budget review', ['snippet' => 'Can you check the numbers?']),
+            $this->message('2', 'Offsite', ['snippet' => 'Where do we meet?']),
+        ]]);
+        $this->classifyAndSend();
+        $this->connection()->executeStatement("UPDATE mail_notification SET delivered_at = NOW() - interval '8 days' WHERE message_id = (SELECT id FROM message WHERE subject = 'Budget review')");
+
+        $cleared = static::getContainer()->get(MailNotificationRetention::class)->scrub(new \DateTimeImmutable());
+
+        self::assertSame(1, $cleared);
+        $rows = $this->connection()->fetchAllAssociative('SELECT m.subject, n.title, n.body, n.sealed_body FROM mail_notification n JOIN message m ON m.id = n.message_id ORDER BY m.subject');
+        self::assertSame(['subject' => 'Budget review', 'title' => '', 'body' => '', 'sealed_body' => null], $rows[0]);
+        self::assertSame('Anna de Vries', $rows[1]['title'], 'A notification clients still get keeps what it says.');
+        self::assertNotNull($rows[1]['sealed_body']);
+        self::assertSame(1, $this->countRows('SELECT COUNT(*) FROM mail_notification WHERE message_id = (SELECT id FROM message WHERE subject = :s)', ['s' => 'Budget review']), 'The row stays, so the mail never notifies again.');
+    }
+
+    public function testNotificationTextFromBeforeEncryptionIsSealedByReencryption(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review', ['snippet' => 'Can you check the numbers?'])]]);
+        $this->classifyAndSend();
+        $this->connection()->executeStatement("UPDATE mail_notification SET body = 'Budget review', sealed_body = NULL");
+
+        static::getContainer()->get(Reencryption::class)->run($this->kimsId(), 200, static function (): void {});
+
+        $row = $this->connection()->fetchAssociative('SELECT body, sealed_body FROM mail_notification');
+        self::assertIsArray($row);
+        self::assertSame('', $row['body']);
+        self::assertIsString($row['sealed_body']);
+        self::assertStringStartsWith('f1.', $row['sealed_body']);
+        self::assertSame('Budget review', $this->changes()['mailNotifications'][0]['body']);
     }
 
     public function testAMessageNotifiesOnlyOnce(): void
@@ -344,7 +395,7 @@ final class MailNotificationTest extends DatabaseTestCase
         $this->classifyAndSend();
 
         self::assertSame([], $this->expoBodies(), 'Held for the meeting.');
-        self::assertSame(['New mail from Work', '', null], $this->connection()->fetchNumeric('SELECT title, body, delivered_at FROM mail_notification'));
+        self::assertSame(['New mail from Work', '', null, null], $this->connection()->fetchNumeric('SELECT title, body, sealed_body, delivered_at FROM mail_notification'));
     }
 
     public function testClassifyingAgainNeverNotifies(): void

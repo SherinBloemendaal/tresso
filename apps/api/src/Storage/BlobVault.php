@@ -37,22 +37,12 @@ final readonly class BlobVault
      */
     public function store(Uuid $owner, BlobKind $kind, mixed $content): StoredBlob
     {
-        $fingerprint = $this->keys->fingerprint($owner, self::sha256($content));
-        $current = $this->keys->current($owner);
-        $blobKey = UserKeys::blobKey($current->key);
-        $out = fopen('php://temp/maxmemory:'.self::SPILL_BYTES, 'w+b') ?: throw new \RuntimeException('No temporary stream for encryption.');
-        try {
-            $size = 0;
-            BlobFormat::encrypt($blobKey, $current->version, $owner, $fingerprint, self::chunks($content, $size), $out);
-            sodium_memzero($blobKey);
-            rewind($out);
-            $key = BlobKey::of($kind, $owner, $fingerprint);
-            $this->storage->write($key, $out, 'application/octet-stream', [self::KEY_VERSION_METADATA => (string) $current->version]);
-        } finally {
-            fclose($out);
-        }
+        $size = 0;
 
-        return new StoredBlob($key, $fingerprint, $current->version, $size);
+        // By reference: the size is known only once all of the content went through.
+        return $this->encryptAndWrite($owner, $kind, $this->keys->fingerprint($owner, self::sha256($content)), self::chunks($content, $size), static function () use (&$size): int {
+            return $size;
+        });
     }
 
     /**
@@ -108,16 +98,59 @@ final readonly class BlobVault
      */
     public function reencrypt(Uuid $owner, BlobKind $kind, string $key): StoredBlob
     {
-        $plain = fopen('php://temp/maxmemory:'.self::SPILL_BYTES, 'w+b') ?: throw new \RuntimeException('No temporary stream for re-encryption.');
-        try {
+        // The content goes straight from decryption into encryption: only ciphertext is ever buffered (and may spill
+        // to a temporary file). Content from before encryption is named by its SHA-256, which is checked once all of it
+        // went through, before anything is written.
+        $legacySha = BlobKey::legacySha256($key);
+        $fingerprint = null === $legacySha
+            ? (BlobKey::parse($key)->fingerprint ?? throw new CryptoException(\sprintf('"%s" is not an object key.', $key)))
+            : $this->fingerprint($owner, $legacySha);
+        $hash = hash_init('sha256');
+        $size = 0;
+        $content = (function () use ($owner, $key, $hash, &$size): \Generator {
             foreach ($this->stream($owner, $key) as $chunk) {
-                fwrite($plain, $chunk);
+                hash_update($hash, $chunk);
+                $size += \strlen($chunk);
+                yield $chunk;
             }
+        })();
+        $verify = static function () use ($hash, $legacySha, $key): void {
+            if (null !== $legacySha && !hash_equals($legacySha, hash_final($hash))) {
+                throw new CryptoException(\sprintf('The content of "%s" does not match its name.', $key));
+            }
+        };
 
-            return $this->store($owner, $kind, $plain);
+        return $this->encryptAndWrite($owner, $kind, $fingerprint, $content, static function () use (&$size): int {
+            return $size;
+        }, $verify);
+    }
+
+    /**
+     * Encrypts content into a temporary stream (ciphertext only; it spills to disk past 2 MiB) and writes it under the
+     * owner's name for the fingerprint, after $beforeWrite (which may refuse by throwing).
+     *
+     * @param iterable<string> $content
+     * @param \Closure(): int  $size    how much content went through, asked once it all has
+     */
+    private function encryptAndWrite(Uuid $owner, BlobKind $kind, string $fingerprint, iterable $content, \Closure $size, ?\Closure $beforeWrite = null): StoredBlob
+    {
+        $current = $this->keys->current($owner);
+        $blobKey = UserKeys::blobKey($current->key);
+        $out = fopen('php://temp/maxmemory:'.self::SPILL_BYTES, 'w+b') ?: throw new \RuntimeException('No temporary stream for encryption.');
+        try {
+            BlobFormat::encrypt($blobKey, $current->version, $owner, $fingerprint, $content, $out);
+            sodium_memzero($blobKey);
+            if (null !== $beforeWrite) {
+                $beforeWrite();
+            }
+            rewind($out);
+            $key = BlobKey::of($kind, $owner, $fingerprint);
+            $this->storage->write($key, $out, 'application/octet-stream', [self::KEY_VERSION_METADATA => (string) $current->version]);
         } finally {
-            fclose($plain);
+            fclose($out);
         }
+
+        return new StoredBlob($key, $fingerprint, $current->version, $size());
     }
 
     /** The owner's fingerprint of content with this SHA-256 (hex). */

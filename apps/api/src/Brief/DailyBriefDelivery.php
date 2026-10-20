@@ -7,6 +7,7 @@ namespace App\Brief;
 use App\Entity\DailyBrief;
 use App\Entity\NotificationPreferences;
 use App\Enum\NotificationChannel;
+use App\Mail\MessageFields;
 use App\Notification\Channel\EmailNotifier;
 use App\Notification\Channel\PushMessage;
 use App\Notification\NotificationChannelChoice;
@@ -20,6 +21,7 @@ use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bridge\Twig\Mime\TemplatedEmail;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\Mailer\MailerInterface;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * Sends a daily brief besides the app, on the channels of the user's notification preferences for kind
@@ -48,7 +50,13 @@ final readonly class DailyBriefDelivery
         private MailerInterface $mailer,
         #[Autowire(env: 'WEB_APP_URL')]
         private string $webAppUrl,
+        private MessageFields $fields,
     ) {
+    }
+
+    private static function text(mixed $value): string
+    {
+        return \is_string($value) ? $value : throw new \UnexpectedValueException('Expected a text column.');
     }
 
     /** Where a brief goes besides the app unless the user chose otherwise: nowhere. */
@@ -198,12 +206,12 @@ final readonly class DailyBriefDelivery
         }
         $rows = $this->connection->fetchAllAssociative(
             "SELECT t.id, t.subject, COALESCE(c.name, 'Other') AS smart_inbox, c.position, a.email_address AS account,
-                    n.from_address, n.from_name, n.snippet, n.received_at
+                    n.message_id, n.from_address, n.from_name, n.snippet, n.sealed_snippet, n.received_at
              FROM thread t
              JOIN mail_account a ON a.id = t.mail_account_id
              LEFT JOIN category c ON c.id = t.category_id
              JOIN LATERAL (
-                 SELECT m.from_address, m.from_name, m.snippet, m.received_at FROM message m
+                 SELECT m.id AS message_id, m.from_address, m.from_name, m.snippet, m.sealed_snippet, m.received_at FROM message m
                  WHERE m.thread_id = t.id ORDER BY m.received_at DESC, m.id DESC LIMIT 1
              ) n ON true
              WHERE a.owner_id = :owner AND t.id = ANY(CAST(:threads AS UUID[]))
@@ -214,6 +222,7 @@ final readonly class DailyBriefDelivery
             ],
         );
 
+        $owner = $brief->getOwner()->getId();
         $sections = [];
         foreach ($rows as $row) {
             $name = \is_string($row['smart_inbox']) ? $row['smart_inbox'] : throw new \UnexpectedValueException('Expected a smart inbox name.');
@@ -223,7 +232,7 @@ final readonly class DailyBriefDelivery
                 'subject' => $row['subject'],
                 'from' => \is_string($row['from_name']) && '' !== trim($row['from_name']) ? $row['from_name'] : $row['from_address'],
                 'account' => $row['account'],
-                'snippet' => $row['snippet'],
+                'snippet' => $this->fields->snippetOf($owner, Uuid::fromString(self::text($row['message_id'])), null === $row['sealed_snippet'] ? null : self::text($row['sealed_snippet']), self::text($row['snippet'])),
                 'receivedAt' => \is_string($row['received_at']) ? new \DateTimeImmutable($row['received_at'], new \DateTimeZone('UTC')) : null,
             ];
         }

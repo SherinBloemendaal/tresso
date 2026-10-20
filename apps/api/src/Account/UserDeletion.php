@@ -10,12 +10,15 @@ use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Uid\Uuid;
 
 /**
- * Deletes a user, crypto-shredding first: their keys go in a transaction of their own, so from that commit on
- * nothing they stored can be decrypted, wherever copies are (object storage, database dumps, backups). Then the user
- * row goes, which the database cascades to everything they own, with their OAuth tokens; their search documents and
- * objects are purged after that by {@see PurgeDeletedUser}, retried until done.
+ * Deletes a user, crypto-shredding first: their keys go in a transaction of their own, so from that commit on what was
+ * encrypted with them (objects, sealed fields, credentials) cannot be decrypted, also in copies, as long as no copy of
+ * the master key that wrapped them is kept beside an old backup. Then the user row goes, which the database cascades to
+ * everything they own, with their OAuth tokens; their search documents and objects are purged after that by
+ * {@see PurgeDeletedUser}, retried until done.
  *
- * Content stored before encryption is not covered by the shredding: it was never encrypted. Re-encrypt it first.
+ * Not covered, because it was never encrypted with those keys: plaintext columns in backups, WAL archives and
+ * point-in-time recovery, Meilisearch snapshots, content from before re-encryption, and older object versions in a
+ * versioned bucket (ARCHITECTURE "Deleting a user").
  */
 final readonly class UserDeletion
 {

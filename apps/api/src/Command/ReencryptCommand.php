@@ -18,8 +18,9 @@ use Symfony\Component\Uid\Uuid;
  * older version by app:crypto:rotate-user-keys. Older versions are deleted once nothing uses them (and the current
  * one is at least 15 minutes old). Safe to stop and run again at any time; it continues where it stopped.
  *
- * --status only counts what is left. --purge-legacy deletes the plaintext objects from before encryption, once no row
- * anywhere refers to one.
+ * The same work runs in the background on its own ({@see \App\Storage\ReencryptUserDataHandler}); this command is for
+ * doing it now, or for one user. --status only counts what is left. --purge-legacy deletes the plaintext objects from
+ * before encryption, once no row anywhere refers to one.
  */
 #[AsCommand(name: 'app:crypto:reencrypt', description: 'Encrypt stored data with each user\'s current key')]
 final readonly class ReencryptCommand
@@ -46,9 +47,11 @@ final readonly class ReencryptCommand
         bool $status = false,
         #[Option('Delete the plaintext objects stored before encryption; only once nothing refers to them any more')]
         bool $purgeLegacy = false,
+        #[Option('With --purge-legacy: also list the whole bucket, for plaintext objects no row ever referred to')]
+        bool $scanBucket = false,
     ): int {
         if ($purgeLegacy) {
-            return $this->purgeLegacy($io);
+            return $this->purgeLegacy($io, $scanBucket);
         }
         if ($all === ([] !== $user)) {
             $io->error('Pass --user=<email> (once or more) or --all, or --purge-legacy.');
@@ -122,11 +125,12 @@ final readonly class ReencryptCommand
         }
         $io->table(['What', 'Rows not on the current key'], array_map(static fn (string $step, int $count): array => [$step, $count], array_keys($totals), $totals));
         $io->writeln(\sprintf('%d users looked at. Rows anywhere still on content from before encryption: %d.', $users, $this->reencryption->legacyContentLeft()));
+        $io->writeln(\sprintf('Users the background re-encryption still has work for: %d.', $this->reencryption->countUsersWithWork()));
 
         return Command::SUCCESS;
     }
 
-    private function purgeLegacy(SymfonyStyle $io): int
+    private function purgeLegacy(SymfonyStyle $io, bool $scanBucket): int
     {
         $left = $this->reencryption->legacyContentLeft();
         if (0 !== $left) {
@@ -134,7 +138,7 @@ final readonly class ReencryptCommand
 
             return Command::FAILURE;
         }
-        $io->success(\sprintf('Deleted %d plaintext objects from before encryption.', $this->reencryption->purgeLegacyObjects()));
+        $io->success(\sprintf('Deleted %d plaintext objects from before encryption.', $this->reencryption->purgeLegacyObjects($scanBucket)));
 
         return Command::SUCCESS;
     }

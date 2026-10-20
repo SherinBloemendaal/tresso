@@ -32,6 +32,7 @@ use Symfony\Component\Mime\Email;
 final class DailyBriefTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private const string ME = 'kim@company.example';
     private const string EXPO_SEND = 'https://exp.host/--/api/v2/push/send';
@@ -708,7 +709,16 @@ final class DailyBriefTest extends DatabaseTestCase
      */
     private function ingest(string $action, array $payload, ?string $accountId = null): void
     {
-        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.($accountId ?? $this->accountId).'/'.$action, ['workerId' => 'w1'] + $payload, $this->worker);
+        $accountId ??= $this->accountId;
+        // message() names content by a seed; the worker stores it under the account's owner.
+        if (isset($payload['messages']) && \is_array($payload['messages'])) {
+            $payload['messages'] = array_map(function (mixed $message) use ($accountId): array {
+                \assert(\is_array($message) && \is_string($message['rawObjectKey']));
+
+                return ['rawObjectKey' => $this->rawKeyFor($accountId, $message['rawObjectKey'])] + $message;
+            }, $payload['messages']);
+        }
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$accountId.'/'.$action, ['workerId' => 'w1'] + $payload, $this->worker);
         self::assertResponseIsSuccessful();
     }
 
@@ -735,7 +745,8 @@ final class DailyBriefTest extends DatabaseTestCase
 
         return [...[
             'remoteUid' => $uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $uid.$subject,
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => new \DateTimeImmutable('-1 hour')->format(\DATE_ATOM),
             'messageId' => '<'.$sha.'@x>',

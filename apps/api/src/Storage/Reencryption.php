@@ -29,7 +29,12 @@ use Symfony\Component\Uid\Uuid;
  */
 final readonly class Reencryption
 {
-    public const array STEPS = ['credentials', 'messages', 'attachments', 'draftFiles', 'outgoing', 'bodyTexts', 'snippets'];
+    private const string HAS_WORK = 'u.keys_shredded_at IS NULL
+        AND (u.data_key_version IS NULL
+             OR u.data_key_version < (SELECT MAX(k.version) FROM user_key k WHERE k.owner_id = u.id)
+             OR EXISTS (SELECT 1 FROM user_key k WHERE k.owner_id = u.id AND k.version < u.data_key_version))';
+
+    public const array STEPS = ['credentials', 'messages', 'attachments', 'draftFiles', 'outgoing', 'bodyTexts', 'snippets', 'notificationBodies'];
 
     public function __construct(
         private Connection $connection,
@@ -45,12 +50,12 @@ final readonly class Reencryption
     }
 
     /**
-     * Re-encrypts what is not on the owner's current version yet. $progress hears each step with how many rows it
-     * moved and how many failed.
+     * Re-encrypts what is not on the owner's current version yet, until $until if given (whatever is left then is for
+     * the next run). $progress hears each step with how many rows it moved and how many failed.
      *
      * @param callable(string, int, int): void $progress
      */
-    public function run(Uuid $owner, int $batch, callable $progress): ReencryptionResult
+    public function run(Uuid $owner, int $batch, callable $progress, ?\DateTimeImmutable $until = null): ReencryptionResult
     {
         $this->keys->ensure($owner);
         $current = $this->keys->current($owner)->version;
@@ -58,12 +63,13 @@ final readonly class Reencryption
         foreach (self::STEPS as $step) {
             [$moved, $stepFailed] = match ($step) {
                 'credentials' => $this->credentials($owner),
-                'messages' => $this->messages($owner, $current, $batch),
-                'attachments' => $this->attachments($owner, $current, $batch),
-                'draftFiles' => $this->draftFiles($owner, $current, $batch),
-                'outgoing' => $this->outgoing($owner, $current, $batch),
-                'bodyTexts' => $this->bodyTexts($owner, $current, $batch),
-                'snippets' => $this->snippets($owner, $current, $batch),
+                'messages' => $this->messages($owner, $current, $batch, $until),
+                'attachments' => $this->attachments($owner, $current, $batch, $until),
+                'draftFiles' => $this->draftFiles($owner, $current, $batch, $until),
+                'outgoing' => $this->outgoing($owner, $current, $batch, $until),
+                'bodyTexts' => $this->bodyTexts($owner, $current, $batch, $until),
+                'snippets' => $this->snippets($owner, $current, $batch, $until),
+                'notificationBodies' => $this->notificationBodies($owner, $current, $batch, $until),
             };
             $failed += $stepFailed;
             $progress($step, $moved, $stepFailed);
@@ -72,6 +78,8 @@ final readonly class Reencryption
         $retired = [];
         $left = array_sum($this->remaining($owner));
         if (0 === $left) {
+            // What the background job and its sweep go by: all data is on this version.
+            $this->connection->executeStatement('UPDATE app_user SET data_key_version = :current WHERE id = :owner', ['current' => $current, 'owner' => $owner->toRfc4122()]);
             // Counted again under the lock retiring takes: an ingest naming an older version holds a shared lock on the
             // owner until it commits, so its rows are seen.
             $retired = $this->keys->retireOlderVersions($owner, new \DateTimeImmutable(), fn (): bool => 0 === array_sum($this->remaining($owner)));
@@ -88,7 +96,9 @@ final readonly class Reencryption
      */
     public function remaining(Uuid $owner): array
     {
-        $current = $this->keys->current($owner)->version;
+        // Counting never sets up keys: without any, nothing is on a current version yet.
+        $versions = $this->keys->hasKeys($owner) ? $this->keys->versions($owner) : [];
+        $current = [] === $versions ? 0 : max($versions);
         $parameters = ['owner' => $owner->toRfc4122(), 'current' => $current, 'sealed' => 'f1.'.$current.'.%'];
 
         return [
@@ -122,6 +132,10 @@ final readonly class Reencryption
                 'SELECT COUNT(*) FROM message m JOIN mail_account a ON a.id = m.mail_account_id WHERE a.owner_id = :owner AND (m.sealed_snippet IS NULL OR m.sealed_snippet NOT LIKE :sealed)',
                 $parameters,
             )),
+            'notificationBodies' => self::count($this->connection->fetchOne(
+                "SELECT COUNT(*) FROM mail_notification WHERE user_id = :owner AND ((sealed_body IS NULL AND body <> '') OR sealed_body NOT LIKE :sealed)",
+                $parameters,
+            )),
         ];
     }
 
@@ -140,15 +154,29 @@ final readonly class Reencryption
 
     /**
      * Deletes the plaintext objects stored before encryption. They may be shared between users, so this only runs once
-     * no row anywhere refers to one. Returns how many were deleted.
+     * no row anywhere refers to one. It deletes those re-encryption recorded (`legacy_object`), and lists only
+     * `drafts/`, whose copies no row ever referred to; with $scanBucket it lists every kind, for content no row knew of
+     * (say an upload whose ingest batch never arrived). Returns how many were deleted.
      */
-    public function purgeLegacyObjects(): int
+    public function purgeLegacyObjects(bool $scanBucket = false): int
     {
         if (0 !== $this->legacyContentLeft()) {
             throw new \LogicException('Content from before encryption is still in use; re-encrypt every user first.');
         }
         $deleted = 0;
-        foreach (BlobKind::cases() as $kind) {
+        do {
+            /** @var list<string> $keys */
+            $keys = $this->connection->fetchFirstColumn('SELECT object_key FROM legacy_object ORDER BY object_key LIMIT 500');
+            foreach ($keys as $key) {
+                if ($this->storage->exists($key)) {
+                    $this->storage->delete($key);
+                    ++$deleted;
+                }
+                $this->connection->executeStatement('DELETE FROM legacy_object WHERE object_key = :key', ['key' => $key]);
+            }
+        } while ([] !== $keys);
+
+        foreach ($scanBucket ? BlobKind::cases() : [BlobKind::Drafts] as $kind) {
             foreach ($this->storage->list($kind->value.'/') as $key) {
                 if (!BlobKey::isLegacy($key)) {
                     continue;
@@ -159,6 +187,23 @@ final readonly class Reencryption
         }
 
         return $deleted;
+    }
+
+    /**
+     * Users whose data is not all on their current key version yet, or who still have older versions to retire: the
+     * background re-encryption's work list. Users whose keys were shredded are left out.
+     *
+     * @return list<string> user ids
+     */
+    public function usersWithWork(int $limit): array
+    {
+        /** @var list<string> */
+        return $this->connection->fetchFirstColumn('SELECT u.id FROM app_user u WHERE '.self::HAS_WORK.' ORDER BY u.id LIMIT '.$limit);
+    }
+
+    public function countUsersWithWork(): int
+    {
+        return self::count($this->connection->fetchOne('SELECT COUNT(*) FROM app_user u WHERE '.self::HAS_WORK));
     }
 
     /**
@@ -209,7 +254,7 @@ final readonly class Reencryption
     /**
      * @return array{int, int}
      */
-    private function messages(Uuid $owner, int $current, int $batch): array
+    private function messages(Uuid $owner, int $current, int $batch, ?\DateTimeImmutable $until): array
     {
         return $this->walk(
             'SELECT m.id, m.raw_object_key AS key FROM message m JOIN mail_account a ON a.id = m.mail_account_id
@@ -217,8 +262,10 @@ final readonly class Reencryption
             $owner,
             $current,
             $batch,
+            $until,
             function (array $row) use ($owner): bool {
                 $stored = $this->blobs->reencrypt($owner, BlobKind::Raw, self::string($row['key']));
+                $this->rememberLegacy(self::string($row['key']));
 
                 return 1 === $this->connection->executeStatement(
                     'UPDATE message SET raw_object_key = :key, raw_key_version = :version WHERE id = :id AND raw_object_key = :old',
@@ -234,7 +281,7 @@ final readonly class Reencryption
      *
      * @return array{int, int}
      */
-    private function attachments(Uuid $owner, int $current, int $batch): array
+    private function attachments(Uuid $owner, int $current, int $batch, ?\DateTimeImmutable $until): array
     {
         return $this->walk(
             'SELECT t.id, t.sha256, t.key_version FROM attachment t JOIN mail_account a ON a.id = t.mail_account_id
@@ -242,6 +289,7 @@ final readonly class Reencryption
             $owner,
             $current,
             $batch,
+            $until,
             function (array $row) use ($owner): bool {
                 $sha = self::string($row['sha256']);
                 $contentOwner = null === $row['key_version'] ? null : $owner;
@@ -253,6 +301,7 @@ final readonly class Reencryption
                         [Attachment::quarantineKey($sha, $contentOwner), BlobKind::Quarantine],
                     ]);
                     $stored = $this->blobs->reencrypt($owner, $kind, $from);
+                    $this->rememberLegacy(Attachment::objectKeyFor($sha, $contentOwner), Attachment::quarantineKey($sha, $contentOwner));
 
                     return 1 === $this->connection->executeStatement(
                         'UPDATE attachment SET sha256 = :fingerprint, key_version = :version WHERE id = :id AND sha256 = :old AND key_version IS NOT DISTINCT FROM :oldVersion',
@@ -269,7 +318,7 @@ final readonly class Reencryption
      *
      * @return array{int, int}
      */
-    private function draftFiles(Uuid $owner, int $current, int $batch): array
+    private function draftFiles(Uuid $owner, int $current, int $batch, ?\DateTimeImmutable $until): array
     {
         return $this->walk(
             'SELECT f.id, f.sha256, f.object_key AS key, f.key_version FROM draft_attachment f JOIN draft d ON d.id = f.draft_id
@@ -277,6 +326,7 @@ final readonly class Reencryption
             $owner,
             $current,
             $batch,
+            $until,
             function (array $row) use ($owner): bool {
                 $sha = self::string($row['sha256']);
                 $key = self::string($row['key']);
@@ -293,6 +343,7 @@ final readonly class Reencryption
                         [Attachment::quarantineKey($sha, $contentOwner), BlobKind::Quarantine],
                     ]);
                     $stored = $this->blobs->reencrypt($owner, $kind, $from);
+                    $this->rememberLegacy($key, Attachment::quarantineKey($sha, $contentOwner));
 
                     return 1 === $this->connection->executeStatement(
                         'UPDATE draft_attachment SET object_key = :key, sha256 = :fingerprint, key_version = :version
@@ -314,7 +365,7 @@ final readonly class Reencryption
     /**
      * @return array{int, int}
      */
-    private function outgoing(Uuid $owner, int $current, int $batch): array
+    private function outgoing(Uuid $owner, int $current, int $batch, ?\DateTimeImmutable $until): array
     {
         return $this->walk(
             'SELECT o.id, o.raw_object_key AS key FROM outgoing_message o JOIN mail_account a ON a.id = o.mail_account_id
@@ -322,8 +373,10 @@ final readonly class Reencryption
             $owner,
             $current,
             $batch,
+            $until,
             function (array $row) use ($owner): bool {
                 $stored = $this->blobs->reencrypt($owner, BlobKind::Outgoing, self::string($row['key']));
+                $this->rememberLegacy(self::string($row['key']));
 
                 return 1 === $this->connection->executeStatement(
                     'UPDATE outgoing_message SET raw_object_key = :key, raw_key_version = :version WHERE id = :id AND raw_object_key = :old',
@@ -336,7 +389,7 @@ final readonly class Reencryption
     /**
      * @return array{int, int}
      */
-    private function bodyTexts(Uuid $owner, int $current, int $batch): array
+    private function bodyTexts(Uuid $owner, int $current, int $batch, ?\DateTimeImmutable $until): array
     {
         return $this->walk(
             'SELECT t.message_id AS id, t.text, t.sealed_text FROM message_text t JOIN message m ON m.id = t.message_id JOIN mail_account a ON a.id = m.mail_account_id
@@ -344,6 +397,7 @@ final readonly class Reencryption
             $owner,
             $current,
             $batch,
+            $until,
             function (array $row) use ($owner): bool {
                 $messageId = Uuid::fromString(self::string($row['id']));
                 $sealed = self::nullableString($row['sealed_text']);
@@ -363,7 +417,7 @@ final readonly class Reencryption
     /**
      * @return array{int, int}
      */
-    private function snippets(Uuid $owner, int $current, int $batch): array
+    private function snippets(Uuid $owner, int $current, int $batch, ?\DateTimeImmutable $until): array
     {
         return $this->walk(
             'SELECT m.id, m.snippet, m.sealed_snippet FROM message m JOIN mail_account a ON a.id = m.mail_account_id
@@ -371,6 +425,7 @@ final readonly class Reencryption
             $owner,
             $current,
             $batch,
+            $until,
             function (array $row) use ($owner): bool {
                 $messageId = Uuid::fromString(self::string($row['id']));
                 $sealed = self::nullableString($row['sealed_snippet']);
@@ -388,14 +443,44 @@ final readonly class Reencryption
     }
 
     /**
-     * Runs $move on every selected row, a batch at a time in id order. A row whose move throws, or finds the row
-     * changed meanwhile (false), is left for the next run.
+     * What mail notifications say: plaintext from before, or sealed with an older key. An empty body stays none.
+     *
+     * @return array{int, int}
+     */
+    private function notificationBodies(Uuid $owner, int $current, int $batch, ?\DateTimeImmutable $until): array
+    {
+        return $this->walk(
+            "SELECT id, body, sealed_body FROM mail_notification
+             WHERE user_id = :owner AND ((sealed_body IS NULL AND body <> '') OR sealed_body NOT LIKE :sealed) AND id > CAST(:after AS UUID) ORDER BY id LIMIT :batch",
+            $owner,
+            $current,
+            $batch,
+            $until,
+            function (array $row) use ($owner): bool {
+                $id = Uuid::fromString(self::string($row['id']));
+                $sealed = self::nullableString($row['sealed_body']);
+
+                return 1 === $this->connection->executeStatement(
+                    "UPDATE mail_notification SET sealed_body = :sealed, body = '' WHERE id = :id AND sealed_body IS NOT DISTINCT FROM :old",
+                    [
+                        'sealed' => $this->fields->resealNotificationBody($owner, $id, $sealed, self::string($row['body'])),
+                        'id' => $id->toRfc4122(),
+                        'old' => $sealed,
+                    ],
+                );
+            },
+        );
+    }
+
+    /**
+     * Runs $move on every selected row, a batch at a time in id order, until $until (then the next run goes on). A row
+     * whose move throws, or finds the row changed meanwhile (false), is left for the next run.
      *
      * @param callable(array<string, mixed>): bool $move
      *
      * @return array{int, int} rows moved, rows failed
      */
-    private function walk(string $select, Uuid $owner, int $current, int $batch, callable $move): array
+    private function walk(string $select, Uuid $owner, int $current, int $batch, ?\DateTimeImmutable $until, callable $move): array
     {
         $moved = $failed = 0;
         $after = '00000000-0000-0000-0000-000000000000';
@@ -412,7 +497,7 @@ final readonly class Reencryption
                     ++$failed;
                 }
             }
-        } while (\count($rows) === $batch);
+        } while (\count($rows) === $batch && (null === $until || new \DateTimeImmutable() < $until));
 
         return [$moved, $failed];
     }
@@ -442,6 +527,16 @@ final readonly class Reencryption
     private function fingerprintOf(Uuid $owner, string $sha256, ?Uuid $contentOwner): string
     {
         return null === $contentOwner ? $this->blobs->fingerprint($owner, $sha256) : $sha256;
+    }
+
+    /** Plaintext objects from before encryption this moved away from, for {@see purgeLegacyObjects()}. */
+    private function rememberLegacy(string ...$keys): void
+    {
+        foreach ($keys as $key) {
+            if (BlobKey::isLegacy($key)) {
+                $this->connection->executeStatement('INSERT INTO legacy_object (object_key) VALUES (:key) ON CONFLICT DO NOTHING', ['key' => $key]);
+            }
+        }
     }
 
     /** The same lock a verdict and a quarantine take, for both names of the content, always in the same order. */

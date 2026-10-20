@@ -51,7 +51,7 @@ final class UserKeysTest extends DatabaseTestCase
 
         self::assertNotNull($theirs);
         self::assertSame($theirs, $mine, 'This process takes the key the other one stored.');
-        self::assertSame(1, $this->rowCount('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $user->toRfc4122()]));
+        self::assertSame(1, $this->countRows('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $user->toRfc4122()]));
     }
 
     public function testTheDataKeyFromBeforeBecomesVersionOne(): void
@@ -62,6 +62,8 @@ final class UserKeysTest extends DatabaseTestCase
             'wrapped' => static::getContainer()->get(KeyRing::class)->wrap($dataKey, 'tresso:user-data-key:'.$user->toRfc4122()),
             'id' => $user->toRfc4122(),
         ]);
+
+        $this->keys()->ensure($user);
 
         self::assertSame($dataKey, $this->keys()->version($user, 1));
         self::assertNull($this->connection()->fetchOne('SELECT wrapped_data_key FROM app_user WHERE id = :id', ['id' => $user->toRfc4122()]), 'Cleared once it is version 1.');
@@ -105,6 +107,59 @@ final class UserKeysTest extends DatabaseTestCase
         self::assertSame([1, 2], $this->keys()->versions($user));
     }
 
+    public function testReadingNeverCreatesKeys(): void
+    {
+        $user = $this->user('kim@example.test');
+
+        try {
+            $this->keys()->version($user, 1);
+            self::fail('A user without keys has nothing to read with.');
+        } catch (CryptoException) {
+        }
+
+        self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $user->toRfc4122()]));
+    }
+
+    public function testKeysAreNeverCreatedAgainOnceShredded(): void
+    {
+        $user = $this->user('kim@example.test');
+        $this->keys()->current($user);
+        $this->keys()->shred($user);
+
+        // A job still running for the user (an ingest, an upload) wants to write after the shredding committed.
+        foreach (['current' => fn () => $this->freshKeys()->current($user), 'ensure' => fn () => $this->freshKeys()->ensure($user), 'indexKey' => fn () => $this->freshKeys()->indexKey($user)] as $what => $write) {
+            try {
+                $write();
+                self::fail($what.' created keys for a user whose keys were shredded.');
+            } catch (CryptoException) {
+            }
+        }
+
+        self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $user->toRfc4122()]));
+        self::assertNull($this->connection()->fetchOne('SELECT wrapped_index_key FROM app_user WHERE id = :id', ['id' => $user->toRfc4122()]));
+    }
+
+    public function testAJobThatWantsKeysWhileShreddingIsUnderwayIsRefused(): void
+    {
+        $user = $this->user('kim@example.test');
+        $this->keys()->current($user);
+        $refused = null;
+        // Between marking the user and deleting the keys, a job (it found the user's keys gone) sets up new ones.
+        StatementHook::before('DELETE FROM user_key', function () use ($user, &$refused): void {
+            try {
+                $this->freshKeys()->ensure($user);
+                $refused = false;
+            } catch (CryptoException) {
+                $refused = true;
+            }
+        });
+
+        $this->keys()->shred($user);
+
+        self::assertTrue($refused, 'No keys are set up for a user being shredded.');
+        self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $user->toRfc4122()]));
+    }
+
     public function testShreddingDeletesEveryKey(): void
     {
         $user = $this->user('kim@example.test');
@@ -113,7 +168,7 @@ final class UserKeysTest extends DatabaseTestCase
 
         $this->keys()->shred($user);
 
-        self::assertSame(0, $this->rowCount('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $user->toRfc4122()]));
+        self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM user_key WHERE owner_id = :id', ['id' => $user->toRfc4122()]));
         self::assertSame([null, null], array_values((array) $this->connection()->fetchAssociative('SELECT wrapped_index_key, wrapped_data_key FROM app_user WHERE id = :id', ['id' => $user->toRfc4122()])));
     }
 

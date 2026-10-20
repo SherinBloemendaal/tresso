@@ -48,6 +48,8 @@ final readonly class UserProvisioner
 
         $this->entityManager->flush();
         $this->keys->ensure($user->getId());
+        // A new user has no data yet on any other key: nothing for the background re-encryption.
+        $this->entityManager->getConnection()->executeStatement('UPDATE app_user SET data_key_version = 1 WHERE id = :id', ['id' => $user->getId()->toRfc4122()]);
 
         return $user;
     }

@@ -55,7 +55,17 @@ final readonly class BlobKey
 
     public static function isLegacy(string $key): bool
     {
-        return 1 === preg_match(self::LEGACY, $key, $match) && substr($match[3], 0, 2) === $match[2] && null !== BlobKind::tryFrom($match[1]);
+        return null !== self::legacySha256($key);
+    }
+
+    /** The plain SHA-256 a key from before encryption names its content by; null for any other key. */
+    public static function legacySha256(string $key): ?string
+    {
+        if (1 !== preg_match(self::LEGACY, $key, $match) || substr($match[3], 0, 2) !== $match[2] || null === BlobKind::tryFrom($match[1])) {
+            return null;
+        }
+
+        return $match[3];
     }
 
     /** The prefix every object of an owner of one kind starts with. */
