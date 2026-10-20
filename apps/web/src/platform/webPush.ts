@@ -97,21 +97,19 @@ export async function enableWebPush(get: Get, send: Api, userId: string): Promis
 }
 
 /**
- * Stops pushes to this browser: the device goes on the server (when `send` can still reach it) and the subscription
- * in the browser, always. A subscription that is gone makes the server's next push to it fail as gone, and the server
- * then removes the device itself, so even a sign-out that cannot reach the server stops the pushes.
+ * Stops pushes to this browser: the device goes on the server and the subscription in the browser, always. A
+ * subscription that is gone makes the server's next push to it fail as gone, and the server then removes the device
+ * itself, so even a sign-out that cannot reach the server stops the pushes.
  */
-export async function disableWebPush(send: Api | null): Promise<void> {
+export async function disableWebPush(send: Api): Promise<void> {
   const subscription = await currentSubscription()
   if (subscription === null) {
     return
   }
   try {
-    if (send !== null) {
-      // Registering the same endpoint again names the device it already is, which the list does not show.
-      const device = await send<NotificationDevice>('POST', '/api/v1/notification-devices', deviceOf(subscription.toJSON(), browserName(navigator.userAgent)))
-      await send('DELETE', `/api/v1/notification-devices/${device.id}`)
-    }
+    // Registering the same endpoint again names the device it already is, which the list does not show.
+    const device = await send<NotificationDevice>('POST', '/api/v1/notification-devices', deviceOf(subscription.toJSON(), browserName(navigator.userAgent)))
+    await send('DELETE', `/api/v1/notification-devices/${device.id}`)
   } finally {
     await subscription.unsubscribe()
     await setPushOwner(null)

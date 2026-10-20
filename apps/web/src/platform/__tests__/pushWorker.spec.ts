@@ -51,4 +51,13 @@ describe('the push worker', () => {
     expect(JSON.stringify(shown)).not.toContain('Budget')
     expect(unsubscribe).toHaveBeenCalled()
   })
+
+  it('shows nothing of a push that does not say whom it is for', async () => {
+    const { push, shown, unsubscribe } = await worker('kim')
+
+    await push({ ...mail, userId: undefined })
+
+    expect(shown.map((notification) => notification.title)).toEqual(['Tresso'])
+    expect(unsubscribe).toHaveBeenCalled()
+  })
 })

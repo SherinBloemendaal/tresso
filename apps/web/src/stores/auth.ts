@@ -89,16 +89,18 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   /**
-   * Ends the session here. Pushes to this browser stop first, while the tokens can still tell the server; a session
-   * that already expired (tellServer false) only drops the subscription, which makes the server forget the device
-   * at its next push (see disableWebPush).
+   * Ends the session here. When the user signs out (signedOut), pushes to this browser stop first, while the tokens
+   * can still tell the server. A session that expired keeps them, as a closed tab does: the user did not sign out, and
+   * signing in again finds them on; another user signing in here drops them (releaseOtherUsersPush).
    */
-  async function endSession(tellServer: boolean): Promise<void> {
-    try {
-      await disableWebPush(tellServer ? send : null)
-    } catch (error) {
-      // The subscription is gone either way (disableWebPush drops it whatever the server said).
-      console.error('Telling the server this browser signed out failed', error)
+  async function endSession(signedOut: boolean): Promise<void> {
+    if (signedOut) {
+      try {
+        await disableWebPush(send)
+      } catch (error) {
+        // The subscription is gone either way (disableWebPush drops it whatever the server said).
+        console.error('Telling the server this browser signed out failed', error)
+      }
     }
     me.value = null
     await store(null)

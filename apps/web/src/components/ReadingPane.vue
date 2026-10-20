@@ -30,6 +30,8 @@ const notFound = ref(false)
  */
 const pullsAtOpen = ref(mail.pulls)
 const missing = computed(() => notFound.value && mail.pulls > pullsAtOpen.value)
+/** Not here, and the pull that would bring it failed (offline, the server unreachable). */
+const unreachable = computed(() => notFound.value && !missing.value && mail.syncState === 'error')
 /** The conversation a pull was asked for because it was not in the copy, so it is asked once. */
 let pulledFor: string | null = null
 const actions = useMessageActions()
@@ -188,7 +190,11 @@ onBeforeUnmount(() => {
 
 <template>
   <article class="pane" aria-label="Conversation">
-    <p v-if="notFound && !missing" class="state" role="status">Loading the conversation…</p>
+    <p v-if="unreachable" class="missing" role="alert">
+      This conversation could not be loaded: {{ mail.syncError }}. It opens once Tresso can sync again.
+      <button type="button" class="button button-quiet" @click="mail.syncNow()">Try again</button>
+    </p>
+    <p v-else-if="notFound && !missing" class="state" role="status">Loading the conversation…</p>
     <p v-if="missing" class="missing">This conversation no longer exists. <RouterLink :to="backTo">Back to the inbox</RouterLink></p>
     <div v-else-if="thread" class="inner">
       <div class="actions" role="group" aria-label="Conversation actions">
