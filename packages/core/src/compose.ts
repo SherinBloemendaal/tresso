@@ -81,7 +81,7 @@ export function replyRecipients(message: SyncedMessage, ownAddresses: string[], 
   return { to: to.length > 0 ? to : unique([message.from], new Set()), cc: unique(others, taken) }
 }
 
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
