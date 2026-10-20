@@ -89,6 +89,11 @@ Delivered in steps, each its own pull request:
 - [x] 2.2 Todos: synced todos with a due date, time and duration, "Make todo" from an email (one todo per email),
   automatic todos per smart inbox (only with the Do verdict), a Todos page with quick add and sections on the web,
   and a todo list on mobile
+- [x] 2.4 Hand over by forwarding with a note and due date, tracked in "Waiting on" with nudges: the conversation is
+  forwarded through the shared compose flow with its files, a synced hand-over closes when the delegate replies in it
+  (detected on ingest) or is marked done, the due date is scheduled through Messenger and announced in the app (and
+  natively on the desktop) when it passes without a reply, and a one-click nudge replies to the delegate; web and
+  mobile clients
 - [x] 2.7 Batched delivery and one-click unsubscribe: mail of smart inboxes that deliver in batches (notification and
   advertise by default) held until the user's batch times in their zone and kept out of lists and notifications
   until then, released by a delayed message with a sweep every minute as safety net; for authenticated senders only,
@@ -102,7 +107,6 @@ Still to come in this phase:
   over them; choosing a deadline or a time shows how busy each day and hour already is; a todo gets a duration
   ("takes 30 minutes"), and "Plan automatically" picks the best free slot before the deadline with the meeting time
   finder of C6 (working hours, focus blocks and travel time respected), moving it when the calendar changes
-- Hand over by forwarding with a note and due date, tracked in "Waiting on" with nudges
 - Triage mode (one email at a time, D / H / K)
 - Daily brief for `know` mail, one-click "Noted"
 
