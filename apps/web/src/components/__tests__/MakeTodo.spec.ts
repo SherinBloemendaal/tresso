@@ -56,12 +56,15 @@ describe('Make todo in the reading pane', () => {
   const requests: { method: string; path: string }[] = []
   let router: Router
   let todoMade: boolean
+  /** Todos the conversation has before the pane opens. */
+  let existing: Todo[]
 
   beforeEach(async () => {
     sessionStorage.setItem('auth.tokens', JSON.stringify({ accessToken: 'token', refreshToken: null, expiresAt: Date.now() + 3_600_000 }))
     setActivePinia(createPinia())
     requests.length = 0
     todoMade = false
+    existing = []
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -86,7 +89,7 @@ describe('Make todo in the reading pane', () => {
               ),
             )
           }
-          return new Response(JSON.stringify(since === 1 && todoMade ? page(2, { todos: [made] }) : page(since)))
+          return new Response(JSON.stringify(since === 1 && (todoMade || existing.length > 0) ? page(2, { todos: todoMade ? [made] : existing }) : page(since)))
         }
         if (url.pathname === '/api/v1/messages/m2/todo' && method === 'POST') {
           todoMade = true
@@ -140,6 +143,20 @@ describe('Make todo in the reading pane', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 't' }))
 
     await vi.waitFor(() => expect(requests.some((request) => request.path === '/api/v1/messages/m2/todo')).toBe(true))
+    wrapper.unmount()
+  })
+
+  it('leaves T alone once the conversation has a todo, like the button', async () => {
+    existing = [made]
+    await useMailStore().syncNow()
+    const wrapper = mountPane()
+    await vi.waitFor(() => expect(wrapper.find('ul[aria-label="Todos from this conversation"]').exists()).toBe(true))
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 't' }))
+    await flushPromises()
+
+    expect(wrapper.find('button[aria-keyshortcuts="T"]').exists()).toBe(false)
+    expect(requests.filter((request) => request.method === 'POST')).toEqual([])
     wrapper.unmount()
   })
 })
