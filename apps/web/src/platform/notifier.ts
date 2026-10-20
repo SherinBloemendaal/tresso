@@ -1,4 +1,5 @@
-import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
 import { isDesktop } from '@/platform/desktop'
 import type { MailNotification } from '@/mail/mailNotifications'
 
@@ -17,13 +18,40 @@ const desktopNotifier: Notifier = {
       return
     }
     for (const notification of notifications) {
-      sendNotification(notification)
+      sendNotification({ title: notification.title, body: notification.body, extra: { path: notification.path } })
     }
   },
 }
 
 /**
- * The browser build shows none: notifications from an open tab are no substitute for Web Push sent by the server,
- * which the architecture plans for the browser.
+ * The browser build shows none from the page: the server sends browsers Web Push, which the service worker shows
+ * (public/push-worker.js), also while no tab is open.
  */
 export const notifier: Notifier | null = isDesktop ? desktopNotifier : null
+
+/** The path a clicked notification carries, if it is one of ours. */
+export function clickedPath(extra: Record<string, unknown> | undefined): string | null {
+  const path = extra?.path
+  return typeof path === 'string' && path.startsWith('/') ? path : null
+}
+
+/**
+ * The desktop app: a click on a notification brings the window to the front and opens what the notification is about
+ * (the conversation). Notifications shown before this listener existed are not reported (see the plugin's onAction).
+ */
+export async function onNotificationClick(open: (path: string) => void): Promise<void> {
+  if (!isDesktop) {
+    return
+  }
+  await onAction((event) => {
+    if (event.actionId !== 'tap') {
+      return
+    }
+    const window = getCurrentWindow()
+    void window.unminimize().then(() => window.setFocus())
+    const path = clickedPath(event.notification?.extra)
+    if (path !== null) {
+      open(path)
+    }
+  })
+}

@@ -7,6 +7,8 @@ const router = createRouter({
   routes: [
     { path: '/', name: 'unified', component: HomeView },
     { path: '/inbox/:threadId', name: 'unified-thread', component: HomeView },
+    // Where notifications lead (mailNotificationPath): the conversation, in the Unified Inbox.
+    { path: '/thread/:threadId', redirect: (to) => ({ name: 'unified-thread', params: { threadId: to.params.threadId } }) },
     { path: '/accounts/:accountId', name: 'account', component: HomeView },
     { path: '/accounts/:accountId/:threadId', name: 'account-thread', component: HomeView },
     { path: '/smart/:smartInboxId', name: 'smart-inbox', component: HomeView },
@@ -27,6 +29,7 @@ const router = createRouter({
         { path: 'signatures', name: 'settings-signatures', component: () => import('@/views/SettingsSignaturesView.vue') },
         { path: 'smart-inboxes', name: 'settings-smart-inboxes', component: () => import('@/views/SettingsSmartInboxesView.vue') },
         { path: 'smart-inboxes/:smartInboxId', name: 'settings-smart-inbox', component: () => import('@/views/SettingsSmartInboxEditView.vue') },
+        { path: 'notifications', name: 'settings-notifications', component: () => import('@/views/SettingsNotificationsView.vue') },
       ],
     },
     { path: '/auth/callback', name: 'auth-callback', component: () => import('@/views/AuthCallbackView.vue') },
