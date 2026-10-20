@@ -87,3 +87,23 @@ export function oneClickUnsubscribeAvailable(account: { provider: string }): boo
 /** Why an account offers no one-click unsubscribe, in the user's words. */
 export const NO_UNSUBSCRIBE_ON_IMAP =
   "One-click unsubscribe is not available for IMAP accounts: their mail server's checks of who sent a message cannot be trusted, so Tresso cannot tell a real sender from a forged one. Unsubscribe on the sender's website instead."
+
+/**
+ * The batches list in groups: one per batch that delivered conversations, newest batch first, in the order given
+ * (the store lists them newest batch first already).
+ */
+export function batchGroups<T extends { batchedAt: number | null }>(conversations: T[]): { batchedAt: number; conversations: T[] }[] {
+  const groups: { batchedAt: number; conversations: T[] }[] = []
+  for (const conversation of conversations) {
+    if (conversation.batchedAt === null) {
+      continue
+    }
+    const last = groups[groups.length - 1]
+    if (last?.batchedAt === conversation.batchedAt) {
+      last.conversations.push(conversation)
+    } else {
+      groups.push({ batchedAt: conversation.batchedAt, conversations: [conversation] })
+    }
+  }
+  return groups
+}

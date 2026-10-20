@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { batchTimeLabel, oneClickUnsubscribeAvailable, unsubscribeOffer } from './batches'
+import { batchGroups, batchTimeLabel, oneClickUnsubscribeAvailable, unsubscribeOffer } from './batches'
+import { BATCHES_PATH, mailNotificationTarget } from './notifications'
 import type { SyncedMessage, SyncedUnsubscription } from './sync/types'
 
 function message(id: string, receivedAt: string, extra: Partial<SyncedMessage> = {}): SyncedMessage {
@@ -75,5 +76,30 @@ describe('oneClickUnsubscribeAvailable', () => {
     expect(oneClickUnsubscribeAvailable({ provider: 'gmail' })).toBe(true)
     expect(oneClickUnsubscribeAvailable({ provider: 'microsoft' })).toBe(true)
     expect(oneClickUnsubscribeAvailable({ provider: 'imap' })).toBe(false)
+  })
+})
+
+describe('batchGroups', () => {
+  it('groups the batches list by the batch that delivered each conversation', () => {
+    const list = [
+      { id: 'a', batchedAt: 16 },
+      { id: 'b', batchedAt: 16 },
+      { id: 'c', batchedAt: 9 },
+      { id: 'd', batchedAt: null },
+    ]
+
+    expect(batchGroups(list).map((group) => [group.batchedAt, group.conversations.map((c) => c.id)])).toEqual([
+      [16, ['a', 'b']],
+      [9, ['c']],
+    ])
+  })
+})
+
+describe('mailNotificationTarget', () => {
+  it('opens the batches for a summary and the conversation otherwise', () => {
+    expect(mailNotificationTarget({ threadId: null, summary: true })).toBe(BATCHES_PATH)
+    expect(BATCHES_PATH).toBe('/batches')
+    expect(mailNotificationTarget({ threadId: 't1' })).toBe('/thread/t1')
+    expect(mailNotificationTarget({ threadId: null, summary: false })).toBeNull()
   })
 })

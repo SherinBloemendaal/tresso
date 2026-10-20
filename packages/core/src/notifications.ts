@@ -45,11 +45,24 @@ export interface SyncedMailNotification {
   channels: NotificationChannel[]
   /** Delivered during quiet hours or another busy event: show it without sound. */
   silent: boolean
+  /** Stands for several messages a batch delivered ("5 new messages to do"): it opens the batches. */
+  summary?: boolean
 }
 
 /** Where a tap on a mail notification leads, in every client: the conversation. */
 export function mailNotificationPath(threadId: string): string {
   return `/thread/${threadId}`
+}
+
+/** Where a tap on a batch's summary leads, in every client; mirrors MailNotifier::BATCHES_PATH. */
+export const BATCHES_PATH = '/batches'
+
+/** Where a tap on this mail notification leads: the batches for a summary, else its conversation (null when gone). */
+export function mailNotificationTarget(notification: Pick<SyncedMailNotification, 'threadId' | 'summary'>): string | null {
+  if (notification.summary) {
+    return BATCHES_PATH
+  }
+  return notification.threadId === null ? null : mailNotificationPath(notification.threadId)
 }
 
 /** A notification from /api/v1/notifications: delivered in the last week or planned for the coming days. */
