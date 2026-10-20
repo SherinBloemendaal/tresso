@@ -42,6 +42,8 @@ interface Mail extends MailState {
   inbox(mailAccountId: string | null): Promise<ConversationSummary[]>
   thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null>
   body(messageId: string, allowRemoteContent: boolean): Promise<MessageBody>
+  /** A link to a received file that could not be scanned, once the user confirmed they accept that. */
+  unscannedLink(attachmentId: string): Promise<string>
   syncNow(): Promise<void>
   /** The open copy, for writing mail; null while none is open. */
   store(): SqliteMailStore | null
@@ -96,6 +98,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
           },
           forward: (id, attachmentId) => auth.session.api<DraftAttachmentLink>(`/api/v1/drafts/${encodeURIComponent(id)}/forwarded-attachments`, json('POST', { attachmentId })),
           detach: (id, attachmentId) => auth.session.api<{ draftVersion: number }>(`/api/v1/drafts/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`, json('DELETE')),
+          unscannedLink: (attachmentId) => auth.session.api<{ url: string }>(`/api/v1/draft-attachments/${encodeURIComponent(attachmentId)}/unscanned-link`, json('POST', { confirmed: true })),
         },
         // expo/fetch streams response bodies, which the realtime connection reads.
         fetch: streamingFetch as unknown as typeof fetch,
@@ -172,6 +175,11 @@ export function MailProvider({ children }: { children: ReactNode }) {
       auth.session.api<MessageBody>(`/api/v1/messages/${encodeURIComponent(messageId)}/body${allowRemoteContent ? '?remoteContent=allow' : ''}`),
     [auth.session],
   )
+  const unscannedLink = useCallback(
+    async (attachmentId: string) =>
+      (await auth.session.api<{ url: string }>(`/api/v1/attachments/${encodeURIComponent(attachmentId)}/unscanned-link`, json('POST', { confirmed: true }))).url,
+    [auth.session],
+  )
   const syncNow = useCallback(() => session.syncNow(), [session])
   const store = useCallback(() => session.database, [session])
   const signatures = useCallback(async () => (await session.database?.signatures()) ?? [], [session])
@@ -197,6 +205,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
       inbox,
       thread,
       body,
+      unscannedLink,
       syncNow,
       store,
       drafts: session.drafts,
@@ -206,7 +215,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
       cancelOutgoing,
       touch,
     }),
-    [userId, touch, ready, version, syncState, syncError, lookupError, live, mailAccounts, folders, act, inbox, thread, body, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing],
+    [userId, touch, ready, version, syncState, syncError, lookupError, live, mailAccounts, folders, act, inbox, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>
