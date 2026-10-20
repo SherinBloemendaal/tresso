@@ -630,7 +630,9 @@ Mail judged `know` asks nothing of the user, so it does not interrupt: once a da
   covers a day, a long pause at most 7 days) to the second before the sweep: the sweep takes the user's
   classification lock first, so every classification stamped earlier has committed, and times are stored in whole
   seconds. An empty period makes no brief but still counts as covered. The next run is the next delivery time in the
-  user's zone (a time the clock skips moves on as PHP moves it), and always on a later day than the last brief: a
+  user's zone (a time the clock skips moves on as PHP moves it), and always on a later day than the one the last brief
+  was due on (`last_due_day`; the day it was due, not the day it was made, so a 23:59 brief made after midnight leaves
+  the new day its own): a
   time or zone changed after today's brief, a late sweep in the hour the clock repeats in autumn, or a second sweep
   that claimed the row as it was committed, makes no second brief that day. A user whose brief fails is logged and
   put off for 15 minutes, so the sweep goes on with the others. The hourly backfill goes on in batches of 500 users for
