@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
-import type { SyncedMailAccount, SyncedSmartInbox } from '@tresso/core'
+import { handOverStatus, type SyncedMailAccount, type SyncedSmartInbox } from '@tresso/core'
 import AppIcon from '@/components/AppIcon.vue'
 import SenderAvatar from '@/components/SenderAvatar.vue'
 import SmartInboxMark from '@/components/SmartInboxMark.vue'
@@ -24,6 +24,8 @@ const props = defineProps<{
   /** When the next batch comes, e.g. "13:00"; null while unknown. */
   nextBatch: string | null
   live: boolean
+  /** A page of its own on screen instead of a list of mail. */
+  page?: 'waiting'
 }>()
 const emit = defineEmits<{ signOut: [] }>()
 
@@ -32,6 +34,9 @@ const compose = useComposeStore()
 const outboxCount = computed(() => mail.outbox.length)
 const todos = useTodosStore()
 const failedCount = computed(() => mail.outbox.filter((message) => message.status === 'failed').length)
+const waitingCount = computed(() => mail.handOvers.filter((handOver) => handOver.state === 'open').length)
+const overdueCount = computed(() => mail.handOvers.filter((handOver) => handOverStatus(handOver) === 'overdue').length)
+const inList = computed(() => props.page === undefined)
 
 const totalUnread = computed(() => [...props.unreadCounts.values()].reduce((sum, count) => sum + count, 0))
 
@@ -57,7 +62,7 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
     <button type="button" class="button button-primary compose" @click="compose.openNew()">Compose <kbd>C</kbd></button>
 
     <div class="group">
-      <RouterLink :to="{ name: 'unified' }" class="item" :aria-current="mailbox === null && smartInbox === null && !batches ? 'page' : undefined">
+      <RouterLink :to="{ name: 'unified' }" class="item" :aria-current="inList && mailbox === null && smartInbox === null && !batches ? 'page' : undefined">
         <AppIcon name="inbox" />
         <span class="label">Unified Inbox</span>
         <span v-if="totalUnread > 0" class="count">{{ totalUnread }}<span class="visually-hidden"> unread</span></span>
@@ -66,6 +71,13 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         <AppIcon name="todo" />
         <span class="label">Todos</span>
         <span v-if="todos.openCount > 0" class="count">{{ todos.openCount }}<span class="visually-hidden"> open</span></span>
+      </RouterLink>
+      <RouterLink :to="{ name: 'waiting' }" class="item" :aria-current="page === 'waiting' ? 'page' : undefined">
+        <AppIcon name="delegate" />
+        <span class="label">Waiting on</span>
+        <span v-if="waitingCount > 0" class="count" :class="{ failed: overdueCount > 0 }"
+          >{{ waitingCount }}<span class="visually-hidden">{{ overdueCount > 0 ? `, ${overdueCount} past due` : ' waiting' }}</span></span
+        >
       </RouterLink>
       <RouterLink :to="{ name: 'drafts' }" class="item">
         <AppIcon name="draft" />
@@ -89,7 +101,7 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         :key="item.id"
         :to="{ name: 'smart-inbox', params: { smartInboxId: item.id } }"
         class="item smart"
-        :aria-current="smartInbox === item.id ? 'page' : undefined"
+        :aria-current="inList && smartInbox === item.id ? 'page' : undefined"
       >
         <SmartInboxMark :smart-inbox="item" />
         <span class="label">{{ item.name }}</span>
@@ -110,7 +122,7 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         :key="account.id"
         :to="{ name: 'account', params: { accountId: account.id } }"
         class="item account"
-        :aria-current="mailbox === account.id && smartInbox === null && !batches ? 'page' : undefined"
+        :aria-current="inList && mailbox === account.id && smartInbox === null && !batches ? 'page' : undefined"
       >
         <SenderAvatar :sender="{ name: account.displayName, address: account.emailAddress }" :size="24" />
         <span class="account-text">

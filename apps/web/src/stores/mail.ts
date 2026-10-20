@@ -20,6 +20,7 @@ import {
   type SyncedDraft,
   type DraftAttachmentLink,
   type SyncedFolder,
+  type SyncedHandOver,
   type SyncedMailAccount,
   type SyncedMailNotification,
   type SyncedMessage,
@@ -37,7 +38,7 @@ import {
 } from '@tresso/core'
 import type { Contact, Conversation, Draft, ListScope } from '@/mail/db'
 import { deleteMailStore, openMailStore } from '@/mail/store'
-import { forTheDesktop, mailNotifications } from '@/mail/mailNotifications'
+import { forTheDesktop, mailNotifications, overdueNotifications } from '@/mail/mailNotifications'
 import { notifier } from '@/platform/notifier'
 import { useAuthStore } from '@/stores/auth'
 
@@ -73,6 +74,10 @@ export const useMailStore = defineStore('mail', () => {
   const smartInboxCounts = ref<Map<string, number>>(new Map())
   /** Every todo, open ones first in the user's order (see compareTodos). */
   const todos = ref<SyncedTodo[]>([])
+  /** Every hand-over, in "Waiting on" order. */
+  const handOvers = ref<SyncedHandOver[]>([])
+  /** Hand-overs that became overdue since the screens last took them (see takeOverdue). */
+  const overdue = ref<SyncedHandOver[]>([])
   /** The user's unsubscribe requests, of every account. */
   const unsubscriptions = ref<SyncedUnsubscription[]>([])
   const scope = computed<ListScope>(() => {
@@ -163,6 +168,7 @@ export const useMailStore = defineStore('mail', () => {
         delivered.push(...page.mailNotifications)
         void refresh()
         void notifyMail()
+        void notifyOverdue()
       },
     })
     realtime = new RealtimeClient({
@@ -194,6 +200,7 @@ export const useMailStore = defineStore('mail', () => {
       pulls.value += 1
       if (notifyingSince === null) {
         delivered = []
+        db.value?.takeOverdueHandOvers()
         notifyingSince = Date.now()
       }
     } catch (error) {
@@ -235,6 +242,37 @@ export const useMailStore = defineStore('mail', () => {
     }
   }
 
+  /**
+   * Tells the user about hand-overs whose due date passed without a reply: in the app always (see takeOverdue), and
+   * natively when they are not looking at Tresso.
+   */
+  async function notifyOverdue(): Promise<void> {
+    const database = db.value
+    if (database === null || notifyingSince === null) {
+      return
+    }
+    const taken = database.takeOverdueHandOvers()
+    if (taken.length === 0) {
+      return
+    }
+    overdue.value = [...overdue.value, ...taken]
+    if (notifier === null || document.hasFocus()) {
+      return
+    }
+    try {
+      await notifier.show(overdueNotifications(taken))
+    } catch (error) {
+      console.error('Showing a notification failed', error)
+    }
+  }
+
+  /** The hand-overs that became overdue since the last call, for the app to tell the user about. */
+  function takeOverdue(): SyncedHandOver[] {
+    const taken = overdue.value
+    overdue.value = []
+    return taken
+  }
+
   /** Stops syncing and closes the copy; a start still under way gives up. */
   async function stop(): Promise<void> {
     generation += 1
@@ -263,6 +301,8 @@ export const useMailStore = defineStore('mail', () => {
     smartInboxCounts.value = new Map()
     todos.value = []
     unsubscriptions.value = []
+    handOvers.value = []
+    overdue.value = []
     outbox.value = []
     await stopping?.stop()
     await database?.close()
@@ -284,7 +324,7 @@ export const useMailStore = defineStore('mail', () => {
     if (database === null) {
       return
     }
-    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts, nextTodos, nextUnsubscriptions] = await Promise.all([
+    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts, nextTodos, nextUnsubscriptions, nextHandOvers] = await Promise.all([
       database.mailAccounts(),
       database.folders(),
       database.signatures(),
@@ -295,8 +335,10 @@ export const useMailStore = defineStore('mail', () => {
       database.unreadSmartInboxCounts(),
       database.todos(),
       database.unsubscriptions(),
+      database.handOvers(),
     ])
     todos.value = nextTodos
+    handOvers.value = nextHandOvers
     smartInboxes.value = nextSmartInboxes
     smartInboxCounts.value = nextSmartCounts
     outbox.value = nextOutbox
@@ -590,6 +632,9 @@ export const useMailStore = defineStore('mail', () => {
     smartInboxCounts,
     todos,
     unsubscriptions,
+    handOvers,
+    overdue,
+    takeOverdue,
     hasMore,
     syncState,
     pulls,

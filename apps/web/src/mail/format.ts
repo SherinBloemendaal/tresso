@@ -30,6 +30,18 @@ export function shortTime(epochMs: number, now = new Date()): string {
   return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', ...(date.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }) })
 }
 
+/** A due date as the forward and follow-ups write it: "Friday 24 October", with the year when it is another one. */
+export function dueLabel(iso: string, now = new Date()): string {
+  const date = new Date(iso)
+  return date.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', ...(date.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }) })
+}
+
+/** A due date in a list: "Fri 24 Oct". */
+export function shortDue(iso: string, now = new Date()): string {
+  const date = new Date(iso)
+  return date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', ...(date.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }) })
+}
+
 export function fullTime(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 }

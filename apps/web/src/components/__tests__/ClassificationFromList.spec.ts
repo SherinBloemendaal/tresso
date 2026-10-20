@@ -53,6 +53,7 @@ const first: ChangePage = {
   eventNotes: [],
   todos: [],
   mailNotifications: [],
+  handOvers: [],
   deleted: [],
 }
 
@@ -68,7 +69,7 @@ describe('classifying from the conversation list', () => {
         const url = new URL(String(input))
         if (url.pathname === '/api/v1/sync/changes') {
           const since = Number(url.searchParams.get('since'))
-          return new Response(JSON.stringify(since === 0 ? first : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [], smartInboxes: [] }))
+          return new Response(JSON.stringify(since === 0 ? first : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [], smartInboxes: [], handOvers: [] }))
         }
         if (url.pathname === '/api/v1/threads/t1/classification') {
           return new Response(JSON.stringify({ threadId: 't1', smartInboxId: 'info', verdict: 'know', reason: 'user', senderRule: { id: 'r1', sender: 'news@bank.example', verdict: null, spamOverrules: 'server_spam' } }))

@@ -1,8 +1,10 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb'
 import {
   actionResult,
+  becameOverdue,
   classifiedByUser,
   compareTodos,
+  compareHandOvers,
   contactMatches,
   deletedDraft,
   inList,
@@ -23,6 +25,7 @@ import {
   type ListFolders,
   type ListScope,
   type MailStore,
+  type SyncedHandOver,
   type MessageAction,
   type SyncedFolder,
   type SyncedMailAccount,
@@ -114,13 +117,14 @@ interface MailSchema extends DBSchema {
   smartInboxes: { key: string; value: SyncedSmartInbox }
   todos: { key: string; value: SyncedTodo; indexes: { byMessage: string; byThread: string } }
   unsubscriptions: { key: string; value: SyncedUnsubscription; indexes: { byAccount: string } }
+  handOvers: { key: string; value: SyncedHandOver; indexes: { byAccount: string } }
 }
 
 type Stores = StoreNames<MailSchema>[]
 type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
-const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes', 'todos', 'unsubscriptions']
-const VERSION = 7
+const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes', 'todos', 'unsubscriptions', 'handOvers']
+const VERSION = 8
 
 export function databaseName(userId: string): string {
   return `tresso-mail-${userId}`
@@ -133,6 +137,8 @@ export function deleteMailDatabase(userId: string): Promise<void> {
 
 /** The signed-in user's mail in the browser's IndexedDB. The desktop app keeps it in SQLite instead (SqliteMailStore). */
 export class IndexedDbMailStore implements MailStore {
+  /** Collected by {@link apply}, handed out by {@link takeOverdueHandOvers}. */
+  private overdue: SyncedHandOver[] = []
   /** Threads classified on this device whose server version has not arrived yet; see {@link restoreThread}. */
   private readonly unconfirmed = new Set<string>()
 
@@ -201,8 +207,11 @@ export class IndexedDbMailStore implements MailStore {
             }
           }
         }
-        // Outgoing mail, contacts, signatures, drafts, smart inboxes, todos and unsubscriptions come from the delta:
-        // an existing copy syncs again from the start.
+        if (oldVersion < 8) {
+          database.createObjectStore('handOvers', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+        }
+        // Outgoing mail, contacts, signatures, drafts, smart inboxes, todos, unsubscriptions and hand-overs come from the
+        // delta: an existing copy syncs again from the start.
         if (oldVersion >= 1) {
           await transaction.objectStore('meta').delete('cursor')
         }
@@ -249,6 +258,9 @@ export class IndexedDbMailStore implements MailStore {
         }
         case 'outgoingMessage':
           await tx.objectStore('outgoing').delete(deleted.id)
+          break
+        case 'handOver':
+          await tx.objectStore('handOvers').delete(deleted.id)
           break
         case 'signature':
           await tx.objectStore('signatures').delete(deleted.id)
@@ -323,6 +335,13 @@ export class IndexedDbMailStore implements MailStore {
     for (const todo of page.todos) {
       await tx.objectStore('todos').put(todo)
     }
+    const overdue: SyncedHandOver[] = []
+    for (const handOver of page.handOvers) {
+      if (becameOverdue(await tx.objectStore('handOvers').get(handOver.id), handOver)) {
+        overdue.push(handOver)
+      }
+      await tx.objectStore('handOvers').put(handOver)
+    }
 
     const lists = await listFoldersOf(tx)
     for (const threadId of affected) {
@@ -331,6 +350,7 @@ export class IndexedDbMailStore implements MailStore {
 
     await tx.objectStore('meta').put(page.cursor, 'cursor')
     await tx.done
+    this.overdue.push(...overdue)
   }
 
   /**
@@ -389,6 +409,24 @@ export class IndexedDbMailStore implements MailStore {
     await tx.done
   }
 
+
+  takeOverdueHandOvers(): SyncedHandOver[] {
+    const taken = this.overdue
+    this.overdue = []
+    return taken
+  }
+
+  async handOvers(): Promise<SyncedHandOver[]> {
+    const tx = this.db.transaction(['handOvers', 'messages'])
+    const handOvers = await tx.objectStore('handOvers').getAll()
+    const resolved = await Promise.all(
+      handOvers.map(async (handOver) => {
+        const message = handOver.messageId === null ? undefined : await tx.objectStore('messages').get(handOver.messageId)
+        return { ...handOver, threadId: message?.threadId ?? null }
+      }),
+    )
+    return resolved.sort(compareHandOvers)
+  }
 
   async mailAccounts(): Promise<SyncedMailAccount[]> {
     const accounts = await this.db.getAll('mailAccounts')
@@ -712,7 +750,7 @@ async function deleteAccount(tx: WriteTx, accountId: string): Promise<void> {
       await tx.objectStore('drafts').put({ ...draft, mailAccountId: null })
     }
   }
-  for (const store of ['folders', 'threads', 'messages', 'conversations', 'outgoing', 'unsubscriptions'] as const) {
+  for (const store of ['folders', 'threads', 'messages', 'conversations', 'outgoing', 'unsubscriptions', 'handOvers'] as const) {
     const index = tx.objectStore(store).index('byAccount')
     for (let cursor = await index.openCursor(accountId); cursor !== null; cursor = await cursor.continue()) {
       await cursor.delete()
