@@ -5,8 +5,6 @@ package mimeparse
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -55,7 +53,6 @@ type Attachment struct {
 	ContentID   string
 	Inline      bool
 	Size        int64
-	SHA256      string
 	Data        []byte
 }
 
@@ -302,14 +299,12 @@ func readAttachment(body io.Reader, filename, contentType, contentID string, inl
 	if err != nil {
 		return Attachment{}, err
 	}
-	sum := sha256.Sum256(data)
 	return Attachment{
 		Filename:    filename,
 		ContentType: contentType,
 		ContentID:   contentID,
 		Inline:      inline,
 		Size:        int64(len(data)),
-		SHA256:      hex.EncodeToString(sum[:]),
 		Data:        data,
 	}, nil
 }

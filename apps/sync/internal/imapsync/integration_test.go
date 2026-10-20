@@ -25,8 +25,9 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/blobcrypt"
 	"tresso/sync/internal/netguard"
-	"tresso/sync/internal/storage"
+	"tresso/sync/internal/storage/storagetest"
 )
 
 const (
@@ -340,7 +341,7 @@ func TestSyncsMailboxFollowsNewMailFlagsAndDeletions(t *testing.T) {
 	admin.deliver("Projects", mail("project@x", "Project kickoff", "", "Kickoff on Monday."))
 
 	fake := newFakeAPI(host, port, testPassword)
-	store := storage.NewMemory()
+	store := storagetest.New()
 	syncer := New(fake, store, netguard.New(true), "test-worker", testOptions(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -370,11 +371,11 @@ func TestSyncsMailboxFollowsNewMailFlagsAndDeletions(t *testing.T) {
 	if len(invoice.Attachments) != 1 || invoice.Attachments[0].Filename != "invoice.pdf" || invoice.Snippet != "Invoice attached." || invoice.BodyText != "Invoice attached." {
 		t.Errorf("invoice = %+v", invoice)
 	}
-	if _, ok := store.Objects[invoice.RawObjectKey]; !ok {
+	if raw := store.Plaintext(invoice.RawObjectKey); !strings.Contains(string(raw), "Invoice attached.") {
 		t.Error("raw message not stored")
 	}
 	if len(invoice.Attachments) == 1 {
-		if _, ok := store.Objects[storage.AttachmentKey(invoice.Attachments[0].SHA256)]; !ok {
+		if pdf := store.Plaintext(blobcrypt.Key(blobcrypt.KindAttachments, storagetest.OwnerID, invoice.Attachments[0].Fingerprint)); !strings.HasPrefix(string(pdf), "%PDF") {
 			t.Error("attachment not stored")
 		}
 	}
@@ -412,7 +413,7 @@ func TestIdleNotificationsDriveUpdatesWithoutPolling(t *testing.T) {
 	opts.PresenceInterval = time.Hour
 	opts.UpdatePresenceInterval = 2 * time.Second
 	fake := newFakeAPI(host, port, testPassword)
-	syncer := New(fake, storage.NewMemory(), netguard.New(true), "test-worker", opts, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer := New(fake, storagetest.New(), netguard.New(true), "test-worker", opts, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -437,7 +438,7 @@ func TestIdleNotificationsDriveUpdatesWithoutPolling(t *testing.T) {
 func TestRefusedLoginIsReportedAndStops(t *testing.T) {
 	host, port := greenmail(t)
 	fake := newFakeAPI(host, port, "wrong-password")
-	syncer := New(fake, storage.NewMemory(), netguard.New(true), "test-worker", testOptions(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer := New(fake, storagetest.New(), netguard.New(true), "test-worker", testOptions(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -457,7 +458,7 @@ func TestPrivateServerIsBlockedWithoutAllowUnsafe(t *testing.T) {
 	fake := newFakeAPI(host, port, testPassword)
 	opts := testOptions()
 	opts.FailuresBeforeError = 1
-	syncer := New(fake, storage.NewMemory(), netguard.New(false), "test-worker", opts, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	syncer := New(fake, storagetest.New(), netguard.New(false), "test-worker", opts, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

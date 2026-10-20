@@ -1,8 +1,6 @@
 package mimeparse
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -101,8 +99,7 @@ SGVsbG8gd29ybGQ=
 	if !logo.Inline || logo.ContentID != "logo@finance" || logo.ContentType != "image/png" || logo.Filename != "logo.png" {
 		t.Errorf("inline image = %+v", logo)
 	}
-	sum := sha256.Sum256([]byte("Hello world"))
-	if sheet.Inline || sheet.Filename != "budget-q4.xlsx" || sheet.Size != 11 || sheet.SHA256 != hex.EncodeToString(sum[:]) {
+	if sheet.Inline || sheet.Filename != "budget-q4.xlsx" || sheet.Size != 11 || string(sheet.Data) != "Hello world" {
 		t.Errorf("attachment = %+v", sheet)
 	}
 }

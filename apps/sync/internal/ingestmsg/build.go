@@ -7,16 +7,21 @@ import (
 	"time"
 
 	"tresso/sync/internal/api"
+	"tresso/sync/internal/blobcrypt"
 	"tresso/sync/internal/mimeparse"
 	"tresso/sync/internal/storage"
 )
 
-// Build stores raw and its attachments, then describes the message for the ingest API. remoteUID is the provider's id
-// of the message in the folder; receivedAt is when the provider received it (zero falls back to the Date header,
-// then to now).
-func Build(ctx context.Context, store storage.Store, raw []byte, remoteUID string, receivedAt time.Time, flags api.Flags) (api.Message, error) {
-	sha := storage.SHA256(raw)
-	if err := store.PutIfAbsent(ctx, storage.RawKey(sha), raw, "message/rfc822"); err != nil {
+// Build stores raw and its attachments, encrypted with the account owner's key, then describes the message for the
+// ingest API. remoteUID is the provider's id of the message in the folder; receivedAt is when the provider received it
+// (zero falls back to the Date header, then to now).
+func Build(ctx context.Context, blobs storage.Blobs, accountID string, raw []byte, remoteUID string, receivedAt time.Time, flags api.Flags) (api.Message, error) {
+	writer, err := blobs.Writer(ctx, accountID)
+	if err != nil {
+		return api.Message{}, err
+	}
+	rawKey, _, err := writer.Put(ctx, blobcrypt.KindRaw, raw)
+	if err != nil {
 		return api.Message{}, err
 	}
 
@@ -28,10 +33,11 @@ func Build(ctx context.Context, store storage.Store, raw []byte, remoteUID strin
 
 	attachments := make([]api.Attachment, 0, len(parsed.Attachments))
 	for _, a := range parsed.Attachments {
-		if err := store.PutIfAbsent(ctx, storage.AttachmentKey(a.SHA256), a.Data, a.ContentType); err != nil {
+		_, fingerprint, err := writer.Put(ctx, blobcrypt.KindAttachments, a.Data)
+		if err != nil {
 			return api.Message{}, err
 		}
-		attachment := api.Attachment{Filename: a.Filename, ContentType: a.ContentType, Size: a.Size, SHA256: a.SHA256, Inline: a.Inline}
+		attachment := api.Attachment{Filename: a.Filename, ContentType: a.ContentType, Size: a.Size, Fingerprint: fingerprint, Inline: a.Inline}
 		if a.ContentID != "" {
 			contentID := a.ContentID
 			attachment.ContentID = &contentID
@@ -62,7 +68,8 @@ func Build(ctx context.Context, store storage.Store, raw []byte, remoteUID strin
 
 	msg := api.Message{
 		RemoteUID:     remoteUID,
-		RawObjectKey:  storage.RawKey(sha),
+		RawObjectKey:  rawKey,
+		KeyVersion:    writer.KeyVersion(),
 		Size:          int64(len(raw)),
 		ReceivedAt:    receivedAt.UTC(),
 		SentAt:        parsed.Date,

@@ -15,13 +15,13 @@ import (
 )
 
 // buildMessage stores the raw message and its attachments, then describes it for the ingest API.
-func buildMessage(ctx context.Context, store storage.Store, buf *imapclient.FetchMessageBuffer, condStore bool) (api.Message, error) {
+func buildMessage(ctx context.Context, store storage.Blobs, accountID string, buf *imapclient.FetchMessageBuffer, condStore bool) (api.Message, error) {
 	raw := buf.FindBodySection(&imap.FetchItemBodySection{Peek: true})
 	if raw == nil {
 		return api.Message{}, fmt.Errorf("uid %d: server returned no body", buf.UID)
 	}
 
-	msg, err := ingestmsg.Build(ctx, store, raw, strconv.FormatUint(uint64(buf.UID), 10), buf.InternalDate, flagsOf(buf.Flags))
+	msg, err := ingestmsg.Build(ctx, store, accountID, raw, strconv.FormatUint(uint64(buf.UID), 10), buf.InternalDate, flagsOf(buf.Flags))
 	if err != nil {
 		return api.Message{}, err
 	}

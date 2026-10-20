@@ -40,7 +40,7 @@ type Attachment struct {
 	Filename    string  `json:"filename"`
 	ContentType string  `json:"contentType"`
 	Size        int64   `json:"size"`
-	SHA256      string  `json:"sha256"`
+	Fingerprint string  `json:"fingerprint"`
 	ContentID   *string `json:"contentId,omitempty"`
 	Inline      bool    `json:"inline"`
 }
@@ -49,6 +49,7 @@ type Message struct {
 	RemoteUID    string       `json:"remoteUid"`
 	ModSeq       *uint64      `json:"modSeq,omitempty"`
 	RawObjectKey string       `json:"rawObjectKey"`
+	KeyVersion   uint32       `json:"keyVersion"`
 	Size         int64        `json:"size"`
 	ReceivedAt   time.Time    `json:"receivedAt"`
 	SentAt       *time.Time   `json:"sentAt,omitempty"`

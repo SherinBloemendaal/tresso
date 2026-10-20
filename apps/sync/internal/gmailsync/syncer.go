@@ -61,13 +61,13 @@ func DefaultOptions() Options {
 
 type Syncer struct {
 	api      providersync.API
-	store    storage.Store
+	store    storage.Blobs
 	workerID string
 	opts     Options
 	logger   *slog.Logger
 }
 
-func New(client providersync.API, store storage.Store, workerID string, opts Options, logger *slog.Logger) *Syncer {
+func New(client providersync.API, store storage.Blobs, workerID string, opts Options, logger *slog.Logger) *Syncer {
 	return &Syncer{api: client, store: store, workerID: workerID, opts: opts, logger: logger}
 }
 
@@ -251,7 +251,7 @@ func (s *session) fetchRaw(ctx context.Context, ids []string) (map[string]fetche
 		if err != nil {
 			return fmt.Errorf("message %s: decode raw: %w", id, err)
 		}
-		msg, err := ingestmsg.Build(ctx, s.store, raw, id, m.receivedAt(), flagsOf(m.LabelIDs))
+		msg, err := ingestmsg.Build(ctx, s.store, s.account.ID, raw, id, m.receivedAt(), flagsOf(m.LabelIDs))
 		if err != nil {
 			return err
 		}
