@@ -74,6 +74,10 @@ final readonly class TodoProcessor implements ProcessorInterface
             ?? throw new NotFoundHttpException('Todo not found.');
 
         if ($operation instanceof DeleteOperationInterface) {
+            // An automatic todo the user deletes is one they do not want: none is made for that email again.
+            if (TodoSource::Automatic === $todo->getSource()) {
+                $todo->getMessage()?->declineTodo(new \DateTimeImmutable());
+            }
             $this->entityManager->remove($todo);
             $this->entityManager->flush();
 

@@ -231,6 +231,39 @@ final class TodoApiTest extends DatabaseTestCase
         self::assertSame([['Budget review', 'automatic', $message['id']]], array_map(static fn (array $todo): array => [$todo['title'], $todo['source'], $todo['messageId']], $todos));
     }
 
+    public function testTakingBackAPlacementLeavesAnAutomaticTodoTheUserDeletedDeleted(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review')]]);
+        $this->runClassification();
+        $message = $this->messageBySubject('Budget review');
+        $automatic = $this->changes(0)['todos'][0]['id'] ?? null;
+        self::assertIsString($automatic);
+        $this->client->request('DELETE', '/api/v1/todos/'.$automatic, server: $this->kim);
+        self::assertResponseStatusCodeSame(204);
+        $placementId = $this->placeAsInformational($message['threadId']);
+
+        $this->client->request('DELETE', '/api/v1/threads/'.$message['threadId'].'/classification?placementId='.$placementId, server: $this->kim);
+
+        self::assertResponseStatusCodeSame(204);
+        self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM todo'), 'The user did not want it.');
+    }
+
+    public function testDeletingATodoMadeByHandDoesNotDeclineTheAutomaticOne(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review')]]);
+        $queued = $this->takeQueued();
+        $message = $this->messageBySubject('Budget review');
+        $placementId = $this->placeAsInformational($message['threadId']);
+        $this->runClassification($queued);
+        // Triage's do made a todo by hand; its undo removes it again before taking the placement back.
+        $this->client->jsonRequest('POST', '/api/v1/messages/'.$message['id'].'/todo', ['perConversation' => true], $this->kim);
+        $this->client->request('DELETE', '/api/v1/todos/'.$this->responseString('id'), server: $this->kim);
+
+        $this->client->request('DELETE', '/api/v1/threads/'.$message['threadId'].'/classification?placementId='.$placementId, server: $this->kim);
+
+        self::assertSame(['automatic'], array_column($this->changes(0)['todos'], 'source'));
+    }
+
     public function testATodoMadeFromAnEmailWithoutSubjectIsNamedAfterTheSender(): void
     {
         $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', '', ['flags' => ['seen' => true]])]]);
@@ -492,6 +525,17 @@ final class TodoApiTest extends DatabaseTestCase
         $violations = $this->decodedResponse()['violations'] ?? [];
 
         return array_column($violations, 'propertyPath');
+    }
+
+    /** Places the conversation in Informational as the user, for this conversation only; returns the placement's id. */
+    private function placeAsInformational(string $threadId): string
+    {
+        $this->client->request('GET', '/api/v1/smart-inboxes', server: $this->kim);
+        $informational = array_column($this->decodedResponse(), 'id', 'builtin')['informational'] ?? null;
+        self::assertIsString($informational);
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threadId.'/classification', ['smartInboxId' => $informational, 'remember' => false], $this->kim);
+
+        return $this->responseString('placementId');
     }
 
     /**

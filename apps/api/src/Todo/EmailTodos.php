@@ -56,9 +56,10 @@ final readonly class EmailTodos
 
     /**
      * Makes todos for new mail that was just classified into a smart inbox that asks for them: unread, recent (see
-     * {@see AUTOMATIC_WINDOW}), judged `do`, and without a todo yet. A conversation gets one open todo: a reply in a
-     * conversation that has one already (or a second email of it in the same batch) makes none. Runs inside the
-     * classification's transaction, after its lock; the new todos are persisted, not flushed.
+     * {@see AUTOMATIC_WINDOW}), judged `do`, without a todo yet, and whose automatic todo the user did not delete. A
+     * conversation gets one open todo: a reply in a conversation that has one already (or a second email of it in the
+     * same batch) makes none. Runs inside the classification's transaction, after its lock; the new todos are
+     * persisted, not flushed.
      *
      * @param list<Message> $messages
      */
@@ -68,6 +69,7 @@ final readonly class EmailTodos
         $wanted = array_values(array_filter($messages, static fn (Message $message): bool => true === $message->getCategory()?->isAutoCreateTodo()
             && Verdict::Do === $message->getVerdict()
             && !$message->isSeen()
+            && null === $message->getTodoDeclinedAt()
             && $message->getReceivedAt() >= $since));
         if ([] === $wanted) {
             return;
