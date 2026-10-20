@@ -242,9 +242,20 @@ export interface SyncedTodo {
   source: TodoSource
   messageId: string | null
   threadId: string | null
+  /** The time it holds in the calendar (RFC 3339); null while it is not planned. */
+  plannedStart: string | null
+  plannedEnd: string | null
+  /** null while it is not planned. */
+  planState: TodoPlanState | null
   createdAt: string
   updatedAt: string
 }
+
+/**
+ * How a todo's planned time stands: free (`planned`), or no longer free with no other free time before the due date
+ * (`conflict`: it stays where it was until the user plans it again or removes it).
+ */
+export type TodoPlanState = 'planned' | 'conflict'
 
 /**
  * One edition of the daily brief: the conversations judged `know` in a period that were still in an inbox when it was

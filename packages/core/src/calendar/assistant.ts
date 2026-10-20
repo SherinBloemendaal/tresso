@@ -26,6 +26,8 @@ export interface SchedulingPreferences {
   bufferMinutes: number
   travelMinutes: number
   minimumNoticeMinutes: number
+  /** Open todos with a due date and a duration get free time before it on their own. */
+  planTodos: boolean
 }
 
 /** JSON merge patch: omitted fields stay as they are. */

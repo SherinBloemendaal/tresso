@@ -20,16 +20,22 @@ export function daysFrom(firstWall: number, count: number, zone: string): Calend
 }
 
 /**
+ * What a calendar view places: an occurrence, or anything else that takes time, such as the time a todo is planned at.
+ * The layout reads only these fields; the views tell the kinds apart.
+ */
+export type Placed = Pick<Occurrence, 'key' | 'allDay' | 'start' | 'end'>
+
+/**
  * Whether an occurrence belongs in the all-day row rather than on the time grid: all-day events, and timed events of
  * a day or longer, as Google Calendar and Outlook show them.
  */
-export function inAllDayRow(occurrence: Occurrence): boolean {
+export function inAllDayRow(occurrence: Placed): boolean {
   return occurrence.allDay || occurrence.end - occurrence.start >= DAY
 }
 
 /** A piece of a timed occurrence on one day's time grid. */
-export interface TimedBlock {
-  occurrence: Occurrence
+export interface TimedBlock<T extends Placed = Occurrence> {
+  occurrence: T
   /** Minutes after the day's midnight on the clock, so a 09:00 start is at 540 also on a DST day. */
   top: number
   /** At least {@link minMinutes}, so a short event stays readable and clickable. */
@@ -47,7 +53,7 @@ export interface TimedBlock {
  * A block takes the first column no earlier block of its group still occupies, so a group is as narrow as it can be.
  * Clock minutes come from the zone, so blocks sit at the hour their times say on days with a DST change.
  */
-export function layoutDay(occurrences: Occurrence[], day: CalendarDay, zone: string, minMinutes = 15): TimedBlock[] {
+export function layoutDay<T extends Placed>(occurrences: T[], day: CalendarDay, zone: string, minMinutes = 15): TimedBlock<T>[] {
   const pieces = occurrences
     .filter((occurrence) => !inAllDayRow(occurrence) && occurrence.start < day.end && (occurrence.end > day.start || (occurrence.end === occurrence.start && occurrence.start >= day.start)))
     .map((occurrence) => {
@@ -59,8 +65,8 @@ export function layoutDay(occurrences: Occurrence[], day: CalendarDay, zone: str
     })
     .sort((a, b) => a.top - b.top || b.bottom - a.bottom || a.occurrence.key.localeCompare(b.occurrence.key))
 
-  const blocks: TimedBlock[] = []
-  let group: { block: TimedBlock; bottom: number }[] = []
+  const blocks: TimedBlock<T>[] = []
+  let group: { block: TimedBlock<T>; bottom: number }[] = []
   let groupEnd = -1
   const close = (): void => {
     const columns = Math.max(0, ...group.map((entry) => entry.block.column)) + 1
@@ -78,7 +84,7 @@ export function layoutDay(occurrences: Occurrence[], day: CalendarDay, zone: str
     while (taken.has(column)) {
       column++
     }
-    const block: TimedBlock = {
+    const block: TimedBlock<T> = {
       occurrence: piece.occurrence,
       top: piece.top,
       height: Math.min(piece.bottom, 24 * 60) - piece.top,
@@ -98,8 +104,8 @@ export function layoutDay(occurrences: Occurrence[], day: CalendarDay, zone: str
 }
 
 /** An occurrence in a row of days (the all-day row of a week, a week of the month): which days it covers, on which lane. */
-export interface SpanItem {
-  occurrence: Occurrence
+export interface SpanItem<T extends Placed = Occurrence> {
+  occurrence: T
   /** Index of the first and last day it covers within the row. */
   first: number
   last: number
@@ -109,7 +115,7 @@ export interface SpanItem {
 }
 
 /** The days of a row an occurrence covers, or null when it misses them. All-day ends are exclusive dates. */
-function covered(occurrence: Occurrence, days: CalendarDay[]): { first: number; last: number } | null {
+function covered(occurrence: Placed, days: CalendarDay[]): { first: number; last: number } | null {
   let first = -1
   let last = -1
   days.forEach((day, index) => {
@@ -126,7 +132,7 @@ function covered(occurrence: Occurrence, days: CalendarDay[]): { first: number; 
  * Packs occurrences into lanes across a row of days: longer and earlier ones first, each on the first lane that is
  * free over all its days. Used for the all-day row of the week and day views and for the weeks of the month view.
  */
-export function layoutSpans(occurrences: Occurrence[], days: CalendarDay[]): SpanItem[] {
+export function layoutSpans<T extends Placed>(occurrences: T[], days: CalendarDay[]): SpanItem<T>[] {
   if (days.length === 0) {
     return []
   }
@@ -134,7 +140,7 @@ export function layoutSpans(occurrences: Occurrence[], days: CalendarDay[]): Spa
   const rowEnd = days[days.length - 1]!.end
   const placed = occurrences
     .map((occurrence) => ({ occurrence, range: covered(occurrence, days) }))
-    .filter((entry): entry is { occurrence: Occurrence; range: { first: number; last: number } } => entry.range !== null)
+    .filter((entry): entry is { occurrence: T; range: { first: number; last: number } } => entry.range !== null)
     .sort((a, b) => {
       const spanA = a.range.last - a.range.first
       const spanB = b.range.last - b.range.first
@@ -176,7 +182,7 @@ export function layoutSpans(occurrences: Occurrence[], days: CalendarDay[]): Spa
  * this cell alone. When the day has more than fit, one line goes to "+N more" and the items on the lowest lanes show,
  * so a multi-day item keeps its place where it fits.
  */
-export function cellOverflow(items: SpanItem[], dayIndex: number, visible: number): { shown: SpanItem[]; more: number } {
+export function cellOverflow<T extends Placed>(items: SpanItem<T>[], dayIndex: number, visible: number): { shown: SpanItem<T>[]; more: number } {
   const onDay = items.filter((item) => item.first <= dayIndex && item.last >= dayIndex).sort((a, b) => a.lane - b.lane)
   if (onDay.length <= visible) {
     return { shown: onDay, more: 0 }

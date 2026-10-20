@@ -50,6 +50,9 @@ export function todo(id: string, extra: Partial<SyncedTodo> = {}): SyncedTodo {
     source: 'manual',
     messageId: null,
     threadId: null,
+    plannedStart: null,
+    plannedEnd: null,
+    planState: null,
     createdAt: '2026-10-19T08:00:00+00:00',
     updatedAt: '2026-10-19T08:00:00+00:00',
     ...extra,
@@ -520,6 +523,14 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
         expect(await db.todo('first')).toEqual(todo('first', { position: 1, dueDate: '2026-10-24', dueTime: '17:00', durationMinutes: 30 }))
         expect(await db.todo('gone')).toBeNull()
         expect(await db.cursor()).toBe(30)
+      })
+
+      it('keeps the time a todo is planned at, and its conflict', async () => {
+        await db.apply(page({ cursor: 30, todos: [todo('a', { dueDate: '2026-10-24', durationMinutes: 60, plannedStart: '2026-10-21T08:00:00+00:00', plannedEnd: '2026-10-21T09:00:00+00:00', planState: 'planned' })] }))
+        await db.apply(page({ cursor: 31, todos: [todo('a', { dueDate: '2026-10-24', durationMinutes: 60, plannedStart: '2026-10-21T08:00:00+00:00', plannedEnd: '2026-10-21T09:00:00+00:00', planState: 'conflict' })] }))
+
+        expect((await db.todo('a'))?.planState).toBe('conflict')
+        expect((await db.todos()).map((t) => [t.plannedStart, t.plannedEnd])).toEqual([['2026-10-21T08:00:00+00:00', '2026-10-21T09:00:00+00:00']])
       })
 
       it('keeps todos current and drops deleted ones', async () => {
