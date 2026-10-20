@@ -209,8 +209,6 @@ type writer struct {
 	calendar  calsync.Calendar
 	operation api.CalendarOperation
 	doc       *ical.Component
-	// wrote: some step of this write reached Graph, so a failure after it must not lose what it changed.
-	wrote bool
 }
 
 // result reports the write with the event as Graph now has it (with the Teams meeting Graph added).
@@ -235,10 +233,10 @@ func (w *writer) result(ctx context.Context, id string, writeErr error) (api.Ope
 			return s.conflict(current), nil
 		default:
 			result, accessErr := s.failure(ctx, w.operation, writeErr)
-			if w.wrote && result.Outcome == api.OperationRetry && id != "" {
-				// Graph writes a series step by step (the master, then each occurrence). The retry carries the
-				// version the steps so far made, so the next attempt resumes from it instead of conflicting with it;
-				// if no attempt succeeds, that version is what Tresso keeps.
+			if result.Outcome == api.OperationRetry && id != "" {
+				// Graph writes a series step by step (the master, then each occurrence), and an earlier attempt may
+				// have written part of it: every retry carries Graph's version, so the next attempt resumes from it
+				// instead of conflicting with it, and when none is left Tresso keeps it.
 				s.progress(ctx, w.calendar.RemoteID, id, &result)
 			}
 			return result, accessErr
@@ -293,7 +291,6 @@ func (w *writer) create(ctx context.Context) (string, error) {
 	if err := w.session.request(ctx, http.MethodPost, eventsPath(w.calendar.RemoteID), body, &created); err != nil {
 		return "", err
 	}
-	w.wrote = true
 	if created.ID == "" {
 		return "", errors.New("graph: the new event has no id")
 	}
@@ -340,7 +337,7 @@ func (w *writer) patch(ctx context.Context, v *ical.Component, current event, re
 		if !current.IsOrganizer && recurrenceID == nil {
 			return w.respond(ctx, current, "DECLINED")
 		}
-		return w.mark(s.request(ctx, http.MethodDelete, eventPath(w.calendar.RemoteID, current.ID), nil, nil))
+		return s.request(ctx, http.MethodDelete, eventPath(w.calendar.RemoteID, current.ID), nil, nil)
 	}
 	diff := changes(want.fields, have.fields)
 	if recurrenceID != nil {
@@ -384,7 +381,7 @@ func (w *writer) patch(ctx context.Context, v *ical.Component, current event, re
 		if current.ODataETag != "" {
 			req.Header.Set("If-Match", current.ODataETag)
 		}
-		if err := w.mark(s.http.JSON(ctx, req, nil)); err != nil {
+		if err := s.http.JSON(ctx, req, nil); err != nil {
 			return err
 		}
 	}
@@ -452,7 +449,7 @@ func (w *writer) respond(ctx context.Context, current event, partstat string) er
 	if w.operation.Comment != nil {
 		body["comment"] = *w.operation.Comment
 	}
-	return w.mark(w.session.request(ctx, http.MethodPost, eventPath(w.calendar.RemoteID, current.ID, action), body, nil))
+	return w.session.request(ctx, http.MethodPost, eventPath(w.calendar.RemoteID, current.ID, action), body, nil)
 }
 
 // occurrences writes the series' changed and cancelled occurrences.
@@ -512,7 +509,7 @@ func (w *writer) occurrences(ctx context.Context, master event) error {
 					return err
 				}
 				if ok {
-					if err := w.mark(s.request(ctx, http.MethodDelete, eventPath(w.calendar.RemoteID, instance.ID), nil, nil)); err != nil && !gone(err) {
+					if err := s.request(ctx, http.MethodDelete, eventPath(w.calendar.RemoteID, instance.ID), nil, nil); err != nil && !gone(err) {
 						return err
 					}
 				}
@@ -576,15 +573,7 @@ func (s *session) delete(ctx context.Context, operation api.CalendarOperation) (
 	return s.failure(ctx, operation, err)
 }
 
-// mark notes that a change reached Graph.
-func (w *writer) mark(err error) error {
-	if err == nil {
-		w.wrote = true
-	}
-	return err
-}
-
-// progress puts Graph's id, changeKey and version of a partly written event into a retry.
+// progress puts Graph's id, changeKey and version of the event into a retry.
 func (s *session) progress(ctx context.Context, calendarID, id string, result *api.OperationResult) {
 	current, found, err := s.fetch(ctx, calendarID, id)
 	if err != nil || !found {

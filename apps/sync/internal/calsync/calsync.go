@@ -556,7 +556,8 @@ func (r *run) moves(ctx context.Context, operations []api.CalendarOperation) ([]
 			creates[operation.UID] = i
 		}
 	}
-	movedDeletes := map[string]bool{}
+	// held are operations the move answers itself: the moved delete, or the create of a move that conflicted.
+	held := map[string]bool{}
 	for _, operation := range operations {
 		i, paired := creates[operation.UID]
 		if operation.Kind != "delete" || operation.RemoteID == nil || !paired || operations[i].CalendarRemoteID == operation.CalendarRemoteID {
@@ -568,6 +569,16 @@ func (r *run) moves(ctx context.Context, operations []api.CalendarOperation) ([]
 			continue
 		}
 		moved, etag, err := mover.Move(ctx, from, to, *operation.RemoteID, operation.IfMatch)
+		if errors.Is(err, ErrMoveConflict) {
+			// The event changed at the provider: it stays where it is, so the create in the other calendar must not
+			// make a second copy. The create is a conflict (Tresso drops its copy there), and the delete reports the
+			// provider's version below, which Tresso keeps in the old calendar.
+			if err := r.syncer.api.ReportCalendarOperation(ctx, r.account.ID, operations[i].ID, api.OperationResult{WorkerID: r.syncer.workerID, Outcome: api.OperationConflict}); err != nil {
+				return nil, err
+			}
+			held[operations[i].ID] = true
+			continue
+		}
 		if err != nil {
 			if r.fatal(err) {
 				return nil, err
@@ -578,14 +589,14 @@ func (r *run) moves(ctx context.Context, operations []api.CalendarOperation) ([]
 		if err := r.syncer.api.ReportCalendarOperation(ctx, r.account.ID, operation.ID, api.OperationResult{WorkerID: r.syncer.workerID, Outcome: api.OperationDone}); err != nil {
 			return nil, err
 		}
-		movedDeletes[operation.ID] = true
+		held[operation.ID] = true
 		// The update is conditional on the moved event's version, so a change made at the provider meanwhile is a
 		// conflict, not overwritten.
 		operations[i].RemoteID, operations[i].IfMatch = &moved, &etag
 	}
 	kept := make([]api.CalendarOperation, 0, len(operations))
 	for _, operation := range operations {
-		if !movedDeletes[operation.ID] {
+		if !held[operation.ID] {
 			kept = append(kept, operation)
 		}
 	}
