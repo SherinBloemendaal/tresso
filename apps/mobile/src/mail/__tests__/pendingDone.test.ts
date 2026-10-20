@@ -3,7 +3,7 @@ import type { Todo } from '@tresso/core'
 import { stillPending, withPending } from '../pendingDone'
 
 function todo(id: string, completedAt: string | null = null): Todo {
-  return { id, title: id, notes: '', dueDate: null, dueTime: null, durationMinutes: null, completedAt, position: 0, source: 'manual', messageId: null, threadId: null, createdAt: '2026-10-20T08:00:00Z', updatedAt: '2026-10-20T08:00:00Z' }
+  return { id, title: id, notes: '', dueDate: null, dueTime: null, durationMinutes: null, completedAt, position: 0, source: 'manual', messageId: null, threadId: null, plannedStart: null, plannedEnd: null, planState: null, createdAt: '2026-10-20T08:00:00Z', updatedAt: '2026-10-20T08:00:00Z' }
 }
 
 describe('pending check-offs', () => {

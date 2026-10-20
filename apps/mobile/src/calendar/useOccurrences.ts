@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { AppState } from 'react-native'
 import { useFocusEffect } from 'expo-router'
-import { expandOccurrences, readerTimeZone, type Occurrence, type SyncedCalendar } from '@tresso/core'
+import { expandOccurrences, readerTimeZone, todoBlocks, type Occurrence, type SyncedCalendar, type TodoBlock } from '@tresso/core'
 import { useMail } from '@/mail/MailProvider'
 
 /**
@@ -20,19 +20,22 @@ export function useReaderZone(): string {
   return zone
 }
 
+interface CalendarRange {
+  occurrences: Occurrence[]
+  /** Time planned for open todos in the range; Tresso keeps it, in no calendar. */
+  todoBlocks: TodoBlock[]
+  calendars: Map<string, SyncedCalendar>
+  loaded: boolean
+}
+
 /**
  * The occurrences in a range of instants, expanded on the phone from the synced copy, on visible calendars and
  * without cancelled ones; declined ones only when asked for (the event detail keeps showing an event the user just
- * declined). Read again whenever the copy or the zone changes.
+ * declined); and the time planned for todos in it. Read again whenever the copy or the zone changes.
  */
-export function useOccurrences(
-  from: number,
-  to: number,
-  zone: string,
-  options: { includeDeclined?: boolean } = {},
-): { occurrences: Occurrence[]; calendars: Map<string, SyncedCalendar>; loaded: boolean } {
+export function useOccurrences(from: number, to: number, zone: string, options: { includeDeclined?: boolean } = {}): CalendarRange {
   const { store, version } = useMail()
-  const [state, setState] = useState<{ occurrences: Occurrence[]; calendars: Map<string, SyncedCalendar>; loaded: boolean }>({ occurrences: [], calendars: new Map(), loaded: false })
+  const [state, setState] = useState<CalendarRange>({ occurrences: [], todoBlocks: [], calendars: new Map(), loaded: false })
   const includeDeclined = options.includeDeclined === true
 
   useEffect(() => {
@@ -41,13 +44,13 @@ export function useOccurrences(
     if (database === null) {
       return
     }
-    void Promise.all([database.calendars(), database.calendarEvents(from, to)]).then(([calendars, events]) => {
+    void Promise.all([database.calendars(), database.calendarEvents(from, to), database.todos()]).then(([calendars, events, todos]) => {
       if (!current) return
       const visible = new Set(calendars.filter((calendar) => calendar.visible).map((calendar) => calendar.id))
       const occurrences = expandOccurrences(events, from, to, zone).filter(
         (occurrence) => visible.has(occurrence.event.calendarId) && occurrence.event.status !== 'cancelled' && (includeDeclined || occurrence.event.selfResponse !== 'declined'),
       )
-      setState({ occurrences, calendars: new Map(calendars.map((calendar) => [calendar.id, calendar])), loaded: true })
+      setState({ occurrences, todoBlocks: todoBlocks(todos, from, to), calendars: new Map(calendars.map((calendar) => [calendar.id, calendar])), loaded: true })
     })
     return () => {
       current = false

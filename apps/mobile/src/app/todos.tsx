@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Pressable, SectionList, StyleSheet, Text, View } from 'react-native'
 import { Stack, useRouter } from 'expo-router'
-import { dueLabel, groupTodos, todoSection, type SyncedMessage, type Todo } from '@tresso/core'
+import { dueLabel, groupTodos, plannedLabel, readerTimeZone, startOfWallDay, todoSection, toWall, type SyncedMessage, type Todo } from '@tresso/core'
+import { askTodoPlan } from '@/calendar/askTodoPlan'
+import { todoPlanChoices, type TodoPlanAction } from '@/calendar/todoPlan'
 import { useNotices } from '@/components/Notices'
 import { useMail } from '@/mail/MailProvider'
 import { stillPending, withPending, type PendingDone } from '@/mail/pendingDone'
@@ -67,6 +69,21 @@ export default function TodosScreen() {
     }
   }
 
+  /** Plans the todo in the calendar, plans it again, or gives its time back, after asking which. */
+  function planMenu(todo: Todo): void {
+    const zone = readerTimeZone()
+    const where = plannedLabel(todo, zone, startOfWallDay(toWall(now.getTime(), zone)))
+    const run = async (action: TodoPlanAction): Promise<void> => {
+      try {
+        if (action === 'plan') await mail.planTodo(todo.id)
+        else if (action === 'unplan') await mail.unplanTodo(todo.id)
+      } catch (error) {
+        notices.notify({ text: error instanceof Error ? error.message : String(error), tone: 'error' })
+      }
+    }
+    askTodoPlan(todo.title, where === null ? 'Tresso finds free time before the due date. That time is busy for others.' : `${where}.`, todoPlanChoices(todo), (action) => void run(action))
+  }
+
   return (
     <>
       <Stack.Screen options={{ headerShown: true, title: 'Todos', headerBackTitle: 'Inbox' }} />
@@ -110,6 +127,17 @@ export default function TodosScreen() {
                   {[due, email !== undefined ? senderName(email.from) : item.messageId === null ? 'Added by you' : 'From an email'].filter((part) => part !== null).join(' · ')}
                 </Text>
               </Pressable>
+              {!done && todoPlanChoices(item).length > 0 && (
+                <Pressable
+                  style={[styles.plan, item.planState === 'conflict' && styles.planConflict]}
+                  onPress={() => planMenu(item)}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel={item.plannedStart === null ? `Plan ${item.title} in the calendar` : `${item.title} in the calendar`}
+                >
+                  <Text style={[styles.planLabel, item.planState === 'conflict' && styles.planConflictLabel]}>{item.plannedStart === null ? 'Plan' : item.planState === 'conflict' ? 'Conflict' : 'Planned'}</Text>
+                </Pressable>
+              )}
             </View>
           )
         }}
@@ -132,5 +160,9 @@ function makeStyles(theme: Theme) {
     doneTitle: { color: theme.ink2, textDecorationLine: 'line-through' },
     muted: { fontSize: 13, color: theme.ink2 },
     overdue: { color: theme.danger, fontWeight: '600' },
+    plan: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: theme.do },
+    planConflict: { borderColor: theme.danger, borderStyle: 'dashed' },
+    planLabel: { fontSize: 13, fontWeight: '600', color: theme.do },
+    planConflictLabel: { color: theme.danger },
   })
 }
