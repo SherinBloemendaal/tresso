@@ -17,8 +17,13 @@ export const smartInboxSchema = z
     includeSenders: senders,
     excludeSenders: senders,
     verdict: z.enum(['do', 'delegate', 'know', 'none']),
+    // A switch always has a value: not a field to fill in.
+    autoCreateTodo: z.boolean().default(false),
   })
   .superRefine((values, context) => {
+    if (values.autoCreateTodo && values.verdict !== 'do') {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['autoCreateTodo'], message: 'Only smart inboxes with the Do verdict can create todos.' })
+    }
     const included = new Set(values.includeSenders.map(normalizeSenderPattern))
     const both = values.excludeSenders.find((entry) => included.has(normalizeSenderPattern(entry)))
     if (both !== undefined) {

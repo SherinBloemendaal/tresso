@@ -8,7 +8,7 @@ import { useMailStore } from '@/stores/mail'
 import ClassificationMenu from '../ClassificationMenu.vue'
 
 function smartInbox(id: string, name: string, verdict: SyncedSmartInbox['verdict'], position: number): SyncedSmartInbox {
-  return { id, builtin: null, name, instructions: '', includeSenders: [], excludeSenders: [], verdict, position }
+  return { id, builtin: null, name, instructions: '', includeSenders: [], excludeSenders: [], verdict, autoCreateTodo: false, position }
 }
 
 describe('ClassificationMenu', () => {

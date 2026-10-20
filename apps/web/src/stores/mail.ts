@@ -26,6 +26,7 @@ import {
   type SyncedSignature,
   type SyncedSmartInbox,
   type SyncedThread,
+  type SyncedTodo,
   type ThreadClassification,
   type ThreadClassificationRequest,
   type Verdict,
@@ -64,6 +65,8 @@ export const useMailStore = defineStore('mail', () => {
   const smartInboxes = ref<SyncedSmartInbox[]>([])
   /** Threads with unread mail per smart inbox. */
   const smartInboxCounts = ref<Map<string, number>>(new Map())
+  /** Every todo, open ones first in the user's order (see compareTodos). */
+  const todos = ref<SyncedTodo[]>([])
   const scope = computed<ListScope>(() =>
     smartInbox.value === null ? { kind: 'inbox', mailAccountId: mailbox.value } : { kind: 'smartInbox', smartInboxId: smartInbox.value },
   )
@@ -228,6 +231,7 @@ export const useMailStore = defineStore('mail', () => {
     unreadCounts.value = new Map()
     smartInboxes.value = []
     smartInboxCounts.value = new Map()
+    todos.value = []
     outbox.value = []
     await stopping?.stop()
     await database?.close()
@@ -249,7 +253,7 @@ export const useMailStore = defineStore('mail', () => {
     if (database === null) {
       return
     }
-    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts] = await Promise.all([
+    const [nextAccounts, nextFolders, nextSignatures, nextConversations, nextCounts, nextOutbox, nextSmartInboxes, nextSmartCounts, nextTodos] = await Promise.all([
       database.mailAccounts(),
       database.folders(),
       database.signatures(),
@@ -258,7 +262,9 @@ export const useMailStore = defineStore('mail', () => {
       database.outbox(),
       database.smartInboxes(),
       database.unreadSmartInboxCounts(),
+      database.todos(),
     ])
+    todos.value = nextTodos
     smartInboxes.value = nextSmartInboxes
     smartInboxCounts.value = nextSmartCounts
     outbox.value = nextOutbox
@@ -326,6 +332,15 @@ export const useMailStore = defineStore('mail', () => {
 
   async function thread(threadId: string): Promise<{ thread: SyncedThread; messages: SyncedMessage[] } | null> {
     return (await db.value?.thread(threadId)) ?? null
+  }
+
+  async function todosOfThread(threadId: string): Promise<SyncedTodo[]> {
+    return (await db.value?.todosOfThread(threadId)) ?? []
+  }
+
+  /** The messages with these ids this device has, e.g. the emails todos link to. */
+  async function messages(ids: string[]): Promise<SyncedMessage[]> {
+    return ids.length === 0 ? [] : ((await db.value?.messages(ids)) ?? [])
   }
 
   /** Threads in the list on screen from any of these senders (lower-case addresses), loaded in the list or not. */
@@ -505,6 +520,7 @@ export const useMailStore = defineStore('mail', () => {
     smartInbox,
     smartInboxes,
     smartInboxCounts,
+    todos,
     hasMore,
     syncState,
     syncError,
@@ -521,6 +537,8 @@ export const useMailStore = defineStore('mail', () => {
     classifyThread,
     showMore,
     thread,
+    todosOfThread,
+    messages,
     threadsFrom,
     threadsBefore,
     describeThreads,

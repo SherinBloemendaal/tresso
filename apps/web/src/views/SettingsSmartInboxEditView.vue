@@ -37,13 +37,21 @@ const VERDICT_HELP: Record<Verdict, string> = {
 
 const { defineField, handleSubmit, errors, values, meta, resetForm, setErrors } = useForm<SmartInboxValues>({
   validationSchema: toTypedSchema(smartInboxSchema),
-  initialValues: { name: '', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'do' },
+  initialValues: { name: '', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'do', autoCreateTodo: false },
 })
 const [name] = defineField('name')
 const [instructions] = defineField('instructions')
 const [includeSenders] = defineField('includeSenders')
 const [excludeSenders] = defineField('excludeSenders')
 const [verdict] = defineField('verdict')
+const [autoCreateTodo] = defineField('autoCreateTodo')
+
+// Todos come from mail to do: another verdict switches the setting off.
+watch(verdict, (next) => {
+  if (next !== 'do' && autoCreateTodo.value) {
+    autoCreateTodo.value = false
+  }
+})
 
 function listError(path: 'includeSenders' | 'excludeSenders'): string | null {
   return Object.entries(errors.value).find(([field]) => field === path || field.startsWith(`${path}[`))?.[1] ?? null
@@ -52,7 +60,7 @@ function listError(path: 'includeSenders' | 'excludeSenders'): string | null {
 function saved(): SmartInboxValues {
   const smartInbox = existing.value
   if (smartInbox === null) {
-    return { name: '', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'do' }
+    return { name: '', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'do', autoCreateTodo: false }
   }
 
   return {
@@ -61,6 +69,7 @@ function saved(): SmartInboxValues {
     includeSenders: [...smartInbox.includeSenders],
     excludeSenders: [...smartInbox.excludeSenders],
     verdict: smartInbox.verdict,
+    autoCreateTodo: smartInbox.autoCreateTodo,
   }
 }
 
@@ -98,6 +107,7 @@ function changes(current: SmartInboxValues): SmartInboxUpdate {
   if (!sameList(current.includeSenders, original.includeSenders)) changed.includeSenders = current.includeSenders
   if (!sameList(current.excludeSenders, original.excludeSenders)) changed.excludeSenders = current.excludeSenders
   if (current.verdict !== original.verdict) changed.verdict = current.verdict
+  if (current.autoCreateTodo !== original.autoCreateTodo) changed.autoCreateTodo = current.autoCreateTodo
 
   return changed
 }
@@ -203,6 +213,25 @@ function saveShortcut(event: KeyboardEvent): void {
         </div>
         <small class="hint">{{ VERDICT_HELP[values.verdict ?? 'do'] }}</small>
       </fieldset>
+
+      <div class="switch-row">
+        <span class="switch-text">
+          <FieldLabel name="autoCreateTodo" tag="label" for="auto-create-todo">Auto-create todos</FieldLabel>
+          <small id="auto-create-todo-help" class="hint">
+            {{ verdict === 'do' ? 'New unread mail that lands here becomes a todo, linked to the email.' : 'Only available with the Do verdict.' }}
+          </small>
+          <small v-if="errors.autoCreateTodo" class="error">{{ errors.autoCreateTodo }}</small>
+        </span>
+        <input
+          id="auto-create-todo"
+          v-model="autoCreateTodo"
+          type="checkbox"
+          role="switch"
+          class="switch"
+          :disabled="verdict !== 'do'"
+          aria-describedby="auto-create-todo-help"
+        />
+      </div>
 
       <p v-if="error" class="form-error" role="alert">{{ error }}</p>
 
@@ -353,6 +382,61 @@ textarea[aria-invalid='true'] {
   border-color: var(--ink);
   background: var(--surface);
   color: var(--ink);
+}
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 560px;
+}
+.switch-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.switch {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  margin: 0;
+  border-radius: 12px;
+  background: var(--line-strong);
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  transition: transform 150ms ease;
+}
+.switch:checked {
+  background: var(--do);
+}
+.switch:checked::after {
+  transform: translateX(16px);
+}
+.switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.switch:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch::after {
+    transition: none;
+  }
 }
 .actions {
   display: flex;

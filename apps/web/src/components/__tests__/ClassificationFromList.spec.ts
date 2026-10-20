@@ -13,7 +13,7 @@ import NoticeStack from '../NoticeStack.vue'
 const USER = 'list-classify-user'
 
 function smartInbox(id: string, builtin: SyncedSmartInbox['builtin'], name: string, verdict: SyncedSmartInbox['verdict'], position: number): SyncedSmartInbox {
-  return { id, builtin, name, instructions: '', includeSenders: [], excludeSenders: [], verdict, position }
+  return { id, builtin, name, instructions: '', includeSenders: [], excludeSenders: [], verdict, autoCreateTodo: false, position }
 }
 
 const first: ChangePage = {
@@ -51,6 +51,7 @@ const first: ChangePage = {
   calendarEvents: [],
   notifications: [],
   eventNotes: [],
+  todos: [],
   deleted: [],
 }
 
