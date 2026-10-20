@@ -56,6 +56,20 @@ final class ClamdProtocolTest extends TestCase
         $scanner->engine();
     }
 
+    public function testProbeAnswersQuickly(): void
+    {
+        self::assertTrue($this->scanner('reply', 'PONG')->isReachable());
+    }
+
+    public function testProbeOfAClamdThatHangsGivesUpWithinASecondOrSo(): void
+    {
+        $scanner = $this->scanner('silent', '10');
+        $started = microtime(true);
+
+        self::assertFalse($scanner->isReachable());
+        self::assertLessThan(3.0, microtime(true) - $started, 'A health check must not wait for the scan timeout.');
+    }
+
     private function scanner(string $mode, string $argument): ClamdScanner
     {
         $this->clamd = new Process([\PHP_BINARY, __DIR__.'/../../Support/bin/scripted-clamd.php', $mode, $argument]);
@@ -68,6 +82,6 @@ final class ClamdProtocolTest extends TestCase
         });
         self::assertIsInt($port);
 
-        return new ClamdScanner('127.0.0.1', $port, 26_214_400, 5.0, 10.0);
+        return new ClamdScanner('127.0.0.1', $port, 26_214_400, 5.0, 120.0);
     }
 }

@@ -6,6 +6,7 @@ declare(strict_types=1);
  * A clamd stand-in for protocol tests: listens on a free port, prints it, and answers one connection as told.
  *   limit <bytes>   reads an INSTREAM and hangs up once more than <bytes> arrived, like StreamMaxLength
  *   reply <text>    reads a command (and its stream) and answers <text>
+ *   silent <secs>   reads a command and says nothing for <secs> seconds
  */
 $arguments = $_SERVER['argv'] ?? [];
 $mode = is_array($arguments) && is_string($arguments[1] ?? null) ? $arguments[1] : '';
@@ -58,6 +59,11 @@ if ("zINSTREAM\0" === $command) {
             exit(0);
         }
     }
+}
+if ('silent' === $mode) {
+    sleep((int) $argument);
+    fclose($client);
+    exit(0);
 }
 fwrite($client, $argument."\0");
 fclose($client);

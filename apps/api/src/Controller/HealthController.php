@@ -15,8 +15,8 @@ use Symfony\Component\Routing\Attribute\Route;
 /**
  * Liveness and dependency check used by Docker and load balancers.
  *
- * `scanner` reports the virus scanner: ok, off (no CLAMAV_HOST: files are marked as not scanned), unreachable
- * (scans wait and retry), or unconfigured: ATTACHMENTS_REQUIRE_SCAN is on without a scanner, so no attachment could
+ * `scanner` reports the virus scanner, from a PING that waits a second at most: ok, off (no CLAMAV_HOST: files are
+ * marked as not scanned), unreachable (scans wait and retry), or unconfigured: ATTACHMENTS_REQUIRE_SCAN is on without a scanner, so no attachment could
  * ever be opened. Only that last one makes the API unhealthy: a misconfiguration has to show before users find it.
  */
 final readonly class HealthController
@@ -55,7 +55,7 @@ final readonly class HealthController
 
     private function scanner(): string
     {
-        return self::scannerState($this->scanner->isEnabled(), $this->downloads->requiresScan(), fn (): bool => $this->check(fn () => $this->scanner->engine()));
+        return self::scannerState($this->scanner->isEnabled(), $this->downloads->requiresScan(), $this->scanner->isReachable(...));
     }
 
     /**

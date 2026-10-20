@@ -26,6 +26,9 @@ final readonly class ClamdScanner implements VirusScanner
      */
     private const int CHUNK_SIZE = 65536;
 
+    /** Seconds a health probe waits to connect and for the answer: a check must never hold a request for long. */
+    private const float PROBE_TIMEOUT = 1.0;
+
     public function __construct(
         #[Autowire(env: 'CLAMAV_HOST')]
         private string $host,
@@ -48,6 +51,27 @@ final readonly class ClamdScanner implements VirusScanner
     public function maxSize(): int
     {
         return $this->maxSize;
+    }
+
+    public function isReachable(): bool
+    {
+        if (!$this->isEnabled()) {
+            return false;
+        }
+        try {
+            $socket = $this->connect(self::PROBE_TIMEOUT, self::PROBE_TIMEOUT);
+        } catch (ScannerUnavailable) {
+            return false;
+        }
+        try {
+            $this->write($socket, "zPING\0");
+
+            return 'PONG' === rtrim($this->read($socket), "\0\r\n ");
+        } catch (ScannerUnavailable) {
+            return false;
+        } finally {
+            fclose($socket);
+        }
     }
 
     public function engine(): string
@@ -94,19 +118,21 @@ final readonly class ClamdScanner implements VirusScanner
     /**
      * @return resource
      */
-    private function connect()
+    private function connect(?float $connectTimeout = null, ?float $timeout = null)
     {
+        $connectTimeout ??= $this->connectTimeout;
+        $timeout ??= $this->timeout;
         if (!$this->isEnabled()) {
             throw new \LogicException('Scanning is turned off: CLAMAV_HOST is empty.');
         }
 
         $host = str_contains($this->host, ':') ? '['.$this->host.']' : $this->host;
-        $socket = @stream_socket_client(\sprintf('tcp://%s:%d', $host, $this->port), $errorCode, $errorMessage, $this->connectTimeout);
+        $socket = @stream_socket_client(\sprintf('tcp://%s:%d', $host, $this->port), $errorCode, $errorMessage, $connectTimeout);
         if (false === $socket) {
             throw new ScannerUnavailable(\sprintf('Cannot connect to clamd at %s:%d: %s (%d).', $this->host, $this->port, $errorMessage, $errorCode));
         }
-        $seconds = (int) floor($this->timeout);
-        stream_set_timeout($socket, $seconds, (int) (($this->timeout - $seconds) * 1_000_000));
+        $seconds = (int) floor($timeout);
+        stream_set_timeout($socket, $seconds, (int) (($timeout - $seconds) * 1_000_000));
 
         return $socket;
     }

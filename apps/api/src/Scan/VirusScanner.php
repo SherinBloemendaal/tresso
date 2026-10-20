@@ -9,6 +9,9 @@ interface VirusScanner
     /** False when no scanner is configured; nothing can be scanned then. */
     public function isEnabled(): bool;
 
+    /** Whether the scanner answers, within about a second; for health checks, never throws. */
+    public function isReachable(): bool;
+
     /** The largest content, in bytes, the scanner accepts. */
     public function maxSize(): int;
 
