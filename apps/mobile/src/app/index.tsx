@@ -135,6 +135,9 @@ function SignedIn({ styles }: { styles: Styles }) {
                 <Text style={styles.secondaryLabel}>Waiting {waiting}</Text>
               </Pressable>
             )}
+            <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => router.push('/calendar')} accessibilityRole="button">
+              <Text style={styles.secondaryLabel}>Calendar</Text>
+            </Pressable>
             {drafts > 0 && (
               <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => router.push('/drafts')} accessibilityRole="button" accessibilityLabel={`Drafts, ${drafts}`}>
                 <Text style={styles.secondaryLabel}>Drafts {drafts}</Text>

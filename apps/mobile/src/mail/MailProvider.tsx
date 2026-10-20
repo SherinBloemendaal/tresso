@@ -82,6 +82,8 @@ interface Mail extends MailState {
   overdue: SyncedHandOver[]
   /** These were told about. */
   clearOverdue(ids: string[]): void
+  /** Answers an invitation (POST /api/v1/calendar-events/{id}/response): the series, or one occurrence. */
+  respond(eventId: string, response: 'accepted' | 'tentative' | 'declined', recurrenceId: string | null): Promise<void>
 }
 
 function json(method: string, body?: unknown): RequestInit {
@@ -251,6 +253,13 @@ export function MailProvider({ children }: { children: ReactNode }) {
     [auth.session],
   )
   const clearOverdue = useCallback((ids: string[]) => setOverdue((waiting) => waiting.filter((handOver) => !ids.includes(handOver.id))), [])
+  const respond = useCallback(
+    async (eventId: string, response: 'accepted' | 'tentative' | 'declined', recurrenceId: string | null) => {
+      await auth.session.api(`/api/v1/calendar-events/${encodeURIComponent(eventId)}/response`, json('POST', { response, recurrenceId, comment: null, notify: true }))
+      await session.syncNow()
+    },
+    [auth.session, session],
+  )
   const { userId, ready, version, syncState, syncError, live, pulls } = state
   const mail = useMemo<Mail>(
     () => ({
@@ -286,8 +295,9 @@ export function MailProvider({ children }: { children: ReactNode }) {
       handOverApi,
       overdue,
       clearOverdue,
+      respond,
     }),
-    [userId, touch, ready, version, syncState, syncError, lookupError, live, pulls, mailAccounts, folders, act, inbox, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, setTodoDone, handOvers, outgoing, handOverApi, overdue, clearOverdue],
+    [userId, touch, ready, version, syncState, syncError, lookupError, live, pulls, mailAccounts, folders, act, inbox, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, setTodoDone, handOvers, outgoing, handOverApi, overdue, clearOverdue, respond],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>
