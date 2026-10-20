@@ -491,6 +491,51 @@ final class MailNotificationTest extends DatabaseTestCase
         self::assertSame(['New mail from Work', ''], $this->connection()->fetchNumeric('SELECT title, body FROM mail_notification'));
     }
 
+    public function testABatchWithMuchMailThatNeedsTheUserNotifiesOnceWithHowMany(): void
+    {
+        $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => array_map(fn (int $n): array => $this->message((string) $n, 'Invoice '.$n, ['from' => ['address' => 'anna@partner.example', 'name' => 0 === $n % 2 ? 'Anna de Vries' : 'Billing']]), range(1, 5))]);
+        $this->classifyAndSend();
+
+        $this->batchComes();
+        $this->batchComes();
+
+        $expo = $this->expoBodies();
+        self::assertCount(1, $expo, 'One summary, however often the release runs.');
+        self::assertSame('5 new messages to do', $expo[0]['title']);
+        self::assertContains($expo[0]['body'], ['From Billing, Anna de Vries', 'From Anna de Vries, Billing']);
+        self::assertArrayNotHasKey('threadId', $expo[0]['data'], 'It opens no single conversation.');
+        self::assertSame($this->kimsId()->toRfc4122(), $expo[0]['data']['userId']);
+        self::assertEquals(5, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification'));
+        self::assertEquals(4, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification WHERE dropped_at IS NOT NULL'), 'The others never notify later either.');
+    }
+
+    public function testWithoutPreviewsTheSummarySaysOnlyHowMany(): void
+    {
+        $this->patchSettings(['mailPreviews' => false]);
+        $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => array_map(fn (int $n): array => $this->message((string) $n, 'Invoice '.$n), range(1, 4))]);
+        $this->classifyAndSend();
+
+        $this->batchComes();
+
+        $expo = $this->expoBodies();
+        self::assertCount(1, $expo);
+        self::assertSame(['4 new messages to do', ''], [$expo[0]['title'], $expo[0]['body']]);
+        self::assertStringNotContainsString('Anna', json_encode($expo[0], \JSON_THROW_ON_ERROR));
+    }
+
+    public function testABatchWithAFewMessagesNotifiesEachOfThem(): void
+    {
+        $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => array_map(fn (int $n): array => $this->message((string) $n, 'Invoice '.$n), range(1, MailNotifier::SUMMARY_AFTER))]);
+        $this->classifyAndSend();
+
+        $this->batchComes();
+
+        self::assertCount(MailNotifier::SUMMARY_AFTER, $this->expoBodies());
+    }
+
     public function testHeldMailReadOrArchivedBeforeItsBatchDoesNotNotify(): void
     {
         $this->batchedInvoices();
@@ -615,7 +660,15 @@ final class MailNotificationTest extends DatabaseTestCase
     private function sendQueued(): void
     {
         $transport = $this->pushTransport();
-        $envelopes = array_values(array_filter([...$transport->get()], static fn ($envelope): bool => $envelope->getMessage() instanceof SendMailNotification));
+        // The transport hands out one envelope at a time, as a worker fetches them.
+        $all = [];
+        while ([] !== ($fetched = [...$transport->get()])) {
+            foreach ($fetched as $envelope) {
+                $transport->ack($envelope);
+                $all[] = $envelope;
+            }
+        }
+        $envelopes = array_values(array_filter($all, static fn ($envelope): bool => $envelope->getMessage() instanceof SendMailNotification));
         $transport->reset();
         foreach ($envelopes as $envelope) {
             $message = $envelope->getMessage();

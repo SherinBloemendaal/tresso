@@ -116,13 +116,35 @@ class MailNotification implements SyncedOnlyWhenSeen
     }
 
     /**
-     * The user turned previews off: what the notification says becomes only which account the mail came to, so no
-     * sender, subject or text leaves the server (nor stays in this row).
+     * The user turned previews off: what the notification says becomes only which account the mail came to, or for a
+     * summary only how many, so no sender, subject or text leaves the server (nor stays in this row).
      */
     public function hideContent(string $title): void
     {
-        $this->title = mb_substr($title, 0, 255);
         $this->body = '';
+        if (!$this->isSummary()) {
+            $this->title = mb_substr($title, 0, 255);
+        }
+    }
+
+    /**
+     * Whether it stands for several messages (see {@see summarize()}): its title says only how many, so it stays. A
+     * notification about one message always has its conversation, as a message cannot outlive its thread.
+     */
+    public function isSummary(): bool
+    {
+        return null === $this->thread && null !== $this->message;
+    }
+
+    /**
+     * Stands for several messages at once (a batch that delivered many): it says how many, and opens no single
+     * conversation.
+     */
+    public function summarize(string $title, string $body): void
+    {
+        $this->title = mb_substr($title, 0, 255);
+        $this->body = $body;
+        $this->thread = null;
     }
 
     /** A focus block or a meeting: it waits for their end. */

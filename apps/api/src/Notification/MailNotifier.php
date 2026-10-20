@@ -39,6 +39,8 @@ final readonly class MailNotifier
 {
     /** Mail received longer ago than this when it is classified is not news. */
     public const string FRESH = '1 hour';
+    /** A batch that delivers more mail that needs the user than this notifies once, with how many. */
+    public const int SUMMARY_AFTER = 3;
     /** Nothing is delivered later than this after its fire time, nor sent again after a failure. */
     public const string MAX_LATE = '2 hours';
     /** A notification is only delivered this close to its fire time; a later one is waiting for its own message. */
@@ -77,20 +79,21 @@ final readonly class MailNotifier
     /**
      * Called when a batch delivers held mail, in that transaction: it was new when it arrived, and its notification
      * waited with it. Plans one for each message that needs the user now, however long ago it was received; mail
-     * notified before is not notified again. Mail the user's own doing delivers early never comes here, as
+     * notified before is not notified again. More than {@see SUMMARY_AFTER} become one notification that says how
+     * many ("5 new messages to do"); the others are planned and dropped at once, so they never notify later either. Mail the user's own doing delivers early never comes here, as
      * classification that runs again never does.
      *
      * @param list<Message> $released
      */
     public function released(User $user, array $released, \DateTimeImmutable $now): void
     {
-        $this->plan($user, $released, $now);
+        $this->plan($user, $released, $now, summarize: true);
     }
 
     /**
      * @param list<Message> $fresh
      */
-    private function plan(User $user, array $fresh, \DateTimeImmutable $now): void
+    private function plan(User $user, array $fresh, \DateTimeImmutable $now, bool $summarize = false): void
     {
         if ([] === $fresh) {
             return;
@@ -103,6 +106,8 @@ final readonly class MailNotifier
         // Without previews no sender, subject or text is kept, also in notifications that wait, are dropped or deduped.
         $previews = $this->preferences->forUser($user)->isMailPreviews();
         $headers = [];
+        /** @var list<array{MailNotification, Message}> $planned */
+        $planned = [];
         foreach ($fresh as $message) {
             // Classification holds the user's lock, so no other run plans the same message meanwhile.
             if (\in_array($message->getId()->toRfc4122(), $notified, true) || !$this->needsTheUser($message)) {
@@ -121,9 +126,48 @@ final readonly class MailNotifier
             if (null !== $header) {
                 $headers[$header] = true;
             }
+            $planned[] = [$notification, $message];
+        }
+        if ($summarize && \count($planned) > self::SUMMARY_AFTER) {
+            $planned = [$this->summary($planned, $previews, $now)];
+        }
+        foreach ($planned as [$notification]) {
             $this->afterCommit->dispatch(new SendMailNotification($notification->getId()->toRfc4122()));
         }
         $this->entityManager->flush();
+    }
+
+    /**
+     * One notification for many: the newest message's says how many need the user, the others are dropped.
+     *
+     * @param non-empty-list<array{MailNotification, Message}> $planned
+     *
+     * @return array{MailNotification, Message}
+     */
+    private function summary(array $planned, bool $previews, \DateTimeImmutable $now): array
+    {
+        usort($planned, static fn (array $a, array $b): int => $b[1]->getReceivedAt() <=> $a[1]->getReceivedAt());
+        $messages = array_map(static fn (array $pair): Message => $pair[1], $planned);
+        $verdicts = array_unique(array_map(static fn (Message $message): string => (string) $message->getVerdict()?->value, $messages));
+        $what = match ($verdicts) {
+            [Verdict::Do->value] => 'to do',
+            [Verdict::Delegate->value] => 'to hand over',
+            default => 'that need you',
+        };
+        $senders = array_values(array_unique(array_map(self::title(...), $messages)));
+        $body = '';
+        if ($previews) {
+            $named = \array_slice($senders, 0, 2);
+            $others = \count($senders) - \count($named);
+            $body = 'From '.implode(', ', $named).($others > 0 ? \sprintf(' and %d other%s', $others, 1 === $others ? '' : 's') : '');
+        }
+        [$summary] = $planned[0];
+        $summary->summarize(\sprintf('%d new messages %s', \count($planned), $what), $body);
+        foreach (\array_slice($planned, 1) as [$notification]) {
+            $notification->drop($now);
+        }
+
+        return $planned[0];
     }
 
     /**
