@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
-import { dueChoices, firstName, MAX_NOTE, type DueChoice, type SyncedMessage } from '@tresso/core'
+import { dueChoices, firstName, MAX_NOTE, UnscannedFilesError, type DueChoice, type SyncedMessage } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
 import FieldLabel from '@/forms/FieldLabel.vue'
 import { dayValue, handOverSchema, pickedDue, type HandOverValues } from '@/forms/handOver'
@@ -32,6 +32,10 @@ const [due] = defineField('due')
 const [dueDay] = defineField('dueDay')
 
 const ui = reactive({ busy: false, error: null as string | null })
+/** The server's question about files of the original that could not be scanned; null when there is none. */
+const unscanned = ref<string | null>(null)
+/** The user answered that question: the next submit forwards those files too. */
+let acceptUnscanned = false
 const firstField = ref<HTMLElement | null>(null)
 // Today in the user's own calendar; a day whose due time passed already is refused by the schema.
 const minDay = dayValue(new Date())
@@ -52,16 +56,28 @@ const submit = handleSubmit(async (values) => {
   if (dueAt === null || to === undefined) {
     return
   }
+  unscanned.value = null
   ui.busy = true
   ui.error = null
   try {
-    await handOvers.handOver(props.message, { delegate: to, note: values.note, dueAt, dueLabel: dueLabel(dueAt.toISOString()) })
+    await handOvers.handOver(props.message, { delegate: to, note: values.note, dueAt, dueLabel: dueLabel(dueAt.toISOString()), acceptUnscanned })
   } catch (error) {
-    ui.error = errorMessage(error)
+    if (error instanceof UnscannedFilesError) {
+      unscanned.value = error.message
+    } else {
+      ui.error = errorMessage(error)
+    }
   } finally {
+    // A confirmation is for the files of this attempt only.
+    acceptUnscanned = false
     ui.busy = false
   }
 })
+
+function handOverAnyway(): void {
+  acceptUnscanned = true
+  void submit()
+}
 
 function cancel(): void {
   if (!submitting.value) {
@@ -129,6 +145,10 @@ onMounted(async () => {
         </fieldset>
 
         <p v-if="ui.error" class="form-error" role="alert">{{ ui.error }}</p>
+        <div v-if="unscanned" class="unscanned" role="alert">
+          <p>{{ unscanned }}</p>
+          <button type="button" class="button button-quiet" :disabled="submitting" @click="handOverAnyway">Hand over anyway</button>
+        </div>
 
         <footer class="actions">
           <button type="button" class="button button-quiet" :disabled="submitting" @click="cancel">Cancel <kbd>Esc</kbd></button>
@@ -242,6 +262,20 @@ textarea {
   font-size: 13px;
 }
 .form-error {
+  margin: 0;
+}
+.unscanned {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  background: var(--danger-soft);
+  font-size: 13px;
+}
+.unscanned p {
+  flex: 1;
   margin: 0;
 }
 .actions {
