@@ -1136,6 +1136,62 @@ Tresso Cloud (`packages/api-bundle` in its repository) replaces them with AI ver
 Drafts from these features are never saved by themselves: the client shows them in the event editor or as
 suggestions, and the user saves. Content sent to an AI provider follows Tresso Cloud's data processing terms.
 
+The interfaces live in `apps/api/src/Calendar/Assistant`, each with its open edition implementation registered as
+the alias another edition decorates:
+
+| Call | Purpose |
+|---|---|
+| `GET /api/v1/calendar/capabilities` | `eventDrafts`, `meetingTimes`, `attendeeAvailability`, `eventSuggestions`, `textSuggestions`, `meetingBriefs`, `briefSummaries`: what this server offers. The open edition answers `false` for `eventDrafts`, `attendeeAvailability`, `textSuggestions` and `briefSummaries`. |
+| `GET`/`PATCH /api/v1/calendar/scheduling-preferences` | What the finder keeps free besides the working hours: `bufferMinutes`, `travelMinutes` and `minimumNoticeMinutes` (scopes `settings:read`, `settings:write`; JSON merge patch). |
+| `POST /api/v1/calendar/meeting-times` | Proposed slots for a duration in a window (below). |
+| `POST /api/v1/calendar/event-drafts` | Free text to an event draft; 501 where `eventDrafts` is off. |
+| `GET /api/v1/messages/{id}/event-suggestions` | Events (as drafts in the editor's shape, with the stored event's id when the calendar has it) and deadlines found in a message. The open edition reads the `REQUEST`, `PUBLISH` and `ADD` calendar parts, and finds no deadlines. |
+| `GET /api/v1/calendar-events/{id}/brief` | The pre-meeting brief (see reminders above); `summary` is null in the open edition. |
+
+##### Meeting time finder
+
+The finder is deterministic and explainable: the same calendars, preferences and moment give the same slots in the
+same order, and every slot says what closes its free time on each side. Planning a todo ("Plan automatically") uses
+the same `MeetingTimeFinder::find` with no attendees, a window up to the deadline and `limit: 1`, and `ignore` holding
+the todo's own planned time when it is planned again.
+
+- **Working hours and zone** are those of the notification settings (`workDays`, `workStart`, `workEnd`,
+  `timeZone`), the same ones the reminders keep to; working hours that end before they start hold no time there, so
+  they give none here either. A search may name another zone (`timeZone`).
+- **Scheduling preferences** (`scheduling_preferences`, one row per user, created on the first change):
+  `bufferMinutes` (0 to 120) on both sides of busy time, `travelMinutes` (0 to 240) to and from busy time at a place
+  that does not name its own travel time, and `minimumNoticeMinutes` (up to 14 days). All are 0 without a row.
+- **Busy time** comes from every `BusyTimeSource`: the open edition's reads the user's visible calendars (or the
+  `calendarIds` a search names) through the occurrence expander, so recurrence, overrides, exceptions and time zones
+  are those of the range endpoint. An occurrence is busy when it is marked busy, not cancelled and not declined;
+  tentative and unanswered invitations count. All-day occurrences take their days from midnight to midnight in the
+  search's zone. An occurrence is at a place when its location is not a link and does not just name the service of its
+  online meeting; an event's own travel time (set for leave-now) is its travel time here. A focus block is what the
+  reminders take for one: a timed busy event of the user's own, without guests, titled "Focus...". Planned todos can be
+  another source.
+- **Attendees' busy time** comes from every `AttendeeAvailabilitySource`; the open edition has none, so an attendee's
+  availability is `unknown` and closes nothing, except for the user's own addresses, which are known. A provider's
+  free/busy (Google, Microsoft Graph, CalDAV scheduling) can be added as a source.
+- **The search** (`SlotSearch`, framework-free):
+  1. The window starts at the later of `from` and now plus the notice, and ends at `to` (at most 92 days later).
+  2. Open time is the working hours in the window (or the whole window with `workingHoursOnly: false`), read on each
+     local day in the zone: a day with a daylight saving change keeps its clock times and is an hour shorter or
+     longer, and a time the clock skips is the first moment after the gap. Overlapping ranges are merged.
+  3. Closed time is taken out: busy time, with the buffer on both sides, or the travel time when the busy time is at
+     a place or names its own travel time (or the new meeting is in person, `inPerson`) and travel takes longer; focus
+     blocks as they are, without buffer; and the busy time of required attendees whose availability is known. Busy
+     time that takes no time closes nothing. `ignore` leaves out events (by id) or single occurrences (by occurrence
+     id), such as the meeting being moved.
+  4. Slots start on multiples of `stepMinutes` (5, 10, 15, 20, 30 or 60) past the hour on the user's clock, also in
+     zones with a half-hour offset, and fit in what is left.
+  5. Slots are ranked by how many optional attendees are busy then (`optionalConflicts`), then by start; slots that
+     overlap a better one, and slots over `perDay` on one local day, are left out, up to `limit` (at most 50).
+- **The answer** lists the slots best first, each with `freeFrom` and `freeUntil`: the instant, the reason (`window`,
+  `notice`, `working_hours`, `focus`, `busy`, `buffer`, `travel` or `attendee`) and a label (the busy time's title, the
+  focus block's title, or the attendee's address). With no slot, `noSlotReason` is `window_passed`,
+  `no_working_hours` or `no_free_time`. It also names the zone used and each attendee's availability.
+  `describeSlotEdge` in `packages/core` turns an edge into words for the client.
+
 ### 3.14 Todos
 
 - A todo (`todo` table) belongs to one user: title, notes, an optional due date with an optional time, an optional
