@@ -52,18 +52,39 @@ describe('forTheDesktop', () => {
 })
 
 describe('overdueNotifications', () => {
-  function late(id: string, name: string | null): SyncedHandOver {
-    return { id, mailAccountId: 'work', messageId: null, threadId: null, subject: `Subject ${id}`, delegate: { address: `${id}@company.example`, name }, note: '', dueAt: '2026-10-23T15:00:00Z', state: 'open', forwardId: null, overdueAt: '2026-10-23T15:00:00Z', nudgedAt: null, lastNudgeId: null, replyMessageId: null, createdAt: '2026-10-20T08:00:00Z', closedAt: null, updatedAt: '2026-10-23T15:00:00Z' }
+  function late(id: string, name: string | null, silent = false): SyncedHandOver {
+    return {
+      id,
+      mailAccountId: 'work',
+      messageId: null,
+      threadId: null,
+      subject: `Subject ${id}`,
+      delegate: { address: `${id}@company.example`, name },
+      note: '',
+      dueAt: '2026-10-23T15:00:00Z',
+      state: 'open',
+      forwardId: null,
+      overdueAt: '2026-10-23T15:00:00Z',
+      notifiedAt: '2026-10-23T15:00:00Z',
+      notifiedChannels: ['desktop'],
+      notifiedSilently: silent,
+      nudgedAt: null,
+      lastNudgeId: null,
+      replyMessageId: null,
+      createdAt: '2026-10-20T08:00:00Z',
+      closedAt: null,
+      updatedAt: '2026-10-23T15:00:00Z',
+    }
   }
 
-  it('names who has not replied, about what', () => {
-    expect(overdueNotifications([late('lisa', 'Lisa Bakker'), late('tom', null)])).toEqual([
-      { title: 'No reply from Lisa yet', body: 'Subject lisa is past its due date. Nudge from Waiting on.' },
-      { title: 'No reply from tom yet', body: 'Subject tom is past its due date. Nudge from Waiting on.' },
+  it('names who has not replied, about what, and opens the follow-up', () => {
+    expect(overdueNotifications([late('lisa', 'Lisa Bakker'), late('tom', null, true)])).toEqual([
+      { title: 'No reply from Lisa yet', body: 'Subject lisa is past its due date. Nudge from Waiting on.', path: '/waiting?nudge=lisa', silent: false },
+      { title: 'No reply from tom yet', body: 'Subject tom is past its due date. Nudge from Waiting on.', path: '/waiting?nudge=tom', silent: true },
     ])
   })
 
-  it('sums up many at once', () => {
-    expect(overdueNotifications(['a', 'b', 'c', 'd'].map((id) => late(id, null)))).toEqual([{ title: '4 hand-overs are past their due date', body: 'Nudge from Waiting on.' }])
+  it('sums up many at once, quiet only when each came quietly', () => {
+    expect(overdueNotifications(['a', 'b', 'c', 'd'].map((id) => late(id, null, id !== 'a')))).toEqual([{ title: '4 hand-overs are past their due date', body: 'Nudge from Waiting on.', path: '/waiting', silent: false }])
   })
 })
