@@ -62,6 +62,7 @@ const first: ChangePage = {
   eventNotes: [],
   todos: [],
   mailNotifications: [],
+  handOvers: [],
   deleted: [],
 }
 

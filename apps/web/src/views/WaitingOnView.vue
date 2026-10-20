@@ -10,6 +10,7 @@ import { dayValue, pickedDue } from '@/forms/handOver'
 import { provideRequiredFields } from '@/forms/required'
 import { dueLabel, senderName, shortDue } from '@/mail/format'
 import { useAuthStore } from '@/stores/auth'
+import { useBatchesStore } from '@/stores/batches'
 import { useHandOversStore } from '@/stores/handOvers'
 import { useMailStore } from '@/stores/mail'
 import AppIcon from '@/components/AppIcon.vue'
@@ -20,6 +21,7 @@ import MailboxSidebar from '@/components/MailboxSidebar.vue'
 const CLOSED_SHOWN = 20
 
 const auth = useAuthStore()
+const batches = useBatchesStore()
 const mail = useMailStore()
 const handOvers = useHandOversStore()
 const route = useRoute()
@@ -194,6 +196,8 @@ const minDay = dayValue(new Date())
         :smart-inbox-counts="mail.smartInboxCounts"
         :smart-inbox="mail.smartInbox"
         :live="mail.live"
+        :batches="false"
+        :next-batch="batches.nextBatchLabel"
         page="waiting"
         @sign-out="auth.signOut()"
       />
