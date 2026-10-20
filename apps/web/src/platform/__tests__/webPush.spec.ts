@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { applicationServerKey, browserName, deviceOf, openedPath } from '../webPush'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { applicationServerKey, browserName, deviceOf, disableWebPush, openedPath, pushOwner, releaseOtherUsersPush } from '../webPush'
 
 describe('applicationServerKey', () => {
   it('reads the base64url VAPID key without padding as its bytes', () => {
@@ -38,5 +38,57 @@ describe('openedPath', () => {
     expect(openedPath({ type: 'tresso:open', path: 'https://elsewhere.example/' })).toBeNull()
     expect(openedPath({ type: 'other', path: '/thread/t1' })).toBeNull()
     expect(openedPath('tresso:open')).toBeNull()
+  })
+})
+
+describe('the subscription of this browser', () => {
+  let subscription: { endpoint: string; unsubscribe: ReturnType<typeof vi.fn>; toJSON: () => PushSubscriptionJSON } | null
+  let stored: Map<string, string>
+
+  beforeEach(() => {
+    subscription = { endpoint: 'https://push.example.test/1', unsubscribe: vi.fn<() => Promise<boolean>>(async () => true), toJSON: () => ({ endpoint: 'https://push.example.test/1', keys: { p256dh: 'p', auth: 'a' } }) }
+    stored = new Map([['/push-owner', 'kim']])
+    vi.stubGlobal('PushManager', class {})
+    vi.stubGlobal('Notification', class {})
+    vi.stubGlobal('caches', {
+      open: async () => ({
+        match: async (key: string) => (stored.has(key) ? new Response(stored.get(key)) : undefined),
+        put: async (key: string, response: Response) => void stored.set(key, await response.text()),
+        delete: async (key: string) => stored.delete(key),
+      }),
+    })
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { getRegistration: async () => ({ pushManager: { getSubscription: async () => subscription } }) },
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    Reflect.deleteProperty(navigator, 'serviceWorker')
+  })
+
+  it('goes on sign-out: the device on the server, and the subscription even when the server cannot be told', async () => {
+    const send = vi.fn<(method: string, path: string) => Promise<{ id: string }>>(async (method) => {
+      if (method === 'DELETE') {
+        throw new Error('offline')
+      }
+      return { id: 'device-1' }
+    })
+
+    await expect(disableWebPush(send as never)).rejects.toThrow('offline')
+
+    expect(send.mock.calls.map(([method, path]) => `${method} ${path}`)).toEqual(['POST /api/v1/notification-devices', 'DELETE /api/v1/notification-devices/device-1'])
+    expect(subscription!.unsubscribe).toHaveBeenCalled()
+    expect(stored.has('/push-owner')).toBe(false)
+  })
+
+  it('goes when another user signs in here, and stays for the user who turned it on', async () => {
+    expect(await releaseOtherUsersPush('kim')).toBe(false)
+    expect(subscription!.unsubscribe).not.toHaveBeenCalled()
+
+    expect(await releaseOtherUsersPush('lisa')).toBe(true)
+    expect(subscription!.unsubscribe).toHaveBeenCalled()
+    expect(await pushOwner()).toBeNull()
   })
 })

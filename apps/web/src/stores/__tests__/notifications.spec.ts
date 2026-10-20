@@ -68,7 +68,7 @@ describe('notifications for new mail', () => {
     pages.push(page(2, { mailNotifications: [delivered('new')] }))
     await useMailStore().syncNow()
 
-    await vi.waitFor(() => expect(shown).toEqual([[{ title: 'Sender new', body: 'Subject new', path: '/thread/t-new' }]]))
+    await vi.waitFor(() => expect(shown).toEqual([[{ title: 'Sender new', body: 'Subject new', path: '/thread/t-new', silent: false }]]))
   })
 
   it('stays quiet while the user is looking at Tresso', async () => {

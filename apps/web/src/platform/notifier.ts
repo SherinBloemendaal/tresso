@@ -8,6 +8,17 @@ export interface Notifier {
   show(notifications: MailNotification[]): Promise<void>
 }
 
+/**
+ * The sound a notification that may make one plays: the plugin names system sounds per platform, and plays none
+ * without a name, which is how silent notifications (quiet hours, busy) come.
+ */
+export function desktopSound(userAgent: string): string {
+  if (/Mac OS X|Macintosh/.test(userAgent)) {
+    return 'Ping'
+  }
+  return /Windows/.test(userAgent) ? 'Mail' : 'message-new-email'
+}
+
 /** The desktop app: native notifications, asking the operating system for permission the first time. */
 const desktopNotifier: Notifier = {
   async show(notifications) {
@@ -17,8 +28,9 @@ const desktopNotifier: Notifier = {
     if (!(await isPermissionGranted()) && (await requestPermission()) !== 'granted') {
       return
     }
+    const sound = desktopSound(navigator.userAgent)
     for (const notification of notifications) {
-      sendNotification({ title: notification.title, body: notification.body, extra: { path: notification.path } })
+      sendNotification({ title: notification.title, body: notification.body, extra: { path: notification.path }, ...(notification.silent ? {} : { sound }) })
     }
   },
 }
@@ -54,4 +66,12 @@ export async function onNotificationClick(open: (path: string) => void): Promise
       open(path)
     }
   })
+}
+
+/**
+ * Starts listening for clicks without holding anything up: the window mounts at once, and a listener that cannot be
+ * registered is reported (the app works without it, only clicks open nothing).
+ */
+export function startNotificationClicks(open: (path: string) => void, report: (error: unknown) => void): void {
+  onNotificationClick(open).catch(report)
 }

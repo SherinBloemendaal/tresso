@@ -77,6 +77,11 @@ export const useMailStore = defineStore('mail', () => {
   const syncError = ref<string | null>(null)
   const live = ref(false)
   const ready = ref(false)
+  /**
+   * Pulls of the delta that completed: a conversation opened from a notification waits for one after it opened
+   * before it says the conversation is not there (it may not have reached the copy yet).
+   */
+  const pulls = ref(0)
 
   const db = shallowRef<MailStore | null>(null)
   let userId: string | null = null
@@ -175,6 +180,7 @@ export const useMailStore = defineStore('mail', () => {
       await run()
       syncState.value = 'idle'
       syncError.value = null
+      pulls.value += 1
       if (notifyingSince === null) {
         delivered = []
         notifyingSince = Date.now()
@@ -536,6 +542,7 @@ export const useMailStore = defineStore('mail', () => {
     todos,
     hasMore,
     syncState,
+    pulls,
     syncError,
     live,
     ready,

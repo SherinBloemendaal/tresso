@@ -128,6 +128,37 @@ describe('ReadingPane actions', () => {
     return thread?.messages.find((m) => m.id === id)?.folderIds ?? []
   }
 
+  it('shows a conversation a notification opened before the delta brought it as loading, then the conversation', async () => {
+    later = page(2, {
+      threads: [{ id: 't2', mailAccountId: 'work', subject: 'Budget review', messageCount: 1, lastMessageAt: '2026-10-19T10:00:00Z', smartInboxId: null, verdict: 'do', classificationReason: null }],
+      messages: [{ ...message('m3', ['inbox'], '2026-10-19T10:00:00Z', false), threadId: 't2', subject: 'Budget review' }],
+    })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const syncNow = useMailStore().syncNow
+    vi.spyOn(useMailStore(), 'syncNow').mockImplementation(async () => {
+      await held
+      await syncNow()
+    })
+
+    const wrapper = mount(ReadingPane, { props: { threadId: 't2', backTo: '/' }, global: { plugins: [router] }, attachTo: document.body })
+    await settle()
+    expect(wrapper.text()).toContain('Loading the conversation')
+    expect(wrapper.text()).not.toContain('no longer exists')
+
+    release()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Budget review'))
+    expect(wrapper.text()).not.toContain('Loading the conversation')
+    wrapper.unmount()
+  })
+
+  it('says a conversation is gone once a pull after opening did not bring it', async () => {
+    const wrapper = mount(ReadingPane, { props: { threadId: 't9', backTo: '/' }, global: { plugins: [router] }, attachTo: document.body })
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('This conversation no longer exists.'))
+    wrapper.unmount()
+  })
+
   it('reads the conversation when it opens', async () => {
     mountPane()
     await vi.waitFor(() => expect(actions).toHaveLength(1))

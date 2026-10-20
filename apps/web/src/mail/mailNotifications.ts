@@ -13,6 +13,8 @@ export interface MailNotification {
   body: string
   /** Where a click leads: the conversation, or null to open the app as it is. */
   path: string | null
+  /** Delivered in quiet hours or while the user was busy: no sound. */
+  silent: boolean
 }
 
 /**
@@ -33,6 +35,7 @@ export function mailNotifications(notifications: SyncedMailNotification[]): Mail
       title: notification.title,
       body: notification.body,
       path: notification.threadId === null ? null : mailNotificationPath(notification.threadId),
+      silent: notification.silent,
     }))
   }
   const senders = [...new Set(notifications.map((notification) => notification.title))]
@@ -42,6 +45,8 @@ export function mailNotifications(notifications: SyncedMailNotification[]): Mail
       title: `${notifications.length} new messages need you`,
       body: senders.length > MAX_SEPARATE ? `From ${named} and ${senders.length - MAX_SEPARATE} more` : `From ${named}`,
       path: null,
+      // Quiet only when every one of them came quietly.
+      silent: notifications.every((notification) => notification.silent),
     },
   ]
 }

@@ -52,10 +52,31 @@ export async function currentSubscription(): Promise<PushSubscription | null> {
 }
 
 /**
- * Asks the browser for permission, subscribes it with the server's key and registers it as a device. Registering
- * again (the same endpoint) only updates the device.
+ * Who turned Web Push on in this browser, kept where the push worker reads it too (Cache Storage, shared with it): the
+ * worker shows a push only when it is for that user. The server says in every push whom it is for (userId).
  */
-export async function enableWebPush(get: Get, send: Api): Promise<void> {
+const OWNER_CACHE = 'tresso-push'
+const OWNER_KEY = '/push-owner'
+
+async function setPushOwner(userId: string | null): Promise<void> {
+  const cache = await caches.open(OWNER_CACHE)
+  if (userId === null) {
+    await cache.delete(OWNER_KEY)
+    return
+  }
+  await cache.put(OWNER_KEY, new Response(userId))
+}
+
+export async function pushOwner(): Promise<string | null> {
+  const stored = await (await caches.open(OWNER_CACHE)).match(OWNER_KEY)
+  return stored === undefined ? null : stored.text()
+}
+
+/**
+ * Asks the browser for permission, subscribes it with the server's key and registers it as a device of this user.
+ * Registering again (the same endpoint) only updates the device.
+ */
+export async function enableWebPush(get: Get, send: Api, userId: string): Promise<void> {
   if (!webPushSupported()) {
     throw new Error('This browser cannot show notifications from Tresso.')
   }
@@ -71,19 +92,44 @@ export async function enableWebPush(get: Get, send: Api): Promise<void> {
   const subscription =
     (await registration.pushManager.getSubscription()) ??
     (await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(publicKey) }))
+  await setPushOwner(userId)
   await send<NotificationDevice>('POST', '/api/v1/notification-devices', deviceOf(subscription.toJSON(), browserName(navigator.userAgent)))
 }
 
-/** Stops pushes to this browser: the device goes on the server and the subscription in the browser. */
-export async function disableWebPush(send: Api): Promise<void> {
+/**
+ * Stops pushes to this browser: the device goes on the server (when `send` can still reach it) and the subscription
+ * in the browser, always. A subscription that is gone makes the server's next push to it fail as gone, and the server
+ * then removes the device itself, so even a sign-out that cannot reach the server stops the pushes.
+ */
+export async function disableWebPush(send: Api | null): Promise<void> {
   const subscription = await currentSubscription()
   if (subscription === null) {
     return
   }
-  // Registering the same endpoint again names the device it already is, which the list does not show.
-  const device = await send<NotificationDevice>('POST', '/api/v1/notification-devices', deviceOf(subscription.toJSON(), browserName(navigator.userAgent)))
-  await send('DELETE', `/api/v1/notification-devices/${device.id}`)
+  try {
+    if (send !== null) {
+      // Registering the same endpoint again names the device it already is, which the list does not show.
+      const device = await send<NotificationDevice>('POST', '/api/v1/notification-devices', deviceOf(subscription.toJSON(), browserName(navigator.userAgent)))
+      await send('DELETE', `/api/v1/notification-devices/${device.id}`)
+    }
+  } finally {
+    await subscription.unsubscribe()
+    await setPushOwner(null)
+  }
+}
+
+/**
+ * Someone else signed in here: pushes another user turned on in this browser stop (they did not sign out, e.g. they
+ * closed the tab). Returns whether it stopped any.
+ */
+export async function releaseOtherUsersPush(userId: string): Promise<boolean> {
+  const subscription = await currentSubscription()
+  if (subscription === null || (await pushOwner()) === userId) {
+    return false
+  }
   await subscription.unsubscribe()
+  await setPushOwner(null)
+  return true
 }
 
 /** The path a message from the push worker asks an open tab to show (a clicked notification), if it is one. */

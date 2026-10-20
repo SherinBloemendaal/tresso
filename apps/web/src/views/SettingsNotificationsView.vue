@@ -24,9 +24,10 @@ const error = ref<string | null>(null)
 
 const { defineField, handleSubmit, values, resetForm, setErrors, setFieldValue } = useForm<MailNotificationValues>({
   validationSchema: toTypedSchema(mailNotificationSchema),
-  initialValues: { channels: [], holdInMeetings: true },
+  initialValues: { channels: [], holdInMeetings: true, previews: true },
 })
 const [holdInMeetings] = defineField('holdInMeetings')
+const [previews] = defineField('previews')
 const channels = computed(() => values.channels ?? [])
 
 function toggle(channel: NotificationChannel): void {
@@ -60,7 +61,11 @@ async function switchBrowser(on: boolean): Promise<void> {
   browserError.value = null
   try {
     if (on) {
-      await enableWebPush((path) => auth.api(path), (method, path, body) => auth.send(method, path, body))
+      const userId = auth.me?.id
+      if (userId === undefined) {
+        throw new Error('Your account is still loading. Try again in a moment.')
+      }
+      await enableWebPush((path) => auth.api(path), (method, path, body) => auth.send(method, path, body), userId)
     } else {
       await disableWebPush((method, path, body) => auth.send(method, path, body))
     }
@@ -105,6 +110,14 @@ onMounted(async () => {
         <span>Hold mail notifications while I am in a meeting</span>
       </label>
       <p class="hint">Focus blocks hold them too, and during quiet hours they come without sound.</p>
+      <label class="check">
+        <input v-model="previews" type="checkbox" />
+        <span>Show message content in notifications</span>
+      </label>
+      <p class="hint">
+        The sender, subject and the start of the text. Without, a notification only says which account has new mail. Phone
+        notifications pass through Expo, Apple and Google unencrypted; browser notifications are encrypted end to end.
+      </p>
       <p v-if="error" class="form-error" role="alert">{{ error }}</p>
       <p v-if="message" class="done" role="status">{{ message }}</p>
       <div class="actions">
@@ -115,6 +128,10 @@ onMounted(async () => {
       <h3>This browser</h3>
       <p v-if="browserOn">Notifications for the desktop come to this browser, also while Tresso is closed.</p>
       <p v-else>Turn notifications on to get them in this browser, also while Tresso is closed.</p>
+      <p class="hint">
+        Using the Tresso desktop app on this computer? Leave this off: the app shows the same notifications, so you would
+        get each one twice.
+      </p>
       <p v-if="browserError" class="form-error" role="alert">{{ browserError }}</p>
       <button type="button" class="button" :disabled="browserBusy" @click="switchBrowser(!browserOn)">
         {{ browserOn ? 'Turn off in this browser' : 'Turn on in this browser' }}

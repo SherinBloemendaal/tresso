@@ -18,18 +18,18 @@ function delivered(id: string, extra: Partial<SyncedMailNotification> = {}): Syn
 
 describe('mailNotifications', () => {
   it('shows each one as the server wrote it, opening its conversation', () => {
-    expect(mailNotifications([delivered('a'), delivered('b', { threadId: null })])).toEqual([
-      { title: 'Sender a', body: 'Subject a', path: '/thread/t-a' },
-      { title: 'Sender b', body: 'Subject b', path: null },
+    expect(mailNotifications([delivered('a'), delivered('b', { threadId: null, silent: true })])).toEqual([
+      { title: 'Sender a', body: 'Subject a', path: '/thread/t-a', silent: false },
+      { title: 'Sender b', body: 'Subject b', path: null, silent: true },
     ])
   })
 
   it('sums up when much arrives at once', () => {
     expect(mailNotifications(['a', 'b', 'c', 'd'].map((id) => delivered(id)))).toEqual([
-      { title: '4 new messages need you', body: 'From Sender a, Sender b, Sender c and 1 more', path: null },
+      { title: '4 new messages need you', body: 'From Sender a, Sender b, Sender c and 1 more', path: null, silent: false },
     ])
-    expect(mailNotifications(['a', 'a', 'b', 'b'].map((id, i) => delivered(`${id}${i}`, { title: `Sender ${id}` })))).toEqual([
-      { title: '4 new messages need you', body: 'From Sender a, Sender b', path: null },
+    expect(mailNotifications(['a', 'a', 'b', 'b'].map((id, i) => delivered(`${id}${i}`, { title: `Sender ${id}`, silent: true })))).toEqual([
+      { title: '4 new messages need you', body: 'From Sender a, Sender b', path: null, silent: true },
     ])
   })
 })

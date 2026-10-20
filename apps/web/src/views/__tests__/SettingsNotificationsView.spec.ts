@@ -19,7 +19,7 @@ describe('SettingsNotificationsView', () => {
     sessionStorage.setItem('auth.tokens', JSON.stringify({ accessToken: 'token', refreshToken: null, expiresAt: Date.now() + 3_600_000 }))
     setActivePinia(createPinia())
     requests.length = 0
-    settings = { channelsByKind: { brief: ['email'] }, holdMailInMeetings: true }
+    settings = { channelsByKind: { brief: ['email'] }, holdMailInMeetings: true, mailPreviews: true }
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -55,7 +55,7 @@ describe('SettingsNotificationsView', () => {
     await settle()
 
     const patch = requests.find((request) => request.method === 'PATCH')
-    expect(patch).toEqual({ method: 'PATCH', path: '/api/v1/notification-settings', body: { channelsByKind: { mail: ['phone', 'email'] }, holdMailInMeetings: true } })
+    expect(patch).toEqual({ method: 'PATCH', path: '/api/v1/notification-settings', body: { channelsByKind: { mail: ['phone', 'email'] }, holdMailInMeetings: true, mailPreviews: true } })
     expect(wrapper.get('[role="status"]').text()).toBe('Saved.')
     expect(settings.channelsByKind).toEqual({ brief: ['email'], mail: ['phone', 'email'] })
   })
@@ -71,5 +71,19 @@ describe('SettingsNotificationsView', () => {
     await settle()
 
     expect(wrapper.get('[role="status"]').text()).toBe('Saved. New mail no longer notifies you.')
+  })
+
+  it('turns message content off in notifications', async () => {
+    const wrapper = mount(SettingsNotificationsView)
+    await settle()
+
+    const previews = wrapper.findAll('input[type="checkbox"]').find((box) => box.element.closest('label')?.textContent?.includes('Show message content'))
+    expect((previews!.element as HTMLInputElement).checked).toBe(true)
+    await previews!.setValue(false)
+    await wrapper.get('form').trigger('submit')
+    await settle()
+
+    expect(requests.find((request) => request.method === 'PATCH')?.body).toMatchObject({ mailPreviews: false })
+    expect(settings.mailPreviews).toBe(false)
   })
 })
