@@ -9,6 +9,7 @@ use ApiPlatform\State\ProcessorInterface;
 use ApiPlatform\Validator\Exception\ValidationException;
 use App\ApiResource\BulkActionResource;
 use App\ApiResource\Input\Bulk\BulkActionInput;
+use App\Bulk\BulkActionRunning;
 use App\Bulk\BulkActions;
 use App\Bulk\BulkScopeResolver;
 use App\Entity\Folder;
@@ -56,7 +57,11 @@ final readonly class BulkActionProcessor implements ProcessorInterface
             if (!$bulkAction->canUndo()) {
                 throw new ConflictHttpException('This action cannot be undone (anymore).');
             }
-            $this->bulkActions->undo($bulkAction);
+            try {
+                $this->bulkActions->undo($bulkAction);
+            } catch (BulkActionRunning $running) {
+                throw new ConflictHttpException($running->getMessage(), $running);
+            }
 
             return BulkActionResource::fromEntity($bulkAction);
         });
@@ -88,6 +93,8 @@ final readonly class BulkActionProcessor implements ProcessorInterface
             $bulkAction = $this->bulkActions->start($owner, $scope, $action, $target, $now);
         } catch (MissingFolder $missing) {
             throw new ValidationException(new ConstraintViolationList([new ConstraintViolation($missing->getMessage(), null, [], $data, 'action', $action->value)]));
+        } catch (BulkActionRunning $running) {
+            throw new ConflictHttpException($running->getMessage(), $running);
         }
 
         return BulkActionResource::fromEntity($bulkAction);

@@ -17,7 +17,7 @@ use Symfony\Component\Uid\Uuid;
  * that does it. No guessing: every suggestion says which rule it follows and what it found.
  *
  * - `newsletter`: a sender whose mail carries List-Unsubscribe or List-Id has at least {@see self::NEWSLETTER_UNREAD}
- *   unread in the inboxes, and the user opened none of their mail in the last {@see self::WINDOW_DAYS} days.
+ *   unread in the inboxes, sent mail in the last {@see self::WINDOW_DAYS} days, and the user opened none of it.
  *   Archive their conversations in the inboxes.
  * - `unopenedSender`: the same for any other sender, from {@see self::SENDER_UNREAD} unread.
  * - `oldInSmartInbox`: at least {@see self::OLD_MIN} conversations in the Notifications or Advertising smart inbox whose
@@ -61,61 +61,68 @@ final readonly class CleanupSuggestions
     /** @return list<CleanupSuggestion> */
     private function senders(User $owner, \DateTimeImmutable $now): array
     {
-        [$where, $parameters] = $this->selection->where($owner, new BulkScope(BulkArea::Inbox), Uuid::v7());
-
-        /** @var list<array{address: string, name: ?string, conversations: int, unread: int, received: int, listed: int}> $rows */
+        // Starts from the unread messages in the owner's inbox folders (the folder index on message_location), not
+        // from every conversation, and looks at each candidate's recent mail through (mail_account_id, from_address,
+        // received_at). The rule's thresholds apply before the limit.
+        /** @var list<array{address: string, name: ?string, unread: int, received: int, listed: int}> $rows */
         $rows = $this->connection->fetchAllAssociative(
             "WITH senders AS (
                  SELECT m.from_address AS address,
                         (ARRAY_AGG(m.from_name ORDER BY m.received_at DESC) FILTER (WHERE m.from_name IS NOT NULL AND m.from_name <> ''))[1] AS name,
-                        COUNT(DISTINCT m.thread_id) AS conversations, COUNT(*) FILTER (WHERE NOT m.seen) AS unread
-                 FROM (SELECT t.id FROM thread t JOIN mail_account a ON a.id = t.mail_account_id WHERE {$where}) listed
-                 JOIN message m ON m.thread_id = listed.id
-                 WHERE m.from_address <> ALL(CAST(:own AS TEXT[]))
+                        COUNT(DISTINCT m.id) AS unread
+                 FROM mail_account a
+                 JOIN folder f ON f.mail_account_id = a.id AND f.role = 'inbox'
+                 JOIN message_location l ON l.folder_id = f.id
+                 JOIN message m ON m.id = l.message_id AND NOT m.seen
+                 JOIN thread t ON t.id = m.thread_id
+                 WHERE a.owner_id = :owner AND m.from_address <> ALL(CAST(:own AS TEXT[]))
+                   AND NOT EXISTS (SELECT 1 FROM category c WHERE c.id = t.category_id AND c.builtin = :spam)
                  GROUP BY m.from_address
-                 HAVING COUNT(*) FILTER (WHERE NOT m.seen) >= :minUnread
+                 HAVING COUNT(DISTINCT m.id) >= :minUnread
              )
-             SELECT s.address, s.name, s.conversations, s.unread, w.received, w.listed
+             SELECT s.address, s.name, s.unread, w.received, w.listed
              FROM senders s
              JOIN LATERAL (
                  SELECT COUNT(*) AS received, COUNT(*) FILTER (WHERE wm.seen) AS seen,
                         COUNT(*) FILTER (WHERE sig.headers->>'list-unsubscribe' IS NOT NULL OR sig.headers->>'list-id' IS NOT NULL) AS listed
-                 FROM message wm JOIN mail_account wa ON wa.id = wm.mail_account_id
+                 FROM mail_account wa
+                 JOIN message wm ON wm.mail_account_id = wa.id AND wm.from_address = s.address AND wm.received_at >= :since
                  LEFT JOIN message_signals sig ON sig.message_id = wm.id
-                 WHERE wa.owner_id = :owner AND wm.from_address = s.address AND wm.received_at >= :since
-             ) w ON w.seen = 0
+                 WHERE wa.owner_id = :owner
+             ) w ON w.received > 0 AND w.seen = 0
+             WHERE s.unread >= CASE WHEN w.listed > 0 THEN CAST(:newsletterUnread AS INT) ELSE CAST(:senderUnread AS INT) END
              ORDER BY s.unread DESC, s.address
              LIMIT :limit",
             [
-                ...$parameters,
+                'owner' => $owner->getId()->toRfc4122(),
                 'own' => SenderStatistics::textArray($this->statistics->ownAddresses($owner)),
+                'spam' => BuiltinCategory::Spam->value,
                 'minUnread' => min(self::NEWSLETTER_UNREAD, self::SENDER_UNREAD),
+                'newsletterUnread' => self::NEWSLETTER_UNREAD,
+                'senderUnread' => self::SENDER_UNREAD,
                 'since' => $now->modify(\sprintf('-%d days', self::WINDOW_DAYS))->format('Y-m-d H:i:s'),
-                'limit' => self::MAX_SENDERS * 2,
+                'limit' => self::MAX_SENDERS,
             ],
         );
 
         $suggestions = [];
+        $boundary = Uuid::v7();
         foreach ($rows as $row) {
             $newsletter = (int) $row['listed'] > 0;
-            $unread = (int) $row['unread'];
-            if ($unread < ($newsletter ? self::NEWSLETTER_UNREAD : self::SENDER_UNREAD)) {
-                continue;
-            }
+            // What the one click takes: every conversation of theirs the inboxes list, also the read ones.
+            $conversations = $this->selection->count($owner, new BulkScope(BulkArea::Inbox, sender: $row['address']), $boundary)['conversations'];
             $suggestions[] = new CleanupSuggestion(
                 ($newsletter ? 'newsletter:' : 'unopenedSender:').$row['address'],
                 $newsletter ? CleanupSuggestion::NEWSLETTER : CleanupSuggestion::UNOPENED_SENDER,
                 MessageAction::Archive,
                 BulkArea::Inbox,
-                conversations: (int) $row['conversations'],
-                unread: $unread,
+                conversations: $conversations,
+                unread: (int) $row['unread'],
                 sender: $row['address'],
                 senderName: $row['name'],
                 windowDays: self::WINDOW_DAYS,
+                windowReceived: (int) $row['received'],
             );
-            if (\count($suggestions) === self::MAX_SENDERS) {
-                break;
-            }
         }
 
         return $suggestions;

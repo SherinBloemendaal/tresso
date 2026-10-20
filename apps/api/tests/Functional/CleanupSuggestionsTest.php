@@ -56,6 +56,7 @@ final class CleanupSuggestionsTest extends DatabaseTestCase
             'senderName' => 'Shop',
             'smartInboxId' => null,
             'windowDays' => CleanupSuggestions::WINDOW_DAYS,
+            'windowReceived' => 3,
             'olderThanDays' => null,
             'largerThan' => null,
             'action' => 'archive',
@@ -80,6 +81,25 @@ final class CleanupSuggestionsTest extends DatabaseTestCase
         $suggestions = $this->suggestions();
         self::assertSame(['unopenedSender:alerts@monitor.example'], array_column($suggestions, 'id'));
         self::assertSame(CleanupSuggestions::SENDER_UNREAD, $suggestions[0]['unread']);
+    }
+
+    public function testEachRuleAppliesItsOwnThresholdBeforeTheLimit(): void
+    {
+        // More senders just under the threshold for other mail than suggestions fit, all with more unread than the
+        // newsletter that does qualify.
+        for ($i = 1; $i <= CleanupSuggestions::MAX_SENDERS * 2 + 1; ++$i) {
+            $this->mail("Alerts {$i}", "alerts{$i}@monitor.example", CleanupSuggestions::SENDER_UNREAD - 1);
+        }
+        $this->mail('Deals', 'news@shop.example', CleanupSuggestions::NEWSLETTER_UNREAD, newsletter: true);
+
+        self::assertSame(['newsletter:news@shop.example'], array_column($this->suggestions(), 'id'));
+    }
+
+    public function testASenderWhoSentNothingLatelyIsNotSaidToBeUnopened(): void
+    {
+        $this->mail('Old deals', 'news@shop.example', 5, newsletter: true, receivedAt: new \DateTimeImmutable(\sprintf('-%d days', CleanupSuggestions::WINDOW_DAYS + 10)));
+
+        self::assertSame([], $this->suggestions());
     }
 
     public function testTheUsersOwnAddressIsNeverSuggested(): void

@@ -31,12 +31,15 @@ final readonly class MessageActions
      * @param list<Message> $messages the user's own messages
      * @param Folder|null   $target   the folder for {@see MessageAction::Move}, of the messages' account
      * @param Folder|null   $from     for a move: only the copies in this folder move
+     * @param bool          $oneCopy  for a move: only the first of a message's copies moves, for an undo of a message
+     *                                that came from one folder; on Gmail its second copy in the folder is the other
+     *                                label of a move still on its way, which the worker finds gone
      *
      * @return int how many messages changed
      *
      * @throws MissingFolder when an account has no Archive or Trash folder to move into; nothing changes then
      */
-    public function apply(array $messages, MessageAction $action, ?Folder $target, \DateTimeImmutable $now, ?Folder $from = null): int
+    public function apply(array $messages, MessageAction $action, ?Folder $target, \DateTimeImmutable $now, ?Folder $from = null, bool $oneCopy = false): int
     {
         // Every account must have the folder before anything changes, so a mixed selection is all or nothing.
         $targets = [];
@@ -60,7 +63,7 @@ final readonly class MessageActions
                 // Archiving takes the message out of the inbox; copies in other folders stay where they are.
                 MessageAction::Archive => $this->move($message, $folder, static fn (Folder $copy): bool => FolderRole::Inbox === $copy->getRole(), $now),
                 MessageAction::Trash => $this->move($message, $folder, static fn (): bool => true, $now),
-                MessageAction::Move => $this->move($message, $folder, static fn (Folder $copy): bool => null === $from || $copy === $from, $now),
+                MessageAction::Move => $this->move($message, $folder, static fn (Folder $copy): bool => null === $from || $copy === $from, $now, $oneCopy),
             };
             if ($did) {
                 ++$changed;
@@ -108,13 +111,13 @@ final readonly class MessageActions
     /**
      * @param \Closure(Folder): bool $leaves which of the message's folders it leaves
      */
-    private function move(Message $message, ?Folder $target, \Closure $leaves, \DateTimeImmutable $now): bool
+    private function move(Message $message, ?Folder $target, \Closure $leaves, \DateTimeImmutable $now, bool $oneCopy = false): bool
     {
         if (null === $target) {
             throw new \LogicException('A move needs a target folder.');
         }
         $moved = false;
-        foreach ($this->entityManager->getRepository(MessageLocation::class)->findBy(['message' => $message]) as $location) {
+        foreach ($this->entityManager->getRepository(MessageLocation::class)->findBy(['message' => $message], ['id' => 'ASC']) as $location) {
             if ($location->getFolder() === $target || !$leaves($location->getFolder())) {
                 continue;
             }
@@ -123,6 +126,9 @@ final readonly class MessageActions
             $this->entityManager->persist(new MessageLocation($message, $target, $change->placeholderUid()));
             $this->entityManager->remove($location);
             $moved = true;
+            if ($oneCopy) {
+                break;
+            }
         }
 
         return $moved;

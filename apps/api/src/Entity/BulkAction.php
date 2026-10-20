@@ -68,7 +68,11 @@ class BulkAction
     #[ORM\Column(length: 16, enumType: BulkActionStatus::class)]
     private BulkActionStatus $status = BulkActionStatus::Running;
 
-    /** Where the next batch starts: the last thread id done, or while undoing the last move row id put back. */
+    /** The account the next batch looks at; null for a smart inbox, which spans them, and while undoing. */
+    #[ORM\Column(type: UuidType::NAME, nullable: true)]
+    private ?Uuid $resumeAccount = null;
+
+    /** Where the next batch starts: the last thread id looked at, or while undoing the last move row id put back. */
     #[ORM\Column(type: UuidType::NAME, nullable: true)]
     private ?Uuid $resumeAfter = null;
 
@@ -178,6 +182,11 @@ class BulkAction
         return $this->status;
     }
 
+    public function getResumeAccount(): ?Uuid
+    {
+        return $this->resumeAccount;
+    }
+
     public function getResumeAfter(): ?Uuid
     {
         return $this->resumeAfter;
@@ -225,9 +234,10 @@ class BulkAction
             && \in_array($this->action, [MessageAction::Archive, MessageAction::Trash, MessageAction::Move], true);
     }
 
-    public function recordBatch(Uuid $lastThreadId, int $conversations, int $changed, int $unrestorable): void
+    public function recordBatch(?Uuid $account, ?Uuid $after, int $conversations, int $changed, int $unrestorable): void
     {
-        $this->resumeAfter = $lastThreadId;
+        $this->resumeAccount = $account;
+        $this->resumeAfter = $after;
         $this->conversations += $conversations;
         $this->changed += $changed;
         $this->unrestorable += $unrestorable;
@@ -242,6 +252,7 @@ class BulkAction
     public function finish(\DateTimeImmutable $now): void
     {
         $this->status = BulkActionStatus::Undoing === $this->status ? BulkActionStatus::Undone : BulkActionStatus::Done;
+        $this->resumeAccount = null;
         $this->resumeAfter = null;
         $this->finishedAt = $now;
     }
@@ -250,6 +261,7 @@ class BulkAction
     {
         $this->status = BulkActionStatus::Failed;
         $this->error = mb_substr($error, 0, 255);
+        $this->resumeAccount = null;
         $this->resumeAfter = null;
         $this->finishedAt = $now;
     }
@@ -260,6 +272,7 @@ class BulkAction
             throw new \LogicException('This bulk action cannot be undone.');
         }
         $this->status = BulkActionStatus::Undoing;
+        $this->resumeAccount = null;
         $this->resumeAfter = null;
         $this->restored = 0;
         $this->error = null;

@@ -15,7 +15,7 @@ use App\State\CleanupSuggestionProvider;
  * its rule:
  *
  * - `newsletter`: a sender of mailing-list mail (List-Unsubscribe or List-Id) with `unread` unread messages in the
- *   inboxes, none of whose mail the user opened in the last `windowDays` days.
+ *   inboxes, who sent `windowReceived` messages in the last `windowDays` days, none of which the user opened.
  * - `unopenedSender`: the same for any other sender, with many more unread.
  * - `oldInSmartInbox`: conversations in the Notifications or Advertising smart inbox older than `olderThanDays`.
  * - `largeOld`: conversations with a message of `largerThan` bytes or more, older than `olderThanDays`, `bytes` in all.

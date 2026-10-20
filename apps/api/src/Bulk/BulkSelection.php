@@ -19,6 +19,9 @@ use Symfony\Component\Uid\Uuid;
  */
 final readonly class BulkSelection
 {
+    /** How many conversations one batch looks at, at most. */
+    public const int SCAN_PER_BATCH = 1000;
+
     public function __construct(private Connection $connection)
     {
     }
@@ -45,31 +48,61 @@ final readonly class BulkSelection
     }
 
     /**
-     * The next conversations in id order after $after: at most $maxConversations, and no more than about
-     * $maxMessages messages, but always at least one conversation, however long.
-     *
-     * @return list<string> thread ids
+     * The next conversations of the scope in id order, at most $maxConversations and no more than about $maxMessages
+     * messages, but at least one conversation however long. Each call looks at a window of at most $scan
+     * conversations through an index in id order ((category_id, id) for a smart inbox, (mail_account_id, id) for the
+     * owner's accounts one after the other) and tests the scope only on those, so a batch costs the same at the end
+     * of a big mailbox as at the start, and the whole run reads each conversation once.
      */
-    public function nextBatch(User $owner, BulkScope $scope, Uuid $boundary, ?Uuid $after, int $maxConversations, int $maxMessages): array
+    public function nextBatch(User $owner, BulkScope $scope, Uuid $boundary, ?Uuid $account, ?Uuid $after, int $maxConversations, int $maxMessages, int $scan = self::SCAN_PER_BATCH): BulkBatch
     {
-        [$where, $parameters] = $this->where($owner, $scope, $boundary);
+        [$filters, $parameters] = $this->filters($owner, $scope);
+        // The window is read through the index alone; whether a conversation is the owner's is part of the test.
+        $matches = implode(' AND ', ['t.mail_account_id IN (SELECT oa.id FROM mail_account oa WHERE oa.owner_id = :owner)', ...$filters]);
+        $accounts = BulkArea::SmartInbox === $scope->area ? [null] : $this->accountIds($owner, $scope);
+        $index = null === $account ? 0 : array_search($account->toRfc4122(), $accounts, true);
+        if (false === $index) {
+            // The account was removed meanwhile, and its mail with it: go on with the next one.
+            $removed = $account->toRfc4122();
+            $index = \count(array_filter($accounts, static fn (?string $id): bool => null !== $id && $id < $removed));
+            $after = null;
+        }
 
-        /** @var list<string> */
-        return $this->connection->fetchFirstColumn(
-            "SELECT id FROM (
-                 SELECT id, message_count, SUM(message_count) OVER (ORDER BY id) AS running FROM (
-                     SELECT t.id, t.message_count FROM thread t JOIN mail_account a ON a.id = t.mail_account_id
-                     WHERE {$where} AND t.id > :after ORDER BY t.id LIMIT :conversations
-                 ) page
-             ) batch
-             WHERE running - message_count < :messages ORDER BY id",
-            [
-                ...$parameters,
-                'after' => ($after ?? Uuid::fromString('00000000-0000-0000-0000-000000000000'))->toRfc4122(),
-                'conversations' => $maxConversations,
-                'messages' => $maxMessages,
-            ],
-        );
+        $threadIds = [];
+        $messages = 0;
+        for (; $index < \count($accounts); ++$index, $after = null) {
+            $driver = null === $accounts[$index] ? 't.category_id = :smartInbox' : 't.mail_account_id = :driver';
+            /** @var list<array{id: string, message_count: int, matches: bool}> $rows */
+            $rows = $this->connection->fetchAllAssociative(
+                "SELECT t.id, t.message_count, ({$matches}) AS matches
+                 FROM thread t
+                 WHERE {$driver} AND t.id > :after AND t.id < :boundary
+                 ORDER BY t.id LIMIT :scan",
+                [
+                    ...$parameters,
+                    ...(null === $accounts[$index] ? [] : ['driver' => $accounts[$index]]),
+                    'boundary' => $boundary->toRfc4122(),
+                    'after' => ($after ?? Uuid::fromString('00000000-0000-0000-0000-000000000000'))->toRfc4122(),
+                    'scan' => $scan,
+                ],
+            );
+            foreach ($rows as $row) {
+                if ($row['matches']) {
+                    $full = [] !== $threadIds && ($messages + (int) $row['message_count'] > $maxMessages || \count($threadIds) >= $maxConversations);
+                    if ($full) {
+                        return new BulkBatch($threadIds, self::accountUuid($accounts[$index]), $after, false);
+                    }
+                    $threadIds[] = $row['id'];
+                    $messages += (int) $row['message_count'];
+                }
+                $after = Uuid::fromString($row['id']);
+            }
+            if (\count($rows) === $scan) {
+                return new BulkBatch($threadIds, self::accountUuid($accounts[$index]), $after, false);
+            }
+        }
+
+        return new BulkBatch($threadIds, null, null, true);
     }
 
     /**
@@ -99,8 +132,24 @@ final readonly class BulkSelection
      */
     public function where(User $owner, BulkScope $scope, Uuid $boundary): array
     {
-        $conditions = ['a.owner_id = :owner', 't.id < :boundary'];
-        $parameters = ['owner' => $owner->getId()->toRfc4122(), 'boundary' => $boundary->toRfc4122()];
+        [$filters, $parameters] = $this->filters($owner, $scope);
+
+        return [
+            implode(' AND ', ['a.owner_id = :owner', 't.id < :boundary', ...$filters]),
+            [...$parameters, 'boundary' => $boundary->toRfc4122()],
+        ];
+    }
+
+    /**
+     * What makes a conversation of the owner part of the scope. Sender and size are matched through the message
+     * indexes on (mail_account_id, from_address) and (mail_account_id, size), over the owner's accounts.
+     *
+     * @return array{list<string>, array<string, string|int>}
+     */
+    private function filters(User $owner, BulkScope $scope): array
+    {
+        $conditions = [];
+        $parameters = ['owner' => $owner->getId()->toRfc4122()];
 
         switch ($scope->area) {
             case BulkArea::SmartInbox:
@@ -122,7 +171,7 @@ final readonly class BulkSelection
             $parameters['account'] = $scope->mailAccount->getId()->toRfc4122();
         }
         if (null !== $scope->sender) {
-            $conditions[] = 'EXISTS (SELECT 1 FROM message sm WHERE sm.thread_id = t.id AND sm.mail_account_id = t.mail_account_id AND sm.from_address = :sender)';
+            $conditions[] = 't.id IN (SELECT sm.thread_id FROM message sm JOIN mail_account sa ON sa.id = sm.mail_account_id WHERE sa.owner_id = :owner AND sm.from_address = :sender)';
             $parameters['sender'] = $scope->sender;
         }
         if (null !== $scope->before) {
@@ -130,11 +179,31 @@ final readonly class BulkSelection
             $parameters['before'] = $scope->before->format('Y-m-d H:i:s');
         }
         if (null !== $scope->largerThan) {
-            $conditions[] = 'EXISTS (SELECT 1 FROM message lm WHERE lm.thread_id = t.id AND lm.mail_account_id = t.mail_account_id AND lm.size >= :largerThan)';
+            $conditions[] = 't.id IN (SELECT lm.thread_id FROM message lm JOIN mail_account la ON la.id = lm.mail_account_id WHERE la.owner_id = :owner AND lm.size >= :largerThan)';
             $parameters['largerThan'] = $scope->largerThan;
         }
 
-        return [implode(' AND ', $conditions), $parameters];
+        return [$conditions, $parameters];
+    }
+
+    /**
+     * The accounts whose conversations the scope takes, in id order.
+     *
+     * @return list<string>
+     */
+    private function accountIds(User $owner, BulkScope $scope): array
+    {
+        if (null !== $scope->mailAccount) {
+            return [$scope->mailAccount->getId()->toRfc4122()];
+        }
+
+        /** @var list<string> */
+        return $this->connection->fetchFirstColumn('SELECT id FROM mail_account WHERE owner_id = :owner ORDER BY id', ['owner' => $owner->getId()->toRfc4122()]);
+    }
+
+    private static function accountUuid(?string $id): ?Uuid
+    {
+        return null === $id ? null : Uuid::fromString($id);
     }
 
     private static function inFolder(string $roles): string
