@@ -612,11 +612,12 @@ notifications off there, or each one comes twice.
 
 Browsers get Web Push from the server. Settings > Notifications turns it on per browser: the browser asks the user,
 subscribes with the server's VAPID key and registers as a `web_push` device (and turning it off removes the device and
-the subscription). Pushes stop with the session: signing out removes the device and drops the subscription, an
-expired session drops the subscription alone (the server then removes the device when its next push to it fails as
-gone), and another user signing in drops a subscription someone else turned on. The service worker also keeps who
-turned notifications on (Cache Storage, shared with the page) and shows a push only when its `userId` is that user;
-any other shows nothing of theirs and unsubscribes. A service worker (`apps/web/public/push-worker.js`) shows the pushes, also while no Tresso tab is
+the subscription). Signing out removes the device and drops the subscription (the server also removes a device
+when its next push to a dropped subscription fails as gone). An expired session keeps them, as a closed tab does: the
+user did not sign out, and signing in again finds notifications on. Another user signing in drops a subscription
+someone else turned on. The service worker also keeps who turned notifications on (Cache Storage, shared with the
+page) and shows a push only when its `userId` is that user; any other, or one without a `userId`, shows nothing of it
+and unsubscribes. A service worker (`apps/web/public/push-worker.js`) shows the pushes, also while no Tresso tab is
 open, and a click opens what it is about in an open tab (which routes there itself) or in a new one. The same page
 chooses where new mail notifies (phone, desktop and browsers, email: `channelsByKind.mail`) and whether meetings hold
 it (`holdMailInMeetings`). `/thread/{id}`, where every mail notification leads, opens the conversation in the Unified
@@ -667,7 +668,8 @@ tapped notification opens the screen its path names when the phone has it (`tapp
 `/thread/{id}`, the daily brief `/brief`, the todos `/todos`); other paths (a calendar event) open the app as it is. While the app is open, mail goes to the list without
 a banner or sound (the user is in their mail already), and reminders show as a banner unless they came silently. A
 conversation opened from a notification before the delta brought it shows as loading, pulls once, and says it is
-gone only after a pull that completed (the web client does the same).
+gone only after a pull that completed; when that pull fails (offline) it says it could not be loaded, with Try again
+(the web client does the same).
 
 Shared TypeScript lives in `packages/core` (MIT): domain types, the OAuth flow, and the client side of the sync
 protocol, so every client syncs the same way:
@@ -1122,10 +1124,12 @@ after. Everything lives in `apps/api/src/Notification`.
   its end (a delayed message comes back then); quiet hours and other busy events make it silent; no channel chosen
   for `mail` drops it. It goes out with the sender as title, the subject (with "To hand over: " for `delegate`) and
   the start of the text as body, `/thread/{thread}` to open, and the Android `mail` channel. With previews off
-  (`mailPreviews` in the settings, on by default) it says only "New mail from {account}", and the row keeps no more
-  than that, so neither a push service nor the delta sees the sender, subject or text. Expo pushes pass through Expo,
+  (`mailPreviews` in the settings, on by default) it says only "New mail from {account}", and from the moment it is
+  planned the row keeps no more than that (also while it waits, and when it is dropped or a deduped copy), so neither
+  a push service nor the delta sees the sender, subject or text. Expo pushes pass through Expo,
   Apple and Google unencrypted (TLS on the way only); Web Push is encrypted end to end (RFC 8291), so only the browser
-  reads it. Every push names the user it is for (`userId` in its data). The claim is part of the
+  reads it. The dispatcher names the user every push is for (`userId` in its data), whichever feature
+  sends it. The claim is part of the
   transaction that marks it delivered, as for calendar notifications, and a second scheduler task
   (`SweepMailNotifications`, every minute) delivers what a lost message missed and sends failed or stuck deliveries
   again. Nothing is delivered more than 2 hours after its time. Delivered ones reach the delta (`mailNotifications`:
