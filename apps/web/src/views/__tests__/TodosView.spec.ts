@@ -42,6 +42,8 @@ const email: SyncedMessage = {
   smartInboxId: null,
   verdict: 'do',
   summary: null,
+  calendarMethod: null,
+  attachmentScan: null,
 }
 
 /** Form validation runs asynchronously; let it and the requests it starts finish. */
