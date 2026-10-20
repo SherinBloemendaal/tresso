@@ -11,6 +11,8 @@ import {
   type RealtimeAccess,
   type Sql,
   type SyncedHandOver,
+  deliveredNotices,
+  noticeKey,
   CopyClosingError,
   DraftSync,
   SqliteMailStore,
@@ -57,8 +59,8 @@ export interface MailSessionDeps {
   fetch?: typeof fetch
   onState(state: MailState): void
   /**
-   * Hand-overs that became overdue, for the app to tell the user about. Those the first pull of a copy brings are
-   * old news (the device was away), so they are left out.
+   * Overdue notices the server delivered for hand-overs (see `deliveredNotices`), for the app to tell the user about,
+   * each once. Those the first pull of a copy brings are old news (the device was away), so they are left out.
    */
   onOverdue?(handOvers: SyncedHandOver[]): void
   /** Whether the app is in front when the session starts (it can be launched in the background). */
@@ -71,8 +73,10 @@ interface Open {
   database: SqliteMailStore
   engine: SyncEngine
   realtime: RealtimeClient
-  /** Set once the first pull completed: from then on, hand-overs that become overdue are news. */
-  telling: boolean
+  /** When the first pull completed: from then on, overdue notices the server delivers are news. */
+  tellingSince: number | null
+  /** The overdue notices told about (see `noticeKey`). */
+  told: Set<string>
 }
 
 export function databaseName(userId: string): string {
@@ -255,13 +259,15 @@ export class MailSession {
       store: database,
       pageSize: PAGE_SIZE,
       fetchPage: (since, limit) => this.deps.fetchPage(since, limit),
-      onApplied: () => {
+      onApplied: (page) => {
         if (this.open?.database === database) {
           this.update({ version: this.state.version + 1 })
-          if (this.open.telling) {
-            const overdue = database.takeOverdueHandOvers()
-            if (overdue.length > 0) {
-              this.deps.onOverdue?.(overdue)
+          const { tellingSince, told } = this.open
+          if (tellingSince !== null) {
+            const due = deliveredNotices(page.handOvers, tellingSince, told)
+            due.forEach((handOver) => told.add(noticeKey(handOver)))
+            if (due.length > 0) {
+              this.deps.onOverdue?.(due)
             }
           }
         }
@@ -289,7 +295,7 @@ export class MailSession {
         }
       },
     })
-    open = { userId, sql, database, engine, realtime, telling: false }
+    open = { userId, sql, database, engine, realtime, tellingSince: null, told: new Set() }
     const opened = open
     this.open = opened
     this.update({ userId, ready: true, version: this.state.version + 1, syncError: null })
@@ -343,10 +349,7 @@ export class MailSession {
     try {
       await run()
       if (this.open === open) {
-        if (!open.telling) {
-          open.database.takeOverdueHandOvers()
-          open.telling = true
-        }
+        open.tellingSince ??= Date.now()
         this.update({ syncState: 'idle', syncError: null, pulls: this.state.pulls + 1 })
       }
     } catch (error) {
