@@ -118,6 +118,7 @@ describe('forgetPushDevice', () => {
 describe('tappedRoute', () => {
   it('opens the conversation of a mail notification, the daily brief and the todos', () => {
     expect(tappedRoute({ kind: 'mail', path: '/thread/0199-abc' })).toBe('/thread/0199-abc')
+    expect(tappedRoute({ kind: 'mail', path: '/batches' })).toBe('/batches')
     expect(tappedRoute({ kind: 'daily_brief', path: '/brief' })).toBe('/brief')
     expect(tappedRoute({ path: '/brief?date=2026-10-20' })).toBe('/brief?date=2026-10-20')
     expect(tappedRoute({ path: '/todos' })).toBe('/todos')
