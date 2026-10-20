@@ -4,6 +4,7 @@ import { Stack, useRouter } from 'expo-router'
 import { dueLabel, groupTodos, todoSection, type SyncedMessage, type Todo } from '@tresso/core'
 import { useNotices } from '@/components/Notices'
 import { useMail } from '@/mail/MailProvider'
+import { stillPending, withPending, type PendingDone } from '@/mail/pendingDone'
 import { senderName } from '@/mail/format'
 import { useTheme, type Theme } from '@/theme'
 
@@ -16,8 +17,8 @@ export default function TodosScreen() {
   const notices = useNotices()
   const [todos, setTodos] = useState<Todo[]>([])
   const [emails, setEmails] = useState(new Map<string, SyncedMessage>())
-  /** Done or open as the user just set it, by todo id, while the request is under way. */
-  const [pending, setPending] = useState(new Map<string, boolean>())
+  /** Done or open as the user just set it, by todo id, until the loaded list shows it (see stillPending). */
+  const [pending, setPending] = useState<PendingDone>(new Map())
   const [now, setNow] = useState(() => new Date())
   const { todos: loadTodos, messages: loadMessages, version } = mail
 
@@ -27,6 +28,8 @@ export default function TodosScreen() {
       const found = await loadMessages(list.flatMap((todo) => (todo.messageId === null ? [] : [todo.messageId])))
       if (current) {
         setTodos(list)
+        // A check-off stays shown until the list read after its sync carries it.
+        setPending((map) => stillPending(map, list))
         setEmails(new Map(found.map((message) => [message.id, message])))
         setNow(new Date())
       }
@@ -42,14 +45,7 @@ export default function TodosScreen() {
     return () => clearInterval(ticking)
   }, [])
 
-  const shown = useMemo(
-    () =>
-      todos.map((todo) => {
-        const done = pending.get(todo.id)
-        return done === undefined || done === (todo.completedAt !== null) ? todo : { ...todo, completedAt: done ? now.toISOString() : null }
-      }),
-    [todos, pending, now],
-  )
+  const shown = useMemo(() => withPending(todos, pending, now), [todos, pending, now])
   const sections = useMemo(() => groupTodos(shown, now).map((group) => ({ title: group.label, data: group.todos })), [shown, now])
   const open = shown.filter((todo) => todo.completedAt === null).length
 
@@ -59,8 +55,7 @@ export default function TodosScreen() {
     try {
       await mail.setTodoDone(todo.id, done)
     } catch (error) {
-      notices.notify({ text: error instanceof Error ? error.message : String(error), tone: 'error' })
-    } finally {
+      // Refused: back to how the copy has it at once.
       setPending((map) => {
         const next = new Map(map)
         if (next.get(todo.id) === done) {
@@ -68,6 +63,7 @@ export default function TodosScreen() {
         }
         return next
       })
+      notices.notify({ text: error instanceof Error ? error.message : String(error), tone: 'error' })
     }
   }
 
