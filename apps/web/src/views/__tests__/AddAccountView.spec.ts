@@ -166,7 +166,7 @@ describe('AddAccountView', () => {
     await buttons[0]!.trigger('click')
     await settle()
 
-    expect(requests.find((r) => r.path === '/api/v1/provider-authorizations')?.body).toEqual({ provider: 'google', features: ['mail'] })
+    expect(requests.find((r) => r.path === '/api/v1/provider-authorizations')?.body).toEqual({ provider: 'google', features: ['mail', 'calendar'] })
     expect(assign).toHaveBeenCalledWith('https://accounts.google.example/o/oauth2/v2/auth?state=s')
   })
 
@@ -189,7 +189,7 @@ describe('AddAccountView', () => {
     await settle()
 
     expect(wrapper.get('button.button-primary').text()).toBe('Sign in with Google again')
-    expect(requests.find((r) => r.path === '/api/v1/provider-authorizations')?.body).toEqual({ provider: 'google', features: ['mail'], mailAccountId: 'acc-g' })
+    expect(requests.find((r) => r.path === '/api/v1/provider-authorizations')?.body).toEqual({ provider: 'google', features: ['mail', 'calendar'], mailAccountId: 'acc-g' })
     expect(assign).toHaveBeenCalledOnce()
   })
 
