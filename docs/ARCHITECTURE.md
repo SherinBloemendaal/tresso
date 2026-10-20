@@ -953,7 +953,7 @@ after. Everything lives in `apps/api/src/Notification`.
     `GET /api/v1/notification-devices/web-push-key`.
   - Mobile (`expo`): the Expo push token; sent through Expo's push service (`EXPO_ACCESS_TOKEN` when the project
     requires it). A `PushMessage` names its Android notification channel; the phone creates `reminders` (calendar
-    notifications, the default) at normal importance with sound and `reminders_silent` at low importance without
+    notifications, the default) at high importance (a banner, with sound) and `reminders_silent` at low importance without
     sound for silent deliveries, at every launch (on Android the channel decides sound). Mail notifications (phase
     3.7) add `mail` and `mail_silent` the same way. Expo's receipts are read some minutes after each
     send, and phones they report as `DeviceNotRegistered` are removed.
@@ -1003,7 +1003,8 @@ after. Everything lives in `apps/api/src/Notification`.
   notification before it, unless the event moved to start before that time; then the hold goes, and a reminder whose
   own time has passed comes at once. A notification belongs to its occurrence, not to the row the occurrence takes
   its fields from: when an override (or one for this and future occurrences) appears or goes, the notification moves
-  along with its snooze, hold and deliveries, so it is neither lost nor sent twice. When an occurrence moves after
+  along with its snooze, hold and deliveries, so it is neither lost nor sent twice. When a row goes, the projector
+  moves its notifications to the series row before deleting it, and the replan takes them from there. When an occurrence moves after
   its notification was delivered, the notification starts a new round at the new time, if that is still ahead;
   "moves" means its start as the event writes it changed (a date, a wall clock or an instant), so a change of the
   user's zone alone never sends an all-day or floating reminder again. A focus block never holds a notification past the start of
@@ -1015,7 +1016,8 @@ after. Everything lives in `apps/api/src/Notification`.
   10 or 15 minutes, one minute before the start, the start, or the end of the meeting the user is in now). A snoozed
   notification is in the delta with `deliveredAt` null and `snoozedUntil` (moved by quiet hours too), so every device
   hides it until it comes again. One waiting for its occurrence's new time (a new round after the event moved) has
-  `deliveredAt` and `snoozedUntil` both null: hidden too, but not shown as snoozed.
+  `deliveredAt` and `snoozedUntil` both null: hidden too, but not shown as snoozed. Planning a notification that never
+  reached a device is no change for clients (no change number, no realtime ping).
 - **Devices and addresses:** a push endpoint belongs to one user: registering it removes it from whoever had it
   before (someone signed out on that phone). Registrations of one endpoint take turns (an advisory lock), so two at
   once do not fail on its unique key. Known limit: Expo gives no proof that the caller holds the phone, so anyone
@@ -1025,8 +1027,9 @@ after. Everything lives in `apps/api/src/Notification`.
   their mail accounts' addresses.
 - **Time zones:** quiet hours, working hours, all-day reminders and floating times (date-times without a zone) are
   read in the user's zone from the notification settings (`timeZone`, UTC until a client sets it). The web app, the
-  desktop app and the phone send the device's zone once signed in and again when they come to the front in another
-  zone (`keepTimeZone` in `@tresso/core`), so reminders follow the device the user last used.
+  desktop app and the phone send the device's zone the first time a user signs in there and again when they come to
+  the front in another zone (`keepTimeZone` in `@tresso/core`). Each device remembers per user the zone it last sent,
+  so a reload does not send it again and take the zone back from a device the user moved on to.
 - **Deployment:** this stage (C3) needs the calendar core (C2) in the same deploy: the planner reads
   `default_reminders` and the other projection columns C2 adds.
 
