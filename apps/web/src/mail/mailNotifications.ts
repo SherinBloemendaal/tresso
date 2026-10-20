@@ -1,4 +1,4 @@
-import { firstName, mailNotificationPath, type SyncedHandOver, type SyncedMailNotification } from '@tresso/core'
+import { firstName, mailNotificationTarget, type SyncedHandOver, type SyncedMailNotification } from '@tresso/core'
 
 /** More notifications than this at once become one summary instead of a stack of them. */
 const MAX_SEPARATE = 3
@@ -34,7 +34,7 @@ export function mailNotifications(notifications: SyncedMailNotification[]): Mail
     return notifications.map((notification) => ({
       title: notification.title,
       body: notification.body,
-      path: notification.threadId === null ? null : mailNotificationPath(notification.threadId),
+      path: mailNotificationTarget(notification),
       silent: notification.silent,
     }))
   }

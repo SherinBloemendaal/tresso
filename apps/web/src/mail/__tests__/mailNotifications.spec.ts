@@ -24,6 +24,12 @@ describe('mailNotifications', () => {
     ])
   })
 
+  it("opens the batches for a batch's summary", () => {
+    expect(mailNotifications([delivered('s', { threadId: null, title: '5 new messages to do', summary: true })])).toEqual([
+      { title: '5 new messages to do', body: 'Subject s', path: '/batches', silent: false },
+    ])
+  })
+
   it('sums up when much arrives at once', () => {
     expect(mailNotifications(['a', 'b', 'c', 'd'].map((id) => delivered(id)))).toEqual([
       { title: '4 new messages need you', body: 'From Sender a, Sender b, Sender c and 1 more', path: null, silent: false },
