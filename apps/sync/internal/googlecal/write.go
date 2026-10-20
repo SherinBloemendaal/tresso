@@ -311,8 +311,9 @@ func (s *session) Write(ctx context.Context, calendar calsync.Calendar, operatio
 			return s.reread(ctx, calendar, operation, masterID, true)
 		}
 		result, accessErr := s.failure(ctx, calendar, operation, err)
-		if w.wrote && result.Outcome == api.OperationRetry && masterID != "" {
-			// Part of the write reached Google: the retry starts from that version, not from a conflict with it.
+		if result.Outcome == api.OperationRetry && masterID != "" {
+			// A series is written step by step, and an earlier attempt may have written part of it: every retry
+			// carries Google's version, so the next attempt starts from it, and when none is left Tresso keeps it.
 			s.progress(ctx, calendar, operation, masterID, &result)
 		}
 		return result, accessErr
@@ -332,19 +333,13 @@ type writer struct {
 	operation api.CalendarOperation
 	notify    string
 	self      string
-	// wrote: some step of this write reached Google, so a failure after it must not lose what it changed.
-	wrote bool
 	// series is the resource as Google has it, for comparing the master with its cancelled occurrences.
 	series series
 }
 
-// send makes one change at Google and remembers that it did.
+// send makes one change at Google.
 func (w *writer) send(ctx context.Context, method, rawURL string, query url.Values, ifMatch string, body any, out any) error {
-	if err := w.session.send(ctx, method, rawURL, query, ifMatch, body, out); err != nil {
-		return err
-	}
-	w.wrote = true
-	return nil
+	return w.session.send(ctx, method, rawURL, query, ifMatch, body, out)
 }
 
 func (w *writer) query(conference bool) url.Values {

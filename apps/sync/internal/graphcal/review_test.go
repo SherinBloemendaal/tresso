@@ -1,6 +1,7 @@
 package graphcal
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -150,5 +151,34 @@ func TestGraphNeverSaysCalendarsAreNotAllowed(t *testing.T) {
 	denied := &providerhttp.StatusError{Method: "GET", URL: "/me/calendars/x/events", StatusCode: http.StatusForbidden, Reasons: []string{"ErrorAccessDenied"}}
 	if (&Provider{}).NotGranted(denied) {
 		t.Fatal("a 403 on one calendar is no account problem")
+	}
+}
+
+func TestAnOccurrenceThatKeepsFailingStillReportsGraphsVersion(t *testing.T) {
+	graph := newFakeGraph(t)
+	master, occurrences := weekly("ev8")
+	graph.put(master, occurrences...)
+	fake := calsynctest.NewAPI(owner)
+	run(t, graph, fake)
+	calsynctest.Eventually(t, "the sync", func() bool { _, ok := fake.Objects(defaultCalendar)["ev8"]; return ok })
+	object := fake.Objects(defaultCalendar)["ev8"]
+	override := "BEGIN:VEVENT\r\nUID:uid-ev8\r\nDTSTAMP:20261001T000000Z\r\nRECURRENCE-ID;TZID=Europe/Amsterdam:20261026T090000\r\n" +
+		"DTSTART;TZID=Europe/Amsterdam:20261026T100000\r\nDTEND;TZID=Europe/Amsterdam:20261026T103000\r\nSUMMARY:Standup\r\n" +
+		"BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	edited := strings.Replace(strings.Replace(object.Ical, "SUMMARY:Standup", "SUMMARY:Daily standup", 1), "END:VCALENDAR\r\n", override, 1)
+
+	remoteID, etag := "ev8", object.ETag
+	for attempt := range 3 {
+		graph.mu.Lock()
+		graph.failures["PATCH /events/ev8-occ1"] = http.StatusServiceUnavailable
+		graph.mu.Unlock()
+		id, ifMatch := fmt.Sprintf("attempt-%d", attempt), etag
+		fake.Queue(api.CalendarOperation{ID: id, Kind: "put", CalendarRemoteID: defaultCalendar, UID: "uid-ev8", RemoteID: &remoteID, IfMatch: &ifMatch, Ical: &edited, Notify: true})
+		calsynctest.Eventually(t, "attempt "+id, func() bool { _, ok := fake.Result(id); return ok })
+		r, _ := fake.Result(id)
+		if r.Outcome != api.OperationRetry || r.ETag == nil || r.Current == nil || !strings.Contains(*r.Current.Ical, "Daily standup") {
+			t.Fatalf("attempt %d reports Graph's version, which Tresso keeps when no attempt is left: %+v", attempt, r)
+		}
+		etag = *r.ETag
 	}
 }

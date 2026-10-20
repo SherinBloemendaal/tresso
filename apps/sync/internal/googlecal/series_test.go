@@ -1,6 +1,7 @@
 package googlecal
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -260,9 +261,15 @@ func TestAnEventChangedAtGoogleBeforeItsMoveIsNotMovedOver(t *testing.T) {
 		t.Fatalf("the delete is a conflict with Lisa's version: %+v", out)
 	}
 	for _, write := range google.writes() {
-		if strings.HasSuffix(write.Path, "/move") {
-			t.Fatalf("nothing is moved: %+v", google.writes())
+		if strings.HasSuffix(write.Path, "/move") || strings.Contains(write.Path, "/calendars/team@group.calendar.google.com/") {
+			t.Fatalf("nothing is moved, and no second copy is made in the team calendar: %+v", google.writes())
 		}
+	}
+	if in, _ := fake.Result("in"); in.Outcome != api.OperationConflict {
+		t.Fatalf("the create is held back as a conflict: %+v", in)
+	}
+	if _, ok := google.get("team@group.calendar.google.com", "lunch"); ok {
+		t.Fatal("the team calendar has no copy")
 	}
 	if e, _ := google.get(calendarID, "lunch"); e.Summary != "Lunch, moved to noon by Lisa" || e.cancelled() {
 		t.Fatalf("Lisa's change stays: %+v", e)
@@ -300,5 +307,32 @@ func TestAChangeAtGoogleAfterTheMoveIsAConflictForTheUpdate(t *testing.T) {
 	}
 	if e, _ := google.get("team@group.calendar.google.com", "lunch"); e.Summary != "Lunch, Lisa's version" {
 		t.Fatalf("summary = %q", e.Summary)
+	}
+}
+
+func TestAnOccurrenceThatKeepsFailingStillReportsGooglesVersion(t *testing.T) {
+	google := newFakeGoogle(t)
+	series := meetingEvent("standup", "Standup")
+	series.Recurrence = []string{"RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=5"}
+	google.put(calendarID, series)
+	fake, object := synced(t, google, "standup")
+	override := "BEGIN:VEVENT\r\nUID:standup@google.com\r\nDTSTAMP:20261001T000000Z\r\nRECURRENCE-ID;TZID=Europe/Amsterdam:20261026T090000\r\n" +
+		"DTSTART;TZID=Europe/Amsterdam:20261026T110000\r\nDTEND;TZID=Europe/Amsterdam:20261026T113000\r\nSUMMARY:Standup, later\r\n" +
+		"BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT10M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	edited := strings.Replace(strings.Replace(object.Ical, "SUMMARY:Standup", "SUMMARY:Daily standup", 1), "END:VCALENDAR\r\n", override, 1)
+
+	etag := object.ETag
+	for attempt := range 3 {
+		google.mu.Lock()
+		google.failures["PATCH /events/standup_20261026T080000Z"] = http.StatusServiceUnavailable
+		google.mu.Unlock()
+		id := fmt.Sprintf("attempt-%d", attempt)
+		queue(fake, id, "standup", etag, edited, true)
+		r := result(t, fake, id)
+		// After the first attempt the master is written, so later ones write nothing before the occurrence fails.
+		if r.Outcome != api.OperationRetry || r.ETag == nil || r.Current == nil || !strings.Contains(*r.Current.Ical, "Daily standup") {
+			t.Fatalf("attempt %d reports Google's version, which Tresso keeps when no attempt is left: %+v", attempt, r)
+		}
+		etag = *r.ETag
 	}
 }
