@@ -110,6 +110,7 @@ describe('DailyBriefView', () => {
             eventNotes: [],
             todos: [],
             mailNotifications: [],
+            handOvers: [],
             dailyBriefs: [
               { id: 'b1', coversFrom: '2026-10-19T08:00:00+00:00', coversUntil: '2026-10-20T07:59:59+00:00', threadIds: ['t1', 't2', 't3'], createdAt: '2026-10-20T08:00:00+00:00' },
               { id: 'b0', coversFrom: '2026-10-18T08:00:00+00:00', coversUntil: '2026-10-19T07:59:59+00:00', threadIds: ['t1'], createdAt: '2026-10-19T08:00:00+00:00' },
@@ -139,6 +140,9 @@ describe('DailyBriefView', () => {
         { path: '/brief', name: 'brief', component: DailyBriefView },
         { path: '/brief/:briefId', name: 'brief-edition', component: DailyBriefView },
         { path: '/todos', name: 'todos', component: { template: '<p>todos</p>' } },
+        { path: '/batches', name: 'batches', component: { template: '<p>batches</p>' } },
+        { path: '/cleanup', name: 'cleanup', component: { template: '<p>cleanup</p>' } },
+        { path: '/waiting', name: 'waiting', component: { template: '<p>waiting</p>' } },
         { path: '/drafts', name: 'drafts', component: { template: '<p>drafts</p>' } },
         { path: '/outbox', name: 'outbox', component: { template: '<p>outbox</p>' } },
         { path: '/smart/:smartInboxId', name: 'smart-inbox', component: { template: '<p>smart</p>' } },
