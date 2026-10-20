@@ -113,6 +113,11 @@ export interface NotificationSettings {
   holdDuringFocus: boolean
   /** Mail notifications wait while the user is in a meeting. */
   holdMailInMeetings: boolean
+  /**
+   * Mail notifications show the sender, subject and the start of the text; false: only "New mail from {account}".
+   * Phone pushes pass through Expo, Apple and Google unencrypted; Web Push is end-to-end encrypted.
+   */
+  mailPreviews: boolean
   /** Leave-now reminders for events with a place. */
   leaveNow: boolean
   travelMode: TravelMode
