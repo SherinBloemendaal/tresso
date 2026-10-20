@@ -17,7 +17,7 @@ import type { Sql, SqlValue } from './sql'
  * Raised whenever the copy changes shape. A copy made by another version is emptied and synced again from the start,
  * so nothing it skipped stays missing; drafts that exist only on this device are carried over.
  */
-export const SCHEMA_VERSION = 8
+export const SCHEMA_VERSION = 9
 
 /** Rows a filtered list scan reads at a time. */
 const LIST_PAGE = 500
