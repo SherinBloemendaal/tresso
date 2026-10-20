@@ -42,16 +42,26 @@ export const useSelectionStore = defineStore('selection', () => {
     anchor.value = threadId
   }
 
+  /**
+   * A selection that did not change keeps its Set: watchers of the selection (the bulk bar reads it from the local copy
+   * and drops what is gone) would otherwise run again on their own change, without end.
+   */
+  function replaceWhenChanged(next: Set<string>): void {
+    if (next.size !== threadIds.value.size || [...next].some((id) => !threadIds.value.has(id))) {
+      threadIds.value = next
+    }
+  }
+
   function remove(ids: string[]): void {
     const next = new Set(threadIds.value)
     for (const id of ids) {
       next.delete(id)
     }
-    threadIds.value = next
+    replaceWhenChanged(next)
   }
 
   function add(ids: string[]): void {
-    threadIds.value = new Set([...threadIds.value, ...ids])
+    replaceWhenChanged(new Set([...threadIds.value, ...ids]))
   }
 
   function set(ids: string[]): void {

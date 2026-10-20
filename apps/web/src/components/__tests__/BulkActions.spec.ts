@@ -237,6 +237,19 @@ describe('bulk actions', () => {
     expect([...useSelectionStore().threadIds]).toEqual(['t2'])
   })
 
+  it('reads the selection from the local copy once per change, not again and again', async () => {
+    const describe = vi.spyOn(useMailStore(), 'describeThreads')
+    mountList()
+    useSelectionStore().set(['t2'])
+    await settle()
+    const asked = describe.mock.calls.length
+
+    await settle()
+
+    expect(asked).toBeGreaterThan(0)
+    expect(describe.mock.calls.length, 'nothing changed, so nothing is read again').toBe(asked)
+  })
+
   it('lets go of conversations that left the inbox meanwhile', async () => {
     const wrapper = mountList()
     await checkbox(wrapper, 't1').trigger('click')
