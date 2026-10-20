@@ -108,10 +108,12 @@ export interface MailStore extends SyncStore {
    */
   list(scope: ListScope, limit: number): Promise<ConversationSummary[]>
   /**
-   * Threads of a list matching a test, newest first, however many there are: for selecting beyond the part of the list
-   * that is loaded.
+   * Threads of a list matching a test, newest first, however many there are (or the first `limit`, which stops the
+   * scan there): for selecting beyond the part of the list that is loaded.
    */
-  listThreadIds(scope: ListScope, matches: (conversation: ConversationSummary) => boolean): Promise<string[]>
+  listThreadIds(scope: ListScope, matches: (conversation: ConversationSummary) => boolean, limit?: number): Promise<string[]>
+  /** The stored summaries of these threads, whatever list they are in; threads without one are left out. */
+  summaries(threadIds: string[]): Promise<ConversationSummary[]>
   /**
    * What a selection of threads holds now: the ones still in the list on screen, and their accounts and senders
    * (lower-case addresses).

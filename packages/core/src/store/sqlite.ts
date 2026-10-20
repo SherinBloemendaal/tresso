@@ -19,6 +19,9 @@ import type { Sql, SqlValue } from './sql'
  */
 export const SCHEMA_VERSION = 8
 
+/** Rows a filtered list scan reads at a time. */
+const LIST_PAGE = 500
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mail_accounts (id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL);
@@ -474,10 +477,36 @@ export class SqliteMailStore implements MailStore {
     return rows.map((row) => parse<ConversationSummary>(row))
   }
 
-  async listThreadIds(scope: ListScope, matches: (conversation: ConversationSummary) => boolean): Promise<string[]> {
+  async listThreadIds(scope: ListScope, matches: (conversation: ConversationSummary) => boolean, limit?: number): Promise<string[]> {
     const [where, params] = listWhere(scope)
-    const rows = await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE ${where} ORDER BY ${listOrder(scope)}`, params)
-    return rows.map((row) => parse<ConversationSummary>(row)).filter(matches).map((conversation) => conversation.threadId)
+    const ids: string[] = []
+    // In pages, so a limit stops the scan early.
+    for (let offset = 0; limit === undefined || ids.length < limit; offset += LIST_PAGE) {
+      const rows = await this.reader.all<JsonRow>(
+        `SELECT json FROM conversations WHERE ${where} ORDER BY ${listOrder(scope)} LIMIT ? OFFSET ?`,
+        [...params, LIST_PAGE, offset],
+      )
+      for (const row of rows) {
+        const conversation = parse<ConversationSummary>(row)
+        if (matches(conversation) && (limit === undefined || ids.length < limit)) {
+          ids.push(conversation.threadId)
+        }
+      }
+      if (rows.length < LIST_PAGE) {
+        break
+      }
+    }
+    return ids
+  }
+
+  async summaries(threadIds: string[]): Promise<ConversationSummary[]> {
+    const found: ConversationSummary[] = []
+    for (const chunk of chunks(threadIds)) {
+      for (const row of await this.reader.all<JsonRow>(`SELECT json FROM conversations WHERE thread_id IN (${placeholders(chunk)})`, chunk)) {
+        found.push(parse<ConversationSummary>(row))
+      }
+    }
+    return found
   }
 
   async describeThreads(scope: ListScope, threadIds: string[]): Promise<{ present: string[]; accounts: string[]; senders: string[] }> {
