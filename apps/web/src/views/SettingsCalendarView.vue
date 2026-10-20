@@ -67,7 +67,8 @@ const save = handleSubmit(async (current) => {
           <span class="hint">
             A todo with a due date and a duration gets free time before it is due, in your working hours and around focus
             blocks and travel time. That time is busy, so nobody books a meeting over it, and it moves when your calendar
-            changes. You can still plan or remove a single todo yourself.
+            or working hours change. A todo without free time gets some once your calendar frees up. When you remove a
+            todo's time, it stays out of your calendar until you change the todo.
           </span>
         </span>
       </label>
