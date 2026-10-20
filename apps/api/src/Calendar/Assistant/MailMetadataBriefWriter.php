@@ -25,6 +25,11 @@ final readonly class MailMetadataBriefWriter implements MeetingBriefWriter
     ) {
     }
 
+    public function writesSummaries(): bool
+    {
+        return false;
+    }
+
     public function brief(CalendarEvent $event, string $occurrenceKey): MeetingBrief
     {
         $owner = $event->getCalendar()->getOwner();

@@ -12,6 +12,9 @@ use App\Entity\CalendarEvent;
  */
 interface MeetingBriefWriter
 {
+    /** Whether briefs carry a written summary, so clients know to show one (`GET /api/v1/calendar/capabilities`). */
+    public function writesSummaries(): bool;
+
     /**
      * @param string $occurrenceKey '' for a single event
      */
