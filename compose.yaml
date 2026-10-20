@@ -109,6 +109,23 @@ services:
       disable: true
     restart: unless-stopped
 
+  # Bulk actions have their own consumer too: archiving a whole smart inbox must never hold up sending.
+  bulk:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+      target: dev
+    command: ["php", "bin/console", "messenger:consume", "bulk", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    environment: *api-env
+    volumes:
+      - ./apps/api:/app
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
   sync:
     build:
       context: .
