@@ -102,6 +102,19 @@ export const useBulkStore = defineStore('bulk', () => {
     }
   }
 
+  /** Stops the action (or undo) under way; what it did stays done, and the notice that follows offers the undo. */
+  async function cancel(): Promise<void> {
+    const id = running.value?.id
+    if (id === undefined) {
+      return
+    }
+    try {
+      running.value = await auth.send<BulkActionState>('POST', `/api/v1/bulk-actions/${encodeURIComponent(id)}/cancel`, {})
+    } catch (error) {
+      compose.notify({ text: `Could not stop it: ${errorMessage(error)}`, tone: 'error' })
+    }
+  }
+
   /** Asks how the action is doing, soon at first and then less often, until the server stopped working on it. */
   async function follow(first: BulkActionState): Promise<BulkActionState> {
     let state = first
@@ -121,5 +134,5 @@ export const useBulkStore = defineStore('bulk', () => {
     return state
   }
 
-  return { running, busy, progress, count, senders, suggestions, start, undo }
+  return { running, busy, progress, cancel, count, senders, suggestions, start, undo }
 })

@@ -47,7 +47,10 @@ async function clean(suggestion: CleanupSuggestion): Promise<void> {
     </header>
 
     <div class="content">
-      <p v-if="bulk.progress" class="progress" role="status">{{ bulk.progress }}</p>
+      <p v-if="bulk.progress" class="progress" role="status">
+        {{ bulk.progress }}
+        <button v-if="bulk.running" type="button" class="button button-quiet stop" @click="bulk.cancel()">Stop</button>
+      </p>
       <p v-if="loadError" class="error" role="alert">The suggestions could not be loaded: {{ loadError }}</p>
       <p v-else-if="suggestions === null" class="empty">Looking through your mail…</p>
       <p v-else-if="suggestions.length === 0" class="empty">Nothing to clean up right now.</p>
@@ -145,6 +148,9 @@ h2 {
   color: var(--danger);
 }
 .progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   font-weight: 600;
   color: var(--ink-2);

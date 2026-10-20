@@ -163,7 +163,10 @@ async function onSuggestion(item: CleanupSuggestion): Promise<void> {
         </div>
       </div>
 
-      <p v-if="bulk.progress" class="progress" role="status">{{ bulk.progress }}</p>
+      <p v-if="bulk.progress" class="progress" role="status">
+        {{ bulk.progress }}
+        <button v-if="bulk.running" type="button" class="button button-quiet stop" @click="bulk.cancel()">Stop</button>
+      </p>
 
       <div v-if="suggestion" class="suggested">
         <AppIcon name="shield" :size="16" />
@@ -335,6 +338,9 @@ h1 {
   gap: 8px;
 }
 .progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   color: var(--ink-2);
   font-weight: 600;
