@@ -4,6 +4,7 @@ import { RouterView } from 'vue-router'
 import { errorMessage } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
 import { useComposeStore } from '@/stores/compose'
+import { useHandOversStore } from '@/stores/handOvers'
 import { useMailStore } from '@/stores/mail'
 import { startTimeZoneSync, storedSentZone } from '@/platform/timeZone'
 import { releaseOtherUsersPush } from '@/platform/webPush'
@@ -12,15 +13,18 @@ import NoticeStack from '@/components/NoticeStack.vue'
 const auth = useAuthStore()
 const mail = useMailStore()
 const compose = useComposeStore()
+// Started with the app: it tells the user about hand-overs past their due date wherever they are.
+const handOvers = useHandOversStore()
 // The editor is large; it loads the first time a message is written.
 const ComposeWindow = defineAsyncComponent(() => import('@/components/ComposeWindow.vue'))
+const HandOverDialog = defineAsyncComponent(() => import('@/components/HandOverDialog.vue'))
 const error = ref<string | null>(null)
 
 // "C" writes a new message, unless the user is typing somewhere.
 function shortcut(event: KeyboardEvent): void {
   const target = event.target as HTMLElement | null
   const typing = target !== null && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
-  if (!typing && auth.isAuthenticated && !event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c' && compose.draft === null) {
+  if (!typing && auth.isAuthenticated && !event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c' && compose.draft === null && handOvers.handingOver === null) {
     event.preventDefault()
     compose.openNew()
   }
@@ -63,6 +67,7 @@ watch(
   <RouterView />
   <template v-if="auth.isAuthenticated">
     <ComposeWindow v-if="compose.draft" />
+    <HandOverDialog v-if="handOvers.handingOver" :key="handOvers.handingOver.id" :message="handOvers.handingOver" />
     <NoticeStack />
   </template>
   <p v-if="error || mail.syncState === 'error'" class="problem" role="alert">

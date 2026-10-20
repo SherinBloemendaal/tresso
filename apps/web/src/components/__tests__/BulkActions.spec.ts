@@ -95,6 +95,7 @@ describe('bulk actions', () => {
             eventNotes: [],
             todos: [],
             mailNotifications: [],
+            handOvers: [],
             deleted: [],
           }
           const empty = { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [] }
@@ -242,7 +243,7 @@ describe('bulk actions', () => {
     await checkbox(wrapper, 't3').trigger('click')
 
     // Archived on another device.
-    later = { cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [{ ...messages[2]!, folderIds: ['archive'] }], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], mailNotifications: [], deleted: [] }
+    later = { cursor: 2, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [{ ...messages[2]!, folderIds: ['archive'] }], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], mailNotifications: [], handOvers: [], deleted: [] }
     await useMailStore().syncNow()
 
     await vi.waitFor(() => expect([...useSelectionStore().threadIds]).toEqual(['t1']))

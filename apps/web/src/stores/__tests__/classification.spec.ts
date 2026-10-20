@@ -48,6 +48,7 @@ const first: ChangePage = {
   eventNotes: [],
   todos: [],
   mailNotifications: [],
+  handOvers: [],
   deleted: [],
 }
 
@@ -70,8 +71,8 @@ describe('classifying a conversation', () => {
         if (url.pathname === '/api/v1/sync/changes') {
           const since = Number(url.searchParams.get('since'))
           const later = loseAnswer
-            ? { ...first, cursor: since + 1, mailAccounts: [], folders: [], messages: [], smartInboxes: [], threads: [{ ...first.threads[0]!, smartInboxId: 'todo', verdict: 'do', classificationReason: 'user' }] }
-            : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [], smartInboxes: [] }
+            ? { ...first, cursor: since + 1, mailAccounts: [], folders: [], messages: [], smartInboxes: [], handOvers: [], threads: [{ ...first.threads[0]!, smartInboxId: 'todo', verdict: 'do', classificationReason: 'user' }] }
+            : { ...first, cursor: since, mailAccounts: [], folders: [], threads: [], messages: [], smartInboxes: [], handOvers: [] }
           return new Response(JSON.stringify(since === 0 ? first : later))
         }
         if (!url.pathname.startsWith('/api/v1/threads/')) {

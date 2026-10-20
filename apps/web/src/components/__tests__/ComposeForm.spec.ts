@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import type { SyncedOutgoingMessage } from '@tresso/core'
 import type { Draft } from '@/mail/db'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
@@ -20,7 +21,7 @@ function setup(initial: Draft) {
   const mail = useMailStore()
   mail.accounts = [{ id: 'work', emailAddress: 'kim@company.example', displayName: 'Kim', provider: 'imap', status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown' as const, calendarStatusDetail: null }]
   const compose = useComposeStore()
-  const send = vi.fn<(sendAt?: Date) => Promise<void>>(async () => {})
+  const send = vi.fn<(sendAt?: Date) => Promise<SyncedOutgoingMessage | null>>(async () => null)
   compose.send = send
   compose.update = vi.fn<(changes: Partial<Draft>) => void>()
   const wrapper = mount(ComposeForm, { props: { draft: initial }, attachTo: document.body, global: { stubs: { RouterLink: true } } })

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { spamOverruleNotice, VERDICTS, verdictLabel, type Verdict } from '@tresso/core'
+import { openHandOversOf, spamOverruleNotice, VERDICTS, verdictLabel, type Verdict } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
 import { useComposeStore } from '@/stores/compose'
+import { useHandOversStore } from '@/stores/handOvers'
 import { useMailStore } from '@/stores/mail'
 import AppIcon from '@/components/AppIcon.vue'
 import VerdictChip from '@/components/VerdictChip.vue'
@@ -22,6 +23,7 @@ const props = defineProps<{
 
 const mail = useMailStore()
 const compose = useComposeStore()
+const handOvers = useHandOversStore()
 const open = ref(false)
 const busy = ref(false)
 const error = ref<string | null>(null)
@@ -58,6 +60,12 @@ async function choose(smartInboxId: string, verdict?: Verdict): Promise<void> {
     const notice = spamOverruleNotice(result)
     if (notice !== null) {
       compose.notify({ text: notice, tone: 'info' }, 12_000)
+    }
+    // Judged something to hand over: the hand-over itself is one click away.
+    const judged = verdict ?? mail.smartInboxes.find((candidate) => candidate.id === smartInboxId)?.verdict
+    if (judged === 'delegate' && props.verdict !== 'delegate' && openHandOversOf(mail.handOvers, props.threadId).length === 0) {
+      const threadId = props.threadId
+      compose.notify({ text: `${props.subject || '(no subject)'} is for someone else.`, tone: 'info', action: { label: 'Hand over', run: () => void handOvers.openForThread(threadId) } }, 12_000)
     }
   } catch (e) {
     error.value = `Could not move it: ${errorMessage(e)}`

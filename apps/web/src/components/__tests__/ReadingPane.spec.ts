@@ -3,9 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import type { ChangePage, SyncedMessage, SyncedUnsubscription } from '@tresso/core'
+import type { ChangePage, SyncedMessage, SyncedUnsubscription, SyncedHandOver } from '@tresso/core'
 import { deleteMailDatabase } from '@/mail/db'
 import { useComposeStore } from '@/stores/compose'
+import { useHandOversStore } from '@/stores/handOvers'
 import { useMailStore } from '@/stores/mail'
 import { useSelectionStore } from '@/stores/selection'
 import ReadingPane from '../ReadingPane.vue'
@@ -46,7 +47,7 @@ function unsubscription(status: SyncedUnsubscription['status'], error: string | 
 }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], mailNotifications: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], mailNotifications: [], handOvers: [], deleted: [], ...extra }
 }
 
 async function settle(): Promise<void> {
@@ -68,6 +69,8 @@ describe('ReadingPane actions', () => {
   let refuseUnsubscribe: boolean
   /** While set, marking read waits for it before the server answers. */
   let holdMarkRead: Promise<void> | null
+  /** Hand-overs in the first page. */
+  let handOvers: SyncedHandOver[]
   let router: Router
 
   beforeEach(async () => {
@@ -81,6 +84,7 @@ describe('ReadingPane actions', () => {
     refuseUnsubscribe = false
     holdMarkRead = null
     offline = false
+    handOvers = []
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -95,6 +99,7 @@ describe('ReadingPane actions', () => {
             folders,
             threads: [{ id: 't1', mailAccountId: 'work', subject: 'Offsite plan', messageCount: 2, lastMessageAt: '2026-10-19T09:00:00Z', smartInboxId: null, verdict: null, classificationReason: null }],
             messages: [message('m1', ['sent'], '2026-10-19T08:00:00Z', true), message('m2', ['inbox'], '2026-10-19T09:00:00Z', false)],
+            handOvers,
           })
           return new Response(JSON.stringify(since === 0 ? first : since === 1 && later !== null ? later : (pages.get(since) ?? page(since))))
         }
@@ -125,6 +130,7 @@ describe('ReadingPane actions', () => {
       routes: [
         { path: '/', name: 'unified', component: { template: '<div />' } },
         { path: '/inbox/:threadId', name: 'unified-thread', component: { template: '<div />' } },
+        { path: '/waiting', name: 'waiting', component: { template: '<div />' } },
       ],
     })
     await router.push('/inbox/t1')
@@ -428,6 +434,59 @@ describe('ReadingPane actions', () => {
       await opened(wrapper)
 
       expect(wrapper.text()).not.toContain('Unsubscribe')
+    })
+  })
+
+  describe('handing over', () => {
+    const open: SyncedHandOver = {
+      id: 'h1',
+      mailAccountId: 'work',
+      messageId: 'm2',
+      threadId: 't1',
+      subject: 'Offsite plan',
+      delegate: { address: 'lisa@company.example', name: 'Lisa Bakker' },
+      note: '',
+      dueAt: '2099-10-23T15:00:00Z',
+      state: 'open',
+      forwardId: 'f1',
+      overdueAt: null,
+      nudgedAt: null,
+      lastNudgeId: null,
+      replyMessageId: null,
+      createdAt: '2026-10-20T08:00:00Z',
+      closedAt: null,
+      updatedAt: '2026-10-20T08:00:00Z',
+    }
+
+    it('opens the hand-over for the newest message from someone else, also with H', async () => {
+      const wrapper = mountPane()
+      await opened(wrapper)
+      const handOvers = useHandOversStore()
+
+      await wrapper.get('button[aria-keyshortcuts="H"]').trigger('click')
+      await vi.waitFor(() => expect(handOvers.handingOver?.id).toBe('m2'))
+      handOvers.close()
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'h' }))
+      await vi.waitFor(() => expect(handOvers.handingOver?.id).toBe('m2'))
+      wrapper.unmount()
+    })
+
+    it('says who it is handed over to, with a nudge and mark done at hand', async () => {
+      await useMailStore().stop()
+      await deleteMailDatabase('pane-user')
+      handOvers = [open, { ...open, id: 'h2', state: 'done', closedAt: '2026-10-21T08:00:00Z' }]
+      await useMailStore().start('pane-user')
+      const markDone = vi.spyOn(useHandOversStore(), 'markDone').mockResolvedValue(true)
+      const wrapper = mountPane()
+      await opened(wrapper)
+
+      await vi.waitFor(() => expect(wrapper.findAll('.handed')).toHaveLength(1))
+      expect(wrapper.get('.handed').text()).toContain('Handed over to Lisa Bakker, due')
+      expect(wrapper.get('.handed a').attributes('href')).toBe('/waiting?nudge=h1')
+      await wrapper.get('.handed button').trigger('click')
+      expect(markDone).toHaveBeenCalledWith(expect.objectContaining({ id: 'h1' }))
+      wrapper.unmount()
     })
   })
 })

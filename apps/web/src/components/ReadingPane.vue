@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
-import { classificationReasonText, dueLabel, unsubscribeOffer, todoSourceMessage, type MessageAction, type SyncedMessage, type SyncedThread, type Todo } from '@tresso/core'
+import { classificationReasonText, dueLabel, unsubscribeOffer, todoSourceMessage, type MessageAction, type SyncedMessage, type SyncedThread, type Todo, handOverStatus, openHandOversOf } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
 import type { AppliedAction } from '@tresso/core'
 import { shortcutAllowed, useMessageActions } from '@/mail/useMessageActions'
+import { shortDue, senderName } from '@/mail/format'
 import { useComposeStore } from '@/stores/compose'
+import { useHandOversStore } from '@/stores/handOvers'
 import { useMailStore } from '@/stores/mail'
 import { useSelectionStore } from '@/stores/selection'
 import { useTodosStore } from '@/stores/todos'
@@ -19,6 +21,7 @@ const props = defineProps<{ threadId: string; backTo: string }>()
 
 const mail = useMailStore()
 const compose = useComposeStore()
+const handOvers = useHandOversStore()
 const router = useRouter()
 const thread = ref<SyncedThread | null>(null)
 const messages = ref<SyncedMessage[]>([])
@@ -48,6 +51,8 @@ const canMakeTodo = computed(() => todos.value.length === 0 && !busy.value && !m
 let unmounted = false
 
 const flagged = computed(() => messages.value.some((message) => message.flags.flagged))
+/** Who this conversation is handed over to and still waited on. */
+const waitingOn = computed(() => openHandOversOf(mail.handOvers, props.threadId))
 // Folders the conversation can move to: its account's, except the ones mail apps manage themselves.
 const moveTargets = computed(() =>
   folders.value
@@ -176,13 +181,17 @@ function moveTo(folderId: string): void {
   void relocate('move', folderId)
 }
 
-// E archives, # trashes, U marks unread, S flags: only when the conversation has the user's attention, not while
+function handOver(): Promise<void> {
+  return handOvers.openForThread(props.threadId)
+}
+
+// E archives, # trashes, U marks unread, S flags, H hands over: only when the conversation has the user's attention, not while
 // they type, write in the compose window, hold the key down, or have conversations selected in the list.
 function shortcut(event: KeyboardEvent): void {
-  if (!shortcutAllowed(event, compose.draft !== null && !compose.minimized) || thread.value === null || moveMenu.value?.open === true || selection.active) {
+  if (!shortcutAllowed(event, compose.draft !== null && !compose.minimized) || thread.value === null || moveMenu.value?.open === true || selection.active || handOvers.handingOver !== null) {
     return
   }
-  const action = { e: () => relocate('archive'), '#': () => relocate('trash'), u: markUnread, s: toggleFlag, t: makeTodo }[event.key.toLowerCase()]
+  const action = { e: () => relocate('archive'), '#': () => relocate('trash'), u: markUnread, s: toggleFlag, t: makeTodo, h: handOver }[event.key.toLowerCase()]
   if (action !== undefined) {
     event.preventDefault()
     void action()
@@ -222,6 +231,7 @@ onBeforeUnmount(() => {
         >
           <AppIcon name="todo" /> <span>Make todo</span>
         </button>
+        <button type="button" class="tool labelled" aria-keyshortcuts="H" title="Hand over (H)" @click="handOver"><AppIcon name="delegate" />Hand over</button>
         <MenuButton
           ref="moveMenu"
           class="move"
@@ -254,6 +264,14 @@ onBeforeUnmount(() => {
           </RouterLink>
         </li>
       </ul>
+      <p v-for="item in waitingOn" :key="item.id" class="handed" :class="{ late: handOverStatus(item) === 'overdue' }">
+        <AppIcon name="delegate" />
+        <span class="handed-text">
+          Handed over to <strong>{{ senderName(item.delegate) }}</strong>, {{ handOverStatus(item) === 'overdue' ? 'was due' : 'due' }} {{ shortDue(item.dueAt) }}
+        </span>
+        <RouterLink :to="{ name: 'waiting', query: { nudge: item.id } }" class="handed-action">Nudge</RouterLink>
+        <button type="button" class="handed-action" @click="handOvers.markDone(item)">Mark done</button>
+      </p>
       <MessageCard
         v-for="message in messages"
         :key="message.id"
@@ -357,6 +375,39 @@ onBeforeUnmount(() => {
 }
 .unsubscribe {
   margin-left: auto;
+}
+.tool.labelled {
+  font-weight: 600;
+  font-size: 13px;
+}
+.handed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-control);
+  background: var(--delegate-soft);
+  color: var(--ink);
+  font-size: 13px;
+}
+.handed.late {
+  background: var(--danger-soft);
+}
+.handed-text {
+  flex: 1;
+  min-width: 0;
+}
+.handed-action {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
 }
 .tool.on {
   color: var(--delegate);

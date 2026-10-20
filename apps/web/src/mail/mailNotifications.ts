@@ -1,4 +1,4 @@
-import { mailNotificationPath, type SyncedMailNotification } from '@tresso/core'
+import { firstName, mailNotificationPath, type SyncedHandOver, type SyncedMailNotification } from '@tresso/core'
 
 /** More notifications than this at once become one summary instead of a stack of them. */
 const MAX_SEPARATE = 3
@@ -49,4 +49,15 @@ export function mailNotifications(notifications: SyncedMailNotification[]): Mail
       silent: notifications.every((notification) => notification.silent),
     },
   ]
+}
+
+/** What to show for hand-overs whose due date passed without a reply: one each, or a summary for many at once. */
+export function overdueNotifications(handOvers: SyncedHandOver[]): MailNotification[] {
+  if (handOvers.length <= MAX_SEPARATE) {
+    return handOvers.map((handOver) => ({
+      title: `No reply from ${firstName(handOver.delegate)} yet`,
+      body: `${handOver.subject || '(no subject)'} is past its due date. Nudge from Waiting on.`,
+    }))
+  }
+  return [{ title: `${handOvers.length} hand-overs are past their due date`, body: 'Nudge from Waiting on.' }]
 }

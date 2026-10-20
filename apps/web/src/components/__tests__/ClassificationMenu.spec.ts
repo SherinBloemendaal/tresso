@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { SyncedSmartInbox } from '@tresso/core'
 import { ApiError } from '@/api/errors'
 import { useComposeStore } from '@/stores/compose'
+import { useHandOversStore } from '@/stores/handOvers'
 import { useMailStore } from '@/stores/mail'
 import ClassificationMenu from '../ClassificationMenu.vue'
 
@@ -72,6 +73,37 @@ describe('ClassificationMenu', () => {
     await flushPromises()
 
     expect(classify).toHaveBeenCalledWith('t1', 'info', 'know')
+    wrapper.unmount()
+  })
+
+  it('offers to hand it over once judged for someone else', async () => {
+    mail.smartInboxes = [...mail.smartInboxes, smartInbox('others', 'For others', 'delegate', 3)]
+    const openForThread = vi.spyOn(useHandOversStore(), 'openForThread').mockResolvedValue()
+    const wrapper = mountMenu('info', 'know')
+
+    await wrapper.get('button').trigger('click')
+    await wrapper.findAll('[role="menuitemradio"]').find((item) => item.text().startsWith('For others'))!.trigger('click')
+    await flushPromises()
+
+    const notice = useComposeStore().notices.find((candidate) => candidate.action?.label === 'Hand over')
+    expect(notice?.text).toBe('Budget is for someone else.')
+    notice!.action!.run()
+    expect(openForThread).toHaveBeenCalledWith('t1')
+    wrapper.unmount()
+  })
+
+  it('does not offer a hand-over when it is handed over already', async () => {
+    mail.smartInboxes = [...mail.smartInboxes, smartInbox('others', 'For others', 'delegate', 3)]
+    mail.handOvers = [
+      { id: 'h1', mailAccountId: 'work', messageId: 'm1', threadId: 't1', subject: 'Budget', delegate: { address: 'lisa@company.example', name: null }, note: '', dueAt: '2026-10-30T15:00:00Z', state: 'open', forwardId: 'f1', overdueAt: null, nudgedAt: null, lastNudgeId: null, replyMessageId: null, createdAt: '2026-10-20T08:00:00Z', closedAt: null, updatedAt: '2026-10-20T08:00:00Z' },
+    ]
+    const wrapper = mountMenu('info', 'know')
+
+    await wrapper.get('button').trigger('click')
+    await wrapper.findAll('[role="menuitemradio"]').find((item) => item.text().startsWith('For others'))!.trigger('click')
+    await flushPromises()
+
+    expect(useComposeStore().notices.some((candidate) => candidate.action?.label === 'Hand over')).toBe(false)
     wrapper.unmount()
   })
 

@@ -22,6 +22,7 @@ const router = createRouter({
     { path: '/todos/:todoId', name: 'todo', component: () => import('@/views/TodosView.vue'), meta: { requiresAuth: true } },
     { path: '/drafts', name: 'drafts', component: () => import('@/views/DraftsView.vue'), meta: { requiresAuth: true } },
     { path: '/outbox', name: 'outbox', component: () => import('@/views/OutboxView.vue'), meta: { requiresAuth: true } },
+    { path: '/waiting', name: 'waiting', component: () => import('@/views/WaitingOnView.vue'), meta: { requiresAuth: true } },
     {
       path: '/settings',
       component: () => import('@/views/SettingsLayout.vue'),

@@ -131,6 +131,11 @@ export const useComposeStore = defineStore('compose', () => {
     return open(() => composer.openDraft(id))
   }
 
+  /** Opens a message written for the user, such as a follow-up to someone a conversation was handed over to. */
+  function openPrepared(fields: Parameters<Composer['openPrepared']>[0]): void {
+    void open(() => composer.openPrepared(fields))
+  }
+
   function update(changes: Partial<Draft>): void {
     composer.update(changes)
   }
@@ -164,6 +169,7 @@ export const useComposeStore = defineStore('compose', () => {
     openReply,
     defaultSignature: (mailAccountId: string | null) => composer.defaultSignature(mailAccountId),
     openDraft,
+    openPrepared,
     update,
     discard: () => composer.discard(),
     close: () => composer.close(),
