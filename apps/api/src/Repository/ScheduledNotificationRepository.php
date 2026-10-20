@@ -22,6 +22,32 @@ class ScheduledNotificationRepository extends ServiceEntityRepository
         parent::__construct($registry, ScheduledNotification::class);
     }
 
+    /**
+     * Moves the notifications of a row that is going away (an override or a this-and-future row the organizer
+     * dropped) to the row that takes over its occurrences, so the planner finds them there with their snooze, hold
+     * and deliveries. One the new row has already for the same occurrence and reminder stays as it is.
+     */
+    public function moveAll(CalendarEvent $from, CalendarEvent $to): void
+    {
+        $taken = [];
+        if (!$this->getEntityManager()->getUnitOfWork()->isScheduledForInsert($to)) {
+            foreach ($this->findBy(['event' => $to]) as $notification) {
+                $taken[self::slotOf($notification)] = true;
+            }
+        }
+        foreach ($this->findBy(['event' => $from]) as $notification) {
+            if (!isset($taken[self::slotOf($notification)])) {
+                $taken[self::slotOf($notification)] = true;
+                $notification->moveTo($to);
+            }
+        }
+    }
+
+    private static function slotOf(ScheduledNotification $notification): string
+    {
+        return implode('|', [$notification->getOccurrenceKey(), $notification->getKind()->value, $notification->getSlot()]);
+    }
+
     public function findOneOwnedBy(User $user, string $id): ?ScheduledNotification
     {
         return Uuid::isValid($id) ? $this->findOneBy(['id' => Uuid::fromString($id), 'user' => $user]) : null;

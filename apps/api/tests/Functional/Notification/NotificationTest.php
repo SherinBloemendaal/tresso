@@ -456,6 +456,40 @@ final class NotificationTest extends DatabaseTestCase
         self::assertSame('Standup, moved room', $notification[0]['title']);
     }
 
+    public function testASnoozeSurvivesTheOccurrenceLosingItsOwnRow(): void
+    {
+        $this->registerDevices();
+        $start = $this->inMinutes(30);
+        $this->storeSeries($start, true, 25);
+        $id = $this->notificationFor($start);
+        $this->fire($id);
+        $this->client->jsonRequest('POST', '/api/v1/notifications/'.$id.'/snooze', ['minutes' => 15], $this->kim);
+        $snoozedUntil = $this->atom($this->decodedResponse()['fireAt']);
+
+        // The organizer edits the whole series and the provider drops the exception.
+        $this->storeSeries($start, false, 25);
+
+        $notification = $this->notificationsFor($start);
+        self::assertCount(1, $notification);
+        self::assertSame($id, $notification[0]['id']);
+        self::assertSame($snoozedUntil, $this->atom($notification[0]['fireAt']), 'The snooze still holds.');
+    }
+
+    public function testADeliveredReminderIsNotSentAgainWhenItsOccurrenceLosesItsOwnRow(): void
+    {
+        $this->registerDevices();
+        $start = $this->inMinutes(6);
+        $this->storeSeries($start, true, 5);
+        $this->fire($this->notificationFor($start));
+
+        $this->storeSeries($start, false, 5);
+        foreach ($this->notificationsFor($start) as $notification) {
+            $this->fire(self::string($notification['id']));
+        }
+
+        self::assertCount(1, array_filter($this->http()->calls(), static fn (array $call): bool => str_starts_with($call['url'], 'https://exp.host/')));
+    }
+
     public function testADeliveredReminderIsNotSentAgainWhenItsOccurrenceGetsItsOwnRow(): void
     {
         $this->registerDevices();
@@ -652,6 +686,17 @@ final class NotificationTest extends DatabaseTestCase
         self::assertIsArray($snoozed);
         self::assertNull($snoozed['deliveredAt']);
         self::assertIsString($snoozed['snoozedUntil']);
+    }
+
+    public function testPlanningIsNoChangeForClientsUntilANotificationIsDelivered(): void
+    {
+        $eventId = $this->createEvent($this->inMinutes(60), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 10, 'channels' => ['phone']]]]);
+        $this->updateEvent($eventId, $this->inMinutes(90), ['useDefaultReminders' => false, 'reminders' => [['minutesBefore' => 10, 'channels' => ['phone']]]]);
+
+        self::assertEquals(0, $this->connection()->fetchOne('SELECT change_seq FROM scheduled_notification'), 'Planned and moved, never seen: no change number, so no sync for it.');
+
+        $this->fire($this->onlyNotificationId());
+        self::assertNotEquals(0, $this->connection()->fetchOne('SELECT change_seq FROM scheduled_notification'));
     }
 
     public function testQuietHoursMovingASnoozeReachTheOtherDevices(): void
@@ -885,6 +930,28 @@ final class NotificationTest extends DatabaseTestCase
         $delta = $this->getJson('/api/v1/sync/changes?since=0', $this->kim);
         self::assertIsArray($delta['eventNotes']);
         self::assertSame(['Ask about the Q4 numbers.'], array_column($delta['eventNotes'], 'text'));
+    }
+
+    /**
+     * Stores a daily series of two as a provider sync would, its first occurrence with an override of its own or
+     * without one, with a reminder that many minutes before.
+     */
+    private function storeSeries(\DateTimeImmutable $start, bool $override, int $minutesBefore): void
+    {
+        $calendar = static::getContainer()->get(\App\Repository\CalendarRepository::class)->findOneOwnedBy($this->user(), $this->calendarId);
+        self::assertNotNull($calendar);
+        $alarm = ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT'.$minutesBefore.'M', 'END:VALARM'];
+        $lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Test//EN',
+            'BEGIN:VEVENT', 'UID:series@test', 'DTSTAMP:20261019T080000Z', 'DTSTART:'.$start->format('Ymd\THis\Z'), 'DURATION:PT30M', 'RRULE:FREQ=DAILY;COUNT=2', 'SUMMARY:Standup', ...$alarm, 'END:VEVENT'];
+        if ($override) {
+            $lines = [...$lines, 'BEGIN:VEVENT', 'UID:series@test', 'DTSTAMP:20261019T080000Z', 'RECURRENCE-ID:'.$start->format('Ymd\THis\Z'), 'DTSTART:'.$start->format('Ymd\THis\Z'), 'DURATION:PT30M', 'SUMMARY:Standup, room 2', ...$alarm, 'END:VEVENT'];
+        }
+        $ical = implode("\r\n", [...$lines, 'END:VCALENDAR', '']);
+        $entityManager = static::getContainer()->get(EntityManagerInterface::class);
+        $object = $entityManager->getRepository(\App\Entity\CalendarObject::class)->findOneBy(['calendar' => $calendar, 'uid' => 'series@test']) ?? new \App\Entity\CalendarObject($calendar, 'series@test', '');
+        $entityManager->wrapInTransaction(static fn () => static::getContainer()->get(\App\Calendar\CalendarStore::class)->save($object, \App\Calendar\ICalendar\CalendarDocument::parse($ical)));
+        $entityManager->clear();
+        $this->runQueuedPlanning();
     }
 
     /** The id of the one notification for the occurrence starting then. */

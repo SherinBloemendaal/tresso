@@ -6,7 +6,7 @@ namespace App\Entity;
 
 use App\Enum\NotificationKind;
 use App\Repository\ScheduledNotificationRepository;
-use App\Sync\Change\TracksChanges;
+use App\Sync\Change\SyncedOnlyWhenSeen;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
@@ -21,7 +21,7 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\UniqueConstraint(columns: ['event_id', 'occurrence_key', 'kind', 'slot'])]
 #[ORM\Index(columns: ['delivered_at', 'fire_at'])]
 #[ORM\Index(columns: ['user_id', 'change_seq'])]
-class ScheduledNotification implements TracksChanges
+class ScheduledNotification implements SyncedOnlyWhenSeen
 {
     #[ORM\Id]
     #[ORM\Column(type: UuidType::NAME)]
@@ -333,6 +333,12 @@ class ScheduledNotification implements TracksChanges
     public function getCreatedAt(): \DateTimeImmutable
     {
         return $this->createdAt;
+    }
+
+    /** Clients see a notification once a round of it reached a device (delivered, or snoozed after that). */
+    public function isSeenByClients(): bool
+    {
+        return null !== $this->deliveredAt || $this->round > 0;
     }
 
     public function getChangeOwner(): User

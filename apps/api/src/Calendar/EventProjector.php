@@ -9,6 +9,7 @@ use App\Calendar\ICalendar\EventReader;
 use App\Entity\CalendarEvent;
 use App\Entity\CalendarObject;
 use App\Repository\CalendarEventRepository;
+use App\Repository\ScheduledNotificationRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Sabre\VObject\Component\VCalendar;
 
@@ -22,6 +23,7 @@ final readonly class EventProjector
         private EntityManagerInterface $entityManager,
         private CalendarEventRepository $events,
         private SelfAddresses $selfAddresses,
+        private ScheduledNotificationRepository $notifications,
     ) {
     }
 
@@ -50,9 +52,16 @@ final readonly class EventProjector
         }
 
         foreach ($existing as $key => $event) {
-            if (!isset($rows[$key])) {
-                $this->entityManager->remove($event);
+            if (isset($rows[$key])) {
+                continue;
             }
+            // An override that went: the series takes its occurrence back, and with it the occurrence's
+            // notifications (a snooze, a delivery), which the replan then finds there.
+            $series = $rows[''] ?? null;
+            if (null !== $series) {
+                $this->notifications->moveAll($event, $series);
+            }
+            $this->entityManager->remove($event);
         }
 
         return $rows;
