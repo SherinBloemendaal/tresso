@@ -1,6 +1,6 @@
 /** Wire format of /api/v1/todos and /api/v1/messages/{id}/todo, and helpers to show todos. */
 
-import type { SyncedTodo } from './sync/types'
+import type { SyncedMessage, SyncedTodo } from './sync/types'
 
 export type Todo = SyncedTodo
 
@@ -32,6 +32,17 @@ export interface TodoUpdate {
 export const TODO_TITLE_MAX_LENGTH = 500
 export const TODO_NOTES_MAX_LENGTH = 10_000
 export const TODO_DURATION_MAX_MINUTES = 7 * 24 * 60
+
+/**
+ * The email of a conversation to make a todo from: the newest one someone else sent, which is what the conversation
+ * asks of the user; the newest one when the user wrote them all. `messages` go oldest first; `ownAddresses` are the
+ * addresses of the user's accounts.
+ */
+export function todoSourceMessage(messages: SyncedMessage[], ownAddresses: string[]): SyncedMessage | null {
+  const own = new Set(ownAddresses.map((address) => address.toLowerCase()))
+  const incoming = messages.filter((message) => !own.has(message.from.address.toLowerCase()))
+  return incoming[incoming.length - 1] ?? messages[messages.length - 1] ?? null
+}
 
 /** Open todos in the user's order, then done ones, most recently done first. The same order as the API's list. */
 export function compareTodos(a: Todo, b: Todo): number {

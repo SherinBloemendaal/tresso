@@ -21,11 +21,14 @@ import {
   type SyncedMailAccount,
   type SyncedMessage,
   type SyncedThread,
+  type SyncedTodo,
+  type Todo,
 } from '@tresso/core'
 import { useAuth } from '@/auth/AuthProvider'
 import { LAST_USER } from '@/auth/secureTokenStore'
 import { MailSession, type MailState } from '@/mail/mailSession'
 import { deleteSql, openSql } from '@/mail/sql'
+import { todoApi } from '@/mail/todoApi'
 
 const LIST_LIMIT = 200
 /** Wait before asking again who is signed in, after that failed (offline at start, server down). */
@@ -57,6 +60,16 @@ interface Mail extends MailState {
   cancelOutgoing(id: string): Promise<SyncedOutgoingMessage>
   /** The copy changed outside the sync (a draft written here): screens read it again. */
   touch(): void
+  /** Open todos in the user's order, then done ones. */
+  todos(): Promise<SyncedTodo[]>
+  /** The todos made from the emails of a thread. */
+  todosOfThread(threadId: string): Promise<SyncedTodo[]>
+  /** The messages with these ids the phone has, e.g. the emails todos link to. */
+  messages(ids: string[]): Promise<SyncedMessage[]>
+  /** Makes a todo from an email, or returns the one it has; the copy is pulled right after. */
+  makeTodo(messageId: string): Promise<Todo>
+  /** Checks a todo off or opens it again; the copy is pulled right after. */
+  setTodoDone(id: string, done: boolean): Promise<void>
 }
 
 function json(method: string, body?: unknown): RequestInit {
@@ -190,6 +203,25 @@ export function MailProvider({ children }: { children: ReactNode }) {
     [auth.session],
   )
   const touch = useCallback(() => session.changed(), [session])
+  const todosApi = useMemo(() => todoApi((path, init) => auth.session.api(path, init)), [auth.session])
+  const todos = useCallback(async () => (await session.database?.todos()) ?? [], [session])
+  const todosOfThread = useCallback(async (threadId: string) => (await session.database?.todosOfThread(threadId)) ?? [], [session])
+  const messages = useCallback(async (ids: string[]) => (ids.length === 0 ? [] : ((await session.database?.messages(ids)) ?? [])), [session])
+  const makeTodo = useCallback(
+    async (messageId: string) => {
+      const todo = await todosApi.makeFromMessage(messageId)
+      await session.syncNow()
+      return todo
+    },
+    [todosApi, session],
+  )
+  const setTodoDone = useCallback(
+    async (id: string, done: boolean) => {
+      await todosApi.update(id, { done })
+      await session.syncNow()
+    },
+    [todosApi, session],
+  )
   const { userId, ready, version, syncState, syncError, live } = state
   const mail = useMemo<Mail>(
     () => ({
@@ -214,8 +246,13 @@ export function MailProvider({ children }: { children: ReactNode }) {
       send,
       cancelOutgoing,
       touch,
+      todos,
+      todosOfThread,
+      messages,
+      makeTodo,
+      setTodoDone,
     }),
-    [userId, touch, ready, version, syncState, syncError, lookupError, live, mailAccounts, folders, act, inbox, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing],
+    [userId, touch, ready, version, syncState, syncError, lookupError, live, mailAccounts, folders, act, inbox, thread, body, unscannedLink, syncNow, store, session, signatures, suggestContacts, send, cancelOutgoing, todos, todosOfThread, messages, makeTodo, setTodoDone],
   )
 
   return <MailContext.Provider value={mail}>{children}</MailContext.Provider>

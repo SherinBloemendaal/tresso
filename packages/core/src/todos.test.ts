@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Todo } from './todos'
-import { compareTodos, dueLabel, groupTodos, parseQuickAdd, todoSection } from './todos'
+import type { SyncedMessage } from './sync/types'
+import { compareTodos, dueLabel, groupTodos, parseQuickAdd, todoSection, todoSourceMessage } from './todos'
 
 /** Tuesday 20 October 2026, 10:00 on this device. */
 const now = new Date(2026, 9, 20, 10, 0)
@@ -66,6 +67,17 @@ describe('todos', () => {
     expect(dueLabel(todo('e', { dueDate: '2027-01-04' }), now)).toBe('Mon 4 Jan 2027')
     expect(dueLabel(todo('f'), now)).toBeNull()
     expect(dueLabel(todo('g', { completedAt: new Date(2026, 9, 19, 15, 0).toISOString() }), now)).toBe('Done yesterday')
+  })
+
+  it('makes a todo from the newest email someone else sent, or the newest one when the user wrote them all', () => {
+    const email = (id: string, from: string) => ({ id, from: { address: from, name: null } }) as SyncedMessage
+    const anna = email('m1', 'anna@partner.example')
+    const lisa = email('m2', 'lisa@partner.example')
+    const reply = email('m3', 'Kim@Company.example')
+
+    expect(todoSourceMessage([anna, lisa, reply], ['kim@company.example'])?.id).toBe('m2')
+    expect(todoSourceMessage([reply], ['kim@company.example'])?.id).toBe('m3')
+    expect(todoSourceMessage([], ['kim@company.example'])).toBeNull()
   })
 
   describe('quick add', () => {
