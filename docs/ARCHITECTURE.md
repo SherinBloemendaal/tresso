@@ -1456,7 +1456,9 @@ edition hands over by mail.
   `mail:write`). The API checks that the forward came from the message's account, answers the message handed over,
   went to the delegate, was not cancelled or failed and handed over nothing before (one hand-over per forward, also
   for two requests at once), and that the due date lies ahead (at most a year; stored in UTC, whatever zone the client
-  wrote). The clients refuse a second submit while the first is under way. When recording fails, the forward is
+  wrote). The clients refuse a second submit while the first is under way. When files of the original could not be
+  scanned, the outbox's question comes back as an `UnscannedFilesError` and the clients offer "Hand over anyway",
+  which forwards them with `acceptUnscanned`. When recording fails, the forward is
   cancelled and its draft thrown away. Until the forward leaves (the undo window), Undo cancels it and withdraws the
   hand-over (`DELETE`); afterwards the hand-over stays.
 - **Entity** `hand_over` (owner-scoped, tracked for the delta, tombstone type `handOver`): account, message handed
