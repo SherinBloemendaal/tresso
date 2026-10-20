@@ -71,7 +71,27 @@ final readonly class MailNotifier
      */
     public function consider(User $user, array $classified, \DateTimeImmutable $now): void
     {
-        $fresh = array_filter($classified, static fn (Message $message): bool => $message->getReceivedAt() >= $now->modify('-'.self::FRESH));
+        $this->plan($user, array_values(array_filter($classified, static fn (Message $message): bool => $message->getReceivedAt() >= $now->modify('-'.self::FRESH))), $now);
+    }
+
+    /**
+     * Called when a batch delivers held mail, in that transaction: it was new when it arrived, and its notification
+     * waited with it. Plans one for each message that needs the user now, however long ago it was received; mail
+     * notified before is not notified again. Mail the user's own doing delivers early never comes here, as
+     * classification that runs again never does.
+     *
+     * @param list<Message> $released
+     */
+    public function released(User $user, array $released, \DateTimeImmutable $now): void
+    {
+        $this->plan($user, $released, $now);
+    }
+
+    /**
+     * @param list<Message> $fresh
+     */
+    private function plan(User $user, array $fresh, \DateTimeImmutable $now): void
+    {
         if ([] === $fresh) {
             return;
         }
@@ -107,13 +127,14 @@ final readonly class MailNotifier
     }
 
     /**
-     * Whether a message needs the user now: judged `do` or `delegate`, unread, in an inbox, and not in a conversation
-     * the user placed themselves elsewhere (their placement wins over the message's own verdict). Checked when a
-     * notification is planned and again when it is delivered.
+     * Whether a message needs the user now: judged `do` or `delegate`, unread, in an inbox, not waiting for a batch
+     * (held mail notifies when its batch delivers it, see {@see released()}), and not in a conversation the user placed
+     * themselves elsewhere (their placement wins over the message's own verdict). Checked when a notification is
+     * planned and again when it is delivered.
      */
     private function needsTheUser(Message $message): bool
     {
-        if ($message->isSeen() || !self::isDoOrDelegate($message->getVerdict())) {
+        if ($message->isSeen() || $message->isHeld() || !self::isDoOrDelegate($message->getVerdict())) {
             return false;
         }
         $thread = $message->getThread();

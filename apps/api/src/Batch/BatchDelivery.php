@@ -10,6 +10,7 @@ use App\Entity\Category;
 use App\Entity\Message;
 use App\Entity\Thread;
 use App\Entity\User;
+use App\Notification\MailNotifier;
 use App\Realtime\AfterCommitDispatcher;
 use App\Realtime\TransactionListener;
 use Doctrine\DBAL\Connection;
@@ -40,6 +41,7 @@ final class BatchDelivery implements TransactionListener, ResetInterface
         private readonly Connection $connection,
         private readonly AfterCommitDispatcher $afterCommit,
         private readonly UserLocks $locks,
+        private readonly MailNotifier $mailNotifier,
     ) {
     }
 
@@ -126,7 +128,7 @@ final class BatchDelivery implements TransactionListener, ResetInterface
 
     /**
      * Delivers a conversation the user placed: every held message of it, so none arrives (and notifies) later with
-     * its batch.
+     * its batch. The user is looking at it, so it does not notify now either (see {@see delivered()}).
      */
     public function releaseThread(Thread $thread): void
     {
@@ -152,14 +154,19 @@ final class BatchDelivery implements TransactionListener, ResetInterface
     {
         $this->locks->classification($userId);
         $more = false;
+        $messages = [];
         foreach ([Message::class, Thread::class] as $class) {
             $due = $this->heldOf($class, $userId, $now);
             foreach ($due as $entity) {
                 $entity->release($entity->getHeldUntil());
+                if ($entity instanceof Message) {
+                    $messages[] = $entity;
+                }
             }
             $more = $more || \count($due) >= self::RELEASE_BATCH;
         }
         $this->entityManager->flush();
+        $this->delivered($messages, $now);
 
         return $more;
     }
@@ -180,6 +187,27 @@ final class BatchDelivery implements TransactionListener, ResetInterface
             ) due GROUP BY owner_id ORDER BY MIN(held_until) LIMIT :limit',
             ['now' => $now->format('Y-m-d H:i:s'), 'limit' => $limit],
         );
+    }
+
+    /**
+     * Mail whose batch came notifies now, as new mail does when it arrives (see {@see MailNotifier::released()}): once,
+     * and only when it still needs the user. Mail delivered early by the user's own doing (a correction, a changed
+     * rule or smart inbox, batches switched off) does not: like classification that runs again, it would push a burst
+     * while the user is busy in Tresso.
+     *
+     * @param list<Message> $messages
+     */
+    private function delivered(array $messages, \DateTimeImmutable $now): void
+    {
+        $byOwner = [];
+        foreach ($messages as $message) {
+            $owner = $message->getMailAccount()->getOwner();
+            $byOwner[$owner->getId()->toRfc4122()][0] = $owner;
+            $byOwner[$owner->getId()->toRfc4122()][1][] = $message;
+        }
+        foreach ($byOwner as [$owner, $ownMessages]) {
+            $this->mailNotifier->released($owner, $ownMessages, $now);
+        }
     }
 
     /**
