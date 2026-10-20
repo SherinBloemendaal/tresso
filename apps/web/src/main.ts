@@ -11,6 +11,8 @@ import App from './App.vue'
 import router from './router'
 import { config } from './config'
 import { isDesktop, onDeepLinks } from './platform/desktop'
+import { onNotificationClick } from './platform/notifier'
+import { onPushClick } from './platform/webPush'
 import { signInRoute } from './platform/signInLinks'
 import { useAuthStore } from './stores/auth'
 
@@ -29,6 +31,11 @@ if (isDesktop) {
       void router.replace(route)
     }
   })
+  // A click on a mail notification opens its conversation.
+  await onNotificationClick((path) => void router.push(path))
+} else {
+  // A click on a browser notification while Tresso is open opens it here.
+  onPushClick((path) => void router.push(path))
 }
 
 app.mount('#app')

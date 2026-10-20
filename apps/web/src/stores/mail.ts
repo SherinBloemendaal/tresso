@@ -21,6 +21,7 @@ import {
   type DraftAttachmentLink,
   type SyncedFolder,
   type SyncedMailAccount,
+  type SyncedMailNotification,
   type SyncedMessage,
   type SyncedOutgoingMessage,
   type SyncedSignature,
@@ -33,7 +34,7 @@ import {
 } from '@tresso/core'
 import type { Contact, Conversation, Draft, ListScope } from '@/mail/db'
 import { deleteMailStore, openMailStore } from '@/mail/store'
-import { freshArrivals, mailNotifications } from '@/mail/mailNotifications'
+import { forTheDesktop, mailNotifications } from '@/mail/mailNotifications'
 import { notifier } from '@/platform/notifier'
 import { useAuthStore } from '@/stores/auth'
 
@@ -86,6 +87,10 @@ export const useMailStore = defineStore('mail', () => {
    * arrived while the app was closed) does not pop up all at once. null until then.
    */
   let notifyingSince: number | null = null
+  /** Mail notifications the server delivered, from the pages applied since they were last shown. */
+  let delivered: SyncedMailNotification[] = []
+  /** The mail notifications shown in this session, so a page that brings one again never shows it twice. */
+  const shown = new Set<string>()
   /**
    * Raised by every start and stop. A start overtaken while it waited (by a stop, or by another start) gives up, so it
    * never overwrites a newer session's state; the copy it opened is closed again.
@@ -138,9 +143,10 @@ export const useMailStore = defineStore('mail', () => {
       store: database,
       pageSize: PAGE_SIZE,
       fetchPage: (since, limit) => auth.api<ChangePage>(`/api/v1/sync/changes?since=${since}&limit=${limit}`),
-      onApplied: () => {
+      onApplied: (page) => {
+        delivered.push(...page.mailNotifications)
         void refresh()
-        void notifyArrivals()
+        void notifyMail()
       },
     })
     realtime = new RealtimeClient({
@@ -170,7 +176,7 @@ export const useMailStore = defineStore('mail', () => {
       syncState.value = 'idle'
       syncError.value = null
       if (notifyingSince === null) {
-        db.value?.takeArrivals()
+        delivered = []
         notifyingSince = Date.now()
       }
     } catch (error) {
@@ -190,18 +196,23 @@ export const useMailStore = defineStore('mail', () => {
     await refresh()
   }
 
-  /** Tells the user about new mail that needs them, unless they are looking at Tresso already. */
-  async function notifyArrivals(): Promise<void> {
-    const database = db.value
-    if (database === null || notifyingSince === null) {
+  /**
+   * Shows the mail notifications the server delivered to the desktop, unless the user is looking at Tresso already.
+   * The server decided they are due (a new message judged `do` or `delegate`, unread in an inbox, outside a hold); the
+   * phone and browsers got the same ones by push.
+   */
+  async function notifyMail(): Promise<void> {
+    if (notifyingSince === null) {
       return
     }
-    const arrivals = freshArrivals(database.takeArrivals(), notifyingSince)
-    if (arrivals.length === 0 || notifier === null || document.hasFocus()) {
+    const due = forTheDesktop(delivered, notifyingSince, shown)
+    delivered = []
+    if (due.length === 0 || notifier === null || document.hasFocus()) {
       return
     }
+    due.forEach((notification) => shown.add(notification.id))
     try {
-      await notifier.show(mailNotifications(arrivals))
+      await notifier.show(mailNotifications(due))
     } catch (error) {
       console.error('Showing a notification failed', error)
     }
@@ -220,6 +231,8 @@ export const useMailStore = defineStore('mail', () => {
     realtime = null
     engine = null
     notifyingSince = null
+    delivered = []
+    shown.clear()
     db.value = null
     userId = null
     live.value = false
