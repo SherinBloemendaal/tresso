@@ -17,6 +17,7 @@ import {
   nudgeText,
   openHandOversOf,
   textToHtml,
+  UnscannedFilesError,
   type CreateHandOverRequest,
   type NudgeRequest,
   type UpdateHandOverRequest,
@@ -140,6 +141,7 @@ describe('HandOverFlow', () => {
   let createFails: unknown
   let cancelFails: unknown
   let originalFiles: MessageAttachment[]
+  let unscannedRefused: boolean
   let flow: HandOverFlow
 
   beforeEach(async () => {
@@ -158,6 +160,7 @@ describe('HandOverFlow', () => {
     createFails = null
     cancelFails = null
     originalFiles = []
+    unscannedRefused = false
     const explain = (error: unknown) => ({ message: error instanceof Error ? error.message : String(error), violations: error instanceof ApiFailure ? error.violations : {} })
     const cancel = async (id: string) => {
       if (cancelFails !== null) throw cancelFails
@@ -172,6 +175,9 @@ describe('HandOverFlow', () => {
       defaultAccount: () => 'work',
       body: async () => ({ html: '<p>Charged twice</p>', text: null, attachments: originalFiles }),
       send: async (request) => {
+        if (unscannedRefused && request.acceptUnscanned !== true) {
+          throw new ApiFailure(422, { acceptUnscanned: 'invoice.pdf could not be scanned. Send it anyway?' })
+        }
         sent.push(request)
         return outgoing('forward-1', 'scheduled')
       },
@@ -228,12 +234,27 @@ describe('HandOverFlow', () => {
   })
 
   it("takes the original's files along", async () => {
-    originalFiles = [{ id: 'invoice', filename: 'invoice.pdf', contentType: 'application/pdf', size: 100, inline: false, contentId: null, scanStatus: 'clean', url: null }]
+    originalFiles = [{ id: 'invoice', filename: 'invoice.pdf', contentType: 'application/pdf', size: 100, inline: false, contentId: null, scanStatus: 'clean', access: 'allowed', scanSignature: null, scanFailure: null, url: null }]
 
     await flow.handOver(original, input)
 
     expect(drafts.calls.filter((call) => call.startsWith('forward'))).toHaveLength(1)
     expect(sent[0]!.draftId).toBeDefined()
+  })
+
+  it('asks before forwarding files that could not be scanned, and forwards them once confirmed', async () => {
+    unscannedRefused = true
+
+    await expect(flow.handOver(original, input)).rejects.toThrow(new UnscannedFilesError('invoice.pdf could not be scanned. Send it anyway?'))
+    expect(created).toEqual([])
+    expect(await store.drafts()).toEqual([])
+    expect(composer.state.unscannedToConfirm).toBeNull()
+
+    await flow.handOver(original, { ...input, acceptUnscanned: true })
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.acceptUnscanned).toBe(true)
+    expect(created).toHaveLength(1)
   })
 
   it('stops the forward when the hand-over cannot be recorded', async () => {

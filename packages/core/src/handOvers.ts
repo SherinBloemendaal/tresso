@@ -157,6 +157,8 @@ export interface HandOverInput {
   dueAt: Date
   /** How the due date reads in the forward, in the writer's words ("Friday 24 October"). */
   dueLabel: string
+  /** The user confirmed forwarding files that could not be scanned (after an {@link UnscannedFilesError}). */
+  acceptUnscanned?: boolean
 }
 
 /** A hand-over just made, which can be taken back until its forward leaves. */
@@ -179,6 +181,14 @@ export class HandOverError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'HandOverError'
+  }
+}
+
+/** Files of the original could not be scanned: they go along only once the user confirms (`acceptUnscanned`). */
+export class UnscannedFilesError extends HandOverError {
+  constructor(message: string) {
+    super(message)
+    this.name = 'UnscannedFilesError'
   }
 }
 
@@ -221,11 +231,13 @@ export class HandOverFlow {
       throw new HandOverError(reason)
     }
     composer.update({ to: [input.delegate], html: noteHtml(input.note, input.dueLabel) })
-    const forward = await composer.send()
+    const forward = await composer.send(undefined, input.acceptUnscanned ?? false)
     if (forward === null) {
-      const reason = composer.state.error ?? 'The forward could not be sent.'
+      const unscanned = composer.state.unscannedToConfirm
+      const reason = composer.state.error ?? unscanned?.message ?? 'The forward could not be sent.'
+      composer.keepEditing()
       await composer.discard()
-      throw new HandOverError(reason)
+      throw unscanned === null ? new HandOverError(reason) : new UnscannedFilesError(reason)
     }
     const undoable = composer.state.undoable
     let handOver: SyncedHandOver
