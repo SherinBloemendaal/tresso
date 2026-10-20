@@ -150,6 +150,27 @@ final class MailNotificationTest extends DatabaseTestCase
         self::assertSame(1, $this->countRows('SELECT COUNT(*) FROM mail_notification WHERE message_id = (SELECT id FROM message WHERE subject = :s)', ['s' => 'Budget review']), 'The row stays, so the mail never notifies again.');
     }
 
+    public function testANotificationThatCanNoLongerBeDeliveredIsClearedButOneStillDueKeepsItsText(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Budget review', ['snippet' => 'Can you check the numbers?']),
+            $this->message('2', 'Offsite', ['snippet' => 'Where do we meet?']),
+        ]]);
+        $this->classifyAndSend();
+        // Both still waiting: one whose time passed long ago (it would be dropped, never delivered), one held until later.
+        $this->connection()->executeStatement("UPDATE mail_notification SET delivered_at = NULL, dropped_at = NULL, fire_at = NOW() - interval '8 days' WHERE message_id = (SELECT id FROM message WHERE subject = 'Budget review')");
+        $this->connection()->executeStatement("UPDATE mail_notification SET delivered_at = NULL, dropped_at = NULL, fire_at = NOW() + interval '1 hour' WHERE message_id = (SELECT id FROM message WHERE subject = 'Offsite')");
+
+        $cleared = static::getContainer()->get(MailNotificationRetention::class)->scrub(new \DateTimeImmutable());
+
+        self::assertSame(1, $cleared);
+        $rows = $this->connection()->fetchAllAssociative('SELECT m.subject, n.title, n.sealed_body FROM mail_notification n JOIN message m ON m.id = n.message_id ORDER BY m.subject');
+        self::assertSame(['subject' => 'Budget review', 'title' => '', 'sealed_body' => null], $rows[0]);
+        self::assertSame('Anna de Vries', $rows[1]['title'], 'A delivery still due keeps what it says.');
+        self::assertNotNull($rows[1]['sealed_body']);
+        self::assertLessThan(strtotime('+'.MailNotificationRetention::KEEP), strtotime('+'.MailNotifier::MAX_LATE), 'Cleared only once it can never be delivered.');
+    }
+
     public function testNotificationTextFromBeforeEncryptionIsSealedByReencryption(): void
     {
         $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review', ['snippet' => 'Can you check the numbers?'])]]);

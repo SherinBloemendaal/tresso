@@ -51,7 +51,7 @@ framework:
                     max_retries: 5
                     delay: 1000
                     multiplier: 3
-            # Background re-encryption: the lowest priority, consumed after everything else.
+            # Background re-encryption, with its own consumer: a long run never holds up mail or pushes.
             reencrypt:
                 dsn: '%env(MESSENGER_TRANSPORT_DSN)%_reencrypt'
                 retry_strategy:
