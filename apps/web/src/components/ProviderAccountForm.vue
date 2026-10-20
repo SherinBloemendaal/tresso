@@ -4,7 +4,7 @@ import { provideRequiredFields } from '@/forms/required'
 import { ref, watch } from 'vue'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
-import { providerName, type MailAccount, type OAuthProviderId } from '@tresso/core'
+import { providerName, type MailAccount, type OAuthProviderId, type ProviderFeature } from '@tresso/core'
 import { ApiError, errorMessage } from '@/api/errors'
 import { providerAccountSchema, type ProviderAccountValues } from '@/forms/accounts'
 import { useAccountsStore } from '@/stores/accounts'
@@ -50,12 +50,15 @@ const save = handleSubmit(async (values) => {
   }
 })
 
-/** Leaves for the provider's sign-in page; the API sends the browser back to the accounts page. */
-async function signInAgain(): Promise<void> {
+/**
+ * Leaves for the provider's sign-in page; the API sends the browser back to the accounts page. Allowing calendars asks
+ * for just them, on top of what the account allows already.
+ */
+async function signInAgain(features?: ProviderFeature[]): Promise<void> {
   signingIn.value = true
   error.value = null
   try {
-    window.location.assign(await accounts.startProviderSignIn(props.provider, props.account.id))
+    window.location.assign(await accounts.startProviderSignIn(props.provider, props.account.id, features))
   } catch (e) {
     error.value = errorMessage(e)
     signingIn.value = false
@@ -76,13 +79,18 @@ async function signInAgain(): Promise<void> {
       {{ providerName(provider) }} account settings.
     </p>
 
+    <p v-if="account.calendarStatus === 'not_granted'" class="calendars" role="status">
+      Tresso may not use the calendars of this account yet.
+      <button type="button" class="button button-quiet" :disabled="signingIn" @click="signInAgain(['calendar'])">Allow calendar access</button>
+    </p>
+
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
     <p v-if="message" class="done" role="status">{{ message }}</p>
 
     <div class="actions">
       <button type="submit" class="button button-primary" :disabled="saving">Save changes</button>
       <button type="button" class="button button-quiet" :disabled="saving" @click="reset">Undo changes</button>
-      <button type="button" class="button button-quiet" :disabled="signingIn" @click="signInAgain">
+      <button type="button" class="button button-quiet" :disabled="signingIn" @click="signInAgain()">
         {{ signingIn ? `Opening ${providerName(provider)}…` : `Sign in with ${providerName(provider)} again` }}
       </button>
     </div>
@@ -98,6 +106,13 @@ async function signInAgain(): Promise<void> {
 .signs-in {
   margin: 0;
   color: var(--ink-2);
+}
+.calendars {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
 }
 .actions {
   display: flex;

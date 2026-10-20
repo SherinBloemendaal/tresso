@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { MailAccount, MailAccountUpdate, NewMailAccount, OAuthProviderId, OAuthProviderInfo, ProviderAuthorization, SuggestedServerSettings } from '@tresso/core'
+import type { MailAccount, MailAccountUpdate, NewMailAccount, OAuthProviderId, OAuthProviderInfo, ProviderAuthorization, ProviderFeature, SuggestedServerSettings } from '@tresso/core'
 import { useAuthStore } from '@/stores/auth'
 
 /** Mail account settings, read and written through the API (the synced copy has no server settings). */
@@ -49,12 +49,13 @@ export const useAccountsStore = defineStore('accounts', () => {
 
   /**
    * Starts a sign-in at the provider and returns where to send the browser. With an account id, signs that account in
-   * again (after a failed sign-in).
+   * again (after a failed sign-in), or allows more of it (its calendars). The provider asks for what the account
+   * already allows too, so nothing allowed before is lost.
    */
-  async function startProviderSignIn(provider: OAuthProviderId, mailAccountId?: string): Promise<string> {
+  async function startProviderSignIn(provider: OAuthProviderId, mailAccountId?: string, features: ProviderFeature[] = ['mail', 'calendar']): Promise<string> {
     const started = await auth.send<ProviderAuthorization>('POST', '/api/v1/provider-authorizations', {
       provider,
-      features: ['mail'],
+      features,
       ...(mailAccountId === undefined ? {} : { mailAccountId }),
     })
 
