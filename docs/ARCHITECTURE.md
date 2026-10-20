@@ -351,6 +351,36 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   trash and untrash through `messages.trash`/`untrash`, and a move adds the target label and removes the source one.
   Microsoft 365 accounts PATCH `isRead` and `flag` and move with `/move`; immutable ids keep the message's id, so the
   worker always reports the uid in the target.
+- **Bulk actions on a scope:** `POST /api/v1/bulk-actions` (scope `mail:write`) marks read, archives, trashes or
+  moves every conversation of a scope, however many: what a smart inbox lists (`in: smartInbox`), what the inboxes
+  list, or the whole mailbox outside Trash, Spam and Drafts, narrowed to one account (required for a move, which stays
+  within one account), one sender, conversations whose newest message is older than `olderThanDays`, or ones with a
+  message of at least `largerThan` bytes. The lists match the clients' `inList`. It answers 202 at once and works
+  through the conversations on the Messenger transport `bulk`, ten batches per handled message and the rest queued
+  again, each batch its own short transaction of at most 200 conversations and about 500 messages (`thread.message_count`
+  keeps a long conversation from making one batch huge), through the same `MessageActions` a single action uses, so
+  the delta and the mail servers follow batch by batch. Batches go in thread id order after a stored cursor, so a
+  repeated or late message picks up where the last commit left off. Only mail that reached Tresso before the action
+  started is taken: ids are UUIDv7, so messages and threads whose id sorts below the action's own id are older. Every
+  account in scope must have the folder an archive or trash needs before anything starts. `GET
+  /api/v1/bulk-actions/{id}` reports the progress (`running`, `done`, `failed`); a smart inbox or target folder
+  deleted meanwhile stops the run and keeps what it did, as does a run that still fails after its retries.
+  `GET /api/v1/bulk-selection` counts a scope (conversations, messages, accounts) before the user confirms.
+- **Their undo** works like a single action's (`undoPlan` in `packages/core`): each batch records, per message it
+  moved, where it went and the one folder it came from (`bulk_action_move`); messages that came from several folders,
+  or were archived into Gmail's All Mail, are only counted (`unrestorable`). `POST /api/v1/bulk-actions/{id}/undo`
+  moves them back in batches, only the copies still where the action put them. Marking read has no undo, as in the
+  clients. A finished action, and its undo, is forgotten a day later (when the user starts the next one).
+- **Senders and cleanup suggestions:** `GET /api/v1/smart-inboxes/{id}/senders` lists who sends what a smart inbox
+  lists, by conversations, with messages, unread and the newest, without the user's own addresses (at most 100).
+  `GET /api/v1/cleanup-suggestions` applies fixed rules, nothing guessed, each with its numbers and the bulk action
+  (`action` and `scope`) that cleans it up: a sender of mailing-list mail (List-Unsubscribe or List-Id) with at
+  least 3 unread in the inboxes and none of their mail opened in 90 days (archive), any other sender with at least 10
+  (archive), 10 or more conversations in the Notifications or Advertising smart inbox older than 30 days (archive),
+  and 3 or more conversations with a message of 5 MB or more and no new mail for a year (Trash). Every query starts
+  from the owner's accounts; indexes on `message (mail_account_id, from_address, received_at)`,
+  `message (mail_account_id, size)` and `thread (category_id, last_message_at)` serve the per-sender, size and
+  smart inbox age lookups.
 
 - **One-click unsubscribe:** the outbox run also makes the user's RFC 8058 unsubscribe requests for the accounts it
   leases (`/internal/sync/accounts/{id}/unsubscribes/claim` and `.../{request}/report`, a 5 minute claim, announced
@@ -805,6 +835,15 @@ same exact undo as a single conversation (`apps/web/src/mail/useMessageActions.t
 selection exists (not in menus or fields), and the conversation's own shortcuts wait. Conversations that leave the
 mailbox meanwhile (sync from another device) drop out of the selection, and the undo puts back what it exactly can,
 saying how many messages that were in several folders it leaves.
+
+Bulk management in the web client: a smart inbox's list links to its senders (`SmartInboxManage`), with how many
+conversations each has, how much is read and when they last wrote. Its toolbar marks read, archives, moves (to a
+folder of one account, taking that account's conversations) or deletes everything in the smart inbox, or only what is
+older than a week, a month, three months or a year, after asking with the count from the server; each sender's row
+does the same for that sender at once. Clean up in the sidebar shows the cleanup suggestions, each with what its rule
+found and one button. The server works through the action; the web client asks how it is doing (soon at first, then
+every four seconds), shows the progress, pulls the delta when it is done and says how it went with the undo
+(`apps/web/src/stores/bulk.ts`). One bulk action runs at a time.
 
 Writing mail in the web client: reply and reply all pick recipients from Reply-To, To and Cc without the user's own
 addresses, and quote the original (helpers in `packages/core/src/compose.ts`, shared with mobile). Every message is

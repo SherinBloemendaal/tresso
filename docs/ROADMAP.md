@@ -132,6 +132,8 @@ Tresso Cloud: teams, shared inboxes, assignments, internal comments, delegation 
   realtime, no downloads before a scan, rescans from the console, scan states on the web client's attachments
 - [x] 4.2 Bulk actions in the web client: select conversations (checkboxes, shift for a range), act on all of them,
   select everything from their senders or older than an age
-- [ ] 4.3 Bulk management by smart inbox, cleanup suggestions (after 2.1)
+- [x] 4.3 Bulk management by smart inbox, cleanup suggestions (after 2.1): act on everything a smart inbox lists, one
+  of its senders or what is older than an age, in batches on the server with the exact undo; suggestions from fixed
+  rules (newsletters and senders never opened, old notifications, large old mail) with one click each
 
 Tresso Cloud: API keys and third-party apps, webhooks, MCP endpoint, developer tools, statistics, Year in mail.
