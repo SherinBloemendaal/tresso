@@ -134,6 +134,23 @@ describe('WaitingOnView', () => {
     wrapper.unmount()
   })
 
+  it('nudges once when Cmd+Enter is pressed again while the first is on its way', async () => {
+    let finish!: () => void
+    const nudge = vi.spyOn(handOvers, 'nudge').mockImplementation(() => new Promise<void>((resolve) => (finish = resolve)))
+    await router.push({ name: 'waiting', query: { nudge: 'late' } })
+    const wrapper = await mountView()
+
+    await wrapper.get('.followup form.draft').trigger('keydown', { key: 'Enter', metaKey: true })
+    await wrapper.get('.followup form.draft').trigger('keydown', { key: 'Enter', metaKey: true })
+    await settle()
+    await wrapper.get('.followup form.draft').trigger('keydown', { key: 'Enter', metaKey: true })
+    await settle()
+
+    expect(nudge).toHaveBeenCalledTimes(1)
+    finish()
+    wrapper.unmount()
+  })
+
   it('opens the follow-up in the composer to edit it first', async () => {
     const editFollowUp = vi.spyOn(handOvers, 'editFollowUp').mockImplementation(async () => {})
     await router.push({ name: 'waiting', query: { nudge: 'late' } })

@@ -5,7 +5,7 @@ import { toTypedSchema } from '@vee-validate/zod'
 import { dueChoices, firstName, MAX_NOTE, type DueChoice, type SyncedMessage } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
 import FieldLabel from '@/forms/FieldLabel.vue'
-import { handOverSchema, pickedDue, type HandOverValues } from '@/forms/handOver'
+import { dayValue, handOverSchema, pickedDue, type HandOverValues } from '@/forms/handOver'
 import { provideRequiredFields } from '@/forms/required'
 import { dueLabel, senderName } from '@/mail/format'
 import { useHandOversStore } from '@/stores/handOvers'
@@ -22,7 +22,7 @@ provideRequiredFields(schema)
 const choices = dueChoices()
 const choiceText: Record<DueChoice, string> = { today: 'Today', tomorrow: 'Tomorrow', friday: 'Friday', nextWeek: 'Next week' }
 
-const { defineField, handleSubmit, errors } = useForm<HandOverValues>({
+const { defineField, handleSubmit, errors, isSubmitting } = useForm<HandOverValues>({
   validationSchema: toTypedSchema(schema),
   initialValues: { delegate: [], note: '', due: choices[0]!.key, dueDay: '' },
 })
@@ -33,7 +33,10 @@ const [dueDay] = defineField('dueDay')
 
 const ui = reactive({ busy: false, error: null as string | null })
 const firstField = ref<HTMLElement | null>(null)
-const minDay = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
+// Today in the user's own calendar; a day whose due time passed already is refused by the schema.
+const minDay = dayValue(new Date())
+/** A hand-over is under way: from the first press on, while the form validates, until the server answered. */
+const submitting = computed(() => isSubmitting.value || ui.busy)
 
 const person = computed(() => delegate.value?.[0] ?? null)
 const submitText = computed(() => (person.value === null ? 'Hand over' : `Hand over to ${firstName(person.value)}`))
@@ -61,7 +64,7 @@ const submit = handleSubmit(async (values) => {
 })
 
 function cancel(): void {
-  if (!ui.busy) {
+  if (!submitting.value) {
     handOvers.close()
   }
 }
@@ -72,7 +75,10 @@ function keydown(event: KeyboardEvent): void {
     cancel()
   } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault()
-    void submit()
+    // A second press while the first is on its way would forward the conversation twice.
+    if (!submitting.value) {
+      void submit()
+    }
   }
 }
 
@@ -89,7 +95,7 @@ onMounted(async () => {
         <h2 id="hand-over-title">Hand over</h2>
         <p class="about">{{ message.subject || '(no subject)' }}, from {{ senderName(message.from) }}</p>
       </header>
-      <form class="form" novalidate @submit.prevent="submit">
+      <form class="form" novalidate @submit.prevent="!submitting && submit()">
         <div ref="firstField">
           <RecipientField v-model="delegate" label="Hand over to" :error="errors.delegate" />
         </div>
@@ -125,8 +131,8 @@ onMounted(async () => {
         <p v-if="ui.error" class="form-error" role="alert">{{ ui.error }}</p>
 
         <footer class="actions">
-          <button type="button" class="button button-quiet" :disabled="ui.busy" @click="cancel">Cancel <kbd>Esc</kbd></button>
-          <button type="submit" class="button button-primary" :disabled="ui.busy">{{ ui.busy ? 'Handing over…' : submitText }}</button>
+          <button type="button" class="button button-quiet" :disabled="submitting" @click="cancel">Cancel <kbd>Esc</kbd></button>
+          <button type="submit" class="button button-primary" :disabled="submitting">{{ submitting ? 'Handing over…' : submitText }}</button>
         </footer>
       </form>
     </section>

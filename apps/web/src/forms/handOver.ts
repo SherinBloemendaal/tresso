@@ -6,6 +6,11 @@ const person = z.object({
   name: z.string().nullable(),
 })
 
+/** A day as a date input writes it (yyyy-mm-dd), in the local calendar rather than UTC's. */
+export function dayValue(at: Date): string {
+  return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`
+}
+
 /** A picked day (yyyy-mm-dd, the date input's value) as the moment it is due on that day. */
 export function pickedDue(day: string): Date | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day)

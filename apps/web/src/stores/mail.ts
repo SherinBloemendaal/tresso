@@ -244,7 +244,9 @@ export const useMailStore = defineStore('mail', () => {
 
   /**
    * Tells the user about hand-overs whose due date passed without a reply: in the app always (see takeOverdue), and
-   * natively when they are not looking at Tresso.
+   * natively when they are not looking at Tresso. This is the desktop app's only way to show them: the server's
+   * dispatcher claims the desktop app's device without sending anything (it has no push service), and the delta's
+   * `notifications` carry calendar notifications only, so one overdue hand-over is shown once.
    */
   async function notifyOverdue(): Promise<void> {
     const database = db.value
