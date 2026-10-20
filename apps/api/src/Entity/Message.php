@@ -68,8 +68,13 @@ class Message implements TracksChanges
     #[ORM\Column(type: Types::JSON)]
     private array $recipients = [];
 
+    /** The snippet of a message from before encryption; new messages keep it sealed in $sealedSnippet. */
     #[ORM\Column(length: 512)]
     private string $snippet = '';
+
+    /** The snippet sealed with the owner's field key; see {@see \App\Mail\MessageFields}. */
+    #[ORM\Column(type: Types::TEXT, nullable: true)]
+    private ?string $sealedSnippet = null;
 
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $sentAt = null;
@@ -104,6 +109,10 @@ class Message implements TracksChanges
 
     #[ORM\Column(length: 255)]
     private string $rawObjectKey;
+
+    /** The key version the raw MIME is encrypted with; null for plaintext stored before encryption. */
+    #[ORM\Column(nullable: true)]
+    private ?int $rawKeyVersion;
 
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(onDelete: 'SET NULL')]
@@ -144,6 +153,7 @@ class Message implements TracksChanges
         ?string $fromName,
         \DateTimeImmutable $receivedAt,
         string $rawObjectKey,
+        int $rawKeyVersion,
     ) {
         $this->id = Uuid::v7();
         $this->mailAccount = $mailAccount;
@@ -154,6 +164,7 @@ class Message implements TracksChanges
         $this->fromName = $fromName;
         $this->receivedAt = $receivedAt;
         $this->rawObjectKey = $rawObjectKey;
+        $this->rawKeyVersion = $rawKeyVersion;
     }
 
     public function getId(): Uuid
@@ -219,14 +230,21 @@ class Message implements TracksChanges
         $this->recipients = $recipients;
     }
 
-    public function getSnippet(): string
+    /** The snippet from before encryption; empty once it is sealed. */
+    public function getLegacySnippet(): string
     {
         return $this->snippet;
     }
 
-    public function setSnippet(string $snippet): void
+    public function getSealedSnippet(): ?string
     {
-        $this->snippet = mb_substr($snippet, 0, 512);
+        return $this->sealedSnippet;
+    }
+
+    public function sealSnippet(string $sealed): void
+    {
+        $this->sealedSnippet = $sealed;
+        $this->snippet = '';
     }
 
     public function getSentAt(): ?\DateTimeImmutable
@@ -308,6 +326,18 @@ class Message implements TracksChanges
     public function getRawObjectKey(): string
     {
         return $this->rawObjectKey;
+    }
+
+    public function getRawKeyVersion(): ?int
+    {
+        return $this->rawKeyVersion;
+    }
+
+    /** The raw MIME was encrypted again (or for the first time) and is now stored at $key. */
+    public function rawReencrypted(string $key, int $keyVersion): void
+    {
+        $this->rawObjectKey = $key;
+        $this->rawKeyVersion = $keyVersion;
     }
 
     public function getCategory(): ?Category

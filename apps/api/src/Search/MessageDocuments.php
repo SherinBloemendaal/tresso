@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Search;
 
+use App\Mail\MessageFields;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Types\Types;
 use Symfony\Component\Uid\Uuid;
@@ -17,7 +18,10 @@ use Symfony\Component\Uid\Uuid;
  */
 final readonly class MessageDocuments
 {
-    public function __construct(private Connection $connection)
+    public function __construct(
+        private Connection $connection,
+        private MessageFields $fields,
+    )
     {
     }
 
@@ -35,8 +39,8 @@ final readonly class MessageDocuments
         do {
             /** @var list<array<string, mixed>> $rows */
             $rows = $this->connection->fetchAllAssociative(
-                "SELECT m.id, m.thread_id, m.mail_account_id, m.subject, m.from_address, m.from_name, m.recipients, m.snippet,
-                        m.received_at, m.seen, m.flagged, m.has_attachments, m.change_seq, t.text AS body_text,
+                "SELECT m.id, m.thread_id, m.mail_account_id, m.subject, m.from_address, m.from_name, m.recipients, m.snippet, m.sealed_snippet,
+                        m.received_at, m.seen, m.flagged, m.has_attachments, m.change_seq, t.text AS body_text, t.sealed_text AS sealed_body_text,
                         COALESCE((SELECT json_agg(l.folder_id ORDER BY l.folder_id) FROM message_location l WHERE l.message_id = m.id), '[]') AS folder_ids,
                         COALESCE((SELECT json_agg(json_build_object('id', a.id, 'filename', a.filename, 'contentType', a.content_type, 'size', a.size, 'scanStatus', a.scan_status) ORDER BY a.id)
                                   FROM attachment a WHERE a.message_id = m.id AND NOT a.inline), '[]') AS attachments
@@ -90,6 +94,10 @@ final readonly class MessageDocuments
             }
         }
 
+        $messageId = Uuid::fromString(self::string($row['id']));
+        $snippet = $this->fields->snippetOf($ownerId, $messageId, self::nullableString($row['sealed_snippet']), self::string($row['snippet']));
+        $bodyText = $this->fields->textOf($ownerId, $messageId, self::nullableString($row['sealed_body_text']), self::nullableString($row['body_text']));
+
         $receivedAt = $this->connection->convertToPHPValue($row['received_at'], Types::DATETIME_IMMUTABLE);
         \assert($receivedAt instanceof \DateTimeImmutable);
 
@@ -105,8 +113,8 @@ final readonly class MessageDocuments
             'fromTokens' => AddressTokens::forAddress($fromAddress, $fromName),
             'recipients' => $recipientTexts,
             'toTokens' => array_values(array_unique($toTokens)),
-            'snippet' => MessageIndex::clean(self::string($row['snippet'])),
-            'bodyText' => null === $row['body_text'] ? '' : MessageIndex::clean(self::string($row['body_text'])),
+            'snippet' => MessageIndex::clean($snippet),
+            'bodyText' => MessageIndex::clean($bodyText),
             'attachments' => array_map(static fn (array $a): array => [...$a, 'filename' => MessageIndex::clean($a['filename'])], $attachments),
             'hasAttachments' => (bool) $row['has_attachments'],
             'seen' => (bool) $row['seen'],
@@ -135,6 +143,11 @@ final readonly class MessageDocuments
         }
 
         return $value;
+    }
+
+    private static function nullableString(mixed $value): ?string
+    {
+        return null === $value ? null : self::string($value);
     }
 
     private static function int(mixed $value): int

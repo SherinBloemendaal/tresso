@@ -6,7 +6,6 @@ namespace App\Tests\Functional;
 
 use App\Command\RescanAttachmentsCommand;
 use App\Entity\Attachment;
-use App\Entity\DraftAttachment;
 use App\Entity\ScanResult;
 use App\Enum\ScanFailure;
 use App\Outbox\UploadCollector;
@@ -17,6 +16,10 @@ use App\Scan\ScanAttachment;
 use App\Scan\ScanOutcome;
 use App\Scan\SweepPendingScans;
 use App\Scan\SweepPendingScansHandler;
+use App\Security\Crypto\KeyRing;
+use App\Storage\BlobKey;
+use App\Storage\BlobKind;
+use App\Storage\BlobVault;
 use App\Tests\Support\FakeVirusScanner;
 use App\Tests\Support\InMemoryObjectStorage;
 use App\Tests\Support\RecordingMercureHub;
@@ -46,6 +49,7 @@ use Symfony\Component\Uid\Uuid;
 final class AttachmentScanTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private const string INVOICE = "%PDF-1.7\ninvoice-bytes";
     private const string MALWARE = FakeVirusScanner::EICAR;
@@ -149,7 +153,7 @@ final class AttachmentScanTest extends DatabaseTestCase
         self::assertNull($zip['url']);
         $attachment = $this->attachment('invoice.zip');
         self::assertFalse($this->storage()->has($attachment->getObjectKey()));
-        self::assertSame(self::MALWARE, $this->storage()->read($attachment->getQuarantineKey()));
+        self::assertSame(self::MALWARE, $this->plaintext($attachment->getQuarantineKey()));
     }
 
     public function testQuarantinedContentIsNeverServed(): void
@@ -226,9 +230,9 @@ final class AttachmentScanTest extends DatabaseTestCase
 
         $this->runScans($this->uploadScans);
 
-        $uploadKey = DraftAttachment::uploadKey(hash('sha256', self::MALWARE));
+        $uploadKey = BlobKey::of(BlobKind::Uploads, $this->accountOwner($this->accountId), $this->fingerprintFor($this->accountId, self::MALWARE));
         self::assertFalse($this->storage()->has($uploadKey));
-        self::assertTrue($this->storage()->has(Attachment::quarantineKey(hash('sha256', self::MALWARE))));
+        self::assertTrue($this->storage()->has(Attachment::quarantineKey($this->fingerprintFor($this->accountId, self::MALWARE), $this->accountOwner($this->accountId))));
         $this->client->request('GET', $this->signedDraftUrl($upload['id']));
         self::assertResponseStatusCodeSame(403);
     }
@@ -242,17 +246,18 @@ final class AttachmentScanTest extends DatabaseTestCase
 
         $this->rescan(['--all' => true]);
 
-        $sha = hash('sha256', self::MALWARE);
-        self::assertTrue($this->storage()->has(Attachment::objectKeyFor($sha)));
-        self::assertTrue($this->storage()->has(DraftAttachment::uploadKey($sha)));
-        self::assertFalse($this->storage()->has(Attachment::quarantineKey($sha)));
+        $fingerprint = $this->fingerprintFor($this->accountId, self::MALWARE);
+        $owner = $this->accountOwner($this->accountId);
+        self::assertTrue($this->storage()->has(Attachment::objectKeyFor($fingerprint, $owner)));
+        self::assertTrue($this->storage()->has(BlobKey::of(BlobKind::Uploads, $owner, $fingerprint)));
+        self::assertFalse($this->storage()->has(Attachment::quarantineKey($fingerprint, $owner)));
     }
 
     public function testQuarantineIsNeverCollectedAsAnUpload(): void
     {
         $this->expectException(\LogicException::class);
 
-        static::getContainer()->get(UploadCollector::class)->collect(Attachment::quarantineKey(hash('sha256', self::MALWARE)));
+        static::getContainer()->get(UploadCollector::class)->collect(Attachment::quarantineKey($this->fingerprintFor($this->accountId, self::MALWARE), $this->accountOwner($this->accountId)));
     }
 
     public function testSendingWaitsForTheScan(): void
@@ -322,7 +327,7 @@ final class AttachmentScanTest extends DatabaseTestCase
     public function testVerdictIsCachedByContent(): void
     {
         $this->runScans($this->queued);
-        $result = $this->entityManager()->find(ScanResult::class, hash('sha256', self::MALWARE));
+        $result = $this->entityManager()->find(ScanResult::class, $this->cacheKeyOf(self::MALWARE));
         self::assertInstanceOf(ScanResult::class, $result);
         self::assertSame('ClamAV 1.5.1/27800', $result->getEngine());
 
@@ -476,9 +481,54 @@ final class AttachmentScanTest extends DatabaseTestCase
         self::assertCount(1, $failed->getSent(), 'Kept for messenger:failed:retry, not dropped.');
     }
 
-    public function testContentMovesUnderTheVerdictLock(): void
+    public function testTheVerdictCacheServesOtherUsersWithoutLinkingThem(): void
+    {
+        $this->runScans($this->queued);
+        $this->createUser('lisa@example.test', 'Lisa');
+        $this->client->jsonRequest('POST', '/api/v1/mail-accounts', [
+            'emailAddress' => 'lisa@company.example',
+            'displayName' => 'Work',
+            'username' => 'lisa@company.example',
+            'password' => 'app-password-2',
+            'imap' => ['host' => 'imap.company.example', 'port' => 993, 'security' => 'tls'],
+            'smtp' => ['host' => 'smtp.company.example', 'port' => 465, 'security' => 'tls'],
+        ], $this->userHeaders('lisa@example.test', ['settings:write']));
+        $lisaAccount = $this->responseString('id');
+        $this->client->jsonRequest('POST', '/internal/sync/leases', ['workerId' => 'w1'], $this->worker);
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$lisaAccount.'/folders', ['workerId' => 'w1', 'folders' => [
+            ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1],
+        ]], $this->worker);
+        self::assertResponseIsSuccessful();
+
+        $this->runScans($this->ingest('7', '<same-file@finance.example>', ['copy.zip' => self::MALWARE], $lisaAccount));
+
+        self::assertCount(2, $this->scanner()->scanned, 'Lisa\'s copy took the cached verdict.');
+        /** @var array<string, string> $rows */
+        $rows = $this->connection()->fetchAllKeyValue("SELECT filename, sha256 FROM attachment WHERE filename IN ('invoice.zip', 'copy.zip')");
+        self::assertCount(2, $rows);
+        self::assertNotSame($rows['invoice.zip'], $rows['copy.zip'], 'The same file has unrelated names at two users.');
+        self::assertSame('infected', $this->connection()->fetchOne("SELECT scan_status FROM attachment WHERE filename = 'copy.zip'"));
+        /** @var list<string> $cacheKeys */
+        $cacheKeys = $this->connection()->fetchFirstColumn('SELECT content_key FROM scan_result');
+        self::assertSame([], array_intersect($cacheKeys, [...array_values($rows), hash('sha256', self::MALWARE)]), 'Nothing in the cache matches an attachment or the plain hash.');
+    }
+
+    public function testScansContentStoredBeforeEncryption(): void
     {
         $sha = hash('sha256', self::MALWARE);
+        $this->storage()->put(Attachment::objectKeyFor($sha, null), self::MALWARE);
+        $this->connection()->executeStatement("UPDATE attachment SET sha256 = :sha, key_version = NULL WHERE filename = 'invoice.zip'", ['sha' => $sha]);
+
+        $this->runScans($this->queued);
+
+        self::assertSame('infected', $this->listed('invoice.zip')['scanStatus']);
+        self::assertFalse($this->storage()->has(Attachment::objectKeyFor($sha, null)));
+        self::assertSame(self::MALWARE, $this->storage()->read(Attachment::quarantineKey($sha, null)), 'Plaintext content stays plaintext until it is re-encrypted.');
+    }
+
+    public function testContentMovesUnderTheVerdictLock(): void
+    {
+        $sha = $this->fingerprintFor($this->accountId, self::MALWARE);
         $params = $this->connection()->getParams();
         self::assertIsString($params['host'] ?? null);
         self::assertIsString($params['user'] ?? null);
@@ -504,7 +554,7 @@ final class AttachmentScanTest extends DatabaseTestCase
         $this->runScans($this->ingest('2', '<reminder@finance.example>', ['reminder.zip' => self::MALWARE]));
 
         self::assertCount(3, $this->scanner()->scanned, 'New signatures scan the content again.');
-        $result = $this->entityManager()->find(ScanResult::class, hash('sha256', self::MALWARE));
+        $result = $this->entityManager()->find(ScanResult::class, $this->cacheKeyOf(self::MALWARE));
         self::assertInstanceOf(ScanResult::class, $result);
         self::assertSame('ClamAV 1.5.1/27801', $result->getEngine());
     }
@@ -523,7 +573,7 @@ final class AttachmentScanTest extends DatabaseTestCase
         $zip = $this->listed('invoice.zip');
         self::assertSame('infected', $zip['scanStatus'], 'The verdict is committed before the content moves.');
         self::assertNull($zip['url']);
-        self::assertEquals([new PlaceContent(hash('sha256', self::MALWARE))], array_map(static fn (Envelope $envelope): object => $envelope->getMessage(), $placements));
+        self::assertEquals([new PlaceContent($this->fingerprintFor($this->accountId, self::MALWARE))], array_map(static fn (Envelope $envelope): object => $envelope->getMessage(), $placements));
         try {
             $this->runScans($placements);
             self::fail('Moving the content was expected to fail, for Messenger to retry it.');
@@ -558,9 +608,9 @@ final class AttachmentScanTest extends DatabaseTestCase
         // Between locking the affected messages and writing the verdict, the same file arrives in another message.
         StatementHook::before('UPDATE attachment SET scan_status', function () use ($laterMessage, $lateRow): void {
             $this->connection()->executeStatement(
-                "INSERT INTO attachment (id, mail_account_id, message_id, filename, content_type, size, sha256, inline, scan_status, scan_requested_at)
-                 VALUES (:id, :account, :message, 'copy.pdf', 'application/pdf', :size, :sha, false, 'pending', NOW())",
-                ['id' => $lateRow, 'account' => $this->accountId, 'message' => $laterMessage, 'size' => \strlen(self::INVOICE), 'sha' => hash('sha256', self::INVOICE)],
+                "INSERT INTO attachment (id, mail_account_id, message_id, filename, content_type, size, sha256, key_version, inline, scan_status, scan_requested_at)
+                 VALUES (:id, :account, :message, 'copy.pdf', 'application/pdf', :size, :sha, 1, false, 'pending', NOW())",
+                ['id' => $lateRow, 'account' => $this->accountId, 'message' => $laterMessage, 'size' => \strlen(self::INVOICE), 'sha' => $this->fingerprintFor($this->accountId, self::INVOICE)],
             );
             $this->connection()->executeStatement("UPDATE message SET attachment_scan = 'pending', has_attachments = true WHERE id = :id", ['id' => $laterMessage]);
         });
@@ -628,7 +678,7 @@ final class AttachmentScanTest extends DatabaseTestCase
         self::assertSame('clean', $zip['scanStatus']);
         self::assertIsString($zip['url']);
         $attachment = $this->attachment('invoice.zip');
-        self::assertSame(self::MALWARE, $this->storage()->read($attachment->getObjectKey()));
+        self::assertSame(self::MALWARE, $this->plaintext($attachment->getObjectKey()));
         self::assertFalse($this->storage()->has($attachment->getQuarantineKey()));
     }
 
@@ -645,7 +695,7 @@ final class AttachmentScanTest extends DatabaseTestCase
     public function testRescansWaitInTheirOwnQueueAndCanResume(): void
     {
         $this->runScans($this->queued);
-        $hashes = [hash('sha256', self::INVOICE), hash('sha256', self::MALWARE)];
+        $hashes = [$this->fingerprintFor($this->accountId, self::INVOICE), $this->fingerprintFor($this->accountId, self::MALWARE)];
         sort($hashes);
 
         $tester = $this->commandTester();
@@ -697,23 +747,22 @@ final class AttachmentScanTest extends DatabaseTestCase
      *
      * @return list<Envelope> the scans the ingest queued
      */
-    private function ingest(string $uid, string $messageId, array $files): array
+    private function ingest(string $uid, string $messageId, array $files, ?string $accountId = null): array
     {
+        $accountId ??= $this->accountId;
         $raw = "Message-ID: {$messageId}\r\nSubject: Invoice\r\n\r\nSee attached.\r\n";
-        $rawSha = hash('sha256', $raw);
-        $rawKey = 'raw/'.substr($rawSha, 0, 2).'/'.$rawSha;
-        $this->storage()->put($rawKey, $raw);
+        $rawKey = $this->storeAsWorker($accountId, BlobKind::Raw, $raw);
 
         $attachments = [];
         foreach ($files as $filename => $content) {
-            $sha = hash('sha256', $content);
-            $this->storage()->put('attachments/'.substr($sha, 0, 2).'/'.$sha, $content);
-            $attachments[] = ['filename' => $filename, 'contentType' => 'application/octet-stream', 'size' => \strlen($content), 'sha256' => $sha];
+            $this->storeAsWorker($accountId, BlobKind::Attachments, $content);
+            $attachments[] = ['filename' => $filename, 'contentType' => 'application/octet-stream', 'size' => \strlen($content), 'fingerprint' => $this->fingerprintFor($accountId, $content)];
         }
 
-        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
             'remoteUid' => $uid,
             'rawObjectKey' => $rawKey,
+            'keyVersion' => 1,
             'size' => \strlen($raw),
             'receivedAt' => '2026-10-19T08:00:00+00:00',
             'messageId' => $messageId,
@@ -913,6 +962,17 @@ final class AttachmentScanTest extends DatabaseTestCase
     private function scanner(): FakeVirusScanner
     {
         return static::getContainer()->get(FakeVirusScanner::class);
+    }
+
+    private function plaintext(string $key): string
+    {
+        return static::getContainer()->get(BlobVault::class)->read($this->accountOwner($this->accountId), $key);
+    }
+
+    /** Where the verdict cache keeps the verdict for $content. */
+    private function cacheKeyOf(string $content): string
+    {
+        return hash_hmac('sha256', hash('sha256', $content, true), static::getContainer()->get(KeyRing::class)->scanCacheKey()['key']);
     }
 
     private function storage(): InMemoryObjectStorage

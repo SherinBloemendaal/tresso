@@ -62,9 +62,9 @@ final class MailAccountApiTest extends DatabaseTestCase
         $account = $this->account($this->responseString('id'));
 
         $stored = (string) $account->getEncryptedCredentials();
-        self::assertStringStartsWith('v1.', $stored);
+        self::assertStringStartsWith('f1.1.', $stored);
         self::assertStringNotContainsString('app-password-1', $stored);
-        self::assertStringNotContainsString('app-password-1', (string) base64_decode(substr($stored, 3), true));
+        self::assertStringNotContainsString('app-password-1', (string) base64_decode(substr($stored, 5), true));
         self::assertSame(['type' => 'password', 'password' => 'app-password-1'], static::getContainer()->get(CredentialVault::class)->open($account));
     }
 

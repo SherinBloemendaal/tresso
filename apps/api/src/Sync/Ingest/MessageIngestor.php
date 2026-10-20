@@ -16,9 +16,9 @@ use App\Entity\Message;
 use App\Entity\MessageLocation;
 use App\Entity\MessageReference;
 use App\Entity\MessageSignals;
-use App\Entity\MessageText;
 use App\Enum\FolderRole;
 use App\HandOver\HandOvers;
+use App\Mail\MessageFields;
 use App\Mailbox\MailboxChanges;
 use App\Repository\MailboxChangeRepository;
 use Doctrine\ORM\EntityManagerInterface;
@@ -38,6 +38,7 @@ final readonly class MessageIngestor
         private ClassificationScheduler $classification,
         private InvitationRecorder $invitations,
         private HandOvers $handOvers,
+        private MessageFields $fields,
     ) {
     }
 
@@ -101,11 +102,11 @@ final readonly class MessageIngestor
         )));
         $thread = $this->threader->threadFor($account, $messageId, $references, $input->subject, $participants, $receivedAt);
 
-        $message = new Message($account, $thread, $messageId, $input->subject, $from->address, $from->name, $receivedAt, $input->rawObjectKey);
+        $keyVersion = $input->keyVersion ?? throw new \LogicException('Validation guarantees a key version.');
+        $message = new Message($account, $thread, $messageId, $input->subject, $from->address, $from->name, $receivedAt, $input->rawObjectKey, $keyVersion);
         $message->setInReplyTo(MessageIds::normalize($input->inReplyTo));
         $message->setSentAt($input->sentAt);
         $message->setSize($input->size);
-        $message->setSnippet($input->snippet);
         $message->setRecipients([
             'to' => self::addresses($input->to),
             'cc' => self::addresses($input->cc),
@@ -114,6 +115,7 @@ final readonly class MessageIngestor
         ]);
         $this->applyFlags($message, $input, []);
         $this->entityManager->persist($message);
+        $this->fields->sealSnippet($message, $input->snippet);
         $thread->recordMessage($receivedAt);
 
         if ([] !== $input->headers || $input->junk) {
@@ -122,7 +124,7 @@ final readonly class MessageIngestor
         $this->classification->mailArrived($account->getOwner()->getId());
 
         if ('' !== $input->bodyText) {
-            $this->entityManager->persist(new MessageText($message, $input->bodyText));
+            $this->entityManager->persist($this->fields->newText($message, $input->bodyText));
         }
 
         foreach ($references as $reference) {
@@ -132,7 +134,7 @@ final readonly class MessageIngestor
         $hasAttachments = false;
         $scanStatuses = [];
         foreach ($input->attachments as $attachmentInput) {
-            $attachment = new Attachment($message, $attachmentInput->filename, $attachmentInput->contentType, $attachmentInput->size, $attachmentInput->sha256, $attachmentInput->contentId);
+            $attachment = new Attachment($message, $attachmentInput->filename, $attachmentInput->contentType, $attachmentInput->size, $attachmentInput->fingerprint, $keyVersion, $attachmentInput->contentId);
             if ($attachmentInput->inline && null !== $attachment->getContentId()) {
                 $attachment->markInline();
             } else {

@@ -10,6 +10,7 @@ use App\Storage\ObjectStorage;
 use Doctrine\DBAL\Connection;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * Moves content to quarantine while any attachment with it is infected, and back to every key an attachment still
@@ -37,8 +38,12 @@ final readonly class PlaceContentHandler
 
     private function place(string $sha256): void
     {
-        $quarantine = Attachment::quarantineKey($sha256);
-        $liveKeys = $this->liveKeys($sha256);
+        $owner = $this->contentOwner($sha256);
+        if (false === $owner) {
+            return;
+        }
+        $quarantine = Attachment::quarantineKey($sha256, $owner);
+        $liveKeys = $this->liveKeys($sha256, $owner);
 
         if ($this->infected($sha256)) {
             foreach ($liveKeys as $key) {
@@ -77,14 +82,35 @@ final readonly class PlaceContentHandler
     }
 
     /**
+     * Whose key the content is encrypted with: one owner, since a fingerprint names content within one owner; null
+     * for content from before encryption; false when no attachment has the content any more.
+     */
+    private function contentOwner(string $sha256): Uuid|false|null
+    {
+        /** @var array{owner_id: string, encrypted: bool}|false $holder */
+        $holder = $this->connection->fetchAssociative(
+            '(SELECT m.owner_id, a.key_version IS NOT NULL AS encrypted FROM attachment a JOIN mail_account m ON m.id = a.mail_account_id WHERE a.sha256 = :sha LIMIT 1)
+             UNION ALL
+             (SELECT d.owner_id, da.key_version IS NOT NULL AS encrypted FROM draft_attachment da JOIN draft d ON d.id = da.draft_id WHERE da.sha256 = :sha LIMIT 1)
+             LIMIT 1',
+            ['sha' => $sha256],
+        );
+        if (false === $holder) {
+            return false;
+        }
+
+        return $holder['encrypted'] ? Uuid::fromString($holder['owner_id']) : null;
+    }
+
+    /**
      * Where attachments with this content expect it: the received key, and the upload key of draft uploads.
      *
      * @return list<string>
      */
-    private function liveKeys(string $sha256): array
+    private function liveKeys(string $sha256, ?Uuid $owner): array
     {
         $keys = $this->connection->fetchOne('SELECT EXISTS (SELECT 1 FROM attachment WHERE sha256 = :sha)', ['sha' => $sha256])
-            ? [Attachment::objectKeyFor($sha256)]
+            ? [Attachment::objectKeyFor($sha256, $owner)]
             : [];
         /** @var list<string> $draftKeys */
         $draftKeys = $this->connection->fetchFirstColumn('SELECT DISTINCT object_key FROM draft_attachment WHERE sha256 = :sha', ['sha' => $sha256]);

@@ -15,8 +15,11 @@ use Symfony\Component\Uid\Uuid;
 
 /**
  * A file attached to a draft: uploaded by the user, or taken from the message a forward is written about. The content
- * lives in object storage under its SHA-256, so the same file attached twice is stored once; it goes out with the
- * message and into the copy in the Drafts folder.
+ * lives in object storage once per owner and content, encrypted with the owner's key, so the same file attached twice
+ * is stored once; it goes out with the message and into the copy in the Drafts folder.
+ *
+ * $sha256 identifies the content within its owner: the owner's fingerprint, or for content stored before encryption
+ * ($keyVersion null) the plain SHA-256 (see {@see Attachment}).
  */
 #[ORM\Entity(repositoryClass: DraftAttachmentRepository::class)]
 #[ORM\Index(columns: ['object_key'])]
@@ -49,6 +52,10 @@ class DraftAttachment
 
     #[ORM\Column(length: 255)]
     private string $objectKey;
+
+    /** The key version the content is encrypted with; null for plaintext stored before encryption. */
+    #[ORM\Column(nullable: true)]
+    private ?int $keyVersion;
 
     #[ORM\Column(length: 16, enumType: ScanStatus::class, options: ['default' => 'pending'])]
     private ScanStatus $scanStatus = ScanStatus::Pending;
@@ -84,10 +91,13 @@ class DraftAttachment
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
-    public function __construct(Draft $draft, string $filename, string $contentType, int $size, string $sha256, string $objectKey, int $position, \DateTimeImmutable $now)
+    /**
+     * @param ?int $keyVersion null only for a forwarded file stored before encryption
+     */
+    public function __construct(Draft $draft, string $filename, string $contentType, int $size, string $sha256, string $objectKey, ?int $keyVersion, int $position, \DateTimeImmutable $now)
     {
         if (1 !== preg_match('/^[0-9a-f]{64}$/', $sha256)) {
-            throw new \InvalidArgumentException('An attachment is stored under its SHA-256 in hex.');
+            throw new \InvalidArgumentException('An attachment is stored under its content fingerprint in hex.');
         }
         $this->id = Uuid::v7();
         $this->draft = $draft;
@@ -96,15 +106,10 @@ class DraftAttachment
         $this->size = $size;
         $this->sha256 = $sha256;
         $this->objectKey = $objectKey;
+        $this->keyVersion = $keyVersion;
         $this->position = $position;
         $this->createdAt = $now;
         $this->scanRequestedAt = $now;
-    }
-
-    /** Where an uploaded file with this content is stored. */
-    public static function uploadKey(string $sha256): string
-    {
-        return self::UPLOAD_PREFIX.substr($sha256, 0, 2).'/'.$sha256;
     }
 
     public function getId(): Uuid
@@ -140,6 +145,31 @@ class DraftAttachment
     public function getObjectKey(): string
     {
         return $this->objectKey;
+    }
+
+    public function getKeyVersion(): ?int
+    {
+        return $this->keyVersion;
+    }
+
+    /** Whose key the content is encrypted with; null for content stored before encryption. */
+    public function getContentOwner(): ?Uuid
+    {
+        return null === $this->keyVersion ? null : $this->draft->getOwner()->getId();
+    }
+
+    /** Where infected content is moved to; shared with received attachments of the same content. */
+    public function getQuarantineKey(): string
+    {
+        return Attachment::quarantineKey($this->sha256, $this->getContentOwner());
+    }
+
+    /** The content was encrypted again (or for the first time) and is now stored at $objectKey. */
+    public function reencrypted(string $objectKey, string $fingerprint, int $keyVersion): void
+    {
+        $this->objectKey = $objectKey;
+        $this->sha256 = $fingerprint;
+        $this->keyVersion = $keyVersion;
     }
 
     public function isUpload(): bool

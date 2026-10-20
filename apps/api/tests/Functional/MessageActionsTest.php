@@ -10,6 +10,7 @@ use Symfony\Component\Uid\UuidV7;
 final class MessageActionsTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private string $accountId;
 
@@ -602,10 +603,10 @@ final class MessageActionsTest extends DatabaseTestCase
 
     private function ingest(string $accountId, string $folder, string $uid, string $messageId): void
     {
-        $sha = hash('sha256', $messageId);
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$accountId.'/messages', ['workerId' => 'w1', 'folder' => $folder, 'messages' => [[
             'remoteUid' => $uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($accountId, $messageId),
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => '2026-10-19T08:00:00+00:00',
             'messageId' => $messageId,

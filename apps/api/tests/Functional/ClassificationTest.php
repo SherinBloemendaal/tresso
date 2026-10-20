@@ -30,6 +30,7 @@ use Symfony\Component\Uid\Uuid;
 final class ClassificationTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private const string ME = 'kim@company.example';
 
@@ -958,7 +959,8 @@ final class ClassificationTest extends DatabaseTestCase
 
         return [...[
             'remoteUid' => $uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($this->accountId, $uid.$subject),
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => '2026-10-19T08:00:00+00:00',
             'messageId' => '<'.$sha.'@x>',

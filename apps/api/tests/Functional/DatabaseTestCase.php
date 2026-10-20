@@ -25,4 +25,17 @@ abstract class DatabaseTestCase extends WebTestCase
     {
         return static::getContainer()->get(Connection::class);
     }
+
+    /**
+     * The number a counting query returns.
+     *
+     * @param array<string, mixed> $parameters
+     */
+    protected function rowCount(string $sql, array $parameters = []): int
+    {
+        $count = $this->connection()->fetchOne($sql, $parameters);
+        self::assertIsInt($count);
+
+        return $count;
+    }
 }

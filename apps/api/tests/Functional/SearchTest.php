@@ -22,6 +22,7 @@ use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 final class SearchTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private User $kim;
 
@@ -66,7 +67,7 @@ final class SearchTest extends DatabaseTestCase
         $this->ingest($this->workAccount, 'INBOX', [
             $this->message('1', 'Q4 budget, revised', 'anna@finance.example', 'Anna de Vries', '2026-10-19T09:12:00+00:00', [
                 'bodyText' => 'I updated the Q4 numbers with the new hosting costs and the extra hire for support.',
-                'attachments' => [['filename' => 'budget-q4-v3.xlsx', 'contentType' => 'application/vnd.ms-excel', 'size' => 48000, 'sha256' => hash('sha256', 'xlsx')]],
+                'attachments' => [['filename' => 'budget-q4-v3.xlsx', 'contentType' => 'application/vnd.ms-excel', 'size' => 48000, 'fingerprint' => 'xlsx']],
             ]),
             $this->message('2', 'Team day', 'pieter@company.example', 'Pieter', '2026-09-12T10:00:00+00:00', [
                 'bodyText' => 'The budget is fifty euro per person including dinner.',
@@ -75,7 +76,7 @@ final class SearchTest extends DatabaseTestCase
         $this->ingest($this->workAccount, 'Invoices', [
             $this->message('1', 'Invoice 42', 'billing@finance.example', null, '2026-10-02T08:00:00+00:00', [
                 'bodyText' => 'Your invoice for October.',
-                'attachments' => [['filename' => 'factuur-42.pdf', 'contentType' => 'application/pdf', 'size' => 212000, 'sha256' => hash('sha256', 'pdf')]],
+                'attachments' => [['filename' => 'factuur-42.pdf', 'contentType' => 'application/pdf', 'size' => 212000, 'fingerprint' => 'pdf']],
             ]),
         ]);
         $this->ingest($this->personalAccount, 'INBOX', [
@@ -304,6 +305,27 @@ final class SearchTest extends DatabaseTestCase
         self::assertSame(1, $this->indexedFor($this->lisa), 'Other users are left alone.');
     }
 
+    public function testFindsBodyTextStoredBeforeEncryption(): void
+    {
+        $this->connection()->executeStatement(
+            "UPDATE message_text t SET text = 'The budget is fifty euro per person, dessert included.', sealed_text = NULL FROM message m WHERE m.id = t.message_id AND m.subject = 'Team day'",
+        );
+        $this->connection()->executeStatement("UPDATE message SET snippet = 'Old snippet', sealed_snippet = NULL WHERE subject = 'Team day'");
+
+        $this->reindex(['--user' => ['kim@example.test']])->assertCommandIsSuccessful();
+
+        self::assertSame(['Team day'], $this->subjects($this->search('dessert')));
+    }
+
+    public function testFindsWordsOfSealedBodyTexts(): void
+    {
+        $sealed = $this->connection()->fetchOne("SELECT t.sealed_text FROM message_text t JOIN message m ON m.id = t.message_id WHERE m.subject = 'Team day'");
+        self::assertIsString($sealed);
+        self::assertStringStartsWith('f1.', $sealed);
+
+        self::assertSame(['Team day'], $this->subjects($this->search('dinner')));
+    }
+
     public function testReindexAllRebuildsEveryone(): void
     {
         $tester = $this->reindex(['--all' => true]);
@@ -475,6 +497,19 @@ final class SearchTest extends DatabaseTestCase
      */
     private function ingest(string $account, string $folder, array $messages): void
     {
+        // message() names content by a seed; the worker stores it under the account's owner.
+        foreach ($messages as &$message) {
+            \assert(\is_string($message['rawObjectKey']));
+            $message['rawObjectKey'] = $this->rawKeyFor($account, $message['rawObjectKey']);
+            $attachments = $message['attachments'] ?? [];
+            \assert(\is_array($attachments));
+            $message['attachments'] = array_map(function (mixed $attachment) use ($account): array {
+                \assert(\is_array($attachment) && \is_string($attachment['fingerprint']));
+
+                return ['fingerprint' => $this->fingerprintFor($account, $attachment['fingerprint'])] + $attachment;
+            }, $attachments);
+        }
+        unset($message);
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$account.'/messages', ['workerId' => 'w1', 'folder' => $folder, 'messages' => $messages], $this->worker);
         self::assertResponseIsSuccessful();
         $this->runIndexing();
@@ -497,11 +532,10 @@ final class SearchTest extends DatabaseTestCase
      */
     private function message(string $uid, string $subject, string $from, ?string $fromName, string $receivedAt, array $override = []): array
     {
-        $sha = hash('sha256', $subject.$uid);
-
         return $override + [
             'remoteUid' => $uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $subject.$uid,
+            'keyVersion' => 1,
             'size' => 2048,
             'receivedAt' => $receivedAt,
             'flags' => ['seen' => false, 'flagged' => false, 'answered' => false, 'draft' => false],

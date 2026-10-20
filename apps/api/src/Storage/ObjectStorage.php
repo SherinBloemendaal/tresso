@@ -23,8 +23,22 @@ interface ObjectStorage
      */
     public function stream(string $key): iterable;
 
-    /** Stores the object; content-addressed keys make writing it twice harmless. */
-    public function write(string $key, string $content, string $contentType): void;
+    /**
+     * Stores the object, replacing what is there. A resource is read from its current position to its end.
+     *
+     * @param string|resource       $content
+     * @param array<string, string> $metadata stored with the object (S3 user metadata)
+     */
+    public function write(string $key, mixed $content, string $contentType, array $metadata = []): void;
+
+    public function exists(string $key): bool;
+
+    /**
+     * Every key that starts with $prefix, in key order.
+     *
+     * @return iterable<string>
+     */
+    public function list(string $prefix): iterable;
 
     /**
      * Copies an object to another key, replacing what is there.

@@ -27,7 +27,10 @@ use App\Repository\DraftRepository;
 use App\Scan\AttachmentAccess;
 use App\Scan\DownloadPolicy;
 use App\Security\CurrentUser;
-use App\Storage\ObjectStorage;
+use App\Storage\BlobKey;
+use App\Storage\BlobKind;
+use App\Storage\BlobVault;
+use App\Storage\StoredBlob;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
@@ -53,7 +56,7 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
         private DraftRepository $drafts,
         private DraftAttachmentRepository $draftAttachments,
         private AttachmentRepository $attachments,
-        private ObjectStorage $storage,
+        private BlobVault $blobs,
         private UploadCollector $uploads,
         private AttachmentLimits $limits,
         private AttachmentUrls $urls,
@@ -122,16 +125,16 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
         }
         $filename = self::filename($file->getClientOriginalName());
         $contentType = self::contentType($file);
-        $key = DraftAttachment::uploadKey($sha);
+        $key = BlobKey::of(BlobKind::Uploads, $user->getId(), $this->blobs->fingerprint($user->getId(), $sha));
 
         try {
-            return $this->entityManager->wrapInTransaction(function () use ($user, $draftId, $file, $size, $sha, $filename, $contentType, $key): DraftAttachment {
+            return $this->entityManager->wrapInTransaction(function () use ($user, $draftId, $file, $size, $filename, $contentType, $key): DraftAttachment {
                 $draft = $this->lock($user, $draftId);
                 $this->fits($draft, $size);
                 // Locked like a removal, so the file is never collected between being stored and being referred to.
                 $this->uploads->lock($key);
-                $this->storage->write($key, (string) file_get_contents($file->getPathname()), $contentType);
-                $attachment = new DraftAttachment($draft, $filename, $contentType, $size, $sha, $key, $draft->nextAttachmentPosition(), new \DateTimeImmutable());
+                $stored = $this->store($user, $file);
+                $attachment = new DraftAttachment($draft, $filename, $contentType, $size, $stored->fingerprint, $stored->key, $stored->keyVersion, $draft->nextAttachmentPosition(), new \DateTimeImmutable());
                 $this->entityManager->persist($attachment);
                 $draft->attach($attachment);
                 $draft->filesChanged(new \DateTimeImmutable());
@@ -178,6 +181,7 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
                 $source->getSize(),
                 $source->getSha256(),
                 $source->getObjectKey(),
+                $source->getKeyVersion(),
                 $draft->nextAttachmentPosition(),
                 new \DateTimeImmutable(),
             );
@@ -189,6 +193,20 @@ final readonly class DraftAttachmentProcessor implements ProcessorInterface
 
             return $attachment;
         });
+    }
+
+    /** Encrypts the upload as it is read from disk, never holding all of it in memory. */
+    private function store(User $user, UploadedFile $file): StoredBlob
+    {
+        $handle = fopen($file->getPathname(), 'rb');
+        if (false === $handle) {
+            throw new \RuntimeException('The uploaded file could not be read.');
+        }
+        try {
+            return $this->blobs->store($user->getId(), BlobKind::Uploads, $handle);
+        } finally {
+            fclose($handle);
+        }
     }
 
     private function lock(User $user, string $draftId): Draft

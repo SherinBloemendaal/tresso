@@ -17,6 +17,7 @@ use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 final class TodoApiTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private const string ME = 'kim@company.example';
 
@@ -629,7 +630,8 @@ final class TodoApiTest extends DatabaseTestCase
 
         return [...[
             'remoteUid' => $uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($this->accountId, $uid.$subject),
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => new \DateTimeImmutable('-1 hour')->format(\DATE_ATOM),
             'messageId' => '<'.$sha.'@x>',

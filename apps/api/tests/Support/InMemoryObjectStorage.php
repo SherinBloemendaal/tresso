@@ -28,14 +28,50 @@ final class InMemoryObjectStorage implements ObjectStorage
         return $this->objects[$key] ?? throw ObjectNotFound::forKey($key);
     }
 
-    public function write(string $key, string $content, string $contentType): void
+    /** @var array<string, array<string, string>> */
+    public array $metadata = [];
+
+    public function write(string $key, mixed $content, string $contentType, array $metadata = []): void
     {
+        if (\is_resource($content)) {
+            $content = stream_get_contents($content);
+        }
+        if (!\is_string($content)) {
+            throw new \InvalidArgumentException('Object content is a string or a stream.');
+        }
         $this->objects[$key] = $content;
+        $this->metadata[$key] = $metadata;
+    }
+
+    public function list(string $prefix): iterable
+    {
+        $keys = array_values(array_filter(array_keys($this->objects), static fn (string $key): bool => str_starts_with($key, $prefix)));
+        sort($keys);
+
+        return $keys;
+    }
+
+    /**
+     * Every key, for tests that look at what is stored.
+     *
+     * @return list<string>
+     */
+    public function keys(): array
+    {
+        $keys = array_keys($this->objects);
+        sort($keys);
+
+        return $keys;
     }
 
     public function delete(string $key): void
     {
         unset($this->objects[$key]);
+    }
+
+    public function exists(string $key): bool
+    {
+        return $this->has($key);
     }
 
     public function has(string $key): bool

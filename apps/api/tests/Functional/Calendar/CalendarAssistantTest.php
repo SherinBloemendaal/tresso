@@ -13,6 +13,7 @@ use App\Repository\SchedulingPreferencesRepository;
 use App\Repository\UserRepository;
 use App\Tests\Functional\AuthenticatesUsers;
 use App\Tests\Functional\DatabaseTestCase;
+use App\Tests\Functional\StoresMail;
 use App\Tests\Support\QueryLog;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Clock\Test\ClockSensitiveTrait;
@@ -24,6 +25,7 @@ use Symfony\Component\Clock\Test\ClockSensitiveTrait;
 final class CalendarAssistantTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
     use CalendarTestHelpers;
     use ClockSensitiveTrait;
 
@@ -524,10 +526,10 @@ final class CalendarAssistantTest extends DatabaseTestCase
     private function deliver(string $accountId, array $worker, string $subject, string $from, array $to, ?string $ical = null): string
     {
         $uid = ++$this->uid;
-        $sha = hash('sha256', $subject.$uid);
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
             'remoteUid' => (string) $uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($accountId, $subject.$uid),
+            'keyVersion' => 1,
             'size' => 100,
             // After the account was connected, so invitations are applied.
             'receivedAt' => new \DateTimeImmutable('+1 minute')->format(\DATE_ATOM),

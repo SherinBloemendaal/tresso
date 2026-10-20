@@ -11,8 +11,8 @@ use App\Mail\Body\AttachmentResponse;
 use App\Mail\Body\AttachmentUrls;
 use App\Repository\DraftAttachmentRepository;
 use App\Scan\DownloadPolicy;
+use App\Storage\BlobVault;
 use App\Storage\ObjectNotFound;
-use App\Storage\ObjectStorage;
 use Symfony\Component\HttpFoundation\Exception\SignedUriException;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -28,7 +28,7 @@ final readonly class DraftAttachmentContentProvider implements ProviderInterface
 {
     public function __construct(
         private DraftAttachmentRepository $attachments,
-        private ObjectStorage $storage,
+        private BlobVault $blobs,
         private UriSigner $signer,
         private RequestStack $requests,
         private DownloadPolicy $downloads,
@@ -55,7 +55,7 @@ final readonly class DraftAttachmentContentProvider implements ProviderInterface
         }
 
         try {
-            $chunks = $this->storage->stream($attachment->getObjectKey());
+            $chunks = $this->blobs->stream($attachment->getDraft()->getOwner()->getId(), $attachment->getObjectKey());
         } catch (ObjectNotFound $exception) {
             throw new ServiceUnavailableHttpException(null, 'The content of this attachment is not available.', $exception);
         }

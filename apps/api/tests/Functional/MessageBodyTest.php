@@ -7,16 +7,20 @@ namespace App\Tests\Functional;
 use App\Entity\Attachment;
 use App\Repository\AttachmentRepository;
 use App\Scan\ScanOutcome;
+use App\Storage\BlobKey;
+use App\Storage\BlobKind;
 use App\Tests\Support\InMemoryObjectStorage;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\UriSigner;
 use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Messenger\Stamp\ReceivedStamp;
 use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
+use Symfony\Component\Uid\Uuid;
 
 final class MessageBodyTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private const string LOGO = "\x89PNG\r\n\x1a\nlogo-bytes";
     private const string INVOICE = "%PDF-1.7\ninvoice-bytes";
@@ -25,6 +29,8 @@ final class MessageBodyTest extends DatabaseTestCase
     private array $kim;
 
     private string $messageId;
+
+    private string $accountId;
 
     protected function setUp(): void
     {
@@ -42,15 +48,12 @@ final class MessageBodyTest extends DatabaseTestCase
             'imap' => ['host' => 'imap.company.example', 'port' => 993, 'security' => 'tls'],
             'smtp' => ['host' => 'smtp.company.example', 'port' => 465, 'security' => 'tls'],
         ], $this->kim);
-        $accountId = $this->responseString('id');
+        $accountId = $this->accountId = $this->responseString('id');
 
         $raw = $this->rawMessage();
-        $rawSha = hash('sha256', $raw);
-        $rawKey = 'raw/'.substr($rawSha, 0, 2).'/'.$rawSha;
-        $this->storage()->put($rawKey, $raw);
+        $rawKey = $this->storeAsWorker($accountId, BlobKind::Raw, $raw);
         foreach ([self::LOGO, self::INVOICE] as $content) {
-            $sha = hash('sha256', $content);
-            $this->storage()->put('attachments/'.substr($sha, 0, 2).'/'.$sha, $content);
+            $this->storeAsWorker($accountId, BlobKind::Attachments, $content);
         }
 
         $worker = $this->workerHeaders('sync:lease sync:ingest');
@@ -62,6 +65,7 @@ final class MessageBodyTest extends DatabaseTestCase
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
             'remoteUid' => '1',
             'rawObjectKey' => $rawKey,
+            'keyVersion' => 1,
             'size' => \strlen($raw),
             'receivedAt' => '2026-10-19T08:00:00+00:00',
             'messageId' => '<invoice-42@finance.example>',
@@ -70,8 +74,8 @@ final class MessageBodyTest extends DatabaseTestCase
             'to' => [['address' => 'kim@company.example']],
             'snippet' => 'Your invoice',
             'attachments' => [
-                ['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => \strlen(self::LOGO), 'sha256' => hash('sha256', self::LOGO), 'contentId' => 'logo@finance', 'inline' => true],
-                ['filename' => 'Factuur 42 – oktober.pdf', 'contentType' => 'application/pdf', 'size' => \strlen(self::INVOICE), 'sha256' => hash('sha256', self::INVOICE)],
+                ['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => \strlen(self::LOGO), 'fingerprint' => $this->fingerprintFor($accountId, self::LOGO), 'contentId' => 'logo@finance', 'inline' => true],
+                ['filename' => 'Factuur 42 – oktober.pdf', 'contentType' => 'application/pdf', 'size' => \strlen(self::INVOICE), 'fingerprint' => $this->fingerprintFor($accountId, self::INVOICE)],
             ],
         ]]], $worker);
         self::assertResponseIsSuccessful();
@@ -201,6 +205,79 @@ final class MessageBodyTest extends DatabaseTestCase
         $invoice = $this->attachment($this->body(), 'Factuur 42 – oktober.pdf');
         self::assertNull($invoice['url']);
         self::assertSame('infected', $invoice['scanStatus']);
+    }
+
+    public function testStoresContentEncrypted(): void
+    {
+        foreach ($this->storage()->keys() as $key) {
+            $stored = $this->storage()->read($key);
+            self::assertStringNotContainsString('invoice', $stored, $key.' holds plaintext.');
+            self::assertStringStartsWith('TRB1', $stored);
+        }
+        self::assertCount(3, $this->storage()->keys());
+    }
+
+    public function testReadsABodyStoredBeforeEncryption(): void
+    {
+        $sha = hash('sha256', $this->rawMessage());
+        $legacyKey = BlobKey::legacy(BlobKind::Raw, $sha);
+        $this->storage()->put($legacyKey, $this->rawMessage());
+        $this->connection()->executeStatement('UPDATE message SET raw_object_key = :key, raw_key_version = NULL WHERE id = :id', ['key' => $legacyKey, 'id' => $this->messageId]);
+
+        self::assertSame('Your invoice for October.', $this->body()['text']);
+    }
+
+    public function testServesAnAttachmentStoredBeforeEncryption(): void
+    {
+        $sha = hash('sha256', self::INVOICE);
+        $this->storage()->put(BlobKey::legacy(BlobKind::Attachments, $sha), self::INVOICE);
+        $this->connection()->executeStatement("UPDATE attachment SET sha256 = :sha, key_version = NULL WHERE filename LIKE 'Factuur%'", ['sha' => $sha]);
+        $url = $this->attachment($this->body(), 'Factuur 42 – oktober.pdf')['url'];
+        self::assertIsString($url);
+
+        $this->client->request('GET', $url);
+
+        self::assertResponseIsSuccessful();
+        self::assertSame(self::INVOICE, $this->streamedContent());
+    }
+
+    public function testATamperedBodyIsRefused(): void
+    {
+        $key = $this->rawKeyFor($this->accountId, $this->rawMessage());
+        $stored = $this->storage()->read($key);
+        $stored[60] = \chr(\ord($stored[60]) ^ 1);
+        $this->storage()->put($key, $stored);
+
+        $this->client->request('GET', '/api/v1/messages/'.$this->messageId.'/body', server: $this->kim);
+
+        self::assertResponseStatusCodeSame(500);
+    }
+
+    public function testATamperedAttachmentIsNotServed(): void
+    {
+        $url = $this->attachment($this->body(), 'Factuur 42 – oktober.pdf')['url'];
+        self::assertIsString($url);
+        $key = BlobKey::of(BlobKind::Attachments, $this->accountOwner($this->accountId), $this->fingerprintFor($this->accountId, self::INVOICE));
+        $stored = $this->storage()->read($key);
+        $stored[\strlen($stored) - 1] = \chr(\ord($stored[\strlen($stored) - 1]) ^ 1);
+        $this->storage()->put($key, $stored);
+
+        $this->client->request('GET', $url);
+
+        self::assertResponseStatusCodeSame(500);
+    }
+
+    public function testAnotherUsersObjectIsNeverRead(): void
+    {
+        $lisa = $this->connection()->fetchOne("SELECT id FROM app_user WHERE email = 'lisa@example.test'");
+        self::assertIsString($lisa);
+        $theirs = BlobKey::of(BlobKind::Raw, Uuid::fromString($lisa), hash('sha256', 'their mail'));
+        $this->storage()->put($theirs, $this->storage()->read($this->rawKeyFor($this->accountId, $this->rawMessage())));
+        $this->connection()->executeStatement('UPDATE message SET raw_object_key = :key WHERE id = :id', ['key' => $theirs, 'id' => $this->messageId]);
+
+        $this->client->request('GET', '/api/v1/messages/'.$this->messageId.'/body', server: $this->kim);
+
+        self::assertResponseStatusCodeSame(500);
     }
 
     public function testOtherUsersMessagesDoNotExist(): void

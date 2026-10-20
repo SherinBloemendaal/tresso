@@ -13,7 +13,8 @@ use App\Realtime\RealtimeNotifier;
 use App\Repository\DraftRepository;
 use App\Repository\OutgoingMessageRepository;
 use App\Scan\DownloadPolicy;
-use App\Storage\ObjectStorage;
+use App\Storage\BlobKind;
+use App\Storage\BlobVault;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Messenger\Stamp\DelayStamp;
 
@@ -32,7 +33,7 @@ final readonly class Outbox
     public function __construct(
         private EntityManagerInterface $entityManager,
         private MimeComposer $composer,
-        private ObjectStorage $storage,
+        private BlobVault $blobs,
         private RealtimeNotifier $notifier,
         private AfterCommitDispatcher $afterCommit,
         private OutgoingMessageRepository $messages,
@@ -45,16 +46,15 @@ final readonly class Outbox
     public function queue(Composition $composition, \DateTimeImmutable $now): OutgoingMessage
     {
         $composed = $this->composer->compose($composition);
-        $sha = hash('sha256', $composed->raw);
-        $key = 'outgoing/'.substr($sha, 0, 2).'/'.$sha;
-        $this->storage->write($key, $composed->raw, 'message/rfc822');
+        $stored = $this->blobs->store($composition->account->getOwner()->getId(), BlobKind::Outgoing, $composed->raw);
 
         $message = new OutgoingMessage(
             $composition->account,
             $composed->messageId,
             $composition->subject,
             ['to' => $composition->to, 'cc' => $composition->cc, 'bcc' => $composition->bcc],
-            $key,
+            $stored->key,
+            $stored->keyVersion,
             \strlen($composed->raw),
             $composition->sendAt,
             $composition->inReplyTo,

@@ -20,8 +20,12 @@ use App\Sync\Ingest\FolderSynchronizer;
 use App\Sync\Ingest\FolderSyncResult;
 use App\Sync\Ingest\MessageBatchResult;
 use App\Sync\Ingest\MessageIngestor;
+use App\Security\Crypto\UserKeys;
+use App\Storage\BlobKey;
+use App\Storage\BlobKind;
 use App\Sync\LeaseGuard;
 use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 
 /**
  * Checks the lease, then hands the report to the matching ingest service.
@@ -36,6 +40,7 @@ final readonly class SyncIngestProcessor implements ProcessorInterface
         private MessageIngestor $messages,
         private ChangeApplier $changes,
         private EntityManagerInterface $entityManager,
+        private UserKeys $keys,
     ) {
     }
 
@@ -45,7 +50,7 @@ final readonly class SyncIngestProcessor implements ProcessorInterface
 
         $result = $this->entityManager->wrapInTransaction(fn (): FolderSyncResult|MessageBatchResult|ChangeBatchResult|AccountStatusResult => match (true) {
             $data instanceof FolderListInput => new FolderSyncResult($this->folders->sync($account, $data->folders)),
-            $data instanceof MessageBatchInput => $this->messages->ingest($account, $data),
+            $data instanceof MessageBatchInput => $this->ingestMessages($account, $data),
             $data instanceof ChangeBatchInput => $this->changes->apply($account, $data),
             $data instanceof AccountStatusInput => $this->updateStatus($account, $data),
             default => throw new \LogicException(\sprintf('Unexpected ingest input %s.', $data::class)),
@@ -55,6 +60,27 @@ final readonly class SyncIngestProcessor implements ProcessorInterface
         $this->entityManager->clear();
 
         return $result;
+    }
+
+    /**
+     * Content must be stored under the account owner, with a key version the owner still has: anything else could not
+     * be read back, or would be read as another user's. The versions stay until the batch is committed.
+     */
+    private function ingestMessages(MailAccount $account, MessageBatchInput $batch): MessageBatchResult
+    {
+        $owner = $account->getOwner()->getId();
+        $versions = $this->keys->lockOwnerShared($owner);
+        foreach ($batch->messages as $message) {
+            $key = BlobKey::parse($message->rawObjectKey);
+            if (null === $key || BlobKind::Raw !== $key->kind || !$key->owner->equals($owner)) {
+                throw new UnprocessableEntityHttpException(\sprintf('Message %s is not stored under the account owner.', $message->remoteUid));
+            }
+            if (!\in_array($message->keyVersion, $versions, true)) {
+                throw new UnprocessableEntityHttpException(\sprintf('Message %s names key version %d, which the owner does not have; fetch the storage keys again.', $message->remoteUid, (int) $message->keyVersion));
+            }
+        }
+
+        return $this->messages->ingest($account, $batch);
     }
 
     private function updateStatus(MailAccount $account, AccountStatusInput $input): AccountStatusResult

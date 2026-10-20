@@ -19,6 +19,7 @@ use App\Repository\UserRepository;
 use App\Tests\Functional\AuthenticatesUsers;
 use App\Tests\Functional\Calendar\CalendarTestHelpers;
 use App\Tests\Functional\DatabaseTestCase;
+use App\Tests\Functional\StoresMail;
 use App\Tests\Support\MockHttpRouter;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Messenger\MessageBusInterface;
@@ -34,6 +35,7 @@ use Symfony\Component\Uid\Uuid;
 final class MailNotificationTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
     use CalendarTestHelpers;
 
     private const string ME = 'kim@company.example';
@@ -842,7 +844,8 @@ final class MailNotificationTest extends DatabaseTestCase
 
         return [...[
             'remoteUid' => $uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($this->accountId, $uid.$subject),
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => new \DateTimeImmutable('-2 minutes')->format(\DATE_ATOM),
             'messageId' => '<'.$sha.'@x>',

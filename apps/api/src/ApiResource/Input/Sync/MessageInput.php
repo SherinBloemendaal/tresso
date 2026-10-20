@@ -9,7 +9,8 @@ use Symfony\Component\Validator\Constraints as Assert;
 use Symfony\Component\Validator\Context\ExecutionContextInterface;
 
 /**
- * One message in one folder, as parsed by the worker. The raw MIME is already in object storage.
+ * One message in one folder, as parsed by the worker. The raw MIME and the attachments are already in object storage,
+ * encrypted with the account owner's blob key of $keyVersion.
  */
 final class MessageInput
 {
@@ -21,9 +22,14 @@ final class MessageInput
     #[Assert\PositiveOrZero]
     public ?int $modSeq = null;
 
-    /** raw/<sha256[0:2]>/<sha256> */
-    #[Assert\Regex('#^raw/[0-9a-f]{2}/[0-9a-f]{64}$#')]
+    /** raw/<owner id>/<fingerprint[0:2]>/<fingerprint>; the owner is checked against the account's. */
+    #[Assert\Regex('#^raw/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/([0-9a-f]{2})/\1[0-9a-f]{62}$#')]
     public string $rawObjectKey = '';
+
+    /** The owner's key version the raw MIME and the attachments are encrypted with. */
+    #[Assert\NotNull]
+    #[Assert\Positive]
+    public ?int $keyVersion = null;
 
     #[Assert\PositiveOrZero]
     public int $size = 0;

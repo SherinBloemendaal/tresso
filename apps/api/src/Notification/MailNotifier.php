@@ -11,6 +11,7 @@ use App\Entity\NotificationDevice;
 use App\Entity\User;
 use App\Enum\NotificationKind;
 use App\Enum\Verdict;
+use App\Mail\MessageFields;
 use App\Notification\Channel\PushMessage;
 use App\Realtime\AfterCommitDispatcher;
 use App\Repository\NotificationPreferencesRepository;
@@ -61,6 +62,7 @@ final readonly class MailNotifier
         private AfterCommitDispatcher $afterCommit,
         private ManagerRegistry $managers,
         private LoggerInterface $logger,
+        private MessageFields $fields,
     ) {
     }
 
@@ -115,7 +117,7 @@ final readonly class MailNotifier
             if (\in_array($message->getId()->toRfc4122(), $notified, true) || !$this->needsTheUser($message)) {
                 continue;
             }
-            $notification = new MailNotification($user, $message, self::title($message), self::body($message), $now);
+            $notification = new MailNotification($user, $message, self::title($message), $this->body($message), $now);
             if (!$previews) {
                 $notification->hideContent(self::withoutContent($message));
             }
@@ -436,11 +438,11 @@ final readonly class MailNotifier
     }
 
     /** The subject (marked when it is to hand over), and the start of the text on the next line. */
-    private static function body(Message $message): string
+    private function body(Message $message): string
     {
         $subject = '' === trim($message->getSubject()) ? '(no subject)' : $message->getSubject();
         $line = Verdict::Delegate === $message->getVerdict() ? 'To hand over: '.$subject : $subject;
-        $snippet = trim($message->getSnippet());
+        $snippet = trim($this->fields->snippet($message));
 
         return '' === $snippet ? $line : $line."\n".mb_substr($snippet, 0, 200);
     }

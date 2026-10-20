@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Storage;
 
 use AsyncAws\Core\Exception\Http\ClientException;
+use AsyncAws\Core\Waiter;
 use AsyncAws\S3\Exception\NoSuchKeyException;
 use AsyncAws\S3\Result\GetObjectOutput;
 use AsyncAws\S3\S3Client;
@@ -52,9 +53,32 @@ final readonly class S3ObjectStorage implements ObjectStorage
         return $this->open($key)->getBody()->getChunks();
     }
 
-    public function write(string $key, string $content, string $contentType): void
+    public function write(string $key, mixed $content, string $contentType, array $metadata = []): void
     {
-        $this->client->putObject(['Bucket' => $this->bucket, 'Key' => $key, 'Body' => $content, 'ContentType' => $contentType])->resolve();
+        if (!\is_string($content) && !\is_resource($content)) {
+            throw new \InvalidArgumentException('Object content is a string or a stream.');
+        }
+        $this->client->putObject(['Bucket' => $this->bucket, 'Key' => $key, 'Body' => $content, 'ContentType' => $contentType, 'Metadata' => $metadata])->resolve();
+    }
+
+    public function exists(string $key): bool
+    {
+        // A missing object leaves the waiter pending (404); any other answer than 200 or 404 is an error.
+        return match ($this->client->objectExists(['Bucket' => $this->bucket, 'Key' => $key])->getState()) {
+            Waiter::STATE_SUCCESS => true,
+            Waiter::STATE_PENDING => false,
+            default => throw new \RuntimeException(\sprintf('Could not tell whether object "%s" exists.', $key)),
+        };
+    }
+
+    public function list(string $prefix): iterable
+    {
+        foreach ($this->client->listObjectsV2(['Bucket' => $this->bucket, 'Prefix' => $prefix])->getContents() as $object) {
+            $key = $object->getKey();
+            if (null !== $key) {
+                yield $key;
+            }
+        }
     }
 
     public function move(string $from, string $to): void
