@@ -157,6 +157,19 @@ describe('occurrences as the server has them', () => {
     expect(occurrences.map((o) => local(o))).toEqual(['2026-03-22T02:30:00', '2026-03-29T03:30:00', '2026-04-05T02:30:00'])
   })
 
+  it('reads a repeated clock time of a daily series as the later one, as the server gives it', () => {
+    // Occurrences::instances on the API image: 2026-10-25T02:30:00+01:00 (01:30Z), with and without a jump.
+    for (const [first, rule] of [
+      ['2026-10-23', 'FREQ=DAILY;COUNT=4'],
+      ['2026-10-01', 'FREQ=DAILY'],
+    ] as const) {
+      const series = calendarEvent('r', 'cal', { ...timed(`${first}T02:30:00`, `${first}T03:00:00`), recurrence: rule })
+      const keys = expandOccurrences([series], Date.UTC(2026, 9, 24), Date.UTC(2026, 9, 27), AMS).map((o) => o.recurrenceId)
+      expect(keys).toEqual(['20261024T003000Z', '20261025T013000Z', '20261026T013000Z'])
+    }
+  })
+
+  // The server's output for the same series: 00:00 and 01:00 CEST, then 02:00, 03:00 and 04:00 CET.
   it('steps an hourly series on the clock over the night clocks go back', () => {
     const series = calendarEvent('f', 'cal', { ...timed('2026-10-25T00:00:00', '2026-10-25T00:15:00'), recurrence: 'FREQ=HOURLY;COUNT=5' })
     expect(expandOccurrences([series], Date.UTC(2026, 9, 24), Date.UTC(2026, 9, 26), AMS).map((o) => o.recurrenceId)).toEqual([
@@ -168,12 +181,14 @@ describe('occurrences as the server has them', () => {
     ])
   })
 
-  it('jumps an old hourly series in elapsed hours, as the server does', () => {
-    const old = calendarEvent('k', 'cal', { ...timed('2016-01-01T00:00:00', '2016-01-01T00:15:00', 'UTC'), recurrence: 'FREQ=HOURLY;INTERVAL=2' })
+  it('jumps an old hourly series on the clock, as the server does', () => {
+    // From summer 1990 every 2 hours at even clock hours. Walking there step by step would pass the step limit, and a
+    // jump in elapsed hours would land on the odd hours in winter; the server gives 02:00, 04:00, 06:00 and 08:00.
+    const old = calendarEvent('k', 'cal', { ...timed('1990-06-01T00:00:00', '1990-06-01T00:15:00'), recurrence: 'FREQ=HOURLY;INTERVAL=2' })
     const started = Date.now()
-    const occurrences = expandOccurrences([old], Date.UTC(2026, 9, 19), Date.UTC(2026, 9, 20), 'UTC')
-    expect(occurrences.map((o) => o.recurrenceId)).toHaveLength(12)
-    expect(occurrences[0]!.recurrenceId).toBe('20261019T000000Z')
+    const range = expandRange([old], Date.UTC(2026, 10, 10, 0), Date.UTC(2026, 10, 10, 8), AMS)
+    expect(range.truncated).toEqual([])
+    expect(range.occurrences.map((o) => o.recurrenceId)).toEqual(['20261110T010000Z', '20261110T030000Z', '20261110T050000Z', '20261110T070000Z'])
     expect(Date.now() - started).toBeLessThan(1000)
   })
 

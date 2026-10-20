@@ -92,24 +92,29 @@ export function editScopes(occurrence: Occurrence, change?: EventChange): EditSc
  * alone stay where the occurrence is, with the series' own length, so the series does not move.
  */
 export function inputForScope(occurrence: Occurrence, before: EventInput, after: EventInput, scope: EditScope): EventInput {
-  const series = occurrence.series
-  if (scope === 'this' || series === null || occurrence.event.id === series.id) {
+  if (scope === 'this') {
     return after
   }
-  const result: EventInput = { ...inputFromEvent(series), organizerMailAccountId: after.organizerMailAccountId }
-  const changed = <K extends keyof EventInput>(key: K): boolean => JSON.stringify(after[key]) !== JSON.stringify(before[key])
-  for (const key of Object.keys(after) as (keyof EventInput)[]) {
-    if (key !== 'start' && key !== 'end' && changed(key)) {
-      ;(result as unknown as Record<string, unknown>)[key] = after[key]
+  const series = occurrence.series
+  let result = after
+  if (series !== null && occurrence.event.id !== series.id) {
+    result = { ...inputFromEvent(series), organizerMailAccountId: after.organizerMailAccountId }
+    const changed = <K extends keyof EventInput>(key: K): boolean => JSON.stringify(after[key]) !== JSON.stringify(before[key])
+    for (const key of Object.keys(after) as (keyof EventInput)[]) {
+      if (key !== 'start' && key !== 'end' && changed(key)) {
+        ;(result as unknown as Record<string, unknown>)[key] = after[key]
+      }
+    }
+    if (changed('start') || changed('end')) {
+      result.start = after.start
+      result.end = after.end
+    } else {
+      result.start = before.start
+      result.end = withLength(before.start, series.start, series.end)
     }
   }
-  if (changed('start') || changed('end')) {
-    result.start = after.start
-    result.end = after.end
-  } else {
-    result.start = before.start
-    result.end = withLength(before.start, series.start, series.end)
-  }
+  // A move to another day keeps the rule as it is: the server moves its weekdays and days of the month along with
+  // the series and its exceptions (EventEditor::shiftRule).
   return result
 }
 
