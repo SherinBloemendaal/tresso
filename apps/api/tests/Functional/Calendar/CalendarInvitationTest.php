@@ -7,11 +7,13 @@ namespace App\Tests\Functional\Calendar;
 use App\Entity\Calendar;
 use App\Tests\Functional\AuthenticatesUsers;
 use App\Tests\Functional\DatabaseTestCase;
+use App\Tests\Functional\StoresMail;
 use Doctrine\ORM\EntityManagerInterface;
 
 final class CalendarInvitationTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
     use CalendarTestHelpers;
 
     /** @var array<string, string> */
@@ -762,6 +764,7 @@ final class CalendarInvitationTest extends DatabaseTestCase
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
             'remoteUid' => (string) $this->uid,
             'rawObjectKey' => $stored['raw_object_key'],
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => new \DateTimeImmutable('+1 minute')->format(\DATE_ATOM),
             'messageId' => $stored['message_id_header'],
@@ -807,10 +810,10 @@ final class CalendarInvitationTest extends DatabaseTestCase
     private function deliver(string $subject, string $ical, string $from = 'anna@finance.example', string $folder = 'INBOX', ?string $receivedAt = null): void
     {
         ++$this->uid;
-        $sha = hash('sha256', $subject.$this->uid);
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => $folder, 'messages' => [[
             'remoteUid' => (string) $this->uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($this->accountId, $subject.$this->uid),
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => $receivedAt ?? new \DateTimeImmutable('+1 minute')->format(\DATE_ATOM),
             'messageId' => '<invite-'.$this->uid.'@finance.example>',

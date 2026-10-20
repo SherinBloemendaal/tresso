@@ -9,6 +9,9 @@ use App\Entity\DraftAttachment;
 use App\Entity\DraftCopyRemoval;
 use App\Outbox\CollectUpload;
 use App\Outbox\UploadCollector;
+use App\Storage\BlobKey;
+use App\Storage\BlobKind;
+use App\Storage\BlobVault;
 use App\Tests\Support\InMemoryObjectStorage;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
@@ -23,6 +26,7 @@ use Symfony\Component\Uid\Uuid;
 final class DraftAttachmentTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
     use RunsScans;
 
     private const string NOTES = "Q4 notes\nTravel stays, hiring moves to January.\n";
@@ -71,8 +75,8 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $attachment = $this->upload($id, 'Q4 notes.txt', self::NOTES);
 
         self::assertSame(['filename' => 'Q4 notes.txt', 'contentType' => 'text/plain', 'size' => \strlen(self::NOTES), 'scanStatus' => 'clean'], array_intersect_key($attachment, ['filename' => 0, 'contentType' => 0, 'size' => 0, 'scanStatus' => 0]));
-        $sha = hash('sha256', self::NOTES);
-        self::assertSame(self::NOTES, $this->storage()->read('uploads/'.substr($sha, 0, 2).'/'.$sha));
+        self::assertSame(self::NOTES, $this->plaintext($this->uploadKeyOf(self::NOTES)));
+        self::assertStringNotContainsString(self::NOTES, $this->storage()->read($this->uploadKeyOf(self::NOTES)), 'Stored encrypted.');
 
         $this->client->request('GET', '/api/v1/drafts/'.$id, server: $this->kim);
         self::assertResponseIsSuccessful();
@@ -170,8 +174,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $second = $this->newDraft();
         $kept = $this->upload($first, 'notes.txt', self::NOTES);
         $shared = $this->upload($second, 'notes.txt', self::NOTES);
-        $sha = hash('sha256', self::NOTES);
-        $key = 'uploads/'.substr($sha, 0, 2).'/'.$sha;
+        $key = $this->uploadKeyOf(self::NOTES);
 
         $this->client->request('DELETE', '/api/v1/drafts/'.$second.'/attachments/'.$shared['id'], server: $this->kim);
         self::assertResponseStatusCodeSame(200);
@@ -196,8 +199,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
         self::assertResponseStatusCodeSame(204);
         $this->collectQueuedUploads();
 
-        $sha = hash('sha256', self::NOTES);
-        self::assertFalse($this->storage()->has('uploads/'.substr($sha, 0, 2).'/'.$sha));
+        self::assertFalse($this->storage()->has($this->uploadKeyOf(self::NOTES)));
     }
 
     public function testSendsTheFilesAndKeepsTheDraftOutOfSightUntilItWentOut(): void
@@ -306,15 +308,14 @@ final class DraftAttachmentTest extends DatabaseTestCase
         self::assertIsArray($files[0] ?? null);
         self::assertIsString($files[0]['rawObjectKey']);
 
-        self::assertStringContainsString('filename="Q4 notes.txt"', $this->storage()->read($files[0]['rawObjectKey']));
+        self::assertStringContainsString('filename="Q4 notes.txt"', $this->plaintext($files[0]['rawObjectKey']));
     }
 
     public function testAFileGoneFromStorageStopsOnlyItsOwnDraft(): void
     {
         $broken = $this->newDraft(['to' => [['address' => 'anna@finance.example', 'name' => null]], 'subject' => 'Broken']);
         $this->upload($broken, 'gone.txt', 'soon gone');
-        $sha = hash('sha256', 'soon gone');
-        $this->storage()->delete('uploads/'.substr($sha, 0, 2).'/'.$sha);
+        $this->storage()->delete($this->uploadKeyOf('soon gone'));
         $fine = $this->newDraft(['subject' => 'Fine']);
 
         $this->client->jsonRequest('POST', '/api/v1/outgoing-messages', ['mailAccountId' => $this->accountId, 'to' => [['address' => 'anna@finance.example']], 'subject' => 'x', 'html' => '', 'draftId' => $broken], $this->kim);
@@ -334,15 +335,13 @@ final class DraftAttachmentTest extends DatabaseTestCase
 
     public function testAnUploadStoredButNeverReferredToIsCollected(): void
     {
-        $sha = hash('sha256', 'orphan');
-        $key = 'uploads/'.substr($sha, 0, 2).'/'.$sha;
-        $this->storage()->put($key, 'orphan');
+        $key = $this->storeAsWorker($this->accountId, BlobKind::Uploads, 'orphan');
 
         static::getContainer()->get(UploadCollector::class)->collect($key);
 
         self::assertFalse($this->storage()->has($key));
         $this->expectException(\LogicException::class);
-        static::getContainer()->get(UploadCollector::class)->collect('attachments/ab/'.$sha);
+        static::getContainer()->get(UploadCollector::class)->collect(BlobKey::of(BlobKind::Attachments, $this->accountOwner($this->accountId), $this->fingerprintFor($this->accountId, 'orphan')));
     }
 
     public function testAFileChangeIsANewVersionOfTheDraft(): void
@@ -524,16 +523,14 @@ final class DraftAttachmentTest extends DatabaseTestCase
     {
         $id = $this->newDraft(['subject' => 'Broken']);
         $this->upload($id, 'gone.txt', 'soon gone');
-        $sha = hash('sha256', 'soon gone');
-        $key = 'uploads/'.substr($sha, 0, 2).'/'.$sha;
-        $this->storage()->delete($key);
+        $this->storage()->delete($this->uploadKeyOf('soon gone'));
         $this->connection()->executeStatement("UPDATE draft SET updated_at = now() - interval '1 minute'");
         $this->entityManager()->clear();
         self::assertSame([], $this->claimFiling());
         self::assertSame(Draft::UNFILEABLE, $this->connection()->fetchOne('SELECT filing_claimed_by FROM draft WHERE id = :id', ['id' => $id]));
         self::assertSame([], $this->claimFiling(), 'Not tried again on every claim.');
 
-        $this->storage()->put($key, 'soon gone');
+        $this->storeAsWorker($this->accountId, BlobKind::Uploads, 'soon gone');
         $this->client->jsonRequest('PUT', '/api/v1/drafts/'.$id, ['mailAccountId' => $this->accountId, 'kind' => 'new', 'to' => [], 'cc' => [], 'bcc' => [], 'subject' => 'Fixed', 'html' => '', 'quoteHtml' => '', 'expectedVersion' => 2], $this->kim);
         self::assertResponseIsSuccessful();
         $this->connection()->executeStatement("UPDATE draft SET updated_at = now() - interval '1 minute'");
@@ -615,7 +612,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $key = $this->connection()->fetchOne('SELECT raw_object_key FROM outgoing_message WHERE id = :id', ['id' => $outgoingId]);
         self::assertIsString($key);
 
-        return $this->storage()->read($key);
+        return $this->plaintext($key);
     }
 
     /**
@@ -679,11 +676,8 @@ final class DraftAttachmentTest extends DatabaseTestCase
     private function receiveInvoice(): string
     {
         $raw = "From: billing@finance.example\r\nSubject: Invoice 42\r\n\r\nYour invoice";
-        $rawSha = hash('sha256', $raw);
-        $rawKey = 'raw/'.substr($rawSha, 0, 2).'/'.$rawSha;
-        $this->storage()->put($rawKey, $raw);
-        $sha = hash('sha256', self::INVOICE);
-        $this->storage()->put('attachments/'.substr($sha, 0, 2).'/'.$sha, self::INVOICE);
+        $rawKey = $this->storeAsWorker($this->accountId, BlobKind::Raw, $raw);
+        $this->storeAsWorker($this->accountId, BlobKind::Attachments, self::INVOICE);
 
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/folders', ['workerId' => 'w1', 'folders' => [
             ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1],
@@ -692,6 +686,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
             'remoteUid' => '1',
             'rawObjectKey' => $rawKey,
+            'keyVersion' => 1,
             'size' => \strlen($raw),
             'receivedAt' => '2026-10-19T08:00:00+00:00',
             'messageId' => '<invoice-42@finance.example>',
@@ -700,7 +695,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
             'to' => [['address' => 'kim@company.example']],
             'snippet' => 'Your invoice',
             'attachments' => [
-                ['filename' => 'Factuur 42.pdf', 'contentType' => 'application/pdf', 'size' => \strlen(self::INVOICE), 'sha256' => $sha],
+                ['filename' => 'Factuur 42.pdf', 'contentType' => 'application/pdf', 'size' => \strlen(self::INVOICE), 'fingerprint' => $this->fingerprintFor($this->accountId, self::INVOICE)],
             ],
         ]]], $this->worker);
         self::assertResponseIsSuccessful();
@@ -724,16 +719,14 @@ final class DraftAttachmentTest extends DatabaseTestCase
     private function receiveLogo(string $contentId): string
     {
         $raw = "From: billing@finance.example\r\nSubject: Logo\r\n\r\nSee the logo";
-        $rawSha = hash('sha256', $raw);
-        $rawKey = 'raw/'.substr($rawSha, 0, 2).'/'.$rawSha;
-        $this->storage()->put($rawKey, $raw);
+        $rawKey = $this->storeAsWorker($this->accountId, BlobKind::Raw, $raw);
         $png = "\x89PNG logo";
-        $sha = hash('sha256', $png);
-        $this->storage()->put('attachments/'.substr($sha, 0, 2).'/'.$sha, $png);
+        $this->storeAsWorker($this->accountId, BlobKind::Attachments, $png);
 
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
             'remoteUid' => '2',
             'rawObjectKey' => $rawKey,
+            'keyVersion' => 1,
             'size' => \strlen($raw),
             'receivedAt' => '2026-10-19T09:00:00+00:00',
             'messageId' => '<logo@finance.example>',
@@ -742,7 +735,7 @@ final class DraftAttachmentTest extends DatabaseTestCase
             'to' => [['address' => 'kim@company.example']],
             'snippet' => 'See the logo',
             'attachments' => [
-                ['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => \strlen($png), 'sha256' => $sha, 'inline' => true, 'contentId' => $contentId],
+                ['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => \strlen($png), 'fingerprint' => $this->fingerprintFor($this->accountId, $png), 'inline' => true, 'contentId' => $contentId],
             ],
         ]]], $this->worker);
         self::assertResponseIsSuccessful();
@@ -752,6 +745,16 @@ final class DraftAttachmentTest extends DatabaseTestCase
         self::assertIsString($id);
 
         return $id;
+    }
+
+    private function uploadKeyOf(string $content): string
+    {
+        return BlobKey::of(BlobKind::Uploads, $this->accountOwner($this->accountId), $this->fingerprintFor($this->accountId, $content));
+    }
+
+    private function plaintext(string $key): string
+    {
+        return static::getContainer()->get(BlobVault::class)->read($this->accountOwner($this->accountId), $key);
     }
 
     private function storage(): InMemoryObjectStorage

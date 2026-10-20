@@ -11,6 +11,7 @@ use App\Entity\Thread;
 use App\Entity\User;
 use App\Enum\FolderRole;
 use App\Enum\Verdict;
+use App\Mail\MessageFields;
 use App\Notification\MailNotifier;
 use App\Repository\CategoryRepository;
 use App\Repository\MailAccountRepository;
@@ -56,6 +57,7 @@ final readonly class MailClassification
         private EmailTodos $emailTodos,
         private MailNotifier $mailNotifier,
         private BatchDelivery $batches,
+        private MessageFields $fields,
     ) {
     }
 
@@ -427,7 +429,7 @@ final readonly class MailClassification
                 array_map(static fn (array $a): string => mb_strtolower($a['address']), $recipients['to'] ?? []),
                 array_map(static fn (array $a): string => mb_strtolower($a['address']), $recipients['cc'] ?? []),
                 $message->getSubject(),
-                $message->getSnippet(),
+                $this->fields->snippet($message),
                 $headers,
                 (bool) $row['junk'],
                 $folderRoles,

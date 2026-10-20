@@ -11,7 +11,8 @@ use App\Entity\OutgoingMessage;
 use App\Realtime\RealtimeNotifier;
 use App\Repository\DraftCopyRemovalRepository;
 use App\Repository\DraftRepository;
-use App\Storage\ObjectStorage;
+use App\Storage\BlobKind;
+use App\Storage\BlobVault;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
 
@@ -36,7 +37,7 @@ final readonly class DraftFiling
         private DraftRepository $drafts,
         private DraftCopyRemovalRepository $removals,
         private MimeComposer $composer,
-        private ObjectStorage $storage,
+        private BlobVault $blobs,
         private RealtimeNotifier $notifier,
         private UploadCollector $uploads,
         private LoggerInterface $logger,
@@ -60,9 +61,7 @@ final readonly class DraftFiling
                 $draft->claimFiling(Draft::UNFILEABLE, $now->add(new \DateInterval(self::UNFILEABLE_RETRY)));
                 continue;
             }
-            $sha = hash('sha256', $composed->raw);
-            $key = 'drafts/'.substr($sha, 0, 2).'/'.$sha;
-            $this->storage->write($key, $composed->raw, 'message/rfc822');
+            $key = $this->blobs->store($account->getOwner()->getId(), BlobKind::Drafts, $composed->raw)->key;
             $draft->claimFiling($workerId, $until);
             $files[] = ['draft' => $draft, 'version' => $draft->getVersion(), 'rawObjectKey' => $key, 'messageId' => $composed->messageId, 'previousMessageId' => $draft->getFiledMessageId()];
         }

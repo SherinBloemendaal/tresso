@@ -15,6 +15,7 @@ use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 final class UnsubscribeTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private const string ME = 'kim@gmail.example';
     private const string ONE_CLICK = '<https://shop.example/u?t=1>';
@@ -285,7 +286,8 @@ final class UnsubscribeTest extends DatabaseTestCase
 
         return [
             'remoteUid' => $uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($this->accountId, $uid.$subject),
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => '2026-10-19T08:00:00+00:00',
             'messageId' => '<'.$sha.'@x>',

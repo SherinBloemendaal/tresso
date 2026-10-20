@@ -6,8 +6,8 @@ namespace App\Outbox;
 
 use App\Entity\Message;
 use App\Entity\MessageReference;
+use App\Storage\BlobVault;
 use App\Storage\ObjectNotFound;
-use App\Storage\ObjectStorage;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
@@ -35,7 +35,7 @@ final readonly class MimeComposer
     public function __construct(
         private OutgoingHtmlSanitizer $html,
         private EntityManagerInterface $entityManager,
-        private ObjectStorage $storage,
+        private BlobVault $blobs,
     ) {
     }
 
@@ -112,7 +112,7 @@ final readonly class MimeComposer
         $inline = $files = [];
         foreach ($composition->attachments as $attachment) {
             try {
-                $content = $this->storage->read($attachment->objectKey);
+                $content = $this->blobs->read($account->getOwner()->getId(), $attachment->objectKey);
             } catch (ObjectNotFound $exception) {
                 throw new MissingAttachment($attachment->filename, $exception);
             }

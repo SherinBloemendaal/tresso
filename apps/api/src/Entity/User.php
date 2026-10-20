@@ -30,10 +30,18 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     private string $displayName;
 
     /**
-     * Per-user data encryption key, wrapped by the master key. Encrypts mail credentials and webhook secrets.
+     * The data key from before user keys, wrapped by a master key. {@see \App\Security\Crypto\UserKeys} turns it into
+     * key version 1 on first use and clears it; the column goes once no user has one left.
      */
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     private ?string $wrappedDataKey = null;
+
+    /**
+     * Names content (fingerprints and object names), wrapped by a master key; never rotated with the user keys. Read
+     * and written by {@see \App\Security\Crypto\UserKeys} only, in SQL.
+     */
+    #[ORM\Column(type: Types::TEXT, nullable: true)]
+    private ?string $wrappedIndexKey = null;
 
     /** @var list<string> */
     #[ORM\Column(type: Types::JSON)]
@@ -100,16 +108,6 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     public function setPassword(string $hashedPassword): void
     {
         $this->password = $hashedPassword;
-    }
-
-    public function getWrappedDataKey(): ?string
-    {
-        return $this->wrappedDataKey;
-    }
-
-    public function setWrappedDataKey(string $wrappedDataKey): void
-    {
-        $this->wrappedDataKey = $wrappedDataKey;
     }
 
     public function getCreatedAt(): \DateTimeImmutable

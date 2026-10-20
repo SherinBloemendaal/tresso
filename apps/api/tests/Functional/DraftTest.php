@@ -6,6 +6,7 @@ namespace App\Tests\Functional;
 
 use App\Entity\Draft;
 use App\Entity\DraftCopyRemoval;
+use App\Storage\BlobVault;
 use App\Tests\Support\InMemoryObjectStorage;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Uid\Uuid;
@@ -13,6 +14,7 @@ use Symfony\Component\Uid\Uuid;
 final class DraftTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private string $accountId;
 
@@ -109,7 +111,8 @@ final class DraftTest extends DatabaseTestCase
         self::assertIsArray($files[0]);
         self::assertSame(['draftId' => $id, 'version' => 1, 'messageId' => $id.'.1@company.example', 'previousMessageId' => null], array_diff_key($files[0], ['rawObjectKey' => 0]));
         self::assertIsString($files[0]['rawObjectKey']);
-        $raw = static::getContainer()->get(InMemoryObjectStorage::class)->read($files[0]['rawObjectKey']);
+        self::assertStringNotContainsString('archive@company.example', static::getContainer()->get(InMemoryObjectStorage::class)->read($files[0]['rawObjectKey']), 'Stored encrypted.');
+        $raw = static::getContainer()->get(BlobVault::class)->read($this->accountOwner($this->accountId), $files[0]['rawObjectKey']);
         self::assertStringContainsString('Bcc: archive@company.example', $raw, 'The copy keeps Bcc so other mail apps can go on writing it.');
         self::assertStringContainsString('X-Tresso-Draft: '.$id, $raw);
         self::assertSame([], $this->claim()['files'], 'A claimed draft is not handed out twice.');

@@ -11,6 +11,7 @@ use App\Entity\NotificationPreferences;
 use App\Entity\User;
 use App\Entity\UserSettings;
 use App\Notification\ReminderRules;
+use App\Security\Crypto\UserKeys;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Clock\ClockInterface;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
@@ -27,6 +28,7 @@ final readonly class UserProvisioner
         private BuiltinSmartInboxes $builtinSmartInboxes,
         private ReminderRules $reminderRules,
         private ClockInterface $clock,
+        private UserKeys $keys,
     ) {
     }
 
@@ -45,6 +47,7 @@ final readonly class UserProvisioner
         $this->builtinSmartInboxes->ensure($user);
 
         $this->entityManager->flush();
+        $this->keys->ensure($user->getId());
 
         return $user;
     }

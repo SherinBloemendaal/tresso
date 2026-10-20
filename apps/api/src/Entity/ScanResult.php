@@ -6,19 +6,28 @@ namespace App\Entity;
 
 use App\Enum\ScanStatus;
 use App\Repository\ScanResultRepository;
+use App\Scan\ScanCacheKey;
 use App\Scan\ScanOutcome;
 use Doctrine\ORM\Mapping as ORM;
 
 /**
- * The last definitive verdict (clean or infected) for a piece of attachment content, by SHA-256. The same file mailed
- * to many people, or synced from several folders, is scanned once. Rescans overwrite it.
+ * The last definitive verdict (clean or infected) for a piece of attachment content, shared by all users: the same
+ * file mailed to many people, or synced from several folders, is scanned once. Rescans overwrite it.
+ *
+ * Keyed by HMAC-SHA256(scan cache key, SHA-256 of the content) ({@see \App\Scan\ScanCacheKey}), with the id of the
+ * master key the cache key comes from. Nothing ties a row to a user or an attachment, and without the master key a
+ * database dump cannot test whether a known file was ever received. Rows of another master key, and rows from before
+ * ($keyId null, keyed by the plain SHA-256), are never matched; key rotation and re-encryption delete them.
  */
 #[ORM\Entity(repositoryClass: ScanResultRepository::class)]
 class ScanResult
 {
     #[ORM\Id]
     #[ORM\Column(length: 64)]
-    private string $sha256;
+    private string $contentKey;
+
+    #[ORM\Column(length: 32, nullable: true)]
+    private ?string $keyId;
 
     #[ORM\Column(length: 16, enumType: ScanStatus::class)]
     private ScanStatus $status;
@@ -33,15 +42,21 @@ class ScanResult
     #[ORM\Column]
     private \DateTimeImmutable $scannedAt;
 
-    public function __construct(string $sha256, ScanOutcome $outcome, string $engine, \DateTimeImmutable $scannedAt)
+    public function __construct(ScanCacheKey $key, ScanOutcome $outcome, string $engine, \DateTimeImmutable $scannedAt)
     {
-        $this->sha256 = $sha256;
+        $this->contentKey = $key->contentKey;
+        $this->keyId = $key->keyId;
         $this->record($outcome, $engine, $scannedAt);
     }
 
-    public function getSha256(): string
+    public function getContentKey(): string
     {
-        return $this->sha256;
+        return $this->contentKey;
+    }
+
+    public function getKeyId(): ?string
+    {
+        return $this->keyId;
     }
 
     public function getStatus(): ScanStatus

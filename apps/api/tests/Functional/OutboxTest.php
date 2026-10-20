@@ -9,7 +9,7 @@ use App\Outbox\ReleaseOutgoingMessage;
 use App\Outbox\ReleaseOutgoingMessageHandler;
 use App\Realtime\MercureTokens;
 use App\Realtime\RealtimeNotifier;
-use App\Tests\Support\InMemoryObjectStorage;
+use App\Storage\BlobVault;
 use App\Tests\Support\RecordingMercureHub;
 use Doctrine\ORM\EntityManagerInterface;
 use Lcobucci\JWT\Encoding\JoseEncoder;
@@ -22,6 +22,7 @@ use Symfony\Component\Uid\Uuid;
 final class OutboxTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private string $accountId;
 
@@ -391,7 +392,9 @@ final class OutboxTest extends DatabaseTestCase
 
     private function raw(string $id): string
     {
-        return static::getContainer()->get(InMemoryObjectStorage::class)->read($this->outgoing($id)->getRawObjectKey());
+        $message = $this->outgoing($id);
+
+        return static::getContainer()->get(BlobVault::class)->read($message->getMailAccount()->getOwner()->getId(), $message->getRawObjectKey());
     }
 
     /** @return list<string> */
@@ -409,10 +412,10 @@ final class OutboxTest extends DatabaseTestCase
             ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1],
         ]], $this->worker);
         self::assertResponseIsSuccessful();
-        $sha = hash('sha256', 'plan-2');
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
             'remoteUid' => '1',
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($this->accountId, 'plan-2'),
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => '2026-10-19T08:00:00+00:00',
             'messageId' => '<plan-2@finance.example>',

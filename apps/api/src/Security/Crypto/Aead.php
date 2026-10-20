@@ -20,7 +20,7 @@ final class Aead
     public static function decrypt(string $sealed, string $additionalData, #[\SensitiveParameter] string $key): string
     {
         $nonceLength = \SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
-        if (\strlen($sealed) <= $nonceLength + \SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_ABYTES) {
+        if (\strlen($sealed) < $nonceLength + \SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_ABYTES) {
             throw new CryptoException('Ciphertext is too short.');
         }
 

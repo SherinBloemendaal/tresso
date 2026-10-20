@@ -7,10 +7,12 @@ namespace App\Scan;
 use App\Entity\Attachment;
 use App\Entity\DraftAttachment;
 use App\Enum\ScanStatus;
+use Symfony\Component\Uid\Uuid;
 
 /**
- * What a scan job needs of the attachment it names: its content, how large it is, its current status, and where the
- * content may be stored (its own key, then quarantine).
+ * What a scan job needs of the attachment it names: its content (by fingerprint, or the SHA-256 of content stored
+ * before encryption), whose it is, how large it is, its current status, and where the content may be stored (its own
+ * key, then quarantine).
  */
 final readonly class ScanSubject
 {
@@ -19,6 +21,8 @@ final readonly class ScanSubject
      */
     private function __construct(
         public string $sha256,
+        public Uuid $owner,
+        public bool $encrypted,
         public int $size,
         public ScanStatus $status,
         public array $keys,
@@ -27,11 +31,11 @@ final readonly class ScanSubject
 
     public static function ofAttachment(Attachment $attachment): self
     {
-        return new self($attachment->getSha256(), $attachment->getSize(), $attachment->getScanStatus(), [$attachment->getObjectKey(), $attachment->getQuarantineKey()]);
+        return new self($attachment->getSha256(), $attachment->getMailAccount()->getOwner()->getId(), null !== $attachment->getKeyVersion(), $attachment->getSize(), $attachment->getScanStatus(), [$attachment->getObjectKey(), $attachment->getQuarantineKey()]);
     }
 
     public static function ofDraftAttachment(DraftAttachment $attachment): self
     {
-        return new self($attachment->getSha256(), $attachment->getSize(), $attachment->getScanStatus(), [$attachment->getObjectKey(), Attachment::quarantineKey($attachment->getSha256())]);
+        return new self($attachment->getSha256(), $attachment->getDraft()->getOwner()->getId(), null !== $attachment->getKeyVersion(), $attachment->getSize(), $attachment->getScanStatus(), [$attachment->getObjectKey(), $attachment->getQuarantineKey()]);
     }
 }

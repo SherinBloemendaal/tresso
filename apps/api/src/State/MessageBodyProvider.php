@@ -16,8 +16,8 @@ use App\Mail\Body\MessageBodyParser;
 use App\Repository\AttachmentRepository;
 use App\Repository\MessageRepository;
 use App\Security\CurrentUser;
+use App\Storage\BlobVault;
 use App\Storage\ObjectNotFound;
-use App\Storage\ObjectStorage;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
@@ -32,7 +32,7 @@ final readonly class MessageBodyProvider implements ProviderInterface
         private CurrentUser $currentUser,
         private MessageRepository $messages,
         private AttachmentRepository $attachments,
-        private ObjectStorage $storage,
+        private BlobVault $blobs,
         private MessageBodyParser $parser,
         private MailHtmlSanitizer $sanitizer,
         private AttachmentUrls $attachmentUrls,
@@ -79,7 +79,7 @@ final readonly class MessageBodyProvider implements ProviderInterface
     private function raw(Message $message): string
     {
         try {
-            return $this->storage->read($message->getRawObjectKey());
+            return $this->blobs->read($message->getMailAccount()->getOwner()->getId(), $message->getRawObjectKey());
         } catch (ObjectNotFound $exception) {
             $this->logger->error('Raw message is missing from object storage.', ['messageId' => $message->getId()->toRfc4122(), 'exception' => $exception]);
 

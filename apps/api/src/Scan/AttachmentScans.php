@@ -34,16 +34,17 @@ final readonly class AttachmentScans
     }
 
     /**
-     * @param ?string $engine the scanner that gave a definitive verdict, to cache it; null for a cached or failed one
-     * @param bool    $rescan whether the verdict may replace clean and infected verdicts too
+     * @param string        $sha256   the content: an owner's fingerprint, or the SHA-256 of content from before encryption
+     * @param bool          $rescan   whether the verdict may replace clean and infected verdicts too
+     * @param ?ScanCacheKey $cacheKey where to cache a verdict the scanner ($engine) just gave; null for a cached or failed one
      */
-    public function record(string $sha256, ScanOutcome $outcome, ?string $engine, bool $rescan): void
+    public function record(string $sha256, ScanOutcome $outcome, bool $rescan, ?ScanCacheKey $cacheKey = null, ?string $engine = null): void
     {
-        $this->entityManager->wrapInTransaction(function () use ($sha256, $outcome, $engine, $rescan): void {
+        $this->entityManager->wrapInTransaction(function () use ($sha256, $outcome, $rescan, $cacheKey, $engine): void {
             $this->connection->executeStatement("SELECT pg_advisory_xact_lock(hashtextextended('scan:' || :sha, 0))", ['sha' => $sha256]);
 
-            if (null !== $engine && $outcome->isDefinitive()) {
-                $this->cache($sha256, $outcome, $engine);
+            if (null !== $cacheKey && $outcome->isDefinitive()) {
+                $this->cache($cacheKey, $outcome, $engine ?? throw new \LogicException('A cached verdict names the scanner that gave it.'));
             }
             $wasInfected = $this->anyInfected($sha256);
 
@@ -109,13 +110,14 @@ final readonly class AttachmentScans
         $this->entityManager->clear();
     }
 
-    private function cache(string $sha256, ScanOutcome $outcome, string $engine): void
+    private function cache(ScanCacheKey $key, ScanOutcome $outcome, string $engine): void
     {
         $this->connection->executeStatement(
-            'INSERT INTO scan_result (sha256, status, signature, engine, scanned_at) VALUES (:sha, :status, :signature, :engine, :now)
-             ON CONFLICT (sha256) DO UPDATE SET status = EXCLUDED.status, signature = EXCLUDED.signature, engine = EXCLUDED.engine, scanned_at = EXCLUDED.scanned_at',
+            'INSERT INTO scan_result (content_key, key_id, status, signature, engine, scanned_at) VALUES (:key, :keyId, :status, :signature, :engine, :now)
+             ON CONFLICT (content_key) DO UPDATE SET key_id = EXCLUDED.key_id, status = EXCLUDED.status, signature = EXCLUDED.signature, engine = EXCLUDED.engine, scanned_at = EXCLUDED.scanned_at',
             [
-                'sha' => $sha256,
+                'key' => $key->contentKey,
+                'keyId' => $key->keyId,
                 'status' => $outcome->status->value,
                 'signature' => $outcome->signature,
                 'engine' => mb_substr($engine, 0, 255),

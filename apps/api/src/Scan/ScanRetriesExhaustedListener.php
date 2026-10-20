@@ -51,6 +51,6 @@ final readonly class ScanRetriesExhaustedListener
         $clamdError = $throwable instanceof ScanError
             || ($throwable instanceof HandlerFailedException && [] !== $throwable->getWrappedExceptions(ScanError::class, true));
         $this->logger->error('Gave up scanning attachment {id}: {reason}', ['id' => $message->attachmentId, 'reason' => $throwable->getMessage()]);
-        $this->scans->record($subject->sha256, ScanOutcome::failed($clamdError ? ScanFailure::Unscannable : ScanFailure::Unavailable), null, false);
+        $this->scans->record($subject->sha256, ScanOutcome::failed($clamdError ? ScanFailure::Unscannable : ScanFailure::Unavailable), false);
     }
 }

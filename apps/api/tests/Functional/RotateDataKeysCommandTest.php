@@ -6,50 +6,51 @@ namespace App\Tests\Functional;
 
 use App\Command\RotateDataKeysCommand;
 use App\Entity\User;
-use App\Repository\UserRepository;
-use App\Security\Crypto\DataKeyManager;
 use App\Security\Crypto\KeyRing;
+use App\Security\Crypto\UserKeys;
+use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Console\Application;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
+use Symfony\Component\Uid\Uuid;
 
 final class RotateDataKeysCommandTest extends DatabaseTestCase
 {
-    public function testRewrapsEveryUserWithTheCurrentKey(): void
+    public function testRewrapsEveryUserKeyWithTheCurrentMasterKey(): void
     {
         $oldKey = base64_encode(random_bytes(32));
         $newKey = base64_encode(random_bytes(32));
+        $connection = static::getContainer()->get(Connection::class);
         $entityManager = static::getContainer()->get(EntityManagerInterface::class);
-        $users = static::getContainer()->get(UserRepository::class);
 
-        $before = new DataKeyManager(new KeyRing('old:'.$oldKey, 'old'));
-        $dataKeys = [];
-        foreach (['kim@example.test', 'lisa@example.test', 'pieter@example.test'] as $email) {
+        $before = new UserKeys($connection, new KeyRing('old:'.$oldKey, 'old'));
+        $keys = [];
+        foreach (['kim@example.test', 'lisa@example.test'] as $email) {
             $user = new User($email, 'User');
-            $dataKeys[$email] = $before->dataKeyFor($user);
             $entityManager->persist($user);
+            $entityManager->flush();
+            $before->rotate($user->getId(), new \DateTimeImmutable());
+            $keys[$email] = ['id' => $user->getId(), 'versions' => [1 => $before->version($user->getId(), 1), 2 => $before->version($user->getId(), 2)], 'index' => $before->indexKey($user->getId())];
         }
-        $withoutKey = new User('nokey@example.test', 'No key yet');
-        $entityManager->persist($withoutKey);
-        $entityManager->flush();
+        $connection->executeStatement("INSERT INTO scan_result (content_key, key_id, status, engine, scanned_at) VALUES ('a', 'old', 'clean', 'x', NOW()), ('b', NULL, 'clean', 'x', NOW()), ('c', 'new', 'clean', 'x', NOW())");
 
-        $after = new DataKeyManager(new KeyRing('old:'.$oldKey.',new:'.$newKey, 'new'));
+        $afterRing = new KeyRing('old:'.$oldKey.',new:'.$newKey, 'new');
         $application = new Application();
-        $application->addCommand(new Command(null, new RotateDataKeysCommand($users, $after, $entityManager)));
+        $application->addCommand(new Command(null, new RotateDataKeysCommand($connection, new UserKeys($connection, $afterRing), $afterRing)));
         $tester = new CommandTester($application->find('app:crypto:rotate-data-keys'));
         $tester->execute([]);
 
         $tester->assertCommandIsSuccessful();
-        self::assertStringContainsString('Re-wrapped 3 of 4 data keys.', $tester->getDisplay());
+        self::assertStringContainsString('Re-wrapped 6 keys', $tester->getDisplay(), 'Two versions and an index key per user.');
+        self::assertSame(['c'], $connection->fetchFirstColumn('SELECT content_key FROM scan_result'), 'Cached verdicts of other master keys are dropped.');
 
-        $onlyNew = new DataKeyManager(new KeyRing('new:'.$newKey, 'new'));
-        foreach ($dataKeys as $email => $dataKey) {
-            $user = $users->findOneByEmail($email);
-            self::assertInstanceOf(User::class, $user);
-            self::assertStringStartsWith('v1.new.', (string) $user->getWrappedDataKey());
-            self::assertSame($dataKey, $onlyNew->dataKeyFor($user), 'The data key itself is unchanged.');
+        $onlyNew = new UserKeys($connection, new KeyRing('new:'.$newKey, 'new'));
+        foreach ($keys as $user) {
+            self::assertInstanceOf(Uuid::class, $user['id']);
+            self::assertSame($user['versions'][1], $onlyNew->version($user['id'], 1), 'The user keys themselves are unchanged.');
+            self::assertSame($user['versions'][2], $onlyNew->version($user['id'], 2));
+            self::assertSame($user['index'], $onlyNew->indexKey($user['id']));
         }
-        self::assertNull($users->findOneByEmail('nokey@example.test')?->getWrappedDataKey());
     }
 }

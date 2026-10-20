@@ -12,10 +12,12 @@ use App\Classification\BuiltinSmartInboxes;
 use App\Classification\ReceivingServers;
 use App\Entity\Calendar;
 use App\Enum\MailProvider;
+use App\Mail\MessageFields;
 use App\Security\CurrentUser;
 use App\Unsubscribe\UnsubscribeLink;
 use Doctrine\DBAL\Connection;
 use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\Uid\Uuid;
 
 /**
  * Reads the user's changes after a change number, in pages that never split one change number.
@@ -32,6 +34,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
         private RequestStack $requests,
         private BuiltinSmartInboxes $builtinSmartInboxes,
         private LocalCalendars $localCalendars,
+        private MessageFields $fields,
     ) {
     }
 
@@ -260,7 +263,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private function messages(array $range): array
     {
         $rows = $this->connection->fetchAllAssociative(
-            "SELECT m.id, m.mail_account_id, m.thread_id, m.subject, m.from_address, m.from_name, m.recipients, m.snippet,
+            "SELECT m.id, m.mail_account_id, m.thread_id, m.subject, m.from_address, m.from_name, m.recipients, m.snippet, m.sealed_snippet,
                     m.sent_at, m.received_at, m.seen, m.flagged, m.answered, m.draft, m.has_attachments, m.attachment_scan,
                     m.category_id, m.verdict, m.summary, m.held_until, m.batched_at,
                     (SELECT i.method FROM calendar_invitation i WHERE i.message_id = m.id ORDER BY i.id LIMIT 1) AS calendar_method,
@@ -272,7 +275,9 @@ final readonly class SyncChangesProvider implements ProviderInterface
             $range,
         );
 
-        return array_map(static function (array $r): array {
+        $owner = Uuid::fromString($range['user']);
+
+        return array_map(function (array $r) use ($owner): array {
             $unsubscribe = self::unsubscribeLink($r);
 
             return [
@@ -283,7 +288,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 'subject' => $r['subject'],
                 'from' => ['address' => $r['from_address'], 'name' => $r['from_name']],
                 'recipients' => json_decode(\is_string($r['recipients']) ? $r['recipients'] : '{}', true, flags: \JSON_THROW_ON_ERROR),
-                'snippet' => $r['snippet'],
+                'snippet' => $this->fields->snippetOf($owner, Uuid::fromString(self::text($r['id'])), self::nullableText($r['sealed_snippet']), self::text($r['snippet'])),
                 'sentAt' => self::date($r['sent_at']),
                 'receivedAt' => self::date($r['received_at']),
                 'flags' => ['seen' => (bool) $r['seen'], 'flagged' => (bool) $r['flagged'], 'answered' => (bool) $r['answered'], 'draft' => (bool) $r['draft']],
@@ -783,6 +788,11 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private static function text(mixed $value): string
     {
         return \is_string($value) ? $value : throw new \UnexpectedValueException('Expected a text column.');
+    }
+
+    private static function nullableText(mixed $value): ?string
+    {
+        return null === $value ? null : self::text($value);
     }
 
     private static function int(mixed $value): int

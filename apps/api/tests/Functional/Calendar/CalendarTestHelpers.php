@@ -7,7 +7,7 @@ namespace App\Tests\Functional\Calendar;
 use App\Calendar\Invitation\ApplyCalendarInvitation;
 use App\Calendar\Invitation\InvitationApplier;
 use App\Entity\OutgoingMessage;
-use App\Tests\Support\InMemoryObjectStorage;
+use App\Storage\BlobVault;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
@@ -107,6 +107,6 @@ trait CalendarTestHelpers
 
     private function rawOutgoing(OutgoingMessage $message): string
     {
-        return static::getContainer()->get(InMemoryObjectStorage::class)->read($message->getRawObjectKey());
+        return static::getContainer()->get(BlobVault::class)->read($message->getMailAccount()->getOwner()->getId(), $message->getRawObjectKey());
     }
 }

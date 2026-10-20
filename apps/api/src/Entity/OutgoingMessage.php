@@ -59,6 +59,10 @@ class OutgoingMessage implements TracksChanges
     #[ORM\Column(length: 255)]
     private string $rawObjectKey;
 
+    /** The key version the message is encrypted with; null for plaintext stored before encryption. */
+    #[ORM\Column(nullable: true)]
+    private ?int $rawKeyVersion;
+
     #[ORM\Column]
     private int $size;
 
@@ -94,6 +98,7 @@ class OutgoingMessage implements TracksChanges
         string $subject,
         array $recipients,
         string $rawObjectKey,
+        int $rawKeyVersion,
         int $size,
         \DateTimeImmutable $sendAt,
         ?Message $inReplyTo,
@@ -105,6 +110,7 @@ class OutgoingMessage implements TracksChanges
         $this->subject = $subject;
         $this->recipients = $recipients;
         $this->rawObjectKey = $rawObjectKey;
+        $this->rawKeyVersion = $rawKeyVersion;
         $this->size = $size;
         $this->sendAt = $sendAt;
         $this->inReplyTo = $inReplyTo;
@@ -162,6 +168,18 @@ class OutgoingMessage implements TracksChanges
     public function getRawObjectKey(): string
     {
         return $this->rawObjectKey;
+    }
+
+    public function getRawKeyVersion(): ?int
+    {
+        return $this->rawKeyVersion;
+    }
+
+    /** The message was encrypted again (or for the first time) and is now stored at $key. */
+    public function rawReencrypted(string $key, int $keyVersion): void
+    {
+        $this->rawObjectKey = $key;
+        $this->rawKeyVersion = $keyVersion;
     }
 
     public function getSize(): int

@@ -14,6 +14,7 @@ use Symfony\Component\Uid\Uuid;
 final class SyncChangesTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private string $accountId;
 
@@ -368,11 +369,10 @@ final class SyncChangesTest extends DatabaseTestCase
      */
     private function message(string $uid, string $messageId, string $subject, ?string $inReplyTo = null): array
     {
-        $sha = hash('sha256', $uid.$messageId);
-
         return [
             'remoteUid' => $uid,
-            'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
+            'rawObjectKey' => $this->rawKeyFor($this->accountId, $uid.$messageId),
+            'keyVersion' => 1,
             'size' => 100,
             'receivedAt' => '2026-10-19T08:00:00+00:00',
             'messageId' => $messageId,

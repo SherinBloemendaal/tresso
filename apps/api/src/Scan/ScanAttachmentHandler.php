@@ -6,24 +6,23 @@ namespace App\Scan;
 
 use App\Enum\ScanFailure;
 use App\Enum\ScanStatus;
-use App\Repository\ScanResultRepository;
-use App\Storage\ObjectNotFound;
-use App\Storage\ObjectStorage;
+use App\Storage\BlobVault;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
 
 /**
- * Scans attachment content with clamd, or takes the cached verdict of the same signatures. Exceptions (scanner down
- * or answering with an error, content not in object storage) make Messenger retry; {@see ScanRetriesExhaustedListener}
- * records the failure once it gives up.
+ * Scans attachment content with clamd, or takes the cached verdict of the same signatures. Encrypted content is
+ * decrypted on the way to clamd and never written anywhere in plaintext. Exceptions (scanner down or answering with an
+ * error, content not in object storage) make Messenger retry; {@see ScanRetriesExhaustedListener} records the failure
+ * once it gives up.
  */
 #[AsMessageHandler]
 final readonly class ScanAttachmentHandler
 {
     public function __construct(
         private ScanSubjects $subjects,
-        private ScanResultRepository $results,
+        private ScanCache $cache,
         private VirusScanner $scanner,
-        private ObjectStorage $storage,
+        private BlobVault $blobs,
         private AttachmentScans $scans,
     ) {
     }
@@ -41,7 +40,7 @@ final readonly class ScanAttachmentHandler
         }
 
         if (!$this->scanner->isEnabled()) {
-            $this->scans->record($subject->sha256, ScanOutcome::failed(ScanFailure::Disabled), null, false);
+            $this->scans->record($subject->sha256, ScanOutcome::failed(ScanFailure::Disabled), false);
 
             return;
         }
@@ -49,38 +48,21 @@ final readonly class ScanAttachmentHandler
         // Also proves clamd has signatures loaded: it refuses to report a version without.
         $engine = $this->scanner->engine();
 
-        $cached = $message->rescan ? null : $this->results->find($subject->sha256);
+        $cacheKey = $this->cache->keyFor($subject);
+        $cached = $message->rescan ? null : $this->cache->find($cacheKey);
         if (null !== $cached && $cached->getEngine() === $engine) {
-            $this->scans->record($subject->sha256, $cached->outcome(), null, false);
+            $this->scans->record($subject->sha256, $cached->outcome(), false);
 
             return;
         }
 
         if ($subject->size > $this->scanner->maxSize()) {
-            $this->scans->record($subject->sha256, ScanOutcome::failed(ScanFailure::TooLarge), null, $message->rescan);
+            $this->scans->record($subject->sha256, ScanOutcome::failed(ScanFailure::TooLarge), $message->rescan);
 
             return;
         }
 
-        $outcome = $this->scanner->scan($this->content($subject));
-        $this->scans->record($subject->sha256, $outcome, $engine, $message->rescan);
-    }
-
-    /**
-     * Content that was quarantined before is still scanned there, so a rescan can clear it.
-     *
-     * @return iterable<string>
-     */
-    private function content(ScanSubject $subject): iterable
-    {
-        foreach ($subject->keys as $key) {
-            try {
-                return $this->storage->stream($key);
-            } catch (ObjectNotFound) {
-                continue;
-            }
-        }
-
-        throw ObjectNotFound::forKey($subject->keys[0]);
+        $outcome = $this->scanner->scan(ScanContent::stream($this->blobs, $subject));
+        $this->scans->record($subject->sha256, $outcome, $message->rescan, $cacheKey, $engine);
     }
 }

@@ -10,12 +10,18 @@ use App\Entity\Message;
 use App\Entity\MessageLocation;
 use App\Entity\MessageText;
 use App\Entity\Thread;
+use App\Mail\MessageFields;
 use App\Repository\AttachmentRepository;
+use App\Storage\BlobKey;
+use App\Storage\BlobKind;
+use App\Tests\Support\QueryLog;
 use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\Uid\Uuid;
 
 final class SyncIngestTest extends DatabaseTestCase
 {
     use AuthenticatesUsers;
+    use StoresMail;
 
     private string $accountId;
 
@@ -83,8 +89,8 @@ final class SyncIngestTest extends DatabaseTestCase
     public function testStoresMessageWithRecipientsAttachmentsAndFlags(): void
     {
         $this->folders(['INBOX' => 1]);
-        $shaA = hash('sha256', 'a');
-        $shaB = hash('sha256', 'b');
+        $fingerprintA = $this->fingerprintFor($this->accountId, 'a');
+        $fingerprintB = $this->fingerprintFor($this->accountId, 'b');
 
         $result = $this->messages('INBOX', [$this->message('42', [
             'messageId' => '<budget-1@finance.example>',
@@ -95,8 +101,8 @@ final class SyncIngestTest extends DatabaseTestCase
             'snippet' => 'Could you approve the revised numbers before Friday?',
             'flags' => ['seen' => true, 'flagged' => true, 'answered' => false, 'draft' => false],
             'attachments' => [
-                ['filename' => 'budget.xlsx', 'contentType' => 'application/vnd.ms-excel', 'size' => 48000, 'sha256' => $shaA],
-                ['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => 1200, 'sha256' => $shaB, 'contentId' => 'logo@x', 'inline' => true],
+                ['filename' => 'budget.xlsx', 'contentType' => 'application/vnd.ms-excel', 'size' => 48000, 'fingerprint' => $fingerprintA],
+                ['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => 1200, 'fingerprint' => $fingerprintB, 'contentId' => 'logo@x', 'inline' => true],
             ],
         ])]);
 
@@ -117,16 +123,15 @@ final class SyncIngestTest extends DatabaseTestCase
         self::assertCount(2, $attachments);
         self::assertFalse($attachments[0]->isInline());
         self::assertTrue($attachments[1]->isInline());
-        self::assertSame('attachments/'.substr($shaA, 0, 2).'/'.$shaA, $attachments[0]->getObjectKey());
+        self::assertSame(BlobKey::of(BlobKind::Attachments, $this->accountOwner($this->accountId), $fingerprintA), $attachments[0]->getObjectKey());
+        self::assertSame(1, $attachments[0]->getKeyVersion());
     }
 
     public function testOnlyInlineAttachmentsDoNotCountAsAttachments(): void
     {
         $this->folders(['INBOX' => 1]);
-        $sha = hash('sha256', 'logo');
-
         $this->messages('INBOX', [$this->message('1', [
-            'attachments' => [['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => 10, 'sha256' => $sha, 'contentId' => 'logo', 'inline' => true]],
+            'attachments' => [['filename' => 'logo.png', 'contentType' => 'image/png', 'size' => 10, 'fingerprint' => $this->fingerprintFor($this->accountId, 'logo'), 'contentId' => 'logo', 'inline' => true]],
         ])]);
 
         self::assertFalse($this->onlyMessage()->hasAttachments());
@@ -140,8 +145,84 @@ final class SyncIngestTest extends DatabaseTestCase
 
         $texts = $this->entityManager()->getRepository(MessageText::class)->findAll();
         self::assertCount(1, $texts, 'A message without text gets no row.');
-        self::assertSame('Could you approve the revised numbers?', $texts[0]->getText());
+        self::assertSame('Could you approve the revised numbers?', static::getContainer()->get(MessageFields::class)->text($texts[0]));
         self::assertSame('msg-1@test.example', $texts[0]->getMessage()->getMessageIdHeader());
+    }
+
+    public function testSealsTheBodyTextAndSnippet(): void
+    {
+        $this->folders(['INBOX' => 1]);
+
+        $this->messages('INBOX', [$this->message('1', ['snippet' => 'Approve the revised numbers', 'bodyText' => 'Could you approve the revised numbers?'])]);
+
+        $row = $this->connection()->fetchAssociative('SELECT m.snippet, m.sealed_snippet, t.text, t.sealed_text FROM message m JOIN message_text t ON t.message_id = m.id');
+        self::assertIsArray($row);
+        self::assertSame('', $row['snippet']);
+        self::assertNull($row['text']);
+        foreach (['sealed_snippet', 'sealed_text'] as $column) {
+            self::assertIsString($row[$column]);
+            self::assertStringStartsWith('f1.1.', $row[$column]);
+            self::assertStringNotContainsString('revised', (string) base64_decode(explode('.', $row[$column], 3)[2], true));
+        }
+        self::assertSame('Approve the revised numbers', static::getContainer()->get(MessageFields::class)->snippet($this->onlyMessage()));
+    }
+
+    public function testRawContentMustBeStoredUnderTheAccountOwner(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $otherOwner = Uuid::v7();
+        $key = BlobKey::of(BlobKind::Raw, $otherOwner, hash('sha256', 'elsewhere'));
+
+        $this->client->jsonRequest('POST', $this->url('messages'), ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [$this->message('1', ['rawObjectKey' => $key])]], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame(0, $this->rows(Message::class));
+    }
+
+    public function testRawContentMustBeOfTheRawKind(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $key = BlobKey::of(BlobKind::Uploads, $this->accountOwner($this->accountId), hash('sha256', 'an upload'));
+
+        $this->client->jsonRequest('POST', $this->url('messages'), ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [$this->message('1', ['rawObjectKey' => $key])]], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+    }
+
+    public function testAKeyVersionTheOwnerDoesNotHaveIsRefused(): void
+    {
+        $this->folders(['INBOX' => 1]);
+
+        $this->client->jsonRequest('POST', $this->url('messages'), ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [$this->message('1', ['keyVersion' => 7])]], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertStringContainsString('key version 7', (string) $this->client->getResponse()->getContent());
+    }
+
+    public function testKeyVersionsCannotBeRetiredWhileABatchNamingThemIsStored(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $log = static::getContainer()->get(QueryLog::class);
+        $log->clear();
+
+        $this->messages('INBOX', [$this->message('1')]);
+
+        $queries = $log->queries();
+        $locked = array_key_first(array_filter($queries, static fn (string $sql): bool => str_starts_with($sql, 'SELECT id FROM app_user WHERE id = ') && str_ends_with($sql, 'FOR SHARE')));
+        $stored = array_key_first(array_filter($queries, static fn (string $sql): bool => str_starts_with($sql, 'INSERT INTO message ')));
+        self::assertNotNull($locked, 'The owner is locked shared, which retiring a key version (FOR UPDATE) waits for.');
+        self::assertNotNull($stored);
+        self::assertLessThan($stored, $locked, 'Locked before anything naming a key version is stored.');
+    }
+
+    public function testRawContentFromBeforeEncryptionIsRefused(): void
+    {
+        $this->folders(['INBOX' => 1]);
+        $sha = hash('sha256', 'plaintext');
+
+        $this->client->jsonRequest('POST', $this->url('messages'), ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [$this->message('1', ['rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha])]], $this->worker);
+
+        self::assertResponseStatusCodeSame(422);
     }
 
     public function testBodyTextLongerThanTheLimitIsRejected(): void
@@ -157,13 +238,13 @@ final class SyncIngestTest extends DatabaseTestCase
     public function testRegularAttachmentsKeepTheirContentId(): void
     {
         $this->folders(['INBOX' => 1]);
-        $sha = hash('sha256', 'photo');
+        $fingerprint = $this->fingerprintFor($this->accountId, 'photo');
 
         $this->messages('INBOX', [$this->message('1', [
-            'attachments' => [['filename' => 'photo.png', 'contentType' => 'image/png', 'size' => 10, 'sha256' => $sha, 'contentId' => 'photo@x', 'inline' => false]],
+            'attachments' => [['filename' => 'photo.png', 'contentType' => 'image/png', 'size' => 10, 'fingerprint' => $fingerprint, 'contentId' => 'photo@x', 'inline' => false]],
         ])]);
 
-        $attachment = static::getContainer()->get(AttachmentRepository::class)->findOneBy(['sha256' => $sha]);
+        $attachment = static::getContainer()->get(AttachmentRepository::class)->findOneBy(['sha256' => $fingerprint]);
         self::assertInstanceOf(Attachment::class, $attachment);
         self::assertSame('photo@x', $attachment->getContentId());
         self::assertFalse($attachment->isInline());
@@ -196,7 +277,7 @@ final class SyncIngestTest extends DatabaseTestCase
     public function testMessageWithoutMessageIdIsMatchedByRawContent(): void
     {
         $this->folders(['INBOX' => 1, 'Archive' => 1]);
-        $raw = $this->rawKey('no-message-id');
+        $raw = $this->rawKeyFor($this->accountId, 'no-message-id');
 
         $this->messages('INBOX', [$this->message('1', ['messageId' => null, 'rawObjectKey' => $raw])]);
         $this->messages('Archive', [$this->message('2', ['messageId' => null, 'rawObjectKey' => $raw])]);
@@ -482,7 +563,8 @@ final class SyncIngestTest extends DatabaseTestCase
         return $override + [
             'remoteUid' => $uid,
             'modSeq' => 1,
-            'rawObjectKey' => $this->rawKey('message-'.$uid.'-'.json_encode($override)),
+            'rawObjectKey' => $this->rawKeyFor($this->accountId, 'message-'.$uid.'-'.json_encode($override)),
+            'keyVersion' => 1,
             'size' => 2048,
             'receivedAt' => '2026-10-19T08:00:00+00:00',
             'sentAt' => '2026-10-19T07:59:00+00:00',
@@ -493,13 +575,6 @@ final class SyncIngestTest extends DatabaseTestCase
             'to' => [['address' => 'kim@company.example']],
             'snippet' => 'Hello',
         ];
-    }
-
-    private function rawKey(string $seed): string
-    {
-        $sha = hash('sha256', $seed);
-
-        return 'raw/'.substr($sha, 0, 2).'/'.$sha;
     }
 
     private function url(string $action): string

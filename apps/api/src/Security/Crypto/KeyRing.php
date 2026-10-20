@@ -7,14 +7,18 @@ namespace App\Security\Crypto;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 
 /**
- * Master keys (key encryption keys) that wrap the per-user data keys.
+ * Master keys (key encryption keys) that wrap the per-user keys.
  *
  * DATA_KEYS holds every key that may still be needed for decryption ("id:base64,id:base64"); DATA_KEY_CURRENT names
  * the one used for new wraps. Rotating: add a new key, make it current, run app:crypto:rotate-data-keys, then remove
  * the old key.
+ *
+ * Wrapped format: "v1.<key id>.<base64(nonce + ciphertext)>".
  */
 final class KeyRing
 {
+    private const string WRAP_VERSION = 'v1';
+
     /** @var array<string, string> key id => raw 32-byte key */
     private array $keys = [];
 
@@ -50,5 +54,48 @@ final class KeyRing
     public function get(string $id): string
     {
         return $this->keys[$id] ?? throw new CryptoException(\sprintf('Unknown data key encryption key "%s".', $id));
+    }
+
+    /** Wraps a key with the current master key; $additionalData names what it is for, so it cannot be swapped. */
+    public function wrap(#[\SensitiveParameter] string $key, string $additionalData): string
+    {
+        return self::WRAP_VERSION.'.'.$this->currentId.'.'.base64_encode(Aead::encrypt($key, $additionalData, $this->get($this->currentId)));
+    }
+
+    public function unwrap(string $wrapped, string $additionalData): string
+    {
+        $payload = base64_decode(explode('.', $wrapped, 3)[2] ?? '', true);
+        if (false === $payload) {
+            throw new CryptoException('Wrapped key is not valid base64.');
+        }
+
+        return Aead::decrypt($payload, $additionalData, $this->get(self::keyIdOf($wrapped)));
+    }
+
+    /** Whether a wrapped key needs re-wrapping with the current master key. */
+    public function isCurrent(string $wrapped): bool
+    {
+        return self::keyIdOf($wrapped) === $this->currentId;
+    }
+
+    /**
+     * The key of the virus scan verdict cache, derived from the current master key, with that key's id: rows written
+     * under another master key are never matched.
+     *
+     * @return array{id: string, key: string}
+     */
+    public function scanCacheKey(): array
+    {
+        return ['id' => $this->currentId, 'key' => hash_hkdf('sha256', $this->get($this->currentId), 32, 'tresso:scan-cache:v1')];
+    }
+
+    private static function keyIdOf(string $wrapped): string
+    {
+        $parts = explode('.', $wrapped, 3);
+        if (3 !== \count($parts) || self::WRAP_VERSION !== $parts[0]) {
+            throw new CryptoException('Unsupported wrapped key format.');
+        }
+
+        return $parts[1];
     }
 }
