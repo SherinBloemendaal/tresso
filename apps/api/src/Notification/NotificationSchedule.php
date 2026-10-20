@@ -4,13 +4,14 @@ declare(strict_types=1);
 
 namespace App\Notification;
 
+use App\HandOver\SweepHandOverNotices;
 use Symfony\Component\Scheduler\Attribute\AsSchedule;
 use Symfony\Component\Scheduler\RecurringMessage;
 use Symfony\Component\Scheduler\Schedule;
 use Symfony\Component\Scheduler\ScheduleProviderInterface;
 
 /**
- * The notification sweeps, calendar and mail, run every minute (transport scheduler_notifications, consumed by the
+ * The notification sweeps, calendar, mail and hand-overs, run every minute (transport scheduler_notifications, consumed by the
  * messenger worker).
  */
 #[AsSchedule('notifications')]
@@ -21,6 +22,7 @@ final readonly class NotificationSchedule implements ScheduleProviderInterface
         return new Schedule()->add(
             RecurringMessage::every('1 minute', new SweepNotifications()),
             RecurringMessage::every('1 minute', new SweepMailNotifications()),
+            RecurringMessage::every('1 minute', new SweepHandOverNotices()),
         );
     }
 }

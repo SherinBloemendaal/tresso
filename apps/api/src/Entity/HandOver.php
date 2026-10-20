@@ -86,6 +86,22 @@ class HandOver implements TracksChanges
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $overdueAt = null;
 
+    /** When the overdue notice is due: the moment it became overdue, later while a focus block holds it. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $notifyAt = null;
+
+    /** When the server delivered the overdue notice, on {@see $notifiedChannels}; clients show it from the delta. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $notifiedAt = null;
+
+    /** @var list<string> */
+    #[ORM\Column(type: Types::JSON)]
+    private array $notifiedChannels = [];
+
+    /** Delivered in quiet hours or while the user was busy: no sound. */
+    #[ORM\Column]
+    private bool $notifiedSilently = false;
+
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $nudgedAt = null;
 
@@ -252,6 +268,10 @@ class HandOver implements TracksChanges
         }
         $this->dueAt = $dueAt;
         $this->overdueAt = null;
+        $this->notifyAt = null;
+        $this->notifiedAt = null;
+        $this->notifiedChannels = [];
+        $this->notifiedSilently = false;
         $this->updatedAt = $now;
     }
 
@@ -262,9 +282,50 @@ class HandOver implements TracksChanges
             return false;
         }
         $this->overdueAt = $now;
+        $this->notifyAt = $now;
         $this->updatedAt = $now;
 
         return true;
+    }
+
+    public function getNotifyAt(): ?\DateTimeImmutable
+    {
+        return $this->notifyAt;
+    }
+
+    /** A focus block holds the overdue notice until it ends. */
+    public function postponeNotice(\DateTimeImmutable $until): void
+    {
+        $this->notifyAt = $until;
+    }
+
+    /**
+     * The overdue notice went out (or, with no channels chosen, was decided against): clients show it from the delta.
+     *
+     * @param list<string> $channels
+     */
+    public function noticeDelivered(\DateTimeImmutable $at, array $channels, bool $silent): void
+    {
+        $this->notifiedAt = $at;
+        $this->notifiedChannels = $channels;
+        $this->notifiedSilently = $silent;
+        $this->updatedAt = $at;
+    }
+
+    public function getNotifiedAt(): ?\DateTimeImmutable
+    {
+        return $this->notifiedAt;
+    }
+
+    /** @return list<string> */
+    public function getNotifiedChannels(): array
+    {
+        return $this->notifiedChannels;
+    }
+
+    public function isNotifiedSilently(): bool
+    {
+        return $this->notifiedSilently;
     }
 
     public function nudged(OutgoingMessage $nudge, \DateTimeImmutable $now): void
@@ -320,7 +381,7 @@ class HandOver implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        return ['message', 'thread', 'subject', 'delegateAddress', 'delegateName', 'note', 'dueAt', 'state', 'forward', 'overdueAt', 'nudgedAt', 'lastNudge', 'reply', 'closedAt', 'updatedAt'];
+        return ['message', 'thread', 'subject', 'delegateAddress', 'delegateName', 'note', 'dueAt', 'state', 'forward', 'overdueAt', 'notifiedAt', 'notifiedChannels', 'notifiedSilently', 'nudgedAt', 'lastNudge', 'reply', 'closedAt', 'updatedAt'];
     }
 
     public static function changeType(): string

@@ -9,7 +9,7 @@ use App\Entity\OutgoingMessage;
 use App\HandOver\HandOverDue;
 use App\HandOver\HandOverDueHandler;
 use App\HandOver\NotifyOverdueHandOver;
-use App\HandOver\NotifyOverdueHandOverHandler;
+use App\HandOver\HandOverNotifier;
 use App\Sync\Ingest\MessageJanitor;
 use App\Tests\Support\InMemoryObjectStorage;
 use App\Tests\Support\MockHttpRouter;
@@ -360,7 +360,59 @@ final class HandOverTest extends DatabaseTestCase
 
         $sends = $this->expoSends();
         self::assertCount(1, $sends, 'A retried message never notifies twice.');
-        self::assertSame(['handOverId' => $id, 'id' => $id, 'kind' => 'hand_over', 'title' => 'No reply from Lisa Bakker yet', 'body' => 'Invoice question is past its due date. Nudge from Waiting on.', 'path' => '/waiting?nudge='.$id, 'silent' => false], $sends[0]['data'] ?? null);
+        self::assertSame(['userId' => $this->kimsId(), 'handOverId' => $id, 'id' => $id, 'kind' => 'hand_over', 'title' => 'No reply from Lisa Bakker yet', 'body' => 'Invoice question is past its due date. Nudge from Waiting on.', 'path' => '/waiting?nudge='.$id, 'silent' => false], $sends[0]['data'] ?? null);
+    }
+
+    public function testRecordsTheNoticeForTheDesktopAppInTheDelta(): void
+    {
+        $id = $this->overdueHandOver();
+
+        $this->notifyOverdue($id);
+
+        $this->client->request('GET', '/api/v1/sync/changes?since=0', server: $this->kim);
+        $synced = array_values(array_filter((array) ($this->decodedResponse()['handOvers'] ?? []), static fn (mixed $h): bool => \is_array($h) && $h['id'] === $id));
+        self::assertCount(1, $synced);
+        self::assertNotNull($synced[0]['notifiedAt']);
+        self::assertSame(['phone', 'desktop'], $synced[0]['notifiedChannels']);
+        self::assertFalse($synced[0]['notifiedSilently']);
+    }
+
+    public function testTellsSilentlyInQuietHours(): void
+    {
+        $id = $this->overdueHandOver();
+        $this->registerPhone();
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $this->client->request('PATCH', '/api/v1/notification-settings', server: $this->settings() + ['CONTENT_TYPE' => 'application/merge-patch+json'], content: json_encode(['timeZone' => 'UTC', 'quietHoursEnabled' => true, 'quietStart' => $now->modify('-1 hour')->format('H:i'), 'quietEnd' => $now->modify('+1 hour')->format('H:i')], \JSON_THROW_ON_ERROR));
+        self::assertResponseIsSuccessful();
+
+        $this->notifyOverdue($id);
+
+        self::assertTrue($this->get($id)['notifiedSilently']);
+        $data = $this->expoSends()[0]['data'] ?? null;
+        self::assertIsArray($data);
+        self::assertTrue($data['silent']);
+    }
+
+    public function testTheSweepTellsWhatALostMessageMissed(): void
+    {
+        $id = $this->overdueHandOver();
+        $this->registerPhone();
+
+        static::getContainer()->get(HandOverNotifier::class)->sweep(new \DateTimeImmutable());
+
+        self::assertNotNull($this->get($id)['notifiedAt']);
+        self::assertCount(1, $this->expoSends());
+    }
+
+    public function testANewDueDateStartsANewRound(): void
+    {
+        $id = $this->overdueHandOver();
+        $this->notifyOverdue($id);
+
+        $handOver = $this->patch($id, ['dueAt' => new \DateTimeImmutable('+1 day')->format(\DATE_ATOM)]);
+
+        self::assertNull($handOver['notifiedAt']);
+        self::assertSame([], $handOver['notifiedChannels']);
     }
 
     public function testTellsAgainWhenANewDueDatePasses(): void
@@ -399,6 +451,9 @@ final class HandOverTest extends DatabaseTestCase
         $this->notifyOverdue($id);
 
         self::assertSame([], $this->expoSends());
+        $handOver = $this->get($id);
+        self::assertNotNull($handOver['notifiedAt'], 'The decision is recorded, so clients do not tell about it either.');
+        self::assertSame([], $handOver['notifiedChannels']);
     }
 
     public function testIsNotOverdueBeforeTheDueDate(): void
@@ -757,7 +812,15 @@ final class HandOverTest extends DatabaseTestCase
     private function notifyOverdue(string $id): void
     {
         static::getContainer()->get(EntityManagerInterface::class)->clear();
-        static::getContainer()->get(NotifyOverdueHandOverHandler::class)(new NotifyOverdueHandOver($id));
+        static::getContainer()->get(HandOverNotifier::class)->deliver($id, new \DateTimeImmutable());
+    }
+
+    private function kimsId(): string
+    {
+        $id = $this->connection()->fetchOne("SELECT id FROM app_user WHERE email = 'kim@example.test'");
+        self::assertIsString($id);
+
+        return $id;
     }
 
     /** @return array<string, string> */

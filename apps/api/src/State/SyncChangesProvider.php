@@ -696,7 +696,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     {
         $rows = $this->connection->fetchAllAssociative(
             'SELECT h.id, h.mail_account_id, h.message_id, COALESCE(m.thread_id, h.thread_id) AS thread_id, h.subject, h.delegate_address, h.delegate_name, h.note,
-                    h.due_at, h.state, h.forward_id, h.overdue_at, h.nudged_at, h.last_nudge_id, h.reply_id, h.created_at,
+                    h.due_at, h.state, h.forward_id, h.overdue_at, h.notified_at, h.notified_channels, h.notified_silently, h.nudged_at, h.last_nudge_id, h.reply_id, h.created_at,
                     h.closed_at, h.updated_at
              FROM hand_over h LEFT JOIN message m ON m.id = h.message_id
              WHERE h.owner_id = :user AND h.change_seq > :since AND h.change_seq <= :until ORDER BY h.change_seq',
@@ -715,6 +715,9 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'state' => $r['state'],
             'forwardId' => $r['forward_id'],
             'overdueAt' => self::date($r['overdue_at']),
+            'notifiedAt' => self::date($r['notified_at']),
+            'notifiedChannels' => json_decode(\is_string($r['notified_channels']) ? $r['notified_channels'] : '[]', true, flags: \JSON_THROW_ON_ERROR),
+            'notifiedSilently' => (bool) $r['notified_silently'],
             'nudgedAt' => self::date($r['nudged_at']),
             'lastNudgeId' => $r['last_nudge_id'],
             'replyMessageId' => $r['reply_id'],
