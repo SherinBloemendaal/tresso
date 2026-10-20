@@ -187,3 +187,20 @@ func TestAWriteThatLostTheAccountsAccessIsReportedAndEndsTheSession(t *testing.T
 		t.Errorf("statuses = %v", statuses)
 	}
 }
+
+func TestARateLimitOnTheCalendarListIsNoMissingPermission(t *testing.T) {
+	limited := &providerhttp.StatusError{Method: "GET", URL: "/users/me/calendarList", StatusCode: http.StatusForbidden, Reasons: []string{"403", "rateLimitExceeded", "PERMISSION_DENIED"}}
+	provider := &fakeProvider{calendars: func() ([]Calendar, error) { return nil, fmt.Errorf("list: %w", limited) }}
+	fake := calsynctest.NewAPI("kim@example.com")
+	start(t, provider, fake, quick)
+
+	calsynctest.Eventually(t, "the quiet failures", func() bool { return len(provider.listings()) >= 4 })
+	for _, status := range fake.Statuses() {
+		if status == api.CalendarNotGranted {
+			t.Fatalf("statuses = %v", fake.Statuses())
+		}
+	}
+	if statuses := fake.Statuses(); len(statuses) != 1 || statuses[0] != api.CalendarError {
+		t.Fatalf("an exhausted rate limit is an ordinary failure, retried with backoff: %v", statuses)
+	}
+}

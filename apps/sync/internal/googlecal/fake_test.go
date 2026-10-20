@@ -36,6 +36,8 @@ type fakeGoogle struct {
 	refusedCalendars map[string]bool
 	// failures answers requests whose method and path end like the key with that status, once each.
 	failures map[string]int
+	// beforeGet runs, with the fake locked, before every GET, as a change someone makes at Google meanwhile.
+	beforeGet func(path string)
 }
 
 type fakeEvent struct {
@@ -154,6 +156,9 @@ func (f *fakeGoogle) handle(w http.ResponseWriter, r *http.Request) {
 	if f.forbidden {
 		f.fail(w, http.StatusForbidden, "insufficientPermissions")
 		return
+	}
+	if f.beforeGet != nil && r.Method == http.MethodGet {
+		f.beforeGet(r.URL.Path)
 	}
 	for key, status := range f.failures {
 		method, suffix, _ := strings.Cut(key, " ")

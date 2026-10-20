@@ -627,8 +627,8 @@ func (s *session) reread(ctx context.Context, calendar calsync.Calendar, operati
 	return result, nil
 }
 
-// progress puts Google's id and ETag of a partly written event into a retry, so the API bases the next attempt on
-// that version.
+// progress puts Google's id, ETag and version of a partly written event into a retry, so the API bases the next
+// attempt on that version.
 func (s *session) progress(ctx context.Context, calendar calsync.Calendar, operation api.CalendarOperation, masterID string, result *api.OperationResult) {
 	current, found, err := s.series(ctx, calendar.RemoteID, masterID, operation.UID)
 	if err != nil || !found {
@@ -636,6 +636,10 @@ func (s *session) progress(ctx context.Context, calendar calsync.Calendar, opera
 	}
 	etag := current.etag()
 	result.RemoteID, result.ETag = &masterID, &etag
+	// If no retry succeeds, this is the version Tresso keeps.
+	if text, err := current.toICalendar(info(calendar)); err == nil {
+		result.Current = &api.RemoteObject{RemoteID: masterID, ETag: &etag, Ical: &text}
+	}
 }
 
 func (s *session) conflict(calendar calsync.Calendar, remoteID string, current series) api.OperationResult {
@@ -686,15 +690,29 @@ func text(s string) *string {
 }
 
 // Move moves an event to another calendar of the account (events.move), telling no one: for attendees nothing
-// changed. The id stays the same.
-func (s *session) Move(ctx context.Context, from, to calsync.Calendar, remoteID string) (string, error) {
-	var moved event
-	err := s.send(ctx, http.MethodPost, s.calendarURL(from.RemoteID, remoteID, "move"), url.Values{"destination": {to.RemoteID}, "sendUpdates": {"none"}}, "", nil, &moved)
+// changed. The id stays the same. An event changed at Google since Tresso's version is not moved.
+func (s *session) Move(ctx context.Context, from, to calsync.Calendar, remoteID string, ifMatch *string) (string, string, error) {
+	current, found, err := s.series(ctx, from.RemoteID, remoteID, "")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	if moved.ID == "" {
-		return remoteID, nil
+	if !found || ifMatch != nil && *ifMatch != current.etag() {
+		return "", "", calsync.ErrMoveConflict
 	}
-	return moved.ID, nil
+	var moved event
+	if err := s.send(ctx, http.MethodPost, s.calendarURL(from.RemoteID, remoteID, "move"), url.Values{"destination": {to.RemoteID}, "sendUpdates": {"none"}}, "", nil, &moved); err != nil {
+		return "", "", err
+	}
+	id := remoteID
+	if moved.ID != "" {
+		id = moved.ID
+	}
+	there, found, err := s.series(ctx, to.RemoteID, id, current.uid())
+	if err != nil {
+		return "", "", err
+	}
+	if !found {
+		return "", "", fmt.Errorf("google: the moved event %s is not in its new calendar", id)
+	}
+	return id, there.etag(), nil
 }

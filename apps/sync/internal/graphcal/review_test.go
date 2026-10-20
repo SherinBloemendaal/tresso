@@ -1,11 +1,13 @@
 package graphcal
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
 	"tresso/sync/internal/api"
 	"tresso/sync/internal/calsync/calsynctest"
+	"tresso/sync/internal/providerhttp"
 )
 
 const sharedCalendar = "AAMkShared"
@@ -103,5 +105,50 @@ func TestADescriptionEditKeepsTheTeamsJoinBlock(t *testing.T) {
 	content := body["content"].(string)
 	if body["contentType"] != "html" || !strings.Contains(content, "Agenda &amp; notes") || !strings.Contains(content, `<a href="https://teams.microsoft.com/l/meetup-join/abc">Join the meeting now</a>`) {
 		t.Fatalf("body = %v", body)
+	}
+}
+
+func TestAPartlyWrittenSeriesResumesFromWhatGraphHas(t *testing.T) {
+	graph := newFakeGraph(t)
+	master, occurrences := weekly("ev7")
+	graph.put(master, occurrences...)
+	fake := calsynctest.NewAPI(owner)
+	run(t, graph, fake)
+	calsynctest.Eventually(t, "the sync", func() bool { _, ok := fake.Objects(defaultCalendar)["ev7"]; return ok })
+	object := fake.Objects(defaultCalendar)["ev7"]
+
+	override := "BEGIN:VEVENT\r\nUID:uid-ev7\r\nDTSTAMP:20261001T000000Z\r\nRECURRENCE-ID;TZID=Europe/Amsterdam:20261026T090000\r\n" +
+		"DTSTART;TZID=Europe/Amsterdam:20261026T100000\r\nDTEND;TZID=Europe/Amsterdam:20261026T103000\r\nSUMMARY:Standup\r\n" +
+		"BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	edited := strings.Replace(strings.Replace(object.Ical, "SUMMARY:Standup", "SUMMARY:Daily standup", 1), "END:VCALENDAR\r\n", override, 1)
+	graph.mu.Lock()
+	graph.failures["PATCH /events/ev7-occ1"] = http.StatusServiceUnavailable
+	graph.mu.Unlock()
+	remoteID, etag := "ev7", object.ETag
+	fake.Queue(api.CalendarOperation{ID: "first", Kind: "put", CalendarRemoteID: defaultCalendar, UID: "uid-ev7", RemoteID: &remoteID, IfMatch: &etag, Ical: &edited, Notify: true})
+	calsynctest.Eventually(t, "the first attempt", func() bool { _, ok := fake.Result("first"); return ok })
+
+	first, _ := fake.Result("first")
+	if first.Outcome != api.OperationRetry || first.ETag == nil || *first.ETag == object.ETag || first.RemoteID == nil || *first.RemoteID != "ev7" {
+		t.Fatalf("the retry carries the changeKey the master's write made: %+v", first)
+	}
+	if first.Current == nil || !strings.Contains(*first.Current.Ical, "Daily standup") {
+		t.Fatalf("and Graph's version, which Tresso keeps if no attempt succeeds: %+v", first.Current)
+	}
+
+	next := *first.ETag
+	fake.Queue(api.CalendarOperation{ID: "again", Kind: "put", CalendarRemoteID: defaultCalendar, UID: "uid-ev7", RemoteID: &remoteID, IfMatch: &next, Ical: &edited, Notify: true})
+	calsynctest.Eventually(t, "the retry", func() bool { _, ok := fake.Result("again"); return ok })
+	if again, _ := fake.Result("again"); again.Outcome != api.OperationDone || again.Current == nil || len(parse(t, *again.Current.Ical).Overrides()) != 1 {
+		t.Fatalf("the retry finishes the write: %+v", again)
+	}
+}
+
+func TestGraphNeverSaysCalendarsAreNotAllowed(t *testing.T) {
+	// Graph answers ErrorAccessDenied alike for a token without the scopes and for one calendar taken back; only a
+	// refused calendar list speaks for the account (calsync).
+	denied := &providerhttp.StatusError{Method: "GET", URL: "/me/calendars/x/events", StatusCode: http.StatusForbidden, Reasons: []string{"ErrorAccessDenied"}}
+	if (&Provider{}).NotGranted(denied) {
+		t.Fatal("a 403 on one calendar is no account problem")
 	}
 }

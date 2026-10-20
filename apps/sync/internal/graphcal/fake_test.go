@@ -32,6 +32,8 @@ type fakeGraph struct {
 	nextID    int
 	requests  []fakeRequest
 	forbidden bool
+	// failures answers requests whose method and path end like the key with that status, once each.
+	failures map[string]int
 	// transactions maps a create's transactionId to the event it made.
 	transactions map[string]string
 }
@@ -55,7 +57,7 @@ type fakeRequest struct {
 const defaultCalendar = "AAMkCal1"
 
 func newFakeGraph(t *testing.T) *fakeGraph {
-	f := &fakeGraph{t: t, events: map[string]*fakeEvent{}, changedAt: map[string]int{}, transactions: map[string]string{}}
+	f := &fakeGraph{t: t, events: map[string]*fakeEvent{}, changedAt: map[string]int{}, transactions: map[string]string{}, failures: map[string]int{}}
 	f.calendars = []calendarEntry{{ID: defaultCalendar, Name: "Calendar", HexColor: "#E3008C", CanEdit: true, IsDefaultCalendar: true, AllowedOnlineMeetingProviders: []string{"teamsForBusiness"}, DefaultOnlineMeetingProvider: "teamsForBusiness"}}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.server.Close)
@@ -215,6 +217,14 @@ func (f *fakeGraph) handle(w http.ResponseWriter, r *http.Request) {
 	if f.forbidden {
 		f.fail(w, http.StatusForbidden, "ErrorAccessDenied")
 		return
+	}
+	for key, status := range f.failures {
+		method, suffix, _ := strings.Cut(key, " ")
+		if r.Method == method && strings.HasSuffix(r.URL.Path, suffix) {
+			delete(f.failures, key)
+			f.fail(w, status, "ServiceUnavailable")
+			return
+		}
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1.0")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
