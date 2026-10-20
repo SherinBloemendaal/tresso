@@ -356,6 +356,11 @@ export const useMailStore = defineStore('mail', () => {
     return (await db.value?.folders()) ?? []
   }
 
+  /** A link to a received file that could not be scanned, once the user confirmed they accept that. */
+  async function unscannedLink(attachmentId: string): Promise<string> {
+    return (await auth.send<{ url: string }>('POST', `/api/v1/attachments/${encodeURIComponent(attachmentId)}/unscanned-link`, { confirmed: true })).url
+  }
+
   function body(messageId: string, allowRemoteContent: boolean): Promise<MessageBody> {
     const query = allowRemoteContent ? '?remoteContent=allow' : ''
 
@@ -438,6 +443,7 @@ export const useMailStore = defineStore('mail', () => {
       },
       forward: (id, attachmentId) => auth.send<DraftAttachmentLink>('POST', `/api/v1/drafts/${encodeURIComponent(id)}/forwarded-attachments`, { attachmentId }),
       detach: (id, attachmentId) => auth.send<{ draftVersion: number }>('DELETE', `/api/v1/drafts/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`),
+      unscannedLink: (attachmentId) => auth.send<{ url: string }>('POST', `/api/v1/draft-attachments/${encodeURIComponent(attachmentId)}/unscanned-link`, { confirmed: true }),
     },
     () => void refresh(),
   )
@@ -522,6 +528,7 @@ export const useMailStore = defineStore('mail', () => {
     messagesByThread,
     folders,
     body,
+    unscannedLink,
     send,
     cancelOutgoing,
     outgoing,

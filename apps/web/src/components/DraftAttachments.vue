@@ -1,18 +1,47 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import { fileSize, SCAN_TEXT, type DraftAttachment } from '@tresso/core'
 import AppIcon from '@/components/AppIcon.vue'
 
 defineProps<{ attachments: DraftAttachment[]; attaching: string[] }>()
-const emit = defineEmits<{ open: [id: string]; remove: [id: string] }>()
+const emit = defineEmits<{ open: [id: string]; openUnscanned: [id: string]; remove: [id: string] }>()
+
+/** A file that could not be scanned opens only after the user confirms the warning, once per click. */
+const confirming = ref<string | null>(null)
+
+function open(attachment: DraftAttachment): void {
+  if (attachment.scanStatus === 'failed') {
+    confirming.value = confirming.value === attachment.id ? null : attachment.id
+    return
+  }
+  emit('open', attachment.id)
+}
+
+function openAnyway(id: string): void {
+  confirming.value = null
+  emit('openUnscanned', id)
+}
 </script>
 
 <template>
   <ul v-if="attachments.length > 0 || attaching.length > 0" class="attachments" aria-label="Attachments">
     <li v-for="attachment in attachments" :key="attachment.id" class="attachment" :class="{ blocked: attachment.scanStatus === 'infected' }">
-      <span class="icon"><AppIcon :name="attachment.scanStatus === 'infected' ? 'blocked' : 'attachment'" /></span>
+      <span class="icon"><AppIcon :name="attachment.scanStatus === 'infected' ? 'blocked' : attachment.scanStatus === 'failed' ? 'shieldAlert' : 'attachment'" /></span>
       <span class="text">
-        <button type="button" class="name" :disabled="attachment.scanStatus === 'infected'" @click="emit('open', attachment.id)">{{ attachment.filename }}</button>
+        <button
+          type="button"
+          class="name"
+          :disabled="attachment.scanStatus === 'infected' || attachment.scanStatus === 'pending'"
+          :aria-expanded="attachment.scanStatus === 'failed' ? confirming === attachment.id : undefined"
+          @click="open(attachment)"
+        >
+          {{ attachment.filename }}
+        </button>
         <span class="detail">{{ fileSize(attachment.size) }}, {{ SCAN_TEXT[attachment.scanStatus] }}</span>
+        <span v-if="confirming === attachment.id" class="confirm">
+          Not checked for malware.
+          <button type="button" class="confirm-link" @click="openAnyway(attachment.id)">Open anyway</button>
+        </span>
       </span>
       <button type="button" class="remove" :aria-label="`Remove ${attachment.filename}`" @click="emit('remove', attachment.id)">
         <AppIcon name="close" />
@@ -29,6 +58,20 @@ const emit = defineEmits<{ open: [id: string]; remove: [id: string] }>()
 </template>
 
 <style scoped>
+.confirm {
+  font-size: 12px;
+  color: var(--ink);
+}
+.confirm-link {
+  margin-left: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--focus);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
 .attachments {
   display: flex;
   flex-wrap: wrap;

@@ -128,7 +128,8 @@ const days = computed(() => {
               </span>
               <span class="subject">
                 <AppIcon v-if="conversation.flagged" name="flag" :size="14" label="Flagged" />
-                <AppIcon v-if="conversation.hasAttachments" name="attachment" :size="14" label="Has attachments" />
+                <AppIcon v-if="conversation.attachmentsBlocked" name="shieldAlert" :size="14" label="Attachment blocked: contains malware" class="blocked" />
+                <AppIcon v-else-if="conversation.hasAttachments" name="attachment" :size="14" label="Has attachments" />
                 {{ conversation.subject || '(no subject)' }}
               </span>
               <span class="snippet">{{ conversation.snippet }}</span>
@@ -295,6 +296,9 @@ h1 {
 .subject svg {
   flex-shrink: 0;
   color: var(--ink-2);
+}
+.subject svg.blocked {
+  color: var(--danger);
 }
 .snippet {
   color: var(--ink-2);
