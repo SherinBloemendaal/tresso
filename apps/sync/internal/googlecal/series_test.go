@@ -151,6 +151,9 @@ func TestAPartlyWrittenChangeResumesFromWhatGoogleHas(t *testing.T) {
 	if e, _ := google.get(calendarID, "standup"); e.Summary != "Daily standup" {
 		t.Fatalf("summary = %q", e.Summary)
 	}
+	if first.Current == nil || !strings.Contains(*first.Current.Ical, "Daily standup") {
+		t.Fatalf("the retry carries Google's version too, which Tresso keeps if no attempt succeeds: %+v", first.Current)
+	}
 
 	queue(fake, "again", "standup", *first.ETag, edited, true)
 
@@ -238,5 +241,64 @@ func TestMovingAnEventToAnotherCalendarUsesGooglesMove(t *testing.T) {
 	}
 	if e, ok := google.get("team@group.calendar.google.com", "lunch"); !ok || e.cancelled() {
 		t.Fatal("the event is in the team calendar")
+	}
+}
+
+func TestAnEventChangedAtGoogleBeforeItsMoveIsNotMovedOver(t *testing.T) {
+	google := newFakeGoogle(t)
+	google.addCalendar(calendarListEntry{ID: "team@group.calendar.google.com", Summary: "Team", AccessRole: "writer", TimeZone: "Europe/Amsterdam", DefaultReminders: []reminder{{Method: "popup", Minutes: 10}}})
+	google.put(calendarID, meetingEvent("lunch", "Lunch"))
+	fake, object := synced(t, google, "lunch")
+	google.put(calendarID, meetingEvent("lunch", "Lunch, moved to noon by Lisa"))
+
+	remoteID, etag, text := "lunch", object.ETag, object.Ical
+	fake.Queue(api.CalendarOperation{ID: "out", Kind: "delete", CalendarRemoteID: calendarID, UID: "lunch@google.com", RemoteID: &remoteID, IfMatch: &etag, Notify: true})
+	fake.Queue(api.CalendarOperation{ID: "in", Kind: "put", CalendarRemoteID: "team@group.calendar.google.com", UID: "lunch@google.com", Ical: &text, Notify: true})
+	result(t, fake, "in")
+
+	if out, _ := fake.Result("out"); out.Outcome != api.OperationConflict || out.Current == nil || !strings.Contains(*out.Current.Ical, "Lisa") {
+		t.Fatalf("the delete is a conflict with Lisa's version: %+v", out)
+	}
+	for _, write := range google.writes() {
+		if strings.HasSuffix(write.Path, "/move") {
+			t.Fatalf("nothing is moved: %+v", google.writes())
+		}
+	}
+	if e, _ := google.get(calendarID, "lunch"); e.Summary != "Lunch, moved to noon by Lisa" || e.cancelled() {
+		t.Fatalf("Lisa's change stays: %+v", e)
+	}
+}
+
+func TestAChangeAtGoogleAfterTheMoveIsAConflictForTheUpdate(t *testing.T) {
+	google := newFakeGoogle(t)
+	google.addCalendar(calendarListEntry{ID: "team@group.calendar.google.com", Summary: "Team", AccessRole: "writer", TimeZone: "Europe/Amsterdam", DefaultReminders: []reminder{{Method: "popup", Minutes: 10}}})
+	google.put(calendarID, meetingEvent("lunch", "Lunch"))
+	fake, object := synced(t, google, "lunch")
+	// Lisa edits the event in its new calendar after the move, before Tresso's update of it reads it.
+	reads := 0
+	google.mu.Lock()
+	google.beforeGet = func(path string) {
+		if !strings.HasSuffix(path, "/team@group.calendar.google.com/events/lunch") {
+			return
+		}
+		if reads++; reads == 2 {
+			e := google.events["team@group.calendar.google.com"]["lunch"].event
+			e.Summary = "Lunch, Lisa's version"
+			google.store("team@group.calendar.google.com", e)
+		}
+	}
+	google.mu.Unlock()
+
+	remoteID, etag := "lunch", object.ETag
+	text := strings.Replace(object.Ical, "SUMMARY:Lunch", "SUMMARY:Team lunch", 1)
+	fake.Queue(api.CalendarOperation{ID: "out", Kind: "delete", CalendarRemoteID: calendarID, UID: "lunch@google.com", RemoteID: &remoteID, IfMatch: &etag, Notify: true})
+	fake.Queue(api.CalendarOperation{ID: "in", Kind: "put", CalendarRemoteID: "team@group.calendar.google.com", UID: "lunch@google.com", Ical: &text, Notify: true})
+
+	in := result(t, fake, "in")
+	if in.Outcome != api.OperationConflict || in.Current == nil || !strings.Contains(*in.Current.Ical, "Lisa's version") {
+		t.Fatalf("the update after the move is a conflict, not an overwrite: %+v", in)
+	}
+	if e, _ := google.get("team@group.calendar.google.com", "lunch"); e.Summary != "Lunch, Lisa's version" {
+		t.Fatalf("summary = %q", e.Summary)
 	}
 }

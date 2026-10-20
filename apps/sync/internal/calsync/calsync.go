@@ -291,7 +291,7 @@ type run struct {
 
 func (r *run) syncAll(ctx context.Context) error {
 	calendars, err := r.session.Calendars(ctx)
-	if providerhttp.IsStatus(err, http.StatusForbidden) {
+	if providerhttp.IsStatus(err, http.StatusForbidden) && !throttled(err) {
 		// The calendar list is the account's own: refusing it means the account may not use calendars.
 		return fmt.Errorf("%w: %w", errListRefused, err)
 	}
@@ -336,6 +336,21 @@ func (r *run) syncAll(ctx context.Context) error {
 // A 403 on one calendar (shared and taken back, or read-only) is not fatal: that calendar is skipped.
 func (r *run) fatal(err error) bool {
 	return errors.Is(err, api.ErrReauthorize) || errors.Is(err, api.ErrNotGranted) || errors.Is(err, providerhttp.ErrUnauthorized) || r.syncer.provider.NotGranted(err)
+}
+
+// throttled: a 403 that is a quota or rate limit (Google answers those with 403 too), which says nothing about
+// what the account may do; once its retries are spent it is an ordinary failure, retried with backoff.
+func throttled(err error) bool {
+	var statusErr *providerhttp.StatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	for _, reason := range []string{"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded", "dailyLimitExceeded", "ApplicationThrottled", "TooManyRequests"} {
+		if statusErr.HasReason(reason) {
+			return true
+		}
+	}
+	return false
 }
 
 // errListRefused: the provider refused the account's calendar list.
@@ -518,9 +533,14 @@ func (r *run) writeAll(ctx context.Context) error {
 // Mover is a session that can move an event to another calendar of the account, so attendees see no cancellation
 // and new invitation (Google's events.move; Graph has no move for events).
 type Mover interface {
-	// Move moves the resource and returns its id in the target calendar.
-	Move(ctx context.Context, from, to Calendar, remoteID string) (string, error)
+	// Move moves the resource, unless the provider's version differs from ifMatch (ErrMoveConflict), and returns its
+	// id and ETag in the target calendar.
+	Move(ctx context.Context, from, to Calendar, remoteID string, ifMatch *string) (id, etag string, err error)
 }
+
+// ErrMoveConflict: the event changed at the provider since Tresso's version, so it is not moved; the delete then
+// reports the conflict as any other write does.
+var ErrMoveConflict = errors.New("the event changed at the provider since it was moved in Tresso")
 
 // moves turns a delete in one calendar and the create of the same event in another, which is how the API queues a
 // move, into a move at the provider. The delete is reported done and the create becomes an update of the moved
@@ -547,7 +567,7 @@ func (r *run) moves(ctx context.Context, operations []api.CalendarOperation) ([]
 		if !fromOK || !toOK {
 			continue
 		}
-		moved, err := mover.Move(ctx, from, to, *operation.RemoteID)
+		moved, etag, err := mover.Move(ctx, from, to, *operation.RemoteID, operation.IfMatch)
 		if err != nil {
 			if r.fatal(err) {
 				return nil, err
@@ -559,7 +579,9 @@ func (r *run) moves(ctx context.Context, operations []api.CalendarOperation) ([]
 			return nil, err
 		}
 		movedDeletes[operation.ID] = true
-		operations[i].RemoteID, operations[i].IfMatch = &moved, nil
+		// The update is conditional on the moved event's version, so a change made at the provider meanwhile is a
+		// conflict, not overwritten.
+		operations[i].RemoteID, operations[i].IfMatch = &moved, &etag
 	}
 	kept := make([]api.CalendarOperation, 0, len(operations))
 	for _, operation := range operations {
