@@ -124,7 +124,7 @@ final readonly class DailyBriefs
         }
 
         $preferences = $this->preferences->forUser($user);
-        if (BriefTime::ranToday($settings->getLastRunAt(), $preferences->getTimeZone(), $now)) {
+        if ($settings->isDueBriefMade($preferences->getTimeZone())) {
             // Another sweep made today's brief while this one waited, or the clock repeated the hour: one a day.
             $settings->reschedule($preferences->getTimeZone(), $now);
             $this->entityManager->flush();

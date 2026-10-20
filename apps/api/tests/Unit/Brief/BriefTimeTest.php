@@ -39,30 +39,35 @@ final class BriefTimeTest extends TestCase
         // The brief due at the first was made late, at 02:00 winter time, which is before the second 02:30.
         $lateSweep = new \DateTimeImmutable('2026-10-25T01:00:00+00:00');
 
-        $next = BriefTime::nextRun('02:30', 'Europe/Amsterdam', $lateSweep, $lateSweep);
+        $next = BriefTime::nextRun('02:30', 'Europe/Amsterdam', $lateSweep, '2026-10-25');
 
         self::assertSame('2026-10-26T01:30:00+00:00', $next->format(\DATE_ATOM));
     }
 
     public function testALaterTimeTheSameDayWaitsForTomorrowOnceTodaysBriefWasMade(): void
     {
-        $madeAt = new \DateTimeImmutable('2026-10-20T08:00:00+00:00');
+        $now = new \DateTimeImmutable('2026-10-20T09:00:00+00:00');
 
-        self::assertSame('2026-10-21T18:00:00+00:00', BriefTime::nextRun('18:00', 'UTC', new \DateTimeImmutable('2026-10-20T09:00:00+00:00'), $madeAt)->format(\DATE_ATOM));
-        self::assertSame('2026-10-20T18:00:00+00:00', BriefTime::nextRun('18:00', 'UTC', new \DateTimeImmutable('2026-10-20T09:00:00+00:00'), $madeAt->modify('-1 day'))->format(\DATE_ATOM));
+        self::assertSame('2026-10-21T18:00:00+00:00', BriefTime::nextRun('18:00', 'UTC', $now, '2026-10-20')->format(\DATE_ATOM));
+        self::assertSame('2026-10-20T18:00:00+00:00', BriefTime::nextRun('18:00', 'UTC', $now, '2026-10-19')->format(\DATE_ATOM));
     }
 
-    public function testAnotherZoneCountsTodayInThatZone(): void
+    public function testALateSlotMadeAfterMidnightLeavesTheNewDayItsOwnBrief(): void
     {
-        // Made at 08:00 UTC, 04:00 in New York: 08:00 there comes later the same New York day, so it waits a day.
-        $madeAt = new \DateTimeImmutable('2026-10-20T08:00:00+00:00');
+        // The 23:59 brief of 20 October was made at 00:00:30 on the 21st: the 21st still gets its 23:59 brief.
+        $next = BriefTime::nextRun('23:59', 'UTC', new \DateTimeImmutable('2026-10-21T00:00:30+00:00'), '2026-10-20');
 
-        $next = BriefTime::nextRun('08:00', 'America/New_York', new \DateTimeImmutable('2026-10-20T09:00:00+00:00'), $madeAt);
+        self::assertSame('2026-10-21T23:59:00+00:00', $next->format(\DATE_ATOM));
+    }
+
+    public function testAnotherZoneCountsTheDayInThatZone(): void
+    {
+        // Due on 20 October at 08:00 UTC, 04:00 in New York: 08:00 there comes later that same day, so it waits a day.
+        $next = BriefTime::nextRun('08:00', 'America/New_York', new \DateTimeImmutable('2026-10-20T09:00:00+00:00'), '2026-10-20');
 
         self::assertSame('2026-10-21T12:00:00+00:00', $next->format(\DATE_ATOM));
-        self::assertTrue(BriefTime::ranToday($madeAt, 'America/New_York', new \DateTimeImmutable('2026-10-20T09:00:00+00:00')));
-        self::assertFalse(BriefTime::ranToday($madeAt, 'Pacific/Auckland', new \DateTimeImmutable('2026-10-20T12:00:00+00:00')));
-        self::assertFalse(BriefTime::ranToday(null, 'UTC', $madeAt));
+        self::assertSame('2026-10-19', BriefTime::localDay(new \DateTimeImmutable('2026-10-20T03:00:00+00:00'), 'America/New_York'));
+        self::assertSame('2026-10-21', BriefTime::localDay(new \DateTimeImmutable('2026-10-20T12:00:00+00:00'), 'Pacific/Auckland'));
     }
 
     public function testATimeThatIsNoTimeIsRefused(): void
