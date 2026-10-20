@@ -109,7 +109,11 @@ export const useBulkStore = defineStore('bulk', () => {
       return
     }
     try {
-      running.value = await auth.send<BulkActionState>('POST', `/api/v1/bulk-actions/${encodeURIComponent(id)}/cancel`, {})
+      const stopped = await auth.send<BulkActionState>('POST', `/api/v1/bulk-actions/${encodeURIComponent(id)}/cancel`, {})
+      // The poll may have seen it end meanwhile: an answer arriving after that must not bring it back as running.
+      if (running.value?.id === id) {
+        running.value = stopped
+      }
     } catch (error) {
       compose.notify({ text: `Could not stop it: ${errorMessage(error)}`, tone: 'error' })
     }
