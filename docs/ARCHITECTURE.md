@@ -1285,12 +1285,15 @@ accepted.
   so every device and the server's reminders agree. The start always counts as the first occurrence, also when the
   rule would not give it or its `UNTIL` comes before it; an `UNTIL` date on a timed series is midnight of that
   date; a UTC `UNTIL` is compared as an instant, for floating series in the reader's zone. Rules of a fixed period
-  without `COUNT` are jumped to near the range (hours in elapsed time, days and weeks on the clock); a walk that
+  without `COUNT` are jumped to near the range on the clock, as the server's `modify('+N hours')` does (an hourly
+  series every 2 hours from summer stays on the even hours in winter); a walk that
   reaches 100,000 steps stops and the views say so. A rule that can never match (`BYMONTH=2;BYMONTHDAY=30`) is only
   its start: `ical.js` would loop forever on it, and days it normalizes into another month are left out. Recurrence
   ids, `EXDATE`s and `RDATE`s compare as the same keys the API uses; an override shows also when an `EXDATE` names
   its occurrence, and an override with `RANGE=THISANDFUTURE` (`thisAndFuture` in the delta) changes every later
-  occurrence, moved as far as it moved its own. All-day occurrences begin and end at midnight in the reader's zone
+  occurrence, moved as far as it moved its own. Rows stored before the API kept that flag get it from
+  `bin/console app:calendar:reproject`, which projects the stored objects again in id order, a batch at a time,
+  without changing their text or writing to a provider, and continues with `--after`. All-day occurrences begin and end at midnight in the reader's zone
   and last as many dates as their event.
 - Finding the rows: every stored row carries the span of its whole series (its earliest start and latest end over
   the series and its overrides), so one indexed range read returns every row of each series touching the range,
@@ -1309,8 +1312,12 @@ accepted.
   events", without "This and following" on the first occurrence (it is all of them), without "This event" when the
   rule changes, and only "All events" for a move to another calendar. The stored rule is saved exactly as stored
   until the user changes a repeat field (moving one occurrence to Tuesday keeps `BYDAY=MO`, and a rule from Outlook,
-  Apple or Thunderbird keeps its spelling), and rules are compared by meaning, so a save never looks like a new rule
-  that would drop every exception. "All events" or "This and following" from a moved occurrence saves the series'
+  Apple or Thunderbird keeps its spelling), and rules are compared exactly as the server compares them (case, spaces and the order of parts aside), so a save
+  never looks like a new rule that would drop every exception. A move to another day for "All events" or "This and
+  following" keeps the rule as the editor sent it; the server moves its weekdays, day of the month or week of the
+  month along with the series (`BYDAY=MO` by a day is `BYDAY=TU`), and overrides that kept their time move with
+  it. "This and following" from a moved occurrence starts the new series at that occurrence's own time in the
+  series, moved by what the user changed, and carries the override along. "All events" or "This and following" from a moved occurrence saves the series'
   own fields with only what the user changed. Invitations are answered, not edited; an update the calendar has not
   taken is applied before it is answered.
 - Web client: day, week, month and agenda views, the event editor (vee-validate), the invitation card in the
