@@ -150,6 +150,11 @@ export class Composer {
     this.open({ ...newDraft('new', account, this.defaultSignature(account)), to })
   }
 
+  /** Opens a message written for the user, such as a follow-up to someone a conversation was handed over to. */
+  openPrepared(fields: Pick<Draft, 'kind' | 'mailAccountId' | 'to' | 'subject' | 'html' | 'inReplyToMessageId'>): void {
+    this.open({ ...newDraft(fields.kind, fields.mailAccountId, this.defaultSignature(fields.mailAccountId)), ...fields })
+  }
+
   async openReply(message: SyncedMessage, kind: 'reply' | 'replyAll' | 'forward'): Promise<void> {
     const body = await this.deps.body(message.id).catch(() => ({ html: null, text: message.snippet, attachments: [] as MessageAttachment[] }))
     const draft = replyDraft(message, body, kind, this.deps.accounts(), this.deps.signatures())
@@ -470,17 +475,18 @@ export class Composer {
 
   /**
    * Sends now (after the undo window) or at a chosen time. Files that could not be scanned only go along once the
-   * user confirmed them: without `acceptUnscanned`, the server's question ends up in `unscannedToConfirm`.
+   * user confirmed them: without `acceptUnscanned`, the server's question ends up in `unscannedToConfirm`. Returns the
+   * message on its way, or null when it was not sent; `state.error` (or `unscannedToConfirm`) then says why.
    */
-  async send(sendAt?: Date, acceptUnscanned = false): Promise<void> {
+  async send(sendAt?: Date, acceptUnscanned = false): Promise<SyncedOutgoingMessage | null> {
     const draft = this.current.draft
     if (draft === null || this.current.sending) {
-      return
+      return null
     }
     const store = this.storeOfDraft()
     if (store === null) {
       this.set({ error: 'You were signed out. Sign in again to send this message.' })
-      return
+      return null
     }
     const problem = this.current.conflict
       ? 'This draft was changed on another device. Choose which version to keep first.'
@@ -489,7 +495,7 @@ export class Composer {
         : this.validate(draft)
     if (problem) {
       this.set({ error: problem })
-      return
+      return null
     }
     this.set({ sending: true, error: null, violations: {}, unscannedToConfirm: null })
     // The draft goes up first, so the server can take it (and its Drafts folder copy) away when the message is queued.
@@ -514,6 +520,7 @@ export class Composer {
         const when = this.deps.formatTime?.(at) ?? at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
         this.deps.notify({ text: `Scheduled for ${when}.`, tone: 'info' }, 8000)
       }
+      return outgoing
     } catch (error) {
       const { message, violations } = this.deps.explain(error)
       const unscanned = violations.acceptUnscanned
@@ -528,6 +535,7 @@ export class Composer {
           30000,
         )
       }
+      return null
     } finally {
       this.set({ sending: false })
     }

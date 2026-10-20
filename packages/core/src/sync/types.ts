@@ -179,6 +179,40 @@ export interface SyncedSmartInbox {
   position: number
 }
 
+export type HandOverState = 'open' | 'replied' | 'done'
+
+/**
+ * A conversation handed over: forwarded to someone with a note and a due date, and waited on ("Waiting on") until they
+ * reply in it or the user marks it done.
+ */
+export interface SyncedHandOver {
+  id: string
+  mailAccountId: string
+  /** The message handed over; null once it is gone. */
+  messageId: string | null
+  /** The conversation that message is in. The mail stores give the one it is in now: conversations can merge. */
+  threadId: string | null
+  /** Of the message handed over, kept when the message is gone. */
+  subject: string
+  delegate: Address
+  /** Plain text; it went along with the forward. */
+  note: string
+  dueAt: string
+  state: HandOverState
+  /** The outgoing message that forwarded it. */
+  forwardId: string | null
+  /** Set once the due date passed without a reply: the moment to tell the user and offer a nudge. */
+  overdueAt: string | null
+  nudgedAt: string | null
+  /** The latest nudge, an outgoing message; it does not count once cancelled. */
+  lastNudgeId: string | null
+  /** The delegate's reply that closed it. */
+  replyMessageId: string | null
+  createdAt: string
+  closedAt: string | null
+  updatedAt: string
+}
+
 /** Who made a todo: the user, the user accepting a suggestion, or a smart inbox on its own. */
 export type TodoSource = 'manual' | 'suggested' | 'automatic'
 
@@ -220,6 +254,7 @@ export type DeletedType =
   | 'notification'
   | 'eventNote'
   | 'todo'
+  | 'handOver'
 
 export type DraftKind = 'new' | 'reply' | 'replyAll' | 'forward'
 
@@ -287,6 +322,7 @@ export interface ChangePage {
   mailNotifications: SyncedMailNotification[]
   /** May be left out when there are none. */
   unsubscriptions?: SyncedUnsubscription[]
+  handOvers: SyncedHandOver[]
   deleted: Deleted[]
 }
 

@@ -29,6 +29,7 @@ function page(cursor: number, hasMore = false, ids: string[] = []): ChangePage {
     eventNotes: [],
     todos: [],
     mailNotifications: [],
+    handOvers: [],
     deleted: [],
   }
 }

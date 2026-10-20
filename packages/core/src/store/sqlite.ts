@@ -1,9 +1,10 @@
 import { actionResult, type AppliedAction, type MessageAction } from '../actions'
 import type { Verdict } from '../domain'
+import { becameOverdue, compareHandOvers } from '../handOvers'
 import { sortSmartInboxes } from '../smartInboxes'
 import { compareTodos } from '../todos'
 import { inList, summarizeConversation, type ConversationSummary, type ListFolders, type ListScope } from '../sync/conversation'
-import type { ChangePage, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
+import type { ChangePage, SyncedFolder, SyncedHandOver, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
 import { CopyClosingError, type Contact, type Draft, type MailStore } from './mailStore'
 import { classifiedByUser, contactMatches, deletedDraft, draftOnlyHere, mergeContact, newerUnsubscription, peopleOn, stillAsClassified, storedDraft, syncedDraft } from './rules'
 import type { Sql, SqlValue } from './sql'
@@ -12,7 +13,7 @@ import type { Sql, SqlValue } from './sql'
  * Raised whenever the copy changes shape. A copy made by another version is emptied and synced again from the start,
  * so nothing it skipped stays missing; drafts that exist only on this device are carried over.
  */
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
@@ -51,10 +52,12 @@ CREATE TABLE IF NOT EXISTS todos (id TEXT PRIMARY KEY NOT NULL, message_id TEXT,
 CREATE INDEX IF NOT EXISTS todos_by_message ON todos (message_id);
 CREATE INDEX IF NOT EXISTS todos_by_thread ON todos (thread_id);
 CREATE TABLE IF NOT EXISTS unsubscriptions (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS hand_overs (id TEXT PRIMARY KEY NOT NULL, mail_account_id TEXT NOT NULL, message_id TEXT, json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS hand_overs_by_account ON hand_overs (mail_account_id);
 `
 
 /** Every table any version made, so a rebuild leaves none of an old shape behind. */
-const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'todos', 'unsubscriptions', 'meta']
+const TABLES = ['mail_accounts', 'folders', 'threads', 'messages', 'message_folders', 'conversations', 'outgoing', 'contacts', 'drafts', 'signatures', 'smart_inboxes', 'todos', 'unsubscriptions', 'hand_overs', 'meta']
 
 type JsonRow = { json: string }
 
@@ -83,6 +86,8 @@ export class SqliteMailStore implements MailStore {
    * connection without a busy timeout, so a second write while one is open would fail with "database is locked".
    */
   private queue: Promise<void> = Promise.resolve()
+  /** Collected by {@link apply}, handed out by {@link takeOverdueHandOvers}. */
+  private overdue: SyncedHandOver[] = []
   /** Threads classified on this device whose server version has not arrived yet; see {@link restoreThread}. */
   private readonly unconfirmed = new Set<string>()
   /** Set while the copy must sync from the start (see resyncFromStart); kept in the database too, so it holds after a restart. */
@@ -187,6 +192,7 @@ export class SqliteMailStore implements MailStore {
 
   private async store(page: ChangePage): Promise<void> {
     let finished: number | null = null
+    const overdue: SyncedHandOver[] = []
     await this.sql.transaction(async (tx) => {
       const affected = new Set<string>()
 
@@ -226,6 +232,9 @@ export class SqliteMailStore implements MailStore {
             break
           case 'todo':
             await tx.run('DELETE FROM todos WHERE id = ?', [deleted.id])
+            break
+          case 'handOver':
+            await tx.run('DELETE FROM hand_overs WHERE id = ?', [deleted.id])
             break
           case 'draft': {
             const local = await readDraft(tx, deleted.id)
@@ -295,6 +304,13 @@ export class SqliteMailStore implements MailStore {
       for (const todo of page.todos) {
         await tx.run('INSERT OR REPLACE INTO todos (id, message_id, thread_id, json) VALUES (?, ?, ?, ?)', [todo.id, todo.messageId, todo.threadId, JSON.stringify(todo)])
       }
+      for (const handOver of page.handOvers) {
+        const row = await tx.first<JsonRow>('SELECT json FROM hand_overs WHERE id = ?', [handOver.id])
+        if (becameOverdue(row === null ? null : parse<SyncedHandOver>(row), handOver)) {
+          overdue.push(handOver)
+        }
+        await tx.run('INSERT OR REPLACE INTO hand_overs (id, mail_account_id, message_id, json) VALUES (?, ?, ?, ?)', [handOver.id, handOver.mailAccountId, handOver.messageId, JSON.stringify(handOver)])
+      }
 
       const lists = await listFoldersOf(tx)
       for (const threadId of affected) {
@@ -308,6 +324,7 @@ export class SqliteMailStore implements MailStore {
         finished = this.resyncsAsked
       }
     })
+    this.overdue.push(...overdue)
     // A resync asked for while this page was being stored still stands: the next pull begins from the start again.
     if (finished !== null && finished === this.resyncsAsked) {
       this.resyncing = false
@@ -351,6 +368,17 @@ export class SqliteMailStore implements MailStore {
     )
   }
 
+
+  takeOverdueHandOvers(): SyncedHandOver[] {
+    const taken = this.overdue
+    this.overdue = []
+    return taken
+  }
+
+  async handOvers(): Promise<SyncedHandOver[]> {
+    const rows = await this.reader.all<JsonRow & { thread_id: string | null }>('SELECT h.json, m.thread_id FROM hand_overs h LEFT JOIN messages m ON m.id = h.message_id')
+    return rows.map((row) => ({ ...parse<SyncedHandOver>(row), threadId: row.thread_id })).sort(compareHandOvers)
+  }
 
   async mailAccounts(): Promise<SyncedMailAccount[]> {
     const accounts = (await this.reader.all<JsonRow>('SELECT json FROM mail_accounts')).map((row) => parse<SyncedMailAccount>(row))
@@ -696,7 +724,7 @@ async function deleteAccount(tx: Sql, accountId: string): Promise<void> {
     await writeDraft(tx, { ...parse<Draft>(row), mailAccountId: null })
   }
   await tx.run('DELETE FROM message_folders WHERE message_id IN (SELECT id FROM messages WHERE mail_account_id = ?)', [accountId])
-  for (const table of ['messages', 'threads', 'folders', 'conversations', 'outgoing', 'unsubscriptions']) {
+  for (const table of ['messages', 'threads', 'folders', 'conversations', 'outgoing', 'unsubscriptions', 'hand_overs']) {
     await tx.run(`DELETE FROM ${table} WHERE mail_account_id = ?`, [accountId])
   }
   await tx.run('DELETE FROM mail_accounts WHERE id = ?', [accountId])

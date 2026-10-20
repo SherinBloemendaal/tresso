@@ -2,7 +2,7 @@ import type { AppliedAction, MessageAction } from '../actions'
 import type { Verdict } from '../domain'
 import type { ConversationSummary, ListScope } from '../sync/conversation'
 import type { SyncStore } from '../sync/engine'
-import type { Address, DraftAttachment, SyncedFolder, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedUnsubscription, SyncedTodo } from '../sync/types'
+import type { Address, DraftAttachment, SyncedFolder, SyncedHandOver, SyncedMailAccount, SyncedMessage, SyncedOutgoingMessage, SyncedSignature, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
 
 /** Someone the user exchanged mail with, for recipient suggestions. */
 export interface Contact {
@@ -73,6 +73,13 @@ export interface MailStore extends SyncStore {
    * messages whose request the server did not take, so a delta can only have brought them someone else's change.
    */
   revertAction(applied: AppliedAction): Promise<void>
+  /** Hand-overs that became overdue in the pages applied since the last call (see `becameOverdue`). */
+  takeOverdueHandOvers(): SyncedHandOver[]
+  /**
+   * Every hand-over in "Waiting on" order (see `compareHandOvers`), each with the conversation its message is in
+   * now; null when that message is not in the copy.
+   */
+  handOvers(): Promise<SyncedHandOver[]>
   /** By display name, then address. */
   mailAccounts(): Promise<SyncedMailAccount[]>
   folders(): Promise<SyncedFolder[]>

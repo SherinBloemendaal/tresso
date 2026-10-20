@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MissingFolderError } from '../actions'
-import type { ChangePage, SyncedMessage, SyncedOutgoingMessage, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
+import type { ChangePage, SyncedHandOver, SyncedMessage, SyncedOutgoingMessage, SyncedSmartInbox, SyncedThread, SyncedTodo, SyncedUnsubscription } from '../sync/types'
 import type { Draft, MailStore } from './mailStore'
 
 /** Test data for the mail stores. */
 export function page(changes: Partial<ChangePage> & { cursor: number }): ChangePage {
-  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], mailNotifications: [], deleted: [], ...changes }
+  return { hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], mailNotifications: [], handOvers: [], deleted: [], ...changes }
 }
 
 export const accounts = [
@@ -75,6 +75,29 @@ export function message(id: string, threadId: string, mailAccountId: string, fol
 
 export function unsubscription(id: string, mailAccountId: string, sender: string, extra: Partial<SyncedUnsubscription> = {}): SyncedUnsubscription {
   return { id, mailAccountId, sender, method: 'oneClick', status: 'pending', error: null, requestedAt: '2026-10-19T12:00:00+00:00', completedAt: null, ...extra }
+}
+
+export function handOver(id: string, messageId: string | null, mailAccountId: string, extra: Partial<SyncedHandOver> = {}): SyncedHandOver {
+  return {
+    id,
+    mailAccountId,
+    messageId,
+    threadId: null,
+    subject: `Subject of ${messageId ?? 'a gone message'}`,
+    delegate: { address: 'lisa@company.example', name: 'Lisa Bakker' },
+    note: 'Can you take this?',
+    dueAt: '2026-10-24T15:00:00+00:00',
+    state: 'open',
+    forwardId: `forward-${id}`,
+    overdueAt: null,
+    nudgedAt: null,
+    lastNudgeId: null,
+    replyMessageId: null,
+    createdAt: '2026-10-20T08:00:00+00:00',
+    closedAt: null,
+    updatedAt: '2026-10-20T08:00:00+00:00',
+    ...extra,
+  }
 }
 
 export function draft(id: string, extra: Partial<Draft> = {}): Draft {
@@ -672,6 +695,73 @@ export function describeMailStore(name: string, open: () => Promise<MailStore>, 
         await db.apply(page({ cursor: 30, messages: [message('m2', 't1', 'work', ['work-inbox'], '2026-10-19T09:00:00+02:00', { unsubscribe: 'oneClick' })] }))
 
         expect((await db.thread('t1'))?.messages.find((m) => m.id === 'm2')?.unsubscribe).toBe('oneClick')
+      })
+    })
+
+    describe('hand-overs', () => {
+      it('lists open hand-overs by due date first, then closed ones most recently closed first', async () => {
+        await db.apply(
+          page({
+            cursor: 11,
+            handOvers: [
+              handOver('h1', 'm1', 'work', { dueAt: '2026-10-25T15:00:00+00:00' }),
+              handOver('h2', 'm3', 'work', { dueAt: '2026-10-22T15:00:00+00:00' }),
+              handOver('h3', 'm4', 'home', { state: 'done', closedAt: '2026-10-20T09:00:00+00:00' }),
+              handOver('h4', 'm2', 'work', { state: 'replied', closedAt: '2026-10-20T10:00:00+00:00', replyMessageId: 'm2' }),
+            ],
+          }),
+        )
+
+        expect((await db.handOvers()).map((h) => h.id)).toEqual(['h2', 'h1', 'h4', 'h3'])
+      })
+
+      it('gives the conversation its message is in now, or none when the message is not in the copy', async () => {
+        await db.apply(page({ cursor: 11, handOvers: [handOver('h1', 'm1', 'work', { threadId: 't1' }), handOver('h2', 'gone', 'work', { threadId: 't9' }), handOver('h3', null, 'work')] }))
+        await db.apply(page({ cursor: 12, threads: [thread('t4', 'work')], messages: [message('m1', 't4', 'work', ['work-inbox'], '2026-10-19T08:00:00+00:00')] }))
+
+        expect(Object.fromEntries((await db.handOvers()).map((h) => [h.id, h.threadId]))).toEqual({ h1: 't4', h2: null, h3: null })
+      })
+
+      it('keeps them current and drops withdrawn ones', async () => {
+        await db.apply(page({ cursor: 11, handOvers: [handOver('h1', 'm1', 'work'), handOver('h2', 'm3', 'work')] }))
+
+        await db.apply(page({ cursor: 12, handOvers: [handOver('h1', 'm1', 'work', { state: 'done', closedAt: '2026-10-20T09:00:00+00:00' })], deleted: [{ type: 'handOver', id: 'h2' }] }))
+
+        expect((await db.handOvers()).map((h) => [h.id, h.state])).toEqual([['h1', 'done']])
+      })
+
+      it('drops the hand-overs of a deleted account', async () => {
+        await db.apply(page({ cursor: 11, handOvers: [handOver('h1', 'm1', 'work'), handOver('h2', 'm4', 'home')] }))
+
+        await db.apply(page({ cursor: 12, deleted: [{ type: 'mailAccount', id: 'work' }] }))
+
+        expect((await db.handOvers()).map((h) => h.id)).toEqual(['h2'])
+      })
+
+      it('hands out a hand-over that became overdue, once', async () => {
+        await db.apply(page({ cursor: 11, handOvers: [handOver('h1', 'm1', 'work'), handOver('h2', 'm3', 'work')] }))
+        expect(db.takeOverdueHandOvers()).toEqual([])
+
+        await db.apply(
+          page({
+            cursor: 12,
+            handOvers: [
+              handOver('h1', 'm1', 'work', { overdueAt: '2026-10-24T15:00:00+00:00' }),
+              handOver('h2', 'm3', 'work', { state: 'replied', overdueAt: '2026-10-24T15:00:00+00:00' }),
+            ],
+          }),
+        )
+        expect(db.takeOverdueHandOvers().map((h) => h.id)).toEqual(['h1'])
+        expect(db.takeOverdueHandOvers()).toEqual([])
+
+        // A nudge changes it again; it was overdue already, so the user is not told twice.
+        await db.apply(page({ cursor: 13, handOvers: [handOver('h1', 'm1', 'work', { overdueAt: '2026-10-24T15:00:00+00:00', nudgedAt: '2026-10-24T16:00:00+00:00' })] }))
+        expect(db.takeOverdueHandOvers()).toEqual([])
+
+        // A new due date clears it; passing that one tells again.
+        await db.apply(page({ cursor: 14, handOvers: [handOver('h1', 'm1', 'work', { dueAt: '2026-10-28T15:00:00+00:00' })] }))
+        await db.apply(page({ cursor: 15, handOvers: [handOver('h1', 'm1', 'work', { dueAt: '2026-10-28T15:00:00+00:00', overdueAt: '2026-10-28T15:00:00+00:00' })] }))
+        expect(db.takeOverdueHandOvers().map((h) => h.id)).toEqual(['h1'])
       })
     })
   })
