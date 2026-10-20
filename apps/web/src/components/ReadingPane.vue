@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
-import { classificationReasonText, dueLabel, type MessageAction, type SyncedMessage, type SyncedThread, type Todo } from '@tresso/core'
+import { classificationReasonText, dueLabel, todoSourceMessage, type MessageAction, type SyncedMessage, type SyncedThread, type Todo } from '@tresso/core'
 import { errorMessage } from '@/api/errors'
 import type { AppliedAction } from '@tresso/core'
 import { shortcutAllowed, useMessageActions } from '@/mail/useMessageActions'
@@ -50,19 +50,9 @@ async function load(): Promise<void> {
   todos.value = threadTodos
 }
 
-/**
- * The email a todo is made from: the newest one someone else sent, which is what the conversation asks of the user;
- * the newest one when the user wrote them all.
- */
-function todoSource(): SyncedMessage | null {
-  const own = new Set(mail.accounts.map((account) => account.emailAddress.toLowerCase()))
-  const incoming = messages.value.filter((message) => !own.has(message.from.address.toLowerCase()))
-  return incoming[incoming.length - 1] ?? messages.value[messages.value.length - 1] ?? null
-}
-
 /** Makes a todo of the conversation, titled after its subject; the email keeps one todo however often this runs. */
 async function makeTodo(): Promise<void> {
-  const source = todoSource()
+  const source = todoSourceMessage(messages.value, mail.accounts.map((account) => account.emailAddress))
   if (source === null || makingTodo.value) {
     return
   }

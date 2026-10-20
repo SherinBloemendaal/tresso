@@ -84,16 +84,18 @@ function SignedIn({ styles }: { styles: Styles }) {
   const theme = useTheme()
   const [accounts, setAccounts] = useState(0)
   const [drafts, setDrafts] = useState(0)
-  const { mailAccounts, store, version } = mail
+  const [openTodos, setOpenTodos] = useState(0)
+  const { mailAccounts, store, todos, version } = mail
 
   useEffect(() => {
     let current = true
     void mailAccounts().then((list) => current && setAccounts(list.length))
     void (store()?.drafts() ?? Promise.resolve([])).then((list) => current && setDrafts(list.filter((draft) => draft.outgoingId === null).length))
+    void todos().then((list) => current && setOpenTodos(list.filter((todo) => todo.completedAt === null).length))
     return () => {
       current = false
     }
-  }, [mailAccounts, store, version])
+  }, [mailAccounts, store, todos, version])
 
   return (
     <View style={styles.fill}>
@@ -109,6 +111,9 @@ function SignedIn({ styles }: { styles: Styles }) {
                 {mail.live ? '' : ' · not live'}
               </Text>
             </View>
+            <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => router.push('/todos')} accessibilityRole="button" accessibilityLabel={`Todos, ${openTodos} open`}>
+              <Text style={styles.secondaryLabel}>Todos{openTodos > 0 ? ` ${openTodos}` : ''}</Text>
+            </Pressable>
             {drafts > 0 && (
               <Pressable style={({ pressed }) => [styles.secondary, pressed && styles.pressed]} onPress={() => router.push('/drafts')} accessibilityRole="button" accessibilityLabel={`Drafts, ${drafts}`}>
                 <Text style={styles.secondaryLabel}>Drafts {drafts}</Text>

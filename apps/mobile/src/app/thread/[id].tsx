@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import type { SyncedFolder, SyncedMessage, SyncedThread } from '@tresso/core'
+import { dueLabel, todoSourceMessage, type SyncedFolder, type SyncedMessage, type SyncedThread, type SyncedTodo } from '@tresso/core'
 import { MessageBodyView } from '@/components/MessageBodyView'
 import { useComposer } from '@/compose/ComposerProvider'
 import { useMail } from '@/mail/MailProvider'
@@ -25,7 +25,10 @@ export default function ThreadScreen() {
   const [missing, setMissing] = useState(false)
   const [expanded, setExpanded] = useState<Set<string> | null>(null)
   const [folders, setFolders] = useState<SyncedFolder[]>([])
-  const { thread: load, folders: loadFolders, version } = mail
+  const [todos, setTodos] = useState<SyncedTodo[]>([])
+  const [ownAddresses, setOwnAddresses] = useState<string[]>([])
+  const [makingTodo, setMakingTodo] = useState(false)
+  const { thread: load, folders: loadFolders, todosOfThread, mailAccounts, version } = mail
   const router = useRouter()
   const insets = useSafeAreaInsets()
   const actions = useMessageActions()
@@ -58,6 +61,38 @@ export default function ThreadScreen() {
       current = false
     }
   }, [loadFolders, version])
+
+  useEffect(() => {
+    let current = true
+    void Promise.all([todosOfThread(id), mailAccounts()]).then(([list, accounts]) => {
+      if (current) {
+        setTodos(list)
+        setOwnAddresses(accounts.map((account) => account.emailAddress))
+      }
+    })
+    return () => {
+      current = false
+    }
+  }, [todosOfThread, mailAccounts, id, version])
+
+  /** Makes a todo of the conversation, titled after its subject; the email keeps one todo however often this runs. */
+  async function makeTodo() {
+    const source = todoSourceMessage(messages, ownAddresses)
+    if (source === null || makingTodo) {
+      return
+    }
+    setMakingTodo(true)
+    try {
+      await mail.makeTodo(source.id)
+      notices.notify({ text: 'Added to your todos.', tone: 'info', action: { label: 'View', run: () => router.push('/todos') } })
+    } catch (error) {
+      notices.notify({ text: error instanceof Error ? error.message : String(error), tone: 'error' })
+    } finally {
+      if (mounted.current) {
+        setMakingTodo(false)
+      }
+    }
+  }
 
   // Another conversation in the same screen starts with its own folding.
   const [shownId, setShownId] = useState(id)
@@ -164,6 +199,26 @@ export default function ThreadScreen() {
             <Text style={styles.subject} accessibilityRole="header">
               {thread.subject || '(no subject)'}
             </Text>
+            {todos.length === 0 ? (
+              <Pressable
+                style={({ pressed }) => [styles.todoButton, (pressed || makingTodo) && styles.replyPressed]}
+                onPress={() => void makeTodo()}
+                disabled={makingTodo}
+                accessibilityRole="button"
+                accessibilityState={{ disabled: makingTodo }}
+              >
+                <Text style={styles.todoButtonLabel}>Make todo</Text>
+              </Pressable>
+            ) : (
+              todos.map((todo) => (
+                <Pressable key={todo.id} style={styles.todo} onPress={() => router.push('/todos')} accessibilityRole="link">
+                  <Text style={[styles.todoTitle, todo.completedAt !== null && styles.todoDone]} numberOfLines={1}>
+                    {todo.title}
+                  </Text>
+                  <Text style={styles.muted}>{dueLabel(todo, new Date()) ?? 'Open'}</Text>
+                </Pressable>
+              ))
+            )}
             {messages.map((message) => {
               const open = expanded?.has(message.id) ?? false
               const to = [...message.recipients.to, ...message.recipients.cc].map(senderName).join(', ')
@@ -237,6 +292,11 @@ function makeStyles(theme: Theme) {
     content: { padding: 20, gap: 16 },
     subject: { color: theme.ink, fontSize: 24, lineHeight: 30, fontWeight: '700' },
     replies: { flexDirection: 'row', gap: 8, paddingTop: 4 },
+    todoButton: { alignSelf: 'flex-start', minHeight: 40, paddingHorizontal: 14, borderRadius: 999, borderWidth: 1, borderColor: theme.accent, justifyContent: 'center' },
+    todoButtonLabel: { color: theme.accent, fontSize: 15, fontWeight: '600' },
+    todo: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44, paddingHorizontal: 14, borderRadius: 10, borderWidth: 1, borderColor: theme.line, backgroundColor: theme.ground },
+    todoTitle: { flex: 1, color: theme.ink, fontSize: 15, fontWeight: '600' },
+    todoDone: { color: theme.ink2, textDecorationLine: 'line-through' },
     reply: { minHeight: 40, paddingHorizontal: 14, borderRadius: 999, borderWidth: 1, borderColor: theme.lineStrong, justifyContent: 'center' },
     replyPressed: { backgroundColor: theme.ground },
     replyLabel: { fontSize: 14, fontWeight: '600', color: theme.ink },
