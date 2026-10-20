@@ -88,9 +88,7 @@ func run(logger *slog.Logger) error {
 		"gmail":     outbox.GmailTransport(client, cfg.WorkerID, gmailsync.DefaultClientOptions()),
 		"microsoft": outbox.GraphTransport(client, cfg.WorkerID, graphOutboxOptions(workerLogger)),
 	}
-	// Unsubscribe addresses come from whoever sent a message, so their dialer never allows private addresses, whatever
-	// MAIL_ALLOW_UNSAFE_SERVERS says for the user's own mail servers.
-	unsubscriber := unsubscribe.New(netguard.New(false), unsubscribe.DefaultOptions())
+	unsubscriber := newUnsubscriber(cfg)
 	dispatcher := outbox.NewDispatcher(client, store, transports, unsubscriber, cfg.WorkerID, workerLogger)
 	manager.OnOutbox(func(ctx context.Context, accountIDs []string) {
 		for _, id := range accountIDs {
@@ -147,4 +145,11 @@ func graphOutboxOptions(logger *slog.Logger) graphsync.ClientOptions {
 	opts := graphsync.DefaultClientOptions()
 	opts.Logger = logger
 	return opts
+}
+
+// newUnsubscriber posts one-click unsubscribe requests. Their addresses come from whoever sent a message, so its dialer
+// never allows private addresses, whatever MAIL_ALLOW_UNSAFE_SERVERS (cfg.AllowUnsafeServers) says for the user's own
+// mail servers.
+func newUnsubscriber(_ config.Config) *unsubscribe.Sender {
+	return unsubscribe.New(netguard.New(false), unsubscribe.DefaultOptions())
 }

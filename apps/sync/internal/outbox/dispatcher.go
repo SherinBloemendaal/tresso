@@ -167,39 +167,53 @@ type Dispatcher struct {
 
 	mu      sync.Mutex
 	running map[string]*run
-	wg      sync.WaitGroup
+	// unsubscribing holds the runs of the unsubscribe lane, by account.
+	unsubscribing map[string]*run
+	wg            sync.WaitGroup
 }
 
 type run struct{ again bool }
 
 func NewDispatcher(client API, store storage.Reader, transports map[string]Transport, unsubscriber Unsubscriber, workerID string, logger *slog.Logger) *Dispatcher {
-	return &Dispatcher{api: client, store: store, transports: transports, unsubscribe: unsubscriber, workerID: workerID, logger: logger, now: time.Now, running: map[string]*run{}}
+	return &Dispatcher{api: client, store: store, transports: transports, unsubscribe: unsubscriber, workerID: workerID, logger: logger, now: time.Now, running: map[string]*run{}, unsubscribing: map[string]*run{}}
 }
 
-// Trigger makes the account's due mail go out. Runs for one account never overlap: a trigger during a run makes that
-// run go round once more, so nothing is missed and nothing is sent twice by this worker.
+// Trigger makes the account's due work go out, in two lanes: the mail users wait for (sending, drafts, changes to
+// messages), and the unsubscribe requests, which wait on servers of strangers and so must never hold up the mail. Runs
+// of one lane for one account never overlap: a trigger during a run makes that run go round once more, so nothing is
+// missed and nothing is done twice by this worker.
 func (d *Dispatcher) Trigger(ctx context.Context, accountID string) {
+	d.lane(ctx, d.running, accountID, d.process)
+	if d.unsubscribe != nil {
+		d.lane(ctx, d.unsubscribing, accountID, func(ctx context.Context, accountID string) {
+			d.unsubscribes(ctx, d.logger.With("account", accountID), accountID)
+		})
+	}
+}
+
+// lane runs work for the account, once more for every trigger during a run, never twice at once.
+func (d *Dispatcher) lane(ctx context.Context, running map[string]*run, accountID string, work func(context.Context, string)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if r, ok := d.running[accountID]; ok {
+	if r, ok := running[accountID]; ok {
 		r.again = true
 		return
 	}
 	r := &run{again: true}
-	d.running[accountID] = r
+	running[accountID] = r
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
 		for {
 			d.mu.Lock()
 			if !r.again || ctx.Err() != nil {
-				delete(d.running, accountID)
+				delete(running, accountID)
 				d.mu.Unlock()
 				return
 			}
 			r.again = false
 			d.mu.Unlock()
-			d.process(ctx, accountID)
+			work(ctx, accountID)
 		}
 	}()
 }
@@ -211,9 +225,6 @@ func (d *Dispatcher) Wait() {
 
 func (d *Dispatcher) process(ctx context.Context, accountID string) {
 	logger := d.logger.With("account", accountID)
-	// Unsubscribing comes last, so slow senders' servers never hold up mail the user waits for. It is an HTTP POST
-	// that needs nothing of the account, so it also runs when the account cannot send.
-	defer d.unsubscribes(ctx, logger, accountID)
 	// Credentials first: a message is only claimed once this worker can actually send it.
 	credentials, err := d.api.Credentials(ctx, accountID, d.workerID)
 	if err != nil {
