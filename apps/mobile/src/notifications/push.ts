@@ -69,7 +69,7 @@ export async function forgetPushDevice(api: Api, store: DeviceIdStore): Promise<
  * The screens a notification may open on the phone, by the path the server gives (PushMessage.php): a conversation
  * (mail), the daily brief and the todos. Paths the phone has no screen for (a calendar event) open the app as it is.
  */
-const TAP_ROUTES = [/^\/thread\/[^/?#]+$/, /^\/brief(\?[^#]*)?$/, /^\/todos$/]
+const TAP_ROUTES = [/^\/thread\/[^/?#]+$/, /^\/brief(\?[^#]*)?$/, /^\/todos$/, /^\/waiting(\?[^#]*)?$/]
 
 /** Where a tapped notification leads in the app, or null to open it as it is. */
 export function tappedRoute(data: unknown): string | null {

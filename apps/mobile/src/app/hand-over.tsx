@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { dueChoices, firstName, MAX_NOTE, UnscannedFilesError, type Address, type DueChoice, type SyncedMessage } from '@tresso/core'
 import { RecipientField } from '@/compose/RecipientField'
 import { handOverProblem } from '@/handOver/form'
+import { OneAtATime } from '@/handOver/oneAtATime'
 import { dueLabel } from '@/handOver/format'
 import { useHandOvers } from '@/handOver/HandOverProvider'
 import { useMail } from '@/mail/MailProvider'
@@ -51,23 +52,23 @@ export default function HandOverScreen() {
   const person = delegate[0]
   const submitText = person === undefined ? 'Hand over' : `Hand over to ${firstName(person)}`
 
-  // Set at once, unlike state, so a second tap before the screen updates does not forward the conversation twice.
-  const submitting = useRef(false)
+  // A second tap before the screen updates must not forward the conversation twice.
+  const [gate] = useState(() => new OneAtATime())
 
   /** The server's question about files of the original that could not be scanned; null when there is none. */
   const [unscanned, setUnscanned] = useState<string | null>(null)
 
-  async function submit(acceptUnscanned = false) {
-    if (submitting.current) {
-      return
-    }
+  function submit(acceptUnscanned = false): Promise<boolean> {
+    return gate.run(() => handOver(acceptUnscanned))
+  }
+
+  async function handOver(acceptUnscanned: boolean) {
     const wrong = handOverProblem(delegate, note)
     const choice = choices.find((candidate) => candidate.key === due)
     if (wrong !== null || message === null || choice === undefined || person === undefined) {
       setProblem(wrong)
       return
     }
-    submitting.current = true
     setBusy(true)
     setProblem(null)
     setUnscanned(null)
@@ -81,7 +82,6 @@ export default function HandOverScreen() {
         setProblem(error instanceof Error ? error.message : String(error))
       }
     } finally {
-      submitting.current = false
       setBusy(false)
     }
   }
