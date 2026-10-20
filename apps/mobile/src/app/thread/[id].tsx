@@ -8,6 +8,7 @@ import { useComposer } from '@/compose/ComposerProvider'
 import { useMail } from '@/mail/MailProvider'
 import { useNotices } from '@/components/Notices'
 import { useMessageActions } from '@/mail/useMessageActions'
+import { absentConversation } from '@/mail/openedConversation'
 import { initials, senderName, shortTime } from '@/mail/format'
 import { useTheme, type Theme } from '@/theme'
 
@@ -28,7 +29,7 @@ export default function ThreadScreen() {
   const [todos, setTodos] = useState<SyncedTodo[]>([])
   const [ownAddresses, setOwnAddresses] = useState<string[]>([])
   const [makingTodo, setMakingTodo] = useState(false)
-  const { thread: load, folders: loadFolders, todosOfThread, mailAccounts, version, pulls, syncNow } = mail
+  const { thread: load, folders: loadFolders, todosOfThread, mailAccounts, version, pulls, syncNow, syncState, syncError } = mail
   /**
    * The pulls done when this conversation opened. Until one more is done, a conversation that is not in the copy may
    * just not have arrived yet (a tapped notification can be quicker than the delta), so it shows as loading.
@@ -37,7 +38,7 @@ export default function ThreadScreen() {
   if (opened.id !== id) {
     setOpened({ id, pulls })
   }
-  const missing = notFound && pulls > opened.pulls
+  const absent = notFound ? absentConversation(pulls, opened.pulls, syncState) : null
   const router = useRouter()
   const insets = useSafeAreaInsets()
   const actions = useMessageActions()
@@ -209,8 +210,16 @@ export default function ThreadScreen() {
     <>
       <Stack.Screen options={{ headerShown: true, title: '', headerBackTitle: 'Inbox' }} />
       <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-        {notFound && !missing && <ActivityIndicator accessibilityLabel="Loading the conversation" />}
-        {missing && <Text style={styles.muted}>This conversation no longer exists.</Text>}
+        {absent === 'loading' && <ActivityIndicator accessibilityLabel="Loading the conversation" />}
+        {absent === 'unreachable' && (
+          <View accessibilityRole="alert">
+            <Text style={styles.muted}>This conversation could not be loaded: {syncError}. It opens once Tresso can sync again.</Text>
+            <Pressable onPress={() => void syncNow()} accessibilityRole="button" style={({ pressed }) => [styles.retry, pressed && styles.pressed]}>
+              <Text style={styles.on}>Try again</Text>
+            </Pressable>
+          </View>
+        )}
+        {absent === 'missing' && <Text style={styles.muted}>This conversation no longer exists.</Text>}
         {thread !== null && (
           <>
             <Text style={styles.subject} accessibilityRole="header">
@@ -325,6 +334,7 @@ function makeStyles(theme: Theme) {
     from: { color: theme.ink, fontSize: 16 },
     bold: { fontWeight: '600' },
     muted: { color: theme.ink2, fontSize: 13 },
+    retry: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingVertical: 8 },
     on: { color: theme.ink },
     bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.line, backgroundColor: theme.surface },
     action: { minWidth: 64, minHeight: 44, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center', borderRadius: 6 },
