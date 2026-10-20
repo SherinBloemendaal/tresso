@@ -23,6 +23,9 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Index(columns: ['mail_account_id', 'message_id_header'])]
 #[ORM\Index(columns: ['thread_id'])]
 #[ORM\Index(columns: ['mail_account_id', 'change_seq'])]
+// Per-sender lookups of bulk actions and cleanup suggestions, and their "large mail" rule.
+#[ORM\Index(columns: ['mail_account_id', 'from_address', 'received_at'])]
+#[ORM\Index(columns: ['mail_account_id', 'size'])]
 #[ORM\Index(name: 'message_unclassified', columns: ['mail_account_id', 'received_at'], options: ['where' => '(classified_at IS NULL)'])]
 #[ORM\Index(name: 'message_held', columns: ['held_until'], options: ['where' => '(held_until IS NOT NULL)'])]
 class Message implements TracksChanges

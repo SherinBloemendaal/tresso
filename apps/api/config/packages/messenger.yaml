@@ -44,6 +44,13 @@ framework:
                     max_retries: 5
                     delay: 5000
                     multiplier: 3
+            # Bulk actions too, with their own consumer: archiving a whole smart inbox must not hold up sending.
+            bulk:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%_bulk'
+                retry_strategy:
+                    max_retries: 5
+                    delay: 1000
+                    multiplier: 3
             failed: '%env(MESSENGER_TRANSPORT_DSN)%_failed'
             sync: 'sync://'
 
@@ -61,6 +68,7 @@ framework:
             App\Notification\PlanUserNotifications: push
             App\Notification\FireNotification: push
             App\Notification\SendMailNotification: push
+            App\Bulk\RunBulkAction: bulk
 
 when@test:
     framework:
@@ -72,4 +80,5 @@ when@test:
                 push: 'in-memory://'
                 scan: 'in-memory://'
                 scan_rescan: 'in-memory://'
+                bulk: 'in-memory://'
                 failed: 'in-memory://'

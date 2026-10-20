@@ -18,6 +18,8 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Index(columns: ['mail_account_id', 'normalized_subject'])]
 #[ORM\Index(columns: ['mail_account_id', 'change_seq'])]
 #[ORM\Index(name: 'thread_held', columns: ['held_until'], options: ['where' => '(held_until IS NOT NULL)'])]
+// A smart inbox's conversations by age, for bulk actions on it.
+#[ORM\Index(columns: ['category_id', 'last_message_at'])]
 class Thread implements TracksChanges
 {
     #[ORM\Id]

@@ -42,13 +42,9 @@ final readonly class MessageActions
         $targets = [];
         foreach ($messages as $message) {
             $account = $message->getMailAccount();
-            $targets[$account->getId()->toRfc4122()] ??= match ($action) {
-                // Gmail has no Archive folder: moving out of INBOX into All Mail is how it archives.
-                MessageAction::Archive => $this->roleFolder($account, FolderRole::Archive, FolderRole::All),
-                MessageAction::Trash => $this->roleFolder($account, FolderRole::Trash),
-                MessageAction::Move => $target ?? throw new \LogicException('A move needs a target folder.'),
-                default => null,
-            };
+            $targets[$account->getId()->toRfc4122()] ??= MessageAction::Move === $action
+                ? $target ?? throw new \LogicException('A move needs a target folder.')
+                : $this->folderFor($account, $action);
         }
 
         $changed = 0;
@@ -78,6 +74,22 @@ final readonly class MessageActions
         }
 
         return $changed;
+    }
+
+    /**
+     * The folder an archive or trash moves the account's mail into; null for actions that do not move or take the
+     * folder from the caller.
+     *
+     * @throws MissingFolder when the account has no such folder
+     */
+    public function folderFor(MailAccount $account, MessageAction $action): ?Folder
+    {
+        return match ($action) {
+            // Gmail has no Archive folder: moving out of INBOX into All Mail is how it archives.
+            MessageAction::Archive => $this->roleFolder($account, FolderRole::Archive, FolderRole::All),
+            MessageAction::Trash => $this->roleFolder($account, FolderRole::Trash),
+            default => null,
+        };
     }
 
     private function setFlags(Message $message, ?bool $seen, ?bool $flagged, \DateTimeImmutable $now): bool
