@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/minio/minio-go/v7"
@@ -28,8 +30,10 @@ type Objects interface {
 // ErrNotFound means there is no object with that key.
 var ErrNotFound = errors.New("object not found")
 
-// KeyVersionMetadata names the key version an object is encrypted with, as object metadata (the API writes it too).
-const KeyVersionMetadata = "Tresso-Key-Version"
+// KeyVersionMetadata names the key version an object is encrypted with, as S3 user metadata
+// (x-amz-meta-tresso-key-version). The API writes the same name; header names are case-insensitive, and S3 clients
+// change their case, so it is always looked up without regard to case.
+const KeyVersionMetadata = "tresso-key-version"
 
 // maxObjectBytes bounds what is read into memory: far above any message a mail server accepts.
 const maxObjectBytes = 100 << 20
@@ -72,26 +76,57 @@ func (s *S3) EnsureBucket(ctx context.Context) error {
 }
 
 func (s *S3) PutUnlessCurrent(ctx context.Context, key string, data []byte, version uint32) error {
-	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
-	if err == nil {
-		stored, parseErr := strconv.ParseUint(info.UserMetadata[KeyVersionMetadata], 10, 32)
-		if parseErr == nil && stored >= uint64(version) {
+	// Conditional writes: another worker or the API may write the same object at the same time. Whoever loses the race
+	// looks again, so an object is never replaced by an older version than the one it holds.
+	for attempt := 0; attempt < 3; attempt++ {
+		opts := minio.PutObjectOptions{
+			ContentType:  "application/octet-stream",
+			UserMetadata: map[string]string{KeyVersionMetadata: strconv.FormatUint(uint64(version), 10)},
+		}
+		info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+		switch {
+		case err == nil:
+			stored, ok := keyVersionOf(info.UserMetadata)
+			if ok && stored >= version {
+				return nil
+			}
+			opts.SetMatchETag(info.ETag)
+		case isNoSuchKey(err):
+			opts.SetMatchETagExcept("*")
+		default:
+			return fmt.Errorf("stat %s: %w", key, err)
+		}
+
+		_, err = s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), opts)
+		if err == nil {
 			return nil
 		}
+		if !isPreconditionFailed(err) {
+			return fmt.Errorf("put %s: %w", key, err)
+		}
 	}
-	var response minio.ErrorResponse
-	if err != nil && (!errors.As(err, &response) || response.Code != minio.NoSuchKey) {
-		return fmt.Errorf("stat %s: %w", key, err)
-	}
+	return fmt.Errorf("put %s: changed by another writer three times in a row", key)
+}
 
-	_, err = s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
-		ContentType:  "application/octet-stream",
-		UserMetadata: map[string]string{KeyVersionMetadata: strconv.FormatUint(uint64(version), 10)},
-	})
-	if err != nil {
-		return fmt.Errorf("put %s: %w", key, err)
+// keyVersionOf reads the key version from an object's user metadata, whatever the case of its name.
+func keyVersionOf(metadata map[string]string) (uint32, bool) {
+	for name, value := range metadata {
+		if strings.EqualFold(name, KeyVersionMetadata) {
+			version, err := strconv.ParseUint(value, 10, 32)
+			return uint32(version), err == nil
+		}
 	}
-	return nil
+	return 0, false
+}
+
+func isNoSuchKey(err error) bool {
+	var response minio.ErrorResponse
+	return errors.As(err, &response) && response.Code == minio.NoSuchKey
+}
+
+func isPreconditionFailed(err error) bool {
+	var response minio.ErrorResponse
+	return errors.As(err, &response) && (response.StatusCode == http.StatusPreconditionFailed || response.Code == "PreconditionFailed")
 }
 
 func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
