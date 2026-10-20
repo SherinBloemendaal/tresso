@@ -8,7 +8,6 @@ use Sabre\VObject\Component\VCalendar;
 use Sabre\VObject\Component\VEvent;
 use Sabre\VObject\Recur\MaxInstancesExceededException;
 use Sabre\VObject\Recur\RRuleIterator;
-use Sabre\VObject\Settings;
 
 /**
  * The occurrences of one resource in a range, and turning one occurrence of a series into its own VEVENT (an
@@ -22,6 +21,12 @@ use Sabre\VObject\Settings;
  */
 final class Occurrences
 {
+    /**
+     * Steps of a rule walked for one look at a series, the skip to the range included: an old series of a regular
+     * frequency is jumped to near the range, so only an endless or huge irregular walk reaches this.
+     */
+    public const int MAX_STEPS = 100000;
+
     /**
      * Whether a series repeats more often than hourly. sabre/vobject does not advance such rules reliably, and they
      * would produce more occurrences than anyone can use, so they are refused when stored.
@@ -101,9 +106,10 @@ final class Occurrences
                 }
             }
         }
-        // Overrides moved into the range from an occurrence outside it.
+        // Overrides moved into the range from an occurrence outside it, and overrides whose occurrence the series no
+        // longer has (clients show those too, as their own event).
         foreach ($overrides as $key => $override) {
-            if (!isset($seen[$key]) && self::overlaps($override, $from, $to, $zone) && self::isOccurrence($master, (string) $key, $zone)) {
+            if (!isset($seen[$key]) && self::overlaps($override, $from, $to, $zone)) {
                 yield (string) $key => $override;
                 if (++$count >= $limit) {
                     return;
@@ -131,16 +137,18 @@ final class Occurrences
             }
         }
 
+        $first = \DateTimeImmutable::createFromInterface($dtStart->getDateTime($zone));
         $extra = [];
         foreach (Props::dateTimes($master, 'RDATE') as $property) {
-            // RDATE;VALUE=PERIOD is not supported by sabre's reader; dates and date-times are, each in its own TZID.
+            // RDATE;VALUE=PERIOD is not supported by sabre's reader; dates and date-times are, each in its own TZID,
+            // and taken into the series' zone, so an occurrence (and an override saved from it) uses the zone the
+            // resource defines.
             foreach ($property->getDateTimes($zone) as $value) {
-                $extra[] = \DateTimeImmutable::createFromInterface($value);
+                $extra[] = \DateTimeImmutable::createFromInterface($value)->setTimezone($first->getTimezone());
             }
         }
         usort($extra, static fn (\DateTimeImmutable $a, \DateTimeImmutable $b): int => $a <=> $b);
 
-        $first = \DateTimeImmutable::createFromInterface($dtStart->getDateTime($zone));
         $rule = Props::text($master, 'RRULE');
         $ruled = null === $rule ? new \ArrayIterator([$first]) : self::ruleStarts($rule, $first, $from);
 
@@ -213,21 +221,6 @@ final class Occurrences
         throw new InvalidCalendarData('The series has no occurrence at that time.');
     }
 
-    /** Whether the series has an occurrence with this recurrence key. */
-    public static function isOccurrence(VEvent $master, string $key, \DateTimeZone $zone): bool
-    {
-        foreach (self::starts($master, $zone, self::lookFrom($key)) as $current => $start) {
-            if ($current === $key) {
-                return true;
-            }
-            if ($current > $key) {
-                return false;
-            }
-        }
-
-        return false;
-    }
-
     /**
      * Where to start looking for the occurrence with this key: a little before it, as floating and all-day keys are
      * read in a zone, so a long series is not walked from its first occurrence.
@@ -288,7 +281,7 @@ final class Occurrences
         $instance->remove('RECURRENCE-ID');
         $dtStart = Props::dateTime($instance, 'DTSTART') ?? throw new InvalidCalendarData('The override has no start.');
         $dtStart->setDateTime($moved, $dtStart->isFloating());
-        Props::dateTime($instance, 'DTEND')?->setDateTime($moved->modify(\sprintf('+%d seconds', $length)), $dtStart->isFloating());
+        Props::dateTime($instance, 'DTEND')?->setDateTime(self::end($range, $moved, $length), $dtStart->isFloating());
         $masterStart = Props::dateTime($master, 'DTSTART') ?? throw new InvalidCalendarData('The series has no start.');
         $occurrenceId = clone $masterStart;
         $occurrenceId->name = 'RECURRENCE-ID';
@@ -312,28 +305,52 @@ final class Occurrences
     }
 
     /**
-     * The starts an RRULE gives (the first being DTSTART), from $from on when given.
+     * The starts an RRULE gives (the first being DTSTART), from $from on when given. At most MAX_STEPS steps are
+     * walked, the skip to $from included: sabre walks there one occurrence at a time, so an hourly series from year 1
+     * would take seconds on every look. A rule of a fixed period (HOURLY, DAILY, WEEKLY) without COUNT is first
+     * jumped to a couple of periods before $from, which gives the same occurrences.
      *
      * @return \Generator<int, \DateTimeImmutable>
      */
     private static function ruleStarts(string $rule, \DateTimeImmutable $first, ?\DateTimeImmutable $from): \Generator
     {
-        $iterator = new RRuleIterator($rule, $first);
-        if (null !== $from && $from > $first) {
-            $iterator->fastForward($from);
-        }
+        $iterator = new RRuleIterator($rule, null === $from ? $first : self::jump($rule, $first, $from));
         $steps = 0;
         while ($iterator->valid()) {
-            if (++$steps > Settings::$maxRecurrences) {
+            if (++$steps > self::MAX_STEPS) {
                 throw new MaxInstancesExceededException('The series has more occurrences than can be looked through.');
             }
             $current = $iterator->current();
             if (!$current instanceof \DateTimeInterface) {
                 return;
             }
-            yield \DateTimeImmutable::createFromInterface($current);
+            if (null === $from || $current >= $from) {
+                yield \DateTimeImmutable::createFromInterface($current);
+            }
             $iterator->next();
         }
+    }
+
+    /**
+     * A start of the series a couple of periods before $from, for rules whose occurrences repeat every so many hours,
+     * days or weeks from DTSTART; DTSTART itself for the others (COUNT counts from DTSTART, months and years vary).
+     */
+    private static function jump(string $rule, \DateTimeImmutable $first, \DateTimeImmutable $from): \DateTimeImmutable
+    {
+        $parts = [];
+        foreach (explode(';', strtoupper($rule)) as $part) {
+            [$name, $value] = array_pad(explode('=', $part, 2), 2, '');
+            $parts[$name] = $value;
+        }
+        $unit = ['HOURLY' => ['hours', 3600], 'DAILY' => ['days', 86400], 'WEEKLY' => ['weeks', 604800]][$parts['FREQ'] ?? ''] ?? null;
+        if (null === $unit || isset($parts['COUNT'])) {
+            return $first;
+        }
+        $interval = max(1, (int) ($parts['INTERVAL'] ?? 1));
+        // Two periods of slack: a daylight saving change shortens a day by an hour.
+        $periods = intdiv($from->getTimestamp() - $first->getTimestamp(), $unit[1] * $interval) - 2;
+
+        return $periods > 0 ? $first->modify(\sprintf('+%d %s', $periods * $interval, $unit[0])) : $first;
     }
 
     /**
@@ -368,12 +385,32 @@ final class Occurrences
         }
         $dtStart = Props::dateTime($instance, 'DTSTART') ?? throw new InvalidCalendarData('The series has no start.');
         $dtStart->setDateTime($start, $dtStart->isFloating());
-        Props::dateTime($instance, 'DTEND')?->setDateTime($start->modify(\sprintf('+%d seconds', $length)), $dtStart->isFloating());
+        Props::dateTime($instance, 'DTEND')?->setDateTime(self::end($master, $start, $length), $dtStart->isFloating());
         $recurrenceId = clone $dtStart;
         $recurrenceId->name = 'RECURRENCE-ID';
         $instance->add($recurrenceId);
 
         return $instance;
+    }
+
+    /**
+     * Where an occurrence of the event that starts at $start ends: for dates as many calendar days later as the event
+     * lasts (a day of 23 hours is still a day), for date-times $length seconds later.
+     */
+    private static function end(VEvent $event, \DateTimeImmutable $start, int $length): \DateTimeImmutable
+    {
+        $dtStart = Props::dateTime($event, 'DTSTART') ?? throw new InvalidCalendarData('The event has no start.');
+        if ($dtStart->hasTime()) {
+            return $start->modify(\sprintf('+%d seconds', $length));
+        }
+        $dtEnd = Props::dateTime($event, 'DTEND');
+        $days = null === $dtEnd ? 1 : (int) \DateTimeImmutable::createFromInterface($dtStart->getDateTime())->diff($dtEnd->getDateTime())->format('%r%a');
+        $duration = Props::get($event, 'DURATION');
+        if (null === $dtEnd && $duration instanceof \Sabre\VObject\Property\ICalendar\Duration) {
+            return $start->add($duration->getDateInterval());
+        }
+
+        return $start->modify(\sprintf('%+d days', $days));
     }
 
     /** The event's length in seconds: DTEND, else DURATION, else a day for dates and nothing for date-times. */
