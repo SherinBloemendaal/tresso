@@ -73,8 +73,6 @@ export interface MailStore extends SyncStore {
    * messages whose request the server did not take, so a delta can only have brought them someone else's change.
    */
   revertAction(applied: AppliedAction): Promise<void>
-  /** Hand-overs that became overdue in the pages applied since the last call (see `becameOverdue`). */
-  takeOverdueHandOvers(): SyncedHandOver[]
   /**
    * Every hand-over in "Waiting on" order (see `compareHandOvers`), each with the conversation its message is in
    * now; null when that message is not in the copy.

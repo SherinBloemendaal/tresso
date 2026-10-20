@@ -203,6 +203,12 @@ export interface SyncedHandOver {
   forwardId: string | null
   /** Set once the due date passed without a reply: the moment to tell the user and offer a nudge. */
   overdueAt: string | null
+  /** When the server delivered the overdue notice (it decides, like for new mail); null until then. */
+  notifiedAt: string | null
+  /** The channels it went out on: the desktop app shows it when `desktop` is among them. None: the user chose none. */
+  notifiedChannels: string[]
+  /** Delivered in quiet hours or while the user was busy: no sound. */
+  notifiedSilently: boolean
   nudgedAt: string | null
   /** The latest nudge, an outgoing message; it does not count once cancelled. */
   lastNudgeId: string | null

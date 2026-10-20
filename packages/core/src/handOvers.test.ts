@@ -4,8 +4,8 @@ import { Composer } from './composer'
 import { DraftSync } from './drafts'
 import { ApiFailure, FakeDraftApi } from './drafts.fake'
 import {
-  becameOverdue,
   compareHandOvers,
+  deliveredNotices,
   dueChoices,
   firstName,
   followUpDraft,
@@ -14,6 +14,7 @@ import {
   handOverStatus,
   noteHtml,
   nudgeStands,
+  noticeKey,
   nudgeText,
   openHandOversOf,
   textToHtml,
@@ -32,15 +33,25 @@ function outgoing(id: string, status: SyncedOutgoingMessage['status']): SyncedOu
 }
 
 describe('hand-over rules', () => {
-  it('tells once: when an open hand-over first becomes overdue', () => {
-    const open = handOver('h1', 'm1', 'work')
-    const overdue = { ...open, overdueAt: '2026-10-24T15:00:00+00:00' }
+  it('shows the notices the server delivered once per round, fresh, on the channel asked for', () => {
+    const since = Date.parse('2026-10-24T15:00:00Z')
+    const notified = (id: string, at: string, channels: string[], extra: Partial<SyncedHandOver> = {}) => handOver(id, 'm1', 'work', { overdueAt: at, notifiedAt: at, notifiedChannels: channels, ...extra })
+    const list = [
+      notified('desk', '2026-10-24T15:05:00Z', ['phone', 'desktop']),
+      notified('phone', '2026-10-24T15:05:00Z', ['phone']),
+      notified('none', '2026-10-24T15:05:00Z', []),
+      notified('old', '2026-10-24T14:30:00Z', ['desktop']),
+      notified('closed', '2026-10-24T15:05:00Z', ['desktop'], { state: 'done' }),
+      handOver('waiting', 'm1', 'work', { overdueAt: '2026-10-24T15:05:00Z' }),
+      notified('desk', '2026-10-24T15:05:00Z', ['phone', 'desktop'], { nudgedAt: '2026-10-24T15:10:00Z' }),
+    ]
 
-    expect(becameOverdue(null, overdue)).toBe(true)
-    expect(becameOverdue(open, overdue)).toBe(true)
-    expect(becameOverdue(overdue, { ...overdue, nudgedAt: '2026-10-24T16:00:00+00:00' })).toBe(false)
-    expect(becameOverdue(open, { ...overdue, state: 'replied' })).toBe(false)
-    expect(becameOverdue(null, open)).toBe(false)
+    expect(deliveredNotices(list, since, new Set()).map((h) => h.id)).toEqual(['desk', 'phone'])
+    expect(deliveredNotices(list, since, new Set(), 'desktop').map((h) => h.id)).toEqual(['desk'])
+    expect(deliveredNotices(list, since, new Set([noticeKey(list[0]!)]), 'desktop')).toEqual([])
+    // A new due date that passed is a new round: told again.
+    const again = notified('desk', '2026-10-25T15:05:00Z', ['desktop'])
+    expect(deliveredNotices([again], since, new Set([noticeKey(list[0]!)])).map((h) => h.id)).toEqual(['desk'])
   })
 
   it('orders open ones by due date before closed ones, most recently closed first', () => {
