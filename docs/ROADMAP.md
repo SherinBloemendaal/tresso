@@ -66,6 +66,11 @@ Built next to phase 1, each step its own pull request. See "3.13 Calendar" in th
 - [ ] C4 Calendar clients: day, week, month and agenda views and the event editor in the web client, the invitation
   card with RSVP in the reading pane, a mini agenda next to mail, notification settings and push registration;
   agenda and event detail on mobile with Expo push, on shared types and recurrence expansion in `packages/core`
+  - Done: calendars and events in the local copies, recurrence expansion, layout, edit scopes and time zones in
+    `packages/core`; the four web views, the editor, the invitation card and the mini agenda; the mobile agenda,
+    day view and event detail with RSVP.
+  - Still to do, on the C3 endpoints: the notification settings screens, push registration on web and desktop
+    (`POST /api/v1/notification-devices`), and Expo push on mobile.
 - [x] C5 Google and Microsoft calendars and online meetings: Google Calendar API and Microsoft Graph calendar sync
   in both directions through the provider OAuth layer (1.6), with calendars as a feature of their own (incremental
   consent, a `not_granted` calendar status and "Allow calendar access" in the account settings); invitations,
