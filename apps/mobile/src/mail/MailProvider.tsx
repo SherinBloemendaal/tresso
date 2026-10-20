@@ -23,6 +23,7 @@ import {
   type SyncedThread,
   type SyncedTodo,
   type Todo,
+  type SyncedUnsubscription,
 } from '@tresso/core'
 import { useAuth } from '@/auth/AuthProvider'
 import { LAST_USER } from '@/auth/secureTokenStore'
@@ -96,6 +97,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
         postAction: async (request) => {
           await auth.session.api('/api/v1/message-actions', json('POST', request))
         },
+        postUnsubscribe: (request) => auth.session.api<SyncedUnsubscription>('/api/v1/unsubscriptions', json('POST', request)),
         drafts: {
           create: (id, request) => auth.session.api<SyncedDraft>('/api/v1/drafts', json('POST', { ...request, draftId: id })),
           update: (id, request, expectedVersion) => auth.session.api<SyncedDraft>(`/api/v1/drafts/${encodeURIComponent(id)}`, json('PUT', { ...request, expectedVersion })),

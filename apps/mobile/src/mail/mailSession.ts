@@ -13,7 +13,11 @@ import {
   CopyClosingError,
   DraftSync,
   SqliteMailStore,
+  unsubscribeOffer,
   type DraftApi,
+  type SyncedUnsubscription,
+  type UnsubscribeOffer,
+  type UnsubscribeRequest,
 } from '@tresso/core'
 
 const PAGE_SIZE = 500
@@ -45,6 +49,8 @@ export interface MailSessionDeps {
   fetchAccess(): Promise<RealtimeAccess>
   /** POST /api/v1/message-actions */
   postAction(request: MessageActionRequest): Promise<void>
+  /** POST /api/v1/unsubscriptions */
+  postUnsubscribe(request: UnsubscribeRequest): Promise<SyncedUnsubscription>
   /** /api/v1/drafts */
   drafts: DraftApi
   fetch?: typeof fetch
@@ -161,6 +167,39 @@ export class MailSession {
     }
     void this.syncNow()
     return applied
+  }
+
+  /**
+   * What a conversation offers for one-click unsubscribe (see `unsubscribeOffer`); nothing for spam, which is never
+   * answered.
+   */
+  async unsubscribeOffer(threadId: string): Promise<UnsubscribeOffer | null> {
+    const database = this.database
+    const found = await database?.thread(threadId)
+    if (!database || !found) {
+      return null
+    }
+    const spam = (await database.smartInboxes()).find((smartInbox) => smartInbox.builtin === 'spam')
+    if (spam !== undefined && found.thread.smartInboxId === spam.id) {
+      return null
+    }
+    return unsubscribeOffer(found.messages, await database.unsubscriptions())
+  }
+
+  /**
+   * Unsubscribes the account that received a message from its sender. The request shows at once (the button goes);
+   * its outcome arrives with the delta.
+   */
+  async unsubscribe(messageId: string): Promise<SyncedUnsubscription> {
+    const database = this.database
+    if (database === null) {
+      throw new Error('Your mail is not open on this phone yet.')
+    }
+    const unsubscription = await this.deps.postUnsubscribe({ messageId })
+    await database.noteUnsubscription(unsubscription)
+    this.changed()
+    void this.syncNow()
+    return unsubscription
   }
 
   /** The copy changed outside a pull (an action shown before the server confirms it): screens read it again. */

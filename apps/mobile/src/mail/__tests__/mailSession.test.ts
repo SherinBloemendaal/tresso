@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { MAX_MESSAGES_PER_ACTION, PartialActionError, type ChangePage, type MessageActionRequest, type SyncedMessage } from '@tresso/core'
+import { MAX_MESSAGES_PER_ACTION, PartialActionError, type ChangePage, type MessageActionRequest, type SyncedMessage, type SyncedUnsubscription, type UnsubscribeRequest } from '@tresso/core'
 import { databaseName, MailSession, type MailState } from '../mailSession'
 import type { Sql } from '../sql'
 import { memorySql } from '@tresso/core/testing/sql'
@@ -50,6 +50,7 @@ function session(
   disk: ReturnType<typeof device>,
   fetchPage = async (since: number) => page(since === 0 ? 1 : since, since === 0 ? { mailAccounts: [account] } : {}),
   postAction: (request: MessageActionRequest) => Promise<void> = async () => {},
+  postUnsubscribe: (request: UnsubscribeRequest) => Promise<SyncedUnsubscription> = () => Promise.reject(new Error('no unsubscribe in this test')),
 ) {
   const states: MailState[] = []
   const mail = new MailSession({
@@ -58,6 +59,7 @@ function session(
     fetchPage,
     fetchAccess: () => Promise.reject(new Error('no realtime in this test')),
     postAction,
+    postUnsubscribe,
     drafts: {
       create: () => Promise.reject(new Error('no drafts in this test')),
       update: () => Promise.reject(new Error('no drafts in this test')),
@@ -244,5 +246,62 @@ describe('MailSession', () => {
     const { mail } = session(device())
 
     await expect(mail.act(['m1'], 'archive')).rejects.toThrow('Your mail is not open on this phone yet.')
+  })
+
+  it('unsubscribes from a conversation: the button goes at once and spam is never offered', async () => {
+    const disk = device()
+    const newsletter = (id: string, threadId: string): SyncedMessage => ({
+      id,
+      mailAccountId: 'work',
+      threadId,
+      folderIds: ['inbox'],
+      subject: 'Deals',
+      from: { address: 'news@shop.example', name: 'Shop' },
+      recipients: { to: [], cc: [], bcc: [], replyTo: [] },
+      snippet: '',
+      sentAt: null,
+      receivedAt: '2026-10-19T08:00:00Z',
+      flags: { seen: false, flagged: false, answered: false, draft: false },
+      hasAttachments: false,
+      attachmentScan: null,
+      smartInboxId: null,
+      verdict: null,
+      summary: null,
+      calendarMethod: null,
+      unsubscribe: 'oneClick',
+    })
+    const thread = (id: string, smartInboxId: string | null) => ({ id, mailAccountId: 'work', subject: 'Deals', messageCount: 1, lastMessageAt: '2026-10-19T08:00:00Z', smartInboxId, verdict: null, classificationReason: null })
+    const requests: UnsubscribeRequest[] = []
+    const { mail } = session(
+      disk,
+      async (since) =>
+        since === 0
+          ? page(1, {
+              mailAccounts: [account],
+              smartInboxes: [{ id: 'spam', builtin: 'spam', name: 'Spam', instructions: '', includeSenders: [], excludeSenders: [], verdict: 'none', autoCreateTodo: false, position: 4 }],
+              threads: [thread('t1', null), thread('t2', 'spam')],
+              messages: [newsletter('m1', 't1'), newsletter('m2', 't2')],
+            })
+          : page(since),
+      undefined,
+      async (request) => {
+        requests.push(request)
+        return { id: 'u1', mailAccountId: 'work', sender: 'news@shop.example', method: 'oneClick', status: 'pending', error: null, requestedAt: '2026-10-19T12:00:00Z', completedAt: null }
+      },
+    )
+    await mail.switchTo('kim')
+    await vi.waitFor(async () => expect((await mail.unsubscribeOffer('t1'))?.state).toBe('available'))
+    expect(await mail.unsubscribeOffer('t2')).toBeNull()
+
+    await mail.unsubscribe('m1')
+
+    expect(requests).toEqual([{ messageId: 'm1' }])
+    expect(await mail.unsubscribeOffer('t1')).toEqual({ state: 'pending', sender: 'news@shop.example' })
+  })
+
+  it('refuses to unsubscribe while no copy is open', async () => {
+    const { mail } = session(device())
+
+    await expect(mail.unsubscribe('m1')).rejects.toThrow('Your mail is not open on this phone yet.')
   })
 })
