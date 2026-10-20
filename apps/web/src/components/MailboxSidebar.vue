@@ -98,6 +98,10 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
           >{{ waitingCount }}<span class="visually-hidden">{{ overdueCount > 0 ? `, ${overdueCount} past due` : ' waiting' }}</span></span
         >
       </RouterLink>
+      <RouterLink :to="{ name: 'calendar' }" class="item">
+        <AppIcon name="calendar" />
+        <span class="label">Calendar</span>
+      </RouterLink>
       <RouterLink :to="{ name: 'drafts' }" class="item">
         <AppIcon name="draft" />
         <span class="label">Drafts</span>

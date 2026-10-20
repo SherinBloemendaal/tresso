@@ -6,6 +6,7 @@ import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import AppIcon from '@/components/AppIcon.vue'
 import AttachmentList from '@/components/AttachmentList.vue'
+import InvitationCard from '@/components/InvitationCard.vue'
 import MessageFrame from '@/components/MessageFrame.vue'
 import PlainTextBody from '@/components/PlainTextBody.vue'
 import SenderAvatar from '@/components/SenderAvatar.vue'
@@ -82,6 +83,7 @@ watch(
     </button>
 
     <div v-if="expanded" class="content">
+      <InvitationCard v-if="message.calendarMethod !== null" :message-id="message.id" />
       <p v-if="loading && body === null" class="state">Loading message…</p>
       <p v-else-if="error" class="state error" role="alert">
         This message could not be loaded. <button type="button" class="link" @click="load(body?.remoteContentLoaded ?? false)">Try again</button>

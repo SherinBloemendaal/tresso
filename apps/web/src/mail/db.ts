@@ -13,6 +13,8 @@ import {
   mergeContact,
   newerUnsubscription,
   peopleOn,
+  eventSpan,
+  sortCalendars,
   sortSmartInboxes,
   stillAsClassified,
   storedDraft,
@@ -28,6 +30,8 @@ import {
   type MailStore,
   type SyncedHandOver,
   type MessageAction,
+  type SyncedCalendar,
+  type SyncedCalendarEvent,
   type SyncedFolder,
   type SyncedMailAccount,
   type SyncedMessage,
@@ -121,13 +125,28 @@ interface MailSchema extends DBSchema {
   unsubscriptions: { key: string; value: SyncedUnsubscription; indexes: { byAccount: string } }
   handOvers: { key: string; value: SyncedHandOver; indexes: { byAccount: string } }
   dailyBriefs: { key: string; value: SyncedDailyBrief }
+  calendars: { key: string; value: SyncedCalendar; indexes: { byAccount: string } }
+  calendarEvents: { key: string; value: StoredCalendarEvent; indexes: { bySeries: [string, string]; byCalendar: string; byStart: number } }
+}
+
+/**
+ * An event with the instants its series can touch, for finding the rows a range needs. A series without an end has
+ * Infinity, which is a valid key where null is not.
+ */
+interface StoredCalendarEvent {
+  id: string
+  calendarId: string
+  uid: string
+  startsAt: number
+  endsAt: number
+  event: SyncedCalendarEvent
 }
 
 type Stores = StoreNames<MailSchema>[]
 type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
-const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes', 'todos', 'unsubscriptions', 'handOvers', 'dailyBriefs']
-const VERSION = 9
+const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes', 'todos', 'unsubscriptions', 'handOvers', 'dailyBriefs', 'calendars', 'calendarEvents']
+const VERSION = 10
 
 export function databaseName(userId: string): string {
   return `tresso-mail-${userId}`
@@ -248,8 +267,15 @@ export class IndexedDbMailStore implements MailStore {
         if (oldVersion < 9) {
           database.createObjectStore('dailyBriefs', { keyPath: 'id' })
         }
-        // Outgoing mail, contacts, signatures, drafts, smart inboxes, todos, unsubscriptions, hand-overs and daily briefs
-        // come from the delta: an existing copy syncs again from the start.
+        if (oldVersion < 10) {
+          database.createObjectStore('calendars', { keyPath: 'id' }).createIndex('byAccount', 'mailAccountId')
+          const events = database.createObjectStore('calendarEvents', { keyPath: 'id' })
+          events.createIndex('bySeries', ['calendarId', 'uid'])
+          events.createIndex('byCalendar', 'calendarId')
+          events.createIndex('byStart', 'startsAt')
+        }
+        // Outgoing mail, contacts, signatures, drafts, smart inboxes, todos, unsubscriptions, hand-overs, daily briefs and
+        // calendars come from the delta: an existing copy syncs again from the start.
         if (oldVersion >= 1) {
           await transaction.objectStore('meta').delete('cursor')
         }
@@ -313,6 +339,12 @@ export class IndexedDbMailStore implements MailStore {
         case 'dailyBrief':
           await tx.objectStore('dailyBriefs').delete(deleted.id)
           break
+        case 'calendar':
+          await deleteCalendar(tx, deleted.id)
+          break
+        case 'calendarEvent':
+          await tx.objectStore('calendarEvents').delete(deleted.id)
+          break
         case 'draft': {
           const local = await tx.objectStore('drafts').get(deleted.id)
           if (local !== undefined) {
@@ -351,6 +383,13 @@ export class IndexedDbMailStore implements MailStore {
     }
     for (const brief of page.dailyBriefs ?? []) {
       await tx.objectStore('dailyBriefs').put(brief)
+    }
+    for (const calendar of page.calendars) {
+      await tx.objectStore('calendars').put(calendar)
+    }
+    for (const event of page.calendarEvents) {
+      const span = eventSpan(event)
+      await tx.objectStore('calendarEvents').put({ id: event.id, calendarId: event.calendarId, uid: event.uid, startsAt: span.startsAt, endsAt: span.endsAt ?? Infinity, event })
     }
     for (const thread of page.threads) {
       await tx.objectStore('threads').put(thread)
@@ -502,6 +541,30 @@ export class IndexedDbMailStore implements MailStore {
     await tx.done
 
     return conversations
+  }
+
+  async calendars(): Promise<SyncedCalendar[]> {
+    return sortCalendars(await this.db.getAll('calendars'))
+  }
+
+  async calendarEvents(from: number, to: number): Promise<SyncedCalendarEvent[]> {
+    const tx = this.db.transaction('calendarEvents')
+    const store = tx.objectStore('calendarEvents')
+    const touching = (await store.index('byStart').getAll(IDBKeyRange.upperBound(to, true))).filter((stored) => stored.endsAt > from)
+    const series = new Map(touching.map((stored) => [`${stored.calendarId}\u0000${stored.uid}`, [stored.calendarId, stored.uid] as [string, string]]))
+    const events: SyncedCalendarEvent[] = []
+    // Every row of a series that touches the range: an override moved out of it still takes its occurrence away.
+    for (const key of series.values()) {
+      for (const stored of await store.index('bySeries').getAll(key)) {
+        events.push(stored.event)
+      }
+    }
+    await tx.done
+    return events
+  }
+
+  async calendarEvent(id: string): Promise<SyncedCalendarEvent | null> {
+    return (await this.db.get('calendarEvents', id))?.event ?? null
   }
 
   /** Inbox threads, newest first; of one account, or of all accounts (the Unified Inbox). */
@@ -811,6 +874,18 @@ async function deleteAccount(tx: WriteTx, accountId: string): Promise<void> {
       await cursor.delete()
     }
   }
+  // The account's calendars go with it.
+  for (const calendarId of await tx.objectStore('calendars').index('byAccount').getAllKeys(accountId)) {
+    await deleteCalendar(tx, calendarId)
+  }
+}
+
+async function deleteCalendar(tx: WriteTx, calendarId: string): Promise<void> {
+  const index = tx.objectStore('calendarEvents').index('byCalendar')
+  for (let cursor = await index.openCursor(calendarId); cursor !== null; cursor = await cursor.continue()) {
+    await cursor.delete()
+  }
+  await tx.objectStore('calendars').delete(calendarId)
 }
 
 async function applyDraft(tx: WriteTx, draft: SyncedDraft): Promise<void> {
