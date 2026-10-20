@@ -25,6 +25,8 @@ final readonly class HandOvers
 {
     /** How many overdue hand-overs one heartbeat marks at most. */
     private const int SWEEP_BATCH = 100;
+    /** The notification kind, for the user's choice of channels (`channelsByKind`). */
+    public const string NOTIFICATION_KIND = 'hand_over';
 
     public function __construct(
         private EntityManagerInterface $entityManager,
@@ -70,13 +72,17 @@ final readonly class HandOvers
         $this->entityManager->flush();
     }
 
-    /** Called at the due date: an open hand-over nobody replied to becomes overdue, which clients tell the user about. */
+    /**
+     * Called at the due date: an open hand-over nobody replied to becomes overdue. The user is told through the
+     * notification dispatcher once this commits, and by the clients, which see it change.
+     */
     public function markOverdueIfDue(HandOver $handOver, \DateTimeImmutable $now): bool
     {
         if (!$handOver->markOverdueIfDue($now)) {
             return false;
         }
         $this->entityManager->flush();
+        $this->afterCommit->dispatch(new NotifyOverdueHandOver($handOver->getId()->toRfc4122()));
 
         return true;
     }

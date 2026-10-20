@@ -69,6 +69,7 @@ framework:
             App\Notification\PlanUserNotifications: push
             App\Notification\FireNotification: push
             App\Notification\SendMailNotification: push
+            App\HandOver\NotifyOverdueHandOver: push
             App\Bulk\RunBulkAction: bulk
 
 when@test:
