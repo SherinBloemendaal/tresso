@@ -17,6 +17,7 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Index(columns: ['mail_account_id', 'last_message_at'])]
 #[ORM\Index(columns: ['mail_account_id', 'normalized_subject'])]
 #[ORM\Index(columns: ['mail_account_id', 'change_seq'])]
+#[ORM\Index(name: 'thread_held', columns: ['held_until'], options: ['where' => '(held_until IS NOT NULL)'])]
 class Thread implements TracksChanges
 {
     #[ORM\Id]
@@ -57,6 +58,14 @@ class Thread implements TracksChanges
 
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $classifiedAt = null;
+
+    /** The batch the conversation waits for, as its newest incoming message does (see {@see Message::getHeldUntil()}). */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $heldUntil = null;
+
+    /** The batch that delivered its newest incoming message; null when that one was delivered as it came. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $batchedAt = null;
 
     public function __construct(MailAccount $mailAccount, string $subject, \DateTimeImmutable $lastMessageAt)
     {
@@ -153,6 +162,47 @@ class Thread implements TracksChanges
         $this->classifiedAt = $at;
     }
 
+    public function getHeldUntil(): ?\DateTimeImmutable
+    {
+        return $this->heldUntil;
+    }
+
+    public function getBatchedAt(): ?\DateTimeImmutable
+    {
+        return $this->batchedAt;
+    }
+
+    /** The conversation is delivered the way its newest incoming message is: held, from a batch, or as it came. */
+    public function followDelivery(Message $newestIncoming): void
+    {
+        if ($this->heldUntil != $newestIncoming->getHeldUntil()) {
+            $this->heldUntil = $newestIncoming->getHeldUntil();
+        }
+        if ($this->batchedAt != $newestIncoming->getBatchedAt()) {
+            $this->batchedAt = $newestIncoming->getBatchedAt();
+        }
+    }
+
+    /** See {@see Message::hold()}. */
+    public function hold(\DateTimeImmutable $until): void
+    {
+        if ($this->heldUntil == $until) {
+            return;
+        }
+        $this->heldUntil = $until;
+        $this->batchedAt = null;
+    }
+
+    /** See {@see Message::release()}. */
+    public function release(?\DateTimeImmutable $batch): void
+    {
+        if (null === $this->heldUntil) {
+            return;
+        }
+        $this->heldUntil = null;
+        $this->batchedAt = $batch;
+    }
+
     public function getChangeOwner(): User
     {
         return $this->mailAccount->getOwner();
@@ -160,7 +210,7 @@ class Thread implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        return ['subject', 'messageCount', 'lastMessageAt', 'category', 'verdict', 'classificationReason'];
+        return ['subject', 'messageCount', 'lastMessageAt', 'category', 'verdict', 'classificationReason', 'heldUntil', 'batchedAt'];
     }
 
     public static function changeType(): string

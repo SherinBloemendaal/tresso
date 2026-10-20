@@ -36,4 +36,6 @@ final class UpdateSmartInbox
 
     /** Only with the `do` verdict; another verdict switches it off. */
     public ?bool $autoCreateTodo = null;
+
+    public ?bool $batchDelivery = null;
 }

@@ -65,6 +65,7 @@ final readonly class SyncChanges
      * @param list<array<string, mixed>>                $eventNotes
      * @param list<array<string, mixed>>                $todos
      * @param list<array<string, mixed>>                $mailNotifications
+     * @param list<array<string, mixed>>                $unsubscriptions
      * @param list<array{type: string, id: string}> $deleted
      */
     public function __construct(
@@ -84,6 +85,7 @@ final readonly class SyncChanges
         public array $eventNotes,
         public array $todos,
         public array $mailNotifications,
+        public array $unsubscriptions,
         public array $deleted,
     ) {
     }

@@ -254,6 +254,7 @@ final class SyncChangesTest extends DatabaseTestCase
             'excludeSenders' => [],
             'verdict' => 'do',
             'autoCreateTodo' => false,
+            'batchDelivery' => false,
             'position' => 5,
         ]], $page['smartInboxes']);
 

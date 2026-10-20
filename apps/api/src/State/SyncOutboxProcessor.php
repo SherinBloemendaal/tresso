@@ -15,6 +15,7 @@ use App\Sync\LeaseGuard;
 use App\Sync\Outbox\ClaimedMessage;
 use App\Sync\Outbox\ClaimResult;
 use App\Sync\Outbox\OutboxResult;
+use App\Unsubscribe\Unsubscriptions;
 use Doctrine\DBAL\LockMode;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
@@ -30,6 +31,7 @@ final readonly class SyncOutboxProcessor implements ProcessorInterface
         private LeaseGuard $leaseGuard,
         private Outbox $outbox,
         private EntityManagerInterface $entityManager,
+        private Unsubscriptions $unsubscriptions,
     ) {
     }
 
@@ -60,6 +62,8 @@ final readonly class SyncOutboxProcessor implements ProcessorInterface
                 OutboxResultInput::RETRY => $this->outbox->reportRetry($message, '' === $error ? 'Sending failed; trying again later.' : $error, $now),
                 default => $this->outbox->reportFailed($message, '' === $error ? 'The mail server refused the message.' : $error),
             };
+            // An unsubscribe mail settles its request.
+            $this->unsubscriptions->outgoingSettled($message, $now);
 
             return new OutboxResult($message->getStatus()->value);
         });

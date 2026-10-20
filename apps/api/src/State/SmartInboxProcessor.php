@@ -11,6 +11,7 @@ use ApiPlatform\Validator\Exception\ValidationException;
 use App\ApiResource\Input\SmartInbox\CreateSmartInbox;
 use App\ApiResource\Input\SmartInbox\UpdateSmartInbox;
 use App\ApiResource\SmartInboxResource;
+use App\Batch\BatchDelivery;
 use App\Classification\ClassificationScheduler;
 use App\Classification\SenderPattern;
 use App\Classification\UserLocks;
@@ -45,6 +46,7 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
         private ChangeSequencer $sequencer,
         private ClassificationScheduler $classification,
         private UserLocks $locks,
+        private BatchDelivery $batches,
     ) {
     }
 
@@ -73,6 +75,7 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
             $this->assertNameIsFree($data, $existing, $name, null);
 
             $smartInbox = new Category($owner, $name, trim($data->instructions), Verdict::from($data->verdict));
+            $smartInbox->setBatchDelivery($data->batchDelivery);
             $this->applyLists($data, $smartInbox, $data->includeSenders, $data->excludeSenders);
             $this->applyAutoCreateTodo($data, $smartInbox, $data->autoCreateTodo);
             $smartInbox->setPosition(max(array_map(static fn (Category $c): int => $c->getPosition(), $existing) ?: [-1]) + 1);
@@ -116,7 +119,17 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
         }
         $this->applyAutoCreateTodo($data, $smartInbox, $data->autoCreateTodo ?? (Verdict::Do === $smartInbox->getVerdict() && $smartInbox->isAutoCreateTodo()));
         $this->applyLists($data, $smartInbox, $data->includeSenders ?? $smartInbox->getIncludeSenders(), $data->excludeSenders ?? $smartInbox->getExcludeSenders());
+        $releaseHeld = false;
+        if (null !== $data->batchDelivery) {
+            $releaseHeld = $smartInbox->isBatchDelivery() && !$data->batchDelivery;
+            $smartInbox->setBatchDelivery($data->batchDelivery);
+        }
         $this->entityManager->flush();
+        if ($releaseHeld) {
+            // Classification runs hold mail under this lock; taken after the smart inbox lock, the order every path keeps.
+            $this->locks->classification($owner->getId());
+            $this->batches->releaseSmartInbox($smartInbox);
+        }
         $this->classification->rulesChanged($owner->getId());
 
         return SmartInboxResource::fromEntity($smartInbox);
@@ -161,19 +174,19 @@ final readonly class SmartInboxProcessor implements ProcessorInterface
 
     /**
      * Takes the smart inbox's conversations and messages out of it before it goes, so clients see them change (the
-     * foreign keys would clear them silently). The reclassification queued after the commit gives the conversations
+     * foreign keys would clear them silently). Held mail is delivered at once. The reclassification queued after the commit gives the conversations
      * a new smart inbox, including those the user had put there.
      */
     private function release(User $owner, Category $smartInbox): void
     {
         $params = ['user' => $owner->getId()->toRfc4122(), 'category' => $smartInbox->getId()->toRfc4122(), 'seq' => $this->sequencer->next($owner->getId())];
         $this->connection->executeStatement(
-            'UPDATE thread t SET category_id = NULL, verdict = NULL, classification_reason = NULL, change_seq = :seq
+            'UPDATE thread t SET category_id = NULL, verdict = NULL, classification_reason = NULL, held_until = NULL, change_seq = :seq
              FROM mail_account a WHERE a.id = t.mail_account_id AND a.owner_id = :user AND t.category_id = :category',
             $params,
         );
         $this->connection->executeStatement(
-            'UPDATE message m SET category_id = NULL, change_seq = :seq
+            'UPDATE message m SET category_id = NULL, held_until = NULL, change_seq = :seq
              FROM mail_account a WHERE a.id = m.mail_account_id AND a.owner_id = :user AND m.category_id = :category',
             $params,
         );

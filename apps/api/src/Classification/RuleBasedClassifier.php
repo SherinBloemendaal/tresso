@@ -151,9 +151,7 @@ final readonly class RuleBasedClassifier implements Classifier
      */
     private static function authenticated(MailToClassify $mail): bool
     {
-        $results = $mail->header('authentication-results') ?? '';
-
-        return $mail->authenticationResultsTrusted && 1 === preg_match('/\bdmarc=pass\b/', strtolower($results));
+        return SenderAuthentication::dmarcPassed($mail->header('authentication-results'), $mail->authenticationResultsTrusted);
     }
 
     private static function isServerSpam(MailToClassify $mail): bool

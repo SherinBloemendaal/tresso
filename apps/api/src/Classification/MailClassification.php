@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Classification;
 
+use App\Batch\BatchDelivery;
 use App\Entity\Category;
 use App\Entity\Message;
 use App\Entity\Thread;
@@ -24,7 +25,8 @@ use Symfony\Component\Uid\Uuid;
  * conversation, which takes the smart inbox and verdict of its newest incoming message. The user's own messages are
  * never classified. Conversations the user put in a smart inbox themselves keep it. New mail in a smart inbox that
  * asks for todos gets one (see {@see EmailTodos::makeAutomatically()}), and new mail is handed to the
- * {@see MailNotifier}, in the same transaction; classifying again later makes no todo and never notifies.
+ * {@see MailNotifier}, in the same transaction; classifying again later makes no todo and never notifies. New mail of a smart inbox that delivers in batches is held for the next batch (see
+ * {@see BatchDelivery}) and notifies once its batch delivers it.
  *
  * Work goes in batches, each in its own transaction, so change numbers commit in order and a crash loses at most one
  * batch, which the next run picks up again. Runs for one user take turns on an advisory lock, so two runs never
@@ -53,6 +55,7 @@ final readonly class MailClassification
         private UserLocks $locks,
         private EmailTodos $emailTodos,
         private MailNotifier $mailNotifier,
+        private BatchDelivery $batches,
     ) {
     }
 
@@ -119,12 +122,19 @@ final readonly class MailClassification
         $context = $this->context($user);
         $now = new \DateTimeImmutable();
         $messages = $this->incomingMessages($messageIds, $context);
+        $batchTimes = $this->batches->times($user);
 
         /** @var array<string, Classification> $byMessage */
         $byMessage = [];
         foreach ($this->mailToClassify($messages) as $id => $mail) {
             $classification = $this->classifier->classify($mail, $context);
-            $messages[$id]->classify($classification->smartInbox, $classification->verdict, $now);
+            $message = $messages[$id];
+            $message->classify($classification->smartInbox, $classification->verdict, $now);
+            // New mail of a smart inbox that delivers in batches waits for the next batch, unless the user placed the
+            // conversation themselves: it then stays where they put it and its mail arrives as it comes.
+            if (!$message->getThread()->isClassifiedByUser()) {
+                $this->batches->holdNew($message, $classification->smartInbox, $batchTimes, $now);
+            }
             $byMessage[$id] = $classification;
         }
         $this->entityManager->flush();
@@ -143,6 +153,7 @@ final readonly class MailClassification
             if (null !== $messageId && isset($byMessage[$messageId]) && !$thread->isClassifiedByUser()) {
                 $classification = $byMessage[$messageId];
                 $thread->classify($classification->smartInbox, $classification->verdict, $classification->reason, $now);
+                $thread->followDelivery($messages[$messageId]);
             }
         }
         $this->entityManager->flush();
@@ -199,7 +210,9 @@ final readonly class MailClassification
             $classification = $this->classifier->classify($mail, $context);
             $message = $messages[$id];
             $message->classify($classification->smartInbox, $classification->verdict, $now);
+            $this->batches->moved($message, $classification->smartInbox);
             $message->getThread()->classify($classification->smartInbox, $classification->verdict, $classification->reason, $now);
+            $message->getThread()->followDelivery($message);
         }
         $this->entityManager->flush();
 
@@ -236,6 +249,8 @@ final readonly class MailClassification
         $now = new \DateTimeImmutable();
         $thread->classify($smartInbox, $verdict, ClassificationReason::USER, $now);
         $newestIncoming?->classify($smartInbox, $verdict, $now);
+        // The user is looking at it: whatever batch its mail waited for, all of it is delivered now.
+        $this->batches->releaseThread($thread);
     }
 
     /**

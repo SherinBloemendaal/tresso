@@ -24,6 +24,7 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Index(columns: ['thread_id'])]
 #[ORM\Index(columns: ['mail_account_id', 'change_seq'])]
 #[ORM\Index(name: 'message_unclassified', columns: ['mail_account_id', 'received_at'], options: ['where' => '(classified_at IS NULL)'])]
+#[ORM\Index(name: 'message_held', columns: ['held_until'], options: ['where' => '(held_until IS NOT NULL)'])]
 class Message implements TracksChanges
 {
     #[ORM\Id]
@@ -115,6 +116,17 @@ class Message implements TracksChanges
     /** When classification looked at this message; null while it waits for its turn. */
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $classifiedAt = null;
+
+    /**
+     * The batch this message waits for: its smart inbox delivers in batches, so clients keep it out of the lists and
+     * notifications until then. Null once delivered.
+     */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $heldUntil = null;
+
+    /** The batch that delivered this message; null when it was delivered as it came. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $batchedAt = null;
 
     public function __construct(
         MailAccount $mailAccount,
@@ -321,6 +333,44 @@ class Message implements TracksChanges
         $this->category = $category;
         $this->verdict = $verdict;
         $this->classifiedAt = $at;
+    }
+
+    public function getHeldUntil(): ?\DateTimeImmutable
+    {
+        return $this->heldUntil;
+    }
+
+    public function getBatchedAt(): ?\DateTimeImmutable
+    {
+        return $this->batchedAt;
+    }
+
+    public function isHeld(): bool
+    {
+        return null !== $this->heldUntil;
+    }
+
+    /** Keeps the message back until the batch at $until. */
+    public function hold(\DateTimeImmutable $until): void
+    {
+        if ($this->heldUntil == $until) {
+            return;
+        }
+        $this->heldUntil = $until;
+        $this->batchedAt = null;
+    }
+
+    /**
+     * Delivers a held message: with its batch when that time has come ($batch), or right away (null), e.g. because
+     * the user moved it or switched batches off.
+     */
+    public function release(?\DateTimeImmutable $batch): void
+    {
+        if (null === $this->heldUntil) {
+            return;
+        }
+        $this->heldUntil = null;
+        $this->batchedAt = $batch;
     }
 
     public function getChangeOwner(): User

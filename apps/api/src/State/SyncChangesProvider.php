@@ -9,8 +9,11 @@ use ApiPlatform\State\ProviderInterface;
 use App\ApiResource\SyncChanges;
 use App\Calendar\LocalCalendars;
 use App\Classification\BuiltinSmartInboxes;
+use App\Classification\ReceivingServers;
 use App\Entity\Calendar;
+use App\Enum\MailProvider;
 use App\Security\CurrentUser;
+use App\Unsubscribe\UnsubscribeLink;
 use Doctrine\DBAL\Connection;
 use Symfony\Component\HttpFoundation\RequestStack;
 
@@ -67,6 +70,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 eventNotes: [],
                 todos: [],
                 mailNotifications: [],
+                unsubscriptions: [],
                 deleted: [],
             );
         }
@@ -90,6 +94,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             eventNotes: $this->eventNotes($range),
             todos: $this->todos($range),
             mailNotifications: $this->mailNotifications($range),
+            unsubscriptions: $this->unsubscriptions($range),
             deleted: $this->deleted($range),
         );
     }
@@ -133,6 +138,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
                 SELECT o.change_seq, COUNT(*) FROM todo o WHERE o.owner_id = :user AND o.change_seq > :since GROUP BY o.change_seq
                 UNION ALL
                 SELECT n.change_seq, COUNT(*) FROM mail_notification n WHERE n.user_id = :user AND n.change_seq > :since GROUP BY n.change_seq
+                UNION ALL
+                SELECT u.change_seq, COUNT(*) FROM unsubscription u JOIN mail_account a ON a.id = u.mail_account_id WHERE a.owner_id = :user AND u.change_seq > :since GROUP BY u.change_seq
                 UNION ALL
                 SELECT s.change_seq, COUNT(*) FROM sync_tombstone s WHERE s.user_id = :user AND s.change_seq > :since GROUP BY s.change_seq
             ) changes
@@ -216,7 +223,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private function threads(array $range): array
     {
         $rows = $this->connection->fetchAllAssociative(
-            'SELECT t.id, t.mail_account_id, t.subject, t.message_count, t.last_message_at, t.category_id, t.verdict, t.classification_reason
+            'SELECT t.id, t.mail_account_id, t.subject, t.message_count, t.last_message_at, t.category_id, t.verdict, t.classification_reason,
+                    t.held_until, t.batched_at
              FROM thread t JOIN mail_account a ON a.id = t.mail_account_id
              WHERE a.owner_id = :user AND t.change_seq > :since AND t.change_seq <= :until ORDER BY t.change_seq',
             $range,
@@ -231,6 +239,8 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'smartInboxId' => $r['category_id'],
             'verdict' => $r['verdict'],
             'classificationReason' => $r['classification_reason'],
+            'heldUntil' => self::date($r['held_until']),
+            'batchedAt' => self::date($r['batched_at']),
         ], $rows);
     }
 
@@ -244,33 +254,60 @@ final readonly class SyncChangesProvider implements ProviderInterface
         $rows = $this->connection->fetchAllAssociative(
             "SELECT m.id, m.mail_account_id, m.thread_id, m.subject, m.from_address, m.from_name, m.recipients, m.snippet,
                     m.sent_at, m.received_at, m.seen, m.flagged, m.answered, m.draft, m.has_attachments, m.attachment_scan,
-                    m.category_id, m.verdict, m.summary,
+                    m.category_id, m.verdict, m.summary, m.held_until, m.batched_at,
                     (SELECT i.method FROM calendar_invitation i WHERE i.message_id = m.id ORDER BY i.id LIMIT 1) AS calendar_method,
+                    a.provider, s.headers AS signal_headers,
                     COALESCE((SELECT json_agg(l.folder_id ORDER BY l.folder_id) FROM message_location l WHERE l.message_id = m.id), '[]') AS folder_ids
              FROM message m JOIN mail_account a ON a.id = m.mail_account_id
+             LEFT JOIN message_signals s ON s.message_id = m.id
              WHERE a.owner_id = :user AND m.change_seq > :since AND m.change_seq <= :until ORDER BY m.change_seq",
             $range,
         );
 
-        return array_map(static fn (array $r): array => [
-            'id' => $r['id'],
-            'mailAccountId' => $r['mail_account_id'],
-            'threadId' => $r['thread_id'],
-            'folderIds' => json_decode(\is_string($r['folder_ids']) ? $r['folder_ids'] : '[]', true, flags: \JSON_THROW_ON_ERROR),
-            'subject' => $r['subject'],
-            'from' => ['address' => $r['from_address'], 'name' => $r['from_name']],
-            'recipients' => json_decode(\is_string($r['recipients']) ? $r['recipients'] : '{}', true, flags: \JSON_THROW_ON_ERROR),
-            'snippet' => $r['snippet'],
-            'sentAt' => self::date($r['sent_at']),
-            'receivedAt' => self::date($r['received_at']),
-            'flags' => ['seen' => (bool) $r['seen'], 'flagged' => (bool) $r['flagged'], 'answered' => (bool) $r['answered'], 'draft' => (bool) $r['draft']],
-            'hasAttachments' => (bool) $r['has_attachments'],
-            'attachmentScan' => $r['attachment_scan'],
-            'smartInboxId' => $r['category_id'],
-            'verdict' => $r['verdict'],
-            'summary' => $r['summary'],
-            'calendarMethod' => $r['calendar_method'],
-        ], $rows);
+        return array_map(static function (array $r): array {
+            $unsubscribe = self::unsubscribeLink($r);
+
+            return [
+                'id' => $r['id'],
+                'mailAccountId' => $r['mail_account_id'],
+                'threadId' => $r['thread_id'],
+                'folderIds' => json_decode(\is_string($r['folder_ids']) ? $r['folder_ids'] : '[]', true, flags: \JSON_THROW_ON_ERROR),
+                'subject' => $r['subject'],
+                'from' => ['address' => $r['from_address'], 'name' => $r['from_name']],
+                'recipients' => json_decode(\is_string($r['recipients']) ? $r['recipients'] : '{}', true, flags: \JSON_THROW_ON_ERROR),
+                'snippet' => $r['snippet'],
+                'sentAt' => self::date($r['sent_at']),
+                'receivedAt' => self::date($r['received_at']),
+                'flags' => ['seen' => (bool) $r['seen'], 'flagged' => (bool) $r['flagged'], 'answered' => (bool) $r['answered'], 'draft' => (bool) $r['draft']],
+                'hasAttachments' => (bool) $r['has_attachments'],
+                'attachmentScan' => $r['attachment_scan'],
+                'smartInboxId' => $r['category_id'],
+                'verdict' => $r['verdict'],
+                'summary' => $r['summary'],
+                'calendarMethod' => $r['calendar_method'],
+                'heldUntil' => self::date($r['held_until']),
+                'batchedAt' => self::date($r['batched_at']),
+                'unsubscribe' => $unsubscribe?->method->value,
+                'unsubscribeMailto' => $unsubscribe?->recipient,
+            ];
+        }, $rows);
+    }
+
+    /**
+     * How the message can be unsubscribed from; offered only when the sender is authenticated (see
+     * {@see UnsubscribeLink}).
+     *
+     * @param array<string, mixed> $row with `signal_headers`, `from_address` and the account's `provider`
+     */
+    private static function unsubscribeLink(array $row): ?UnsubscribeLink
+    {
+        if (!\is_string($row['signal_headers'])) {
+            return null;
+        }
+        /** @var array<string, string> $headers */
+        $headers = json_decode($row['signal_headers'], true, flags: \JSON_THROW_ON_ERROR);
+
+        return UnsubscribeLink::fromMessage($headers, self::text($row['from_address']), ReceivingServers::trustsTopmostHeaderAt(MailProvider::from(self::text($row['provider']))));
     }
 
     /**
@@ -386,7 +423,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     private function smartInboxes(array $range): array
     {
         $rows = $this->connection->fetchAllAssociative(
-            'SELECT c.id, c.builtin, c.name, c.instructions, c.include_senders, c.exclude_senders, c.verdict, c.auto_create_todo, c.position
+            'SELECT c.id, c.builtin, c.name, c.instructions, c.include_senders, c.exclude_senders, c.verdict, c.auto_create_todo, c.batch_delivery, c.position
              FROM category c WHERE c.owner_id = :user AND c.change_seq > :since AND c.change_seq <= :until ORDER BY c.change_seq',
             $range,
         );
@@ -400,7 +437,34 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'excludeSenders' => json_decode(\is_string($r['exclude_senders']) ? $r['exclude_senders'] : '[]', true, flags: \JSON_THROW_ON_ERROR),
             'verdict' => $r['verdict'],
             'autoCreateTodo' => (bool) $r['auto_create_todo'],
+            'batchDelivery' => (bool) $r['batch_delivery'],
             'position' => self::int($r['position']),
+        ], $rows);
+    }
+
+    /**
+     * @param array{user: string, since: int, until: int} $range
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function unsubscriptions(array $range): array
+    {
+        $rows = $this->connection->fetchAllAssociative(
+            'SELECT u.id, u.mail_account_id, u.sender, u.method, u.status, u.error, u.requested_at, u.completed_at
+             FROM unsubscription u JOIN mail_account a ON a.id = u.mail_account_id
+             WHERE a.owner_id = :user AND u.change_seq > :since AND u.change_seq <= :until ORDER BY u.change_seq',
+            $range,
+        );
+
+        return array_map(static fn (array $r): array => [
+            'id' => $r['id'],
+            'mailAccountId' => $r['mail_account_id'],
+            'sender' => $r['sender'],
+            'method' => $r['method'],
+            'status' => $r['status'],
+            'error' => $r['error'],
+            'requestedAt' => self::date($r['requested_at']),
+            'completedAt' => self::date($r['completed_at']),
         ], $rows);
     }
 
