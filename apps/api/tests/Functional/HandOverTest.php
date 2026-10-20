@@ -582,6 +582,24 @@ final class HandOverTest extends DatabaseTestCase
         self::assertNull($this->get($id)['nudgedAt']);
     }
 
+    public function testAForwardDraftIsNoNudgeWhateverItsSubjectSays(): void
+    {
+        $id = $this->handOverId();
+
+        $this->sendDraft('forward', 'Invoice question, for you too');
+
+        self::assertNull($this->get($id)['nudgedAt']);
+    }
+
+    public function testAReplyDraftIsANudgeWhateverItsSubjectSays(): void
+    {
+        $id = $this->handOverId();
+
+        $followUp = $this->sendDraft('reply', 'Fwd: Invoice question');
+
+        self::assertSame($followUp, $this->get($id)['lastNudgeId']);
+    }
+
     public function testAReplySentLaterIsNoNudgeAndLeavesTheNudgeFree(): void
     {
         $id = $this->handOverId();
@@ -806,6 +824,19 @@ final class HandOverTest extends DatabaseTestCase
     private function forward(): string
     {
         $this->client->jsonRequest('POST', '/api/v1/outgoing-messages', ['mailAccountId' => $this->accountId, 'to' => [['address' => 'lisa@company.example', 'name' => 'Lisa Bakker']], 'subject' => 'Fwd: Invoice question', 'html' => '<p>And this one</p>', 'inReplyToMessageId' => $this->originalId], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+
+        return $this->responseString('id');
+    }
+
+    /** Sends a draft of the given kind to the delegate in the hand-over's conversation; returns the outgoing message's id. */
+    private function sendDraft(string $kind, string $subject): string
+    {
+        $this->client->jsonRequest('POST', '/api/v1/drafts', ['mailAccountId' => $this->accountId, 'kind' => $kind, 'to' => [['address' => 'lisa@company.example', 'name' => null]], 'cc' => [], 'bcc' => [], 'subject' => $subject, 'html' => '', 'quoteHtml' => ''], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+        $draftId = $this->responseString('id');
+
+        $this->client->jsonRequest('POST', '/api/v1/outgoing-messages', ['mailAccountId' => $this->accountId, 'to' => [['address' => 'lisa@company.example']], 'subject' => $subject, 'html' => '<p>Any news?</p>', 'inReplyToMessageId' => $this->originalId, 'draftId' => $draftId], $this->kim);
         self::assertResponseStatusCodeSame(201);
 
         return $this->responseString('id');
