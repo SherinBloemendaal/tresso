@@ -51,8 +51,8 @@ const save = handleSubmit(async (values) => {
 })
 
 /**
- * Leaves for the provider's sign-in page; the API sends the browser back to the accounts page. Allowing calendars asks
- * for just them, on top of what the account allows already.
+ * Leaves for the provider's sign-in page; the API sends the browser back to the accounts page. Signing in again asks
+ * for mail and whatever the account allows already; allowing calendars adds just them.
  */
 async function signInAgain(features?: ProviderFeature[]): Promise<void> {
   signingIn.value = true

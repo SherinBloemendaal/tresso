@@ -5,7 +5,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
-import { connectErrorMessage, defaultPort, providerName, signInProvider, type MailAccount, type OAuthProviderId, type SuggestedServerSettings } from '@tresso/core'
+import { connectErrorMessage, defaultPort, providerName, signInProvider, type MailAccount, type OAuthProviderId, type ProviderFeature, type SuggestedServerSettings } from '@tresso/core'
 import { ApiError, errorMessage } from '@/api/errors'
 import { addressSchema, connectSchema, serverErrors, type AddressValues, type ConnectValues } from '@/forms/accounts'
 import { useAccountsStore } from '@/stores/accounts'
@@ -133,12 +133,16 @@ const connect = connectForm.handleSubmit(async (values) => {
   }
 })
 
+/** Calendars are asked for only when the user chooses to sync them; they can also be allowed later, per account. */
+const withCalendars = ref(false)
+
 /** Leaves for the provider's sign-in page; the API sends the browser back here with the outcome. */
 async function signInWith(provider: OAuthProviderId, mailAccountId?: string): Promise<void> {
   openingProvider.value = provider
   error.value = null
   try {
-    window.location.assign(await accounts.startProviderSignIn(provider, mailAccountId))
+    const features: ProviderFeature[] = mailAccountId === undefined && withCalendars.value ? ['mail', 'calendar'] : ['mail']
+    window.location.assign(await accounts.startProviderSignIn(provider, mailAccountId, features))
   } catch (e) {
     error.value = errorMessage(e)
     openingProvider.value = null
@@ -228,6 +232,10 @@ onBeforeUnmount(() => {
         >
           {{ openingProvider === provider.id ? `Opening ${provider.name}…` : `Sign in with ${provider.name}` }}
         </button>
+        <label class="calendars">
+          <input v-model="withCalendars" type="checkbox" />
+          Also sync my calendars
+        </label>
         <p class="hint">For Gmail, Google Workspace, Outlook.com and Microsoft 365. Tresso never sees your password.</p>
         <p class="divider"><span>or connect any other provider</span></p>
       </div>
@@ -384,6 +392,12 @@ h2 {
 }
 .provider:hover {
   background: var(--ground);
+}
+.calendars {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
 }
 .providers .hint {
   margin: 0;

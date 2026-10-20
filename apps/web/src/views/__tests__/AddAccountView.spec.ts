@@ -166,8 +166,20 @@ describe('AddAccountView', () => {
     await buttons[0]!.trigger('click')
     await settle()
 
-    expect(requests.find((r) => r.path === '/api/v1/provider-authorizations')?.body).toEqual({ provider: 'google', features: ['mail', 'calendar'] })
+    expect(requests.find((r) => r.path === '/api/v1/provider-authorizations')?.body).toEqual({ provider: 'google', features: ['mail'] })
     expect(assign).toHaveBeenCalledWith('https://accounts.google.example/o/oauth2/v2/auth?state=s')
+  })
+
+  it('asks for calendars only when the user chooses to sync them', async () => {
+    vi.stubGlobal('location', { ...window.location, assign: vi.fn<(url: string) => void>() })
+    const wrapper = await mountView()
+    await settle()
+
+    await wrapper.get('.calendars input[type="checkbox"]').setValue(true)
+    await wrapper.findAll('button.provider')[1]!.trigger('click')
+    await settle()
+
+    expect(requests.find((r) => r.path === '/api/v1/provider-authorizations')?.body).toEqual({ provider: 'microsoft', features: ['mail', 'calendar'] })
   })
 
   it('waits for the account the provider sign-in connected, and offers to sign in again when it fails', async () => {
@@ -189,7 +201,7 @@ describe('AddAccountView', () => {
     await settle()
 
     expect(wrapper.get('button.button-primary').text()).toBe('Sign in with Google again')
-    expect(requests.find((r) => r.path === '/api/v1/provider-authorizations')?.body).toEqual({ provider: 'google', features: ['mail', 'calendar'], mailAccountId: 'acc-g' })
+    expect(requests.find((r) => r.path === '/api/v1/provider-authorizations')?.body).toEqual({ provider: 'google', features: ['mail'], mailAccountId: 'acc-g' })
     expect(assign).toHaveBeenCalledOnce()
   })
 

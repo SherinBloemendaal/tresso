@@ -63,6 +63,15 @@ describe('ProviderAccountForm', () => {
     expect(assign).toHaveBeenCalledWith('https://accounts.google.example/o/oauth2/v2/auth?state=s')
   })
 
+  it('signs in again for mail without asking for calendars', async () => {
+    const wrapper = mount(ProviderAccountForm, { props: { account: { ...gmail, calendarStatus: 'unknown', calendarStatusDetail: null }, provider: 'google' } })
+
+    await wrapper.findAll('button').find((button) => button.text() === 'Sign in with Google again')!.trigger('click')
+    await flushPromises()
+
+    expect(requests).toEqual([{ path: '/api/v1/provider-authorizations', body: { provider: 'google', features: ['mail'], mailAccountId: 'acc-g' } }])
+  })
+
   it('shows nothing about calendars once they sync', () => {
     const wrapper = mount(ProviderAccountForm, { props: { account: { ...gmail, calendarStatus: 'active', calendarStatusDetail: null }, provider: 'google' } })
     expect(wrapper.text()).not.toContain('Allow calendar access')
