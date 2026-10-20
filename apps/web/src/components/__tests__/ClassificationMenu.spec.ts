@@ -20,7 +20,7 @@ describe('ClassificationMenu', () => {
     setActivePinia(createPinia())
     mail = useMailStore()
     mail.smartInboxes = [smartInbox('todo', 'To do', 'do', 0), smartInbox('info', 'Informational', 'know', 1), smartInbox('news', 'Newsletters', 'know', 2)]
-    classify = vi.spyOn(mail, 'classifyThread').mockResolvedValue({ threadId: 't1', smartInboxId: 'news', verdict: 'know', reason: 'user', senderRule: null })
+    classify = vi.spyOn(mail, 'classifyThread').mockResolvedValue({ threadId: 't1', smartInboxId: 'news', verdict: 'know', reason: 'user', senderRule: null, placementId: 'p1' })
   })
 
   afterEach(() => {
@@ -123,7 +123,7 @@ describe('ClassificationMenu', () => {
     ['authentication_failed', 'Moved. New mail from news@bank.example still goes to Spam: it fails the checks that prove who sent it.'],
     ['server_spam', 'Moved. Your mail server marks mail from news@bank.example as spam, so new mail from them still goes to Spam.'],
   ] as const)('says when new mail from the sender still goes to Spam (%s)', async (spamOverrules, text) => {
-    classify.mockResolvedValue({ threadId: 't1', smartInboxId: 'info', verdict: 'know', reason: 'user', senderRule: { id: 'r1', sender: 'news@bank.example', verdict: null, spamOverrules } })
+    classify.mockResolvedValue({ threadId: 't1', smartInboxId: 'info', verdict: 'know', reason: 'user', senderRule: { id: 'r1', sender: 'news@bank.example', verdict: null, spamOverrules }, placementId: 'p1' })
     const wrapper = mountMenu('todo', 'do')
 
     await wrapper.get('button').trigger('click')
@@ -135,7 +135,7 @@ describe('ClassificationMenu', () => {
   })
 
   it('says nothing more for a sender whose mail the rule takes', async () => {
-    classify.mockResolvedValue({ threadId: 't1', smartInboxId: 'info', verdict: 'know', reason: 'user', senderRule: { id: 'r1', sender: 'anna@partner.example', verdict: null, spamOverrules: null } })
+    classify.mockResolvedValue({ threadId: 't1', smartInboxId: 'info', verdict: 'know', reason: 'user', senderRule: { id: 'r1', sender: 'anna@partner.example', verdict: null, spamOverrules: null }, placementId: 'p1' })
     const wrapper = mountMenu('todo', 'do')
 
     await wrapper.get('button').trigger('click')

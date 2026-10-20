@@ -102,6 +102,10 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         <AppIcon name="calendar" />
         <span class="label">Calendar</span>
       </RouterLink>
+      <RouterLink :to="{ name: 'triage' }" class="item">
+        <AppIcon name="triage" />
+        <span class="label">Triage</span>
+      </RouterLink>
       <RouterLink :to="{ name: 'drafts' }" class="item">
         <AppIcon name="draft" />
         <span class="label">Drafts</span>

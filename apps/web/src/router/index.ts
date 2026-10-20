@@ -17,6 +17,7 @@ const router = createRouter({
     { path: '/batches', name: 'batches', component: HomeView },
     { path: '/batches/:threadId', name: 'batches-thread', component: HomeView },
     { path: '/cleanup', name: 'cleanup', component: HomeView },
+    { path: '/triage', name: 'triage', component: () => import('@/views/TriageView.vue'), meta: { requiresAuth: true } },
     { path: '/search', name: 'search', component: () => import('@/views/SearchView.vue'), meta: { requiresAuth: true } },
     { path: '/todos', name: 'todos', component: () => import('@/views/TodosView.vue'), meta: { requiresAuth: true } },
     { path: '/todos/:todoId', name: 'todo', component: () => import('@/views/TodosView.vue'), meta: { requiresAuth: true } },

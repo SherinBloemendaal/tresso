@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { compareTodos, type MakeTodoRequest, type NewTodo, type Todo, type TodoUpdate } from '@tresso/core'
+import { compareTodos, type MadeTodo, type MakeTodoRequest, type NewTodo, type Todo, type TodoUpdate } from '@tresso/core'
 import { useAuthStore } from '@/stores/auth'
 import { useMailStore } from '@/stores/mail'
 
@@ -36,8 +36,8 @@ export const useTodosStore = defineStore('todos', () => {
   }
 
   /** The email's todo: made now, or the one it has already. */
-  async function makeFromMessage(messageId: string, request: MakeTodoRequest = {}): Promise<Todo> {
-    const todo = await auth.send<Todo>('POST', `/api/v1/messages/${encodeURIComponent(messageId)}/todo`, request)
+  async function makeFromMessage(messageId: string, request: MakeTodoRequest = {}): Promise<MadeTodo> {
+    const todo = await auth.send<MadeTodo>('POST', `/api/v1/messages/${encodeURIComponent(messageId)}/todo`, request)
     await mail.syncNow()
 
     return todo

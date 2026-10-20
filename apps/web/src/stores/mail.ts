@@ -41,7 +41,9 @@ import {
   type UnsubscribeRequest,
   type Unsubscription,
   type Verdict,
+  needsTriage,
 } from '@tresso/core'
+import { ApiError } from '@/api/errors'
 import type { Contact, Conversation, Draft, ListScope } from '@/mail/db'
 import { deleteMailStore, openMailStore } from '@/mail/store'
 import type { ClosedElsewhere } from '@/mail/db'
@@ -52,6 +54,8 @@ import { useAuthStore } from '@/stores/auth'
 const PAGE_SIZE = 500
 
 const LIST_STEP = 100
+
+const UNIFIED_INBOX: ListScope = { kind: 'inbox', mailAccountId: null }
 
 export type SyncState = 'idle' | 'syncing' | 'error'
 
@@ -116,6 +120,12 @@ export const useMailStore = defineStore('mail', () => {
    * before it says the conversation is not there (it may not have reached the copy yet).
    */
   const pulls = ref(0)
+
+  /**
+   * The first pull after opening the copy is over (done, or failed while offline): from then on the copy holds what
+   * the server had, not only what was stored before. Screens that decide over all mail (triage) wait for it.
+   */
+  const synced = ref(false)
 
   const db = shallowRef<MailStore | null>(null)
   let userId: string | null = null
@@ -210,6 +220,7 @@ export const useMailStore = defineStore('mail', () => {
       return
     }
     await refresh()
+    synced.value = true
     void uploadPendingDrafts()
     realtime.start()
   }
@@ -341,6 +352,7 @@ export const useMailStore = defineStore('mail', () => {
     userId = null
     live.value = false
     ready.value = false
+    synced.value = false
     accounts.value = []
     allFolders.value = []
     signatures.value = []
@@ -445,9 +457,10 @@ export const useMailStore = defineStore('mail', () => {
 
   /**
    * Puts a conversation where the user says it belongs, with the smart inbox's verdict unless one is given. It shows
-   * at once; the server remembers the choice for the sender, and the delta brings its version right after.
+   * at once; the server remembers the choice for the sender (not with `remember: false`, which moves only this
+   * conversation), and the delta brings its version right after.
    */
-  async function classifyThread(threadId: string, smartInboxId: string, verdict?: Verdict): Promise<ThreadClassification> {
+  async function classifyThread(threadId: string, smartInboxId: string, verdict?: Verdict, options: { remember?: boolean } = {}): Promise<ThreadClassification> {
     const database = db.value
     const target = smartInboxes.value.find((candidate) => candidate.id === smartInboxId)
     const shown = verdict ?? target?.verdict
@@ -456,6 +469,9 @@ export const useMailStore = defineStore('mail', () => {
     await refresh()
 
     const request: ThreadClassificationRequest = verdict === undefined ? { smartInboxId } : { smartInboxId, verdict }
+    if (options.remember === false) {
+      request.remember = false
+    }
     try {
       const result = await auth.send<ThreadClassification>('PUT', `/api/v1/threads/${encodeURIComponent(threadId)}/classification`, request)
       void syncNow()
@@ -470,6 +486,38 @@ export const useMailStore = defineStore('mail', () => {
       }
       throw error
     }
+  }
+
+  /**
+   * Takes back the user's placement `placementId` of a conversation: the rules place it again (sender rules stay).
+   * 'moved' when it was placed again since (another device), and that choice stays. Shown once the pull that follows
+   * brings the server's version, since only the server knows where the rules put it.
+   */
+  async function releaseThread(threadId: string, placementId: string): Promise<'released' | 'moved'> {
+    try {
+      await auth.send<void>('DELETE', `/api/v1/threads/${encodeURIComponent(threadId)}/classification?${new URLSearchParams({ placementId }).toString()}`)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        return 'moved'
+      }
+      throw error
+    }
+    await syncNow()
+    return 'released'
+  }
+
+  /** Up to `limit` conversations of the inboxes waiting for triage, newest first. */
+  async function triageWaiting(limit: number): Promise<string[]> {
+    return (await db.value?.listThreadIds(UNIFIED_INBOX, needsTriage, limit)) ?? []
+  }
+
+  /** The newest `limit` conversations of the inboxes. */
+  async function newestInInbox(limit: number): Promise<Conversation[]> {
+    return (await db.value?.list(UNIFIED_INBOX, limit)) ?? []
+  }
+
+  async function summaries(threadIds: string[]): Promise<Conversation[]> {
+    return (await db.value?.summaries(threadIds)) ?? []
   }
 
   async function showMore(): Promise<void> {
@@ -715,6 +763,7 @@ export const useMailStore = defineStore('mail', () => {
     updatedElsewhere,
     live,
     ready,
+    synced,
     start,
     stop,
     syncNow,
@@ -725,6 +774,10 @@ export const useMailStore = defineStore('mail', () => {
     showSmartInbox,
     showBatches,
     classifyThread,
+    releaseThread,
+    triageWaiting,
+    newestInInbox,
+    summaries,
     showMore,
     thread,
     todosOfThread,
