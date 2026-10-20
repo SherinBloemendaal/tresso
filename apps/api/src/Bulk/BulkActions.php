@@ -39,6 +39,9 @@ final readonly class BulkActions
     public const int MESSAGES_PER_BATCH = 500;
     public const int MOVES_PER_UNDO_BATCH = 500;
 
+    /** An account's changes still to be made on its mail server above which a run waits. */
+    public const int MAX_PENDING_CHANGES = 1000;
+
     /** How long a finished bulk action can still be undone. */
     public const string KEPT_FOR = '-1 day';
 
@@ -53,16 +56,20 @@ final readonly class BulkActions
         private int $conversationsPerBatch = self::CONVERSATIONS_PER_BATCH,
         private int $messagesPerBatch = self::MESSAGES_PER_BATCH,
         private int $movesPerUndoBatch = self::MOVES_PER_UNDO_BATCH,
+        private int $maxPendingChanges = self::MAX_PENDING_CHANGES,
+        private int $scanPerBatch = BulkSelection::SCAN_PER_BATCH,
     ) {
     }
 
     /**
      * Starts the action; the first batches run in the background once the caller's transaction commits.
      *
-     * @throws MissingFolder when an account in scope has no folder to archive or trash into; nothing starts then
+     * @throws MissingFolder     when an account in scope has no folder to archive or trash into; nothing starts then
+     * @throws BulkActionRunning when the user has one under way already
      */
     public function start(User $owner, BulkScope $scope, MessageAction $action, ?Folder $target, \DateTimeImmutable $now): BulkAction
     {
+        $this->oneAtATime($owner);
         $bulkAction = new BulkAction($owner, $action, $target, $scope, $now);
 
         // Every account in scope must have the folder before anything changes, as for a single action.
@@ -79,58 +86,104 @@ final readonly class BulkActions
         return $bulkAction;
     }
 
-    /** Starts putting back what the action moved; the caller holds the action's row lock. */
+    /**
+     * Starts putting back what the action moved; the caller holds the action's row lock.
+     *
+     * @throws BulkActionRunning when the user has another one under way
+     */
     public function undo(BulkAction $bulkAction): void
     {
+        $this->oneAtATime($bulkAction->getOwner());
         $bulkAction->startUndo();
         $this->entityManager->flush();
         $this->dispatcher->dispatch(new RunBulkAction($bulkAction->getId()->toRfc4122()));
     }
 
     /**
-     * Works through up to $maxBatches batches, each in its own transaction.
+     * Works through up to $maxBatches batches, each in its own transaction, for at most about $seconds.
      *
-     * @return bool whether work is left
+     * @phpstan-impure
      */
-    public function run(Uuid $id, ?int $maxBatches = null): bool
+    public function run(Uuid $id, ?int $maxBatches = null, ?float $seconds = null): BulkRun
     {
+        $deadline = null === $seconds ? null : microtime(true) + $seconds;
         for ($batch = 0; null === $maxBatches || $batch < $maxBatches; ++$batch) {
-            $more = $this->entityManager->wrapInTransaction(fn (): bool => $this->batch($id));
+            $outcome = $this->entityManager->wrapInTransaction(fn (): BulkRun => $this->batch($id));
             $this->entityManager->clear();
-            if (!$more) {
-                return false;
+            if (BulkRun::More !== $outcome) {
+                return $outcome;
+            }
+            if (null !== $deadline && microtime(true) >= $deadline) {
+                break;
             }
         }
 
-        return true;
-    }
-
-    /** Marks the action as stopped, for when its run keeps failing; what it did so far stays and can be undone. */
-    public function fail(Uuid $id, string $error): void
-    {
-        $this->entityManager->wrapInTransaction(function () use ($id, $error): void {
-            $bulkAction = $this->entityManager->find(BulkAction::class, $id, LockMode::PESSIMISTIC_WRITE);
-            if (null === $bulkAction || !\in_array($bulkAction->getStatus(), [BulkActionStatus::Running, BulkActionStatus::Undoing], true)) {
-                return;
-            }
-            $bulkAction->fail($error, new \DateTimeImmutable());
-            $this->entityManager->flush();
-        });
-        $this->entityManager->clear();
+        return BulkRun::More;
     }
 
     /**
-     * @return bool whether work is left
+     * Marks the action as stopped, for when its run keeps failing; what it did so far stays and can be undone. Written
+     * with plain SQL: after a batch failed, the entity manager is closed, and this must still work.
      */
-    private function batch(Uuid $id): bool
+    public function fail(Uuid $id, string $error): void
+    {
+        $this->connection->executeStatement(
+            'UPDATE bulk_action SET status = :failed, error = :error, resume_after = NULL, finished_at = :now
+             WHERE id = :id AND status IN (:running, :undoing)',
+            [
+                'failed' => BulkActionStatus::Failed->value,
+                'error' => mb_substr($error, 0, 255),
+                'now' => (new \DateTimeImmutable())->format('Y-m-d H:i:s'),
+                'id' => $id->toRfc4122(),
+                'running' => BulkActionStatus::Running->value,
+                'undoing' => BulkActionStatus::Undoing->value,
+            ],
+        );
+    }
+
+    private function batch(Uuid $id): BulkRun
     {
         $bulkAction = $this->entityManager->find(BulkAction::class, $id, LockMode::PESSIMISTIC_WRITE);
+        $status = $bulkAction?->getStatus();
+        if (null === $bulkAction || !\in_array($status, [BulkActionStatus::Running, BulkActionStatus::Undoing], true)) {
+            return BulkRun::Done;
+        }
+        // Each moved or flagged message is one change the worker makes on the mail server, oldest first. While an
+        // account has a backlog, more would only hold up what the user does to single conversations meanwhile.
+        if ($this->backlogged($bulkAction->getOwner())) {
+            return BulkRun::Wait;
+        }
+        $more = BulkActionStatus::Running === $status ? $this->actBatch($bulkAction) : $this->undoBatch($bulkAction);
 
-        return match ($bulkAction?->getStatus()) {
-            BulkActionStatus::Running => $this->actBatch($bulkAction),
-            BulkActionStatus::Undoing => $this->undoBatch($bulkAction),
-            default => false,
-        };
+        return $more ? BulkRun::More : BulkRun::Done;
+    }
+
+    /**
+     * One bulk action (or undo) per user at a time: the lock makes two requests at once take turns, so the second
+     * sees the first.
+     *
+     * @throws BulkActionRunning
+     */
+    private function oneAtATime(User $owner): void
+    {
+        $this->connection->executeStatement('SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))', ['key' => 'bulk:'.$owner->getId()->toRfc4122()]);
+        $running = $this->connection->fetchOne(
+            'SELECT 1 FROM bulk_action WHERE owner_id = :owner AND status IN (:running, :undoing) LIMIT 1',
+            ['owner' => $owner->getId()->toRfc4122(), 'running' => BulkActionStatus::Running->value, 'undoing' => BulkActionStatus::Undoing->value],
+        );
+        if (false !== $running) {
+            throw new BulkActionRunning();
+        }
+    }
+
+    /** Whether an account of the owner has at least {@see self::MAX_PENDING_CHANGES} changes the worker has yet to make. */
+    private function backlogged(User $owner): bool
+    {
+        return false !== $this->connection->fetchOne(
+            'SELECT 1 FROM mailbox_change c JOIN mail_account a ON a.id = c.mail_account_id
+             WHERE a.owner_id = :owner GROUP BY c.mail_account_id HAVING COUNT(*) >= :max LIMIT 1',
+            ['owner' => $owner->getId()->toRfc4122(), 'max' => $this->maxPendingChanges],
+        );
     }
 
     private function actBatch(BulkAction $bulkAction): bool
@@ -147,13 +200,8 @@ final readonly class BulkActions
         }
 
         $owner = $bulkAction->getOwner();
-        $threadIds = $this->selection->nextBatch($owner, $scope, $bulkAction->getId(), $bulkAction->getResumeAfter(), $this->conversationsPerBatch, $this->messagesPerBatch);
-        if ([] === $threadIds) {
-            $bulkAction->finish($now);
-            $this->entityManager->flush();
-
-            return false;
-        }
+        $batch = $this->selection->nextBatch($owner, $scope, $bulkAction->getId(), $bulkAction->getResumeAccount(), $bulkAction->getResumeAfter(), $this->conversationsPerBatch, $this->messagesPerBatch, $this->scanPerBatch);
+        $threadIds = $batch->threadIds;
 
         $messages = array_values($this->messages->lockOwnedBy($owner, $this->selection->messageIds($threadIds, $bulkAction->getId())));
         // Read after the locks: where each message is now decides what the undo can put back.
@@ -182,10 +230,13 @@ final readonly class BulkActions
             }
         }
 
-        $bulkAction->recordBatch(Uuid::fromString($threadIds[\count($threadIds) - 1]), \count($threadIds), $changed, $unrestorable);
+        $bulkAction->recordBatch($batch->account, $batch->after, \count($threadIds), $changed, $unrestorable);
+        if ($batch->done) {
+            $bulkAction->finish($now);
+        }
         $this->entityManager->flush();
 
-        return true;
+        return !$batch->done;
     }
 
     private function undoBatch(BulkAction $bulkAction): bool
@@ -226,7 +277,7 @@ final readonly class BulkActions
         $now = new \DateTimeImmutable();
         foreach ($groups as [$movedTo, $movedFrom, $messages]) {
             // Only the copies still where the action put them go back; mail moved on since stays where it is now.
-            $restored += $this->actions->apply($messages, MessageAction::Move, $movedFrom, $now, $movedTo);
+            $restored += $this->actions->apply($messages, MessageAction::Move, $movedFrom, $now, $movedTo, oneCopy: true);
         }
 
         $bulkAction->recordRestored($moves[\count($moves) - 1]->getId(), $restored);

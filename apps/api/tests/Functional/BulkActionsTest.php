@@ -6,6 +6,7 @@ namespace App\Tests\Functional;
 
 use App\Bulk\BulkActionHandler;
 use App\Bulk\BulkActions;
+use App\Bulk\BulkRun;
 use App\Bulk\BulkSelection;
 use App\Bulk\RunBulkAction;
 use App\Mailbox\MessageActions;
@@ -14,6 +15,12 @@ use App\Repository\BulkActionRepository;
 use App\Repository\MessageRepository;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
+use Psr\Log\NullLogger;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+use Symfony\Component\Messenger\Event\WorkerMessageFailedEvent;
+use Symfony\Component\Messenger\Exception\HandlerFailedException;
+use Symfony\Component\Messenger\Stamp\DelayStamp;
+use Symfony\Component\Messenger\Stamp\RedeliveryStamp;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Messenger\Stamp\ReceivedStamp;
@@ -137,13 +144,13 @@ final class BulkActionsTest extends DatabaseTestCase
         $this->takeQueued();
         $actions = $this->bulkActions(conversationsPerBatch: 2);
 
-        self::assertTrue($actions->run(Uuid::fromString($bulk['id']), 1), 'work is left after one batch');
+        self::assertSame(BulkRun::More, $actions->run(Uuid::fromString($bulk['id']), 1), 'work is left after one batch');
         $progress = $this->bulkAction($bulk['id']);
         self::assertSame('running', $progress['status']);
         self::assertSame(2, $progress['conversations']);
         self::assertSame(2, $this->inFolder('Archive'), 'each batch is committed and seen on its own');
 
-        self::assertFalse($actions->run(Uuid::fromString($bulk['id'])));
+        self::assertSame(BulkRun::Done, $actions->run(Uuid::fromString($bulk['id'])));
         $done = $this->bulkAction($bulk['id']);
         self::assertSame('done', $done['status']);
         self::assertSame(5, $done['conversations']);
@@ -171,7 +178,7 @@ final class BulkActionsTest extends DatabaseTestCase
         $bulk = $this->start(['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise'), 'action' => 'markRead']);
         $this->takeQueued();
 
-        $handler = new BulkActionHandler($this->bulkActions(conversationsPerBatch: 1), static::getContainer()->get(MessageBusInterface::class), batchesPerRun: 1);
+        $handler = new BulkActionHandler($this->bulkActions(conversationsPerBatch: 1), static::getContainer()->get(MessageBusInterface::class), new NullLogger(), batchesPerRun: 1);
         $handler(new RunBulkAction($bulk['id']));
 
         $rest = $this->takeQueued();
@@ -344,15 +351,169 @@ final class BulkActionsTest extends DatabaseTestCase
         self::assertTrue($stopped['canUndo'], 'what it did so far can still be undone');
     }
 
-    public function testARunThatKeepsFailingIsMarkedAsStopped(): void
+    public function testARunThatKeepsFailingIsMarkedAsStoppedWithoutStoppingTheWorker(): void
     {
         $this->newsletters('Deals', 'news@shop.example', 1);
         $bulk = $this->start(['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise'), 'action' => 'archive']);
+        $envelope = $this->takeQueued()[0];
+        // A batch that fails in the database, as a full disk or a lost connection would make it.
+        $this->connection()->executeStatement("CREATE FUNCTION refuse_bulk_moves() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'disk full'; END $$ LANGUAGE plpgsql");
+        $this->connection()->executeStatement('CREATE TRIGGER refuse_bulk_moves BEFORE INSERT ON bulk_action_move FOR EACH ROW EXECUTE FUNCTION refuse_bulk_moves()');
+
+        $failure = null;
+        try {
+            static::getContainer()->get(MessageBusInterface::class)->dispatch($envelope->with(new ReceivedStamp('bulk')));
+        } catch (HandlerFailedException $failed) {
+            $failure = $failed;
+        }
+        self::assertNotNull($failure, 'the batch failed');
+        self::assertFalse(static::getContainer()->get(EntityManagerInterface::class)->isOpen(), 'and closed the entity manager, as a failed transaction does');
+
+        // Its last attempt: the worker gives up on it. This must not throw, or the worker stops and gets it again.
+        $event = new WorkerMessageFailedEvent($envelope->with(new RedeliveryStamp(5)), 'bulk', $failure);
+        static::getContainer()->get(EventDispatcherInterface::class)->dispatch($event);
+        self::assertFalse($event->willRetry());
+
+        self::assertSame(
+            ['status' => 'failed', 'error' => 'Something went wrong. What was done so far stays done.'],
+            $this->connection()->fetchAssociative('SELECT status, error FROM bulk_action WHERE id = :id', ['id' => $bulk['id']]),
+        );
+    }
+
+    public function testWaitsWhileTheMailServerIsBehindOnTheUsersChanges(): void
+    {
+        $this->newsletters('Deals', 'news@shop.example', 3);
+        $bulk = $this->start(['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise'), 'action' => 'archive']);
+        $this->takeQueued();
+        $actions = $this->bulkActions(conversationsPerBatch: 1, maxPendingChanges: 2);
+
+        self::assertSame(BulkRun::More, $actions->run(Uuid::fromString($bulk['id']), 1));
+        self::assertSame(BulkRun::More, $actions->run(Uuid::fromString($bulk['id']), 1));
+        self::assertSame(BulkRun::Wait, $actions->run(Uuid::fromString($bulk['id'])), 'two moves wait for the worker');
+        self::assertSame(2, $this->bulkAction($bulk['id'])['conversations']);
+
+        $handler = new BulkActionHandler($actions, static::getContainer()->get(MessageBusInterface::class), new NullLogger());
+        $handler(new RunBulkAction($bulk['id']));
+        $transport = static::getContainer()->get('messenger.transport.bulk');
+        self::assertInstanceOf(InMemoryTransport::class, $transport);
+        $later = array_values([...$transport->getSent()]);
+        $transport->reset();
+        self::assertCount(1, $later);
+        self::assertSame(BulkActionHandler::WAIT_MS, $later[0]->last(DelayStamp::class)?->getDelay(), 'it asks again in a while');
+
+        $this->connection()->executeStatement('DELETE FROM mailbox_change');
+        self::assertSame(BulkRun::Done, $actions->run(Uuid::fromString($bulk['id'])), 'once the worker caught up, it goes on');
+        self::assertSame(3, $this->bulkAction($bulk['id'])['conversations']);
+    }
+
+    public function testLooksAtEachAccountInSmallWindowsAndTakesEveryMatch(): void
+    {
+        $home = $this->createAccount('kim@home.example', $this->kim);
+        $this->lease();
+        $this->folders($home, [
+            ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1],
+            ['remoteName' => 'Archive', 'displayName' => 'Archive', 'role' => 'archive', 'uidValidity' => 2],
+        ]);
+        foreach (['Work', 'Home'] as $where) {
+            foreach ([1, 2, 3] as $i) {
+                $this->ingest("{$where} deal {$i}", 'news@shop.example', accountId: 'Home' === $where ? $home : null);
+                $this->ingest("{$where} plan {$i}", 'anna@finance.example', accountId: 'Home' === $where ? $home : null);
+            }
+        }
+        $bulk = $this->start(['in' => 'inbox', 'sender' => 'news@shop.example', 'action' => 'archive']);
+        $this->takeQueued();
+        $actions = $this->bulkActions(scanPerBatch: 2);
+
+        $runs = 0;
+        while (BulkRun::More === $actions->run(Uuid::fromString($bulk['id']), 1)) {
+            ++$runs;
+            self::assertLessThan(20, $runs);
+        }
+
+        self::assertSame(6, $this->bulkAction($bulk['id'])['conversations']);
+        foreach (['Work', 'Home'] as $where) {
+            self::assertSame(['Archive'], $this->foldersOf("{$where} deal 3"));
+            self::assertSame(['INBOX'], $this->foldersOf("{$where} plan 3"));
+        }
+    }
+
+    public function testOneActionRunsAtATimePerUser(): void
+    {
+        $this->newsletters('Deals', 'news@shop.example', 2);
+        $first = $this->start(['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise'), 'action' => 'archive']);
+        $this->runQueued();
+        $running = $this->start(['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise'), 'action' => 'markRead']);
+        self::assertResponseStatusCodeSame(202);
         $this->takeQueued();
 
-        static::getContainer()->get(BulkActions::class)->fail(Uuid::fromString($bulk['id']), 'Something went wrong.');
+        $this->start(['in' => 'inbox', 'action' => 'markRead']);
+        self::assertResponseStatusCodeSame(409);
+        $this->client->jsonRequest('POST', '/api/v1/bulk-actions/'.$first['id'].'/undo', [], $this->kim);
+        self::assertResponseStatusCodeSame(409);
+        self::assertSame('done', $this->bulkAction($first['id'])['status'], 'the refused undo changed nothing');
 
-        self::assertSame('failed', $this->bulkAction($bulk['id'])['status']);
+        $this->bulkActions()->run(Uuid::fromString($running['id']));
+        $this->start(['in' => 'inbox', 'action' => 'markRead']);
+        self::assertResponseStatusCodeSame(202);
+    }
+
+    public function testUndoingATrashOnGmailMovesOneCopyBack(): void
+    {
+        $gmail = $this->createAccount('kim@home.example', $this->kim);
+        $this->lease();
+        $this->folders($gmail, [
+            ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1],
+            ['remoteName' => '[Gmail]/All Mail', 'displayName' => 'All Mail', 'role' => 'all', 'uidValidity' => 2],
+            ['remoteName' => '[Gmail]/Trash', 'displayName' => 'Trash', 'role' => 'trash', 'uidValidity' => 3],
+        ]);
+        $this->ingest('Deals', 'news@shop.example', accountId: $gmail);
+        $this->ingest('Deals', 'news@shop.example', folder: '[Gmail]/All Mail', messageId: 'Deals', accountId: $gmail);
+        $this->place('Deals', 'advertise');
+        $bulk = $this->start(['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise'), 'action' => 'trash']);
+        $this->runQueued();
+        $done = $this->bulkAction($bulk['id']);
+        self::assertSame(1, $done['changed']);
+        self::assertSame(0, $done['unrestorable'], 'All Mail is not a folder it came from');
+        self::assertSame(['[Gmail]/Trash', '[Gmail]/Trash'], $this->foldersOf('Deals'), 'each label moves on its own until the worker reports');
+        $moves = $this->pendingMoves();
+
+        $this->client->jsonRequest('POST', '/api/v1/bulk-actions/'.$bulk['id'].'/undo', [], $this->kim);
+        $this->runQueued();
+
+        self::assertSame(1, $this->bulkAction($bulk['id'])['restored']);
+        self::assertSame($moves + 1, $this->pendingMoves(), 'one move back, not one per Trash copy');
+        self::assertSame(['INBOX', '[Gmail]/Trash'], $this->foldersOf('Deals'), 'the other copy goes once the worker finds it gone');
+    }
+
+    public function testAMoveIntoAFolderTheMessageIsInAlreadyCannotBeUndoneExactly(): void
+    {
+        $this->newsletters('Deals', 'news@shop.example', 2);
+        $this->ingest('Deals 1', 'news@shop.example', folder: 'Projects', messageId: 'Deals 1');
+        $bulk = $this->start(['in' => 'smartInbox', 'smartInboxId' => $this->smartInboxId('advertise'), 'mailAccountId' => $this->accountId, 'action' => 'move', 'folderId' => $this->folderId('Projects')]);
+        $this->runQueued();
+
+        $done = $this->bulkAction($bulk['id']);
+        self::assertSame(2, $done['changed']);
+        // Moving the copies in Projects back would take the one that was there before along: not what it was.
+        self::assertSame(1, $done['unrestorable']);
+        self::assertSame(['Projects', 'Projects'], $this->foldersOf('Deals 1'));
+    }
+
+    public function testMovesOnlyIntoTheUsersOwnFolders(): void
+    {
+        $this->newsletters('Deals', 'news@shop.example', 1);
+        $lisa = $this->userHeaders('lisa@example.test', ['mail:read', 'mail:write', 'settings:write']);
+        $lisaAccount = $this->createAccount('lisa@company.example', $lisa);
+        $this->lease();
+        $this->folders($lisaAccount, [['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1]]);
+        $this->ingest('Lisa deals', 'news@shop.example', accountId: $lisaAccount);
+
+        $this->client->jsonRequest('POST', '/api/v1/bulk-actions', ['in' => 'inbox', 'mailAccountId' => $lisaAccount, 'action' => 'move', 'folderId' => $this->folderId('Projects')], $lisa);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame('folderId: This folder does not exist.', $this->decodedResponse()['detail'] ?? null);
+        self::assertSame(['INBOX'], $this->foldersOf('Lisa deals'));
+        self::assertSame(0, $this->rowCount('SELECT COUNT(*) FROM bulk_action'));
     }
 
     public function testFinishedActionsAreForgottenAfterADay(): void
@@ -444,7 +605,7 @@ final class BulkActionsTest extends DatabaseTestCase
     /**
      * The service with smaller batches, to see them.
      */
-    private function bulkActions(int $conversationsPerBatch = BulkActions::CONVERSATIONS_PER_BATCH, int $messagesPerBatch = BulkActions::MESSAGES_PER_BATCH): BulkActions
+    private function bulkActions(int $conversationsPerBatch = BulkActions::CONVERSATIONS_PER_BATCH, int $messagesPerBatch = BulkActions::MESSAGES_PER_BATCH, int $maxPendingChanges = BulkActions::MAX_PENDING_CHANGES, int $scanPerBatch = BulkSelection::SCAN_PER_BATCH): BulkActions
     {
         $container = static::getContainer();
 
@@ -458,6 +619,8 @@ final class BulkActionsTest extends DatabaseTestCase
             $container->get(AfterCommitDispatcher::class),
             $conversationsPerBatch,
             $messagesPerBatch,
+            maxPendingChanges: $maxPendingChanges,
+            scanPerBatch: $scanPerBatch,
         );
     }
 

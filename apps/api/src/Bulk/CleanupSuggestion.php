@@ -28,6 +28,8 @@ final readonly class CleanupSuggestion
         public ?string $smartInboxId = null,
         /** The days the rule looked back to see whether the user opened any of the sender's mail. */
         public ?int $windowDays = null,
+        /** How many messages the sender sent in those days, none of which was opened. */
+        public ?int $windowReceived = null,
         public ?int $olderThanDays = null,
         public ?int $largerThan = null,
     ) {
