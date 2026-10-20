@@ -1650,7 +1650,8 @@ planned again. A deadline that has passed, or a duration outside 5 minutes to 24
 - `/api/v1/todos` (scopes `todos:read`, `todos:write`) lists (open ones in order, then done ones, most recently done
   first), creates, updates (JSON merge patch: fields left out stay, `null` clears the due date, time or duration; a
   cleared date takes its time with it; `done: true` or `false` completes or reopens, keeping the first completion
-  moment) and deletes the user's own todos; other users' todos are a 404.
+  moment) and deletes the user's own todos; other users' todos are a 404. Deleting an automatic todo declines
+  automatic todos for that email for good (`todoDeclinedAt` on the message); a todo made by hand declines nothing.
   `POST /api/v1/messages/{id}/todo` makes a todo from one of the user's emails, titled after its subject (or "Email
   from" the sender when it has none), or returns the one it has (always 200; `made` says whether this request made
   it, so a client undoing its own action removes only a todo it made). With `perConversation` an open todo of another
