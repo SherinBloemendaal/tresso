@@ -355,7 +355,8 @@ Goal: fast synchronisation that scales horizontally to billions of accounts' wor
   moves every conversation of a scope, however many: what a smart inbox lists (`in: smartInbox`), what the inboxes
   list, or the whole mailbox outside Trash, Spam and Drafts, narrowed to one account (required for a move, which stays
   within one account), one sender, conversations whose newest message is older than `olderThanDays`, or ones with a
-  message of at least `largerThan` bytes. The lists match the clients' `inList`. It answers 202 at once and works
+  message of at least `largerThan` bytes. The lists match the clients' `inList`: mail held for its batch (batched
+  delivery, `held_until`) is in no list, so no bulk action, count, sender list or suggestion takes it. It answers 202 at once and works
   through the conversations on the Messenger transport `bulk`, which has its own consumer (`bulk` in Compose), so
   it never holds up sending: at most ten batches or about ten seconds per handled message, the rest queued again.
   Each batch is its own short transaction: it looks at a window of at most 1000 conversations in id order, through
