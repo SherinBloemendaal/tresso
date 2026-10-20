@@ -3,6 +3,8 @@ import { Session, type SessionState } from '@/auth/session'
 import { secureTokenStore } from '@/auth/secureTokenStore'
 import { signInInBrowser } from '@/auth/browserSignIn'
 import { config } from '@/config'
+import { secureDeviceId } from '@/notifications/expoPush'
+import { forgetPushDevice } from '@/notifications/push'
 
 interface Auth extends SessionState {
   session: Session
@@ -11,6 +13,10 @@ interface Auth extends SessionState {
   isAuthenticated: boolean
   /** Signs in through the system browser; resolves false when the user closed it. */
   signIn(): Promise<boolean>
+  /**
+   * Removes this phone from the user's push devices, then signs out. Signed out either way; rejects when the server
+   * could not be told, so this phone may still get the user's notifications until someone signs in here again.
+   */
   signOut(): Promise<void>
 }
 
@@ -42,7 +48,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await session.completeSignIn(authorization.code, authorization.codeVerifier)
         return true
       },
-      signOut: () => session.signOut(),
+      async signOut() {
+        try {
+          await forgetPushDevice((path, init) => session.api(path, init), secureDeviceId)
+        } finally {
+          await session.signOut()
+        }
+      },
     }),
     [state, session, restoring],
   )
