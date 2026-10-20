@@ -41,6 +41,8 @@ final readonly class MailNotifier
     public const string FRESH = '1 hour';
     /** A batch that delivers more mail that needs the user than this notifies once, with how many. */
     public const int SUMMARY_AFTER = 3;
+    /** Where a tap on a summary leads in every client: the batches (mailNotificationPath and BATCHES_PATH in core). */
+    public const string BATCHES_PATH = '/batches';
     /** Nothing is delivered later than this after its fire time, nor sent again after a failure. */
     public const string MAX_LATE = '2 hours';
     /** A notification is only delivered this close to its fire time; a later one is waiting for its own message. */
@@ -147,27 +149,56 @@ final readonly class MailNotifier
     private function summary(array $planned, bool $previews, \DateTimeImmutable $now): array
     {
         usort($planned, static fn (array $a, array $b): int => $b[1]->getReceivedAt() <=> $a[1]->getReceivedAt());
-        $messages = array_map(static fn (array $pair): Message => $pair[1], $planned);
-        $verdicts = array_unique(array_map(static fn (Message $message): string => (string) $message->getVerdict()?->value, $messages));
+        [$summary] = $planned[0];
+        [$title, $body] = self::summaryText(array_map(static fn (array $pair): Message => $pair[1], $planned), $previews);
+        $summary->summarize($title, $body);
+        foreach (\array_slice($planned, 1) as [$notification]) {
+            $notification->foldInto($summary, $now);
+        }
+
+        return $planned[0];
+    }
+
+    /**
+     * The messages a summary stands for that still need the user, at delivery: its own and those folded into it.
+     * Reading the newest one does not settle the others.
+     *
+     * @return list<Message>
+     */
+    private function stillNeeded(MailNotification $summary): array
+    {
+        /** @var list<MailNotification> $folded */
+        $folded = $this->entityManager->getRepository(MailNotification::class)->findBy(['summarizedBy' => $summary]);
+        $messages = array_filter([$summary->getMessage(), ...array_map(static fn (MailNotification $n): ?Message => $n->getMessage(), $folded)]);
+
+        return array_values(array_filter($messages, fn (Message $message): bool => $this->needsTheUser($message)));
+    }
+
+    /**
+     * "5 new messages to do", and who from when previews are on.
+     *
+     * @param non-empty-list<Message> $messages newest first
+     *
+     * @return array{string, string}
+     */
+    private static function summaryText(array $messages, bool $previews): array
+    {
+        $verdicts = array_values(array_unique(array_map(static fn (Message $message): string => (string) $message->getVerdict()?->value, $messages)));
         $what = match ($verdicts) {
             [Verdict::Do->value] => 'to do',
             [Verdict::Delegate->value] => 'to hand over',
             default => 'that need you',
         };
-        $senders = array_values(array_unique(array_map(self::title(...), $messages)));
         $body = '';
         if ($previews) {
+            $senders = array_values(array_unique(array_map(self::title(...), $messages)));
             $named = \array_slice($senders, 0, 2);
             $others = \count($senders) - \count($named);
             $body = 'From '.implode(', ', $named).($others > 0 ? \sprintf(' and %d other%s', $others, 1 === $others ? '' : 's') : '');
         }
-        [$summary] = $planned[0];
-        $summary->summarize(\sprintf('%d new messages %s', \count($planned), $what), $body);
-        foreach (\array_slice($planned, 1) as [$notification]) {
-            $notification->drop($now);
-        }
+        $count = \count($messages);
 
-        return $planned[0];
+        return [1 === $count ? \sprintf('1 new message %s', $what) : \sprintf('%d new messages %s', $count, $what), $body];
     }
 
     /**
@@ -293,13 +324,20 @@ final readonly class MailNotifier
             return [null, false, null];
         }
         $message = $notification->getMessage();
-        if (null === $message || !$this->needsTheUser($message) || $notification->getFireAt() < $now->modify('-'.self::MAX_LATE)) {
+        $needed = $notification->isSummary() ? $this->stillNeeded($notification) : (null !== $message && $this->needsTheUser($message) ? [$message] : []);
+        if ([] === $needed || $notification->getFireAt() < $now->modify('-'.self::MAX_LATE)) {
             // Read, archived or judged otherwise meanwhile, or too late after an outage: no news any more.
             return $this->drop($notification, $now);
         }
 
         $user = $notification->getUser();
         $preferences = $this->preferences->forUser($user);
+        if ($notification->isSummary()) {
+            // Says how many still need the user now; previews as they are set now.
+            usort($needed, static fn (Message $a, Message $b): int => $b->getReceivedAt() <=> $a->getReceivedAt());
+            [$title, $body] = self::summaryText($needed, $preferences->isMailPreviews());
+            $notification->summarize($title, $body);
+        }
         $channels = $preferences->channelsFor(NotificationKind::Mail->value, NotificationKind::Mail->defaultChannels());
         if ($channels->isEmpty()) {
             return $this->drop($notification, $now);
@@ -322,7 +360,7 @@ final readonly class MailNotifier
 
         // Turned off since it was planned.
         if (!$preferences->isMailPreviews()) {
-            $notification->hideContent(self::withoutContent($message));
+            $notification->hideContent(self::withoutContent($needed[0]));
         }
         $notification->markDelivered($now, $channels->values(), $silent);
         $this->entityManager->flush();
@@ -361,7 +399,7 @@ final readonly class MailNotifier
             NotificationKind::Mail->value,
             $notification->getTitle(),
             $notification->getBody(),
-            null === $threadId ? null : '/thread/'.$threadId,
+            $notification->isSummary() ? self::BATCHES_PATH : (null === $threadId ? null : '/thread/'.$threadId),
             $notification->isSilent(),
             $now->modify(self::EXPIRES),
             $data,

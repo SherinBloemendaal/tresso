@@ -65,6 +65,15 @@ class MailNotification implements SyncedOnlyWhenSeen
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $droppedAt = null;
 
+    /** Stands for several messages that a batch delivered at once (see {@see summarize()}). */
+    #[ORM\Column(options: ['default' => false])]
+    private bool $summary = false;
+
+    /** The summary this notification was folded into: it is not sent itself, but counts towards that one. */
+    #[ORM\ManyToOne]
+    #[ORM\JoinColumn(onDelete: 'SET NULL')]
+    private ?MailNotification $summarizedBy = null;
+
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
@@ -122,18 +131,22 @@ class MailNotification implements SyncedOnlyWhenSeen
     public function hideContent(string $title): void
     {
         $this->body = '';
-        if (!$this->isSummary()) {
+        if (!$this->summary) {
             $this->title = mb_substr($title, 0, 255);
         }
     }
 
-    /**
-     * Whether it stands for several messages (see {@see summarize()}): its title says only how many, so it stays. A
-     * notification about one message always has its conversation, as a message cannot outlive its thread.
-     */
+    /** Whether it stands for several messages (see {@see summarize()}); its title says only how many. */
     public function isSummary(): bool
     {
-        return null === $this->thread && null !== $this->message;
+        return $this->summary;
+    }
+
+    /** Counts towards a summary instead of being sent itself (see {@see summarize()}). */
+    public function foldInto(MailNotification $summary, \DateTimeImmutable $at): void
+    {
+        $this->summarizedBy = $summary;
+        $this->drop($at);
     }
 
     /**
@@ -142,6 +155,7 @@ class MailNotification implements SyncedOnlyWhenSeen
      */
     public function summarize(string $title, string $body): void
     {
+        $this->summary = true;
         $this->title = mb_substr($title, 0, 255);
         $this->body = $body;
         $this->thread = null;
@@ -212,7 +226,7 @@ class MailNotification implements SyncedOnlyWhenSeen
 
     public static function clientFields(): ?array
     {
-        return ['deliveredAt', 'channels', 'silent'];
+        return ['deliveredAt', 'channels', 'silent', 'summary'];
     }
 
     public static function changeType(): string

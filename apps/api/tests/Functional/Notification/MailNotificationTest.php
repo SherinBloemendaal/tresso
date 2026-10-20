@@ -505,9 +505,48 @@ final class MailNotificationTest extends DatabaseTestCase
         self::assertSame('5 new messages to do', $expo[0]['title']);
         self::assertContains($expo[0]['body'], ['From Billing, Anna de Vries', 'From Anna de Vries, Billing']);
         self::assertArrayNotHasKey('threadId', $expo[0]['data'], 'It opens no single conversation.');
+        self::assertSame(MailNotifier::BATCHES_PATH, $expo[0]['data']['path'], 'A tap opens the batches.');
+        self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification WHERE summary'));
+        self::assertEquals(4, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification WHERE summarized_by_id IS NOT NULL'));
+        $delta = $this->changes()['mailNotifications'];
+        self::assertCount(1, $delta);
+        self::assertTrue($delta[0]['summary'], 'The desktop app opens the batches too.');
+        self::assertNull($delta[0]['threadId']);
         self::assertSame($this->kimsId()->toRfc4122(), $expo[0]['data']['userId']);
         self::assertEquals(5, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification'));
         self::assertEquals(4, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification WHERE dropped_at IS NOT NULL'), 'The others never notify later either.');
+    }
+
+    public function testASummaryCountsAgainAtDeliveryWhatStillNeedsTheUser(): void
+    {
+        $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => array_map(fn (int $n): array => $this->message((string) $n, 'Invoice '.$n, ['receivedAt' => new \DateTimeImmutable(\sprintf('-%d minutes', 10 - $n))->format(\DATE_ATOM)]), range(1, 5))]);
+        $this->classifyAndSend();
+        $this->releaseWithoutSending();
+        // Read on the phone before the push went out: the newest, which the summary is attached to, and one more.
+        $this->connection()->executeStatement("UPDATE message SET seen = true WHERE subject IN ('Invoice 5', 'Invoice 4')");
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+
+        $this->sendQueued();
+
+        $expo = $this->expoBodies();
+        self::assertCount(1, $expo, 'The others still need the user.');
+        self::assertSame('3 new messages to do', $expo[0]['title']);
+    }
+
+    public function testASummaryWhoseMailWasAllReadMeanwhileIsDropped(): void
+    {
+        $this->batchedInvoices();
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => array_map(fn (int $n): array => $this->message((string) $n, 'Invoice '.$n), range(1, 4))]);
+        $this->classifyAndSend();
+        $this->releaseWithoutSending();
+        $this->connection()->executeStatement('UPDATE message SET seen = true');
+        static::getContainer()->get(EntityManagerInterface::class)->clear();
+
+        $this->sendQueued();
+
+        self::assertSame([], $this->expoBodies());
+        self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification WHERE summary AND dropped_at IS NOT NULL'));
     }
 
     public function testWithoutPreviewsTheSummarySaysOnlyHowMany(): void
@@ -616,12 +655,18 @@ final class MailNotificationTest extends DatabaseTestCase
     /** The batch time comes: the sweep releases what waits and its notifications go out. */
     private function batchComes(): void
     {
+        $this->releaseWithoutSending();
+        $this->sendQueued();
+    }
+
+    /** The batch time comes and the sweep releases what waits; its notifications are still on their way. */
+    private function releaseWithoutSending(): void
+    {
         foreach (['message', 'thread'] as $table) {
             $this->connection()->executeStatement("UPDATE {$table} SET held_until = now() - interval '1 minute' WHERE held_until IS NOT NULL");
         }
         static::getContainer()->get(EntityManagerInterface::class)->clear();
         static::getContainer()->get(ReleaseBatchHandler::class)->sweep(new SweepBatches());
-        $this->sendQueued();
     }
 
     private function builtinId(string $builtin): string
