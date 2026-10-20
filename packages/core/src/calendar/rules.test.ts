@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { attendeeSummary, isoWeek, occurrenceTimes, relativeDay } from './format'
 import { calendarEvent } from '../store/contract'
 import { expandOccurrences } from './occurrences'
-import { describeRule, endOf, presetLabel, presetOf, presetRule, withEnd } from './rules'
+import { describeRule, endOf, presetLabel, presetOf, presetRule, sameRule, withEnd } from './rules'
 
 // Thursday 22 October 2026, the fourth Thursday of the month.
 const thursday = Date.UTC(2026, 9, 22, 10)
@@ -30,6 +30,14 @@ describe('repeat presets', () => {
     expect(withEnd('FREQ=DAILY', { kind: 'until', date: '2026-12-31' }, false, null)).toBe('FREQ=DAILY;UNTIL=20261231T235959')
     expect(withEnd('FREQ=DAILY;UNTIL=20261231', { kind: 'count', count: 4 }, true, null)).toBe('FREQ=DAILY;COUNT=4')
     expect(endOf('FREQ=DAILY;UNTIL=20261231T225959Z')).toEqual({ kind: 'until', date: '2026-12-31' })
+  })
+
+  it('compares rules however they are written', () => {
+    expect(sameRule('FREQ=WEEKLY;INTERVAL=1;BYDAY=TH,MO;WKST=MO', 'freq=weekly;byday=MO,TH')).toBe(true)
+    expect(sameRule('FREQ=WEEKLY;BYDAY=MO;WKST=SU', 'FREQ=WEEKLY;BYDAY=MO')).toBe(false)
+    expect(sameRule('FREQ=WEEKLY;UNTIL=20261231T080000Z', 'FREQ=WEEKLY;UNTIL=20261231T225959Z')).toBe(false)
+    expect(sameRule(null, null)).toBe(true)
+    expect(sameRule(null, 'FREQ=DAILY')).toBe(false)
   })
 
   it('describes any rule in a sentence', () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { calendarEvent } from '../store/contract'
-import { eventSpan, expandOccurrences, type Occurrence } from './occurrences'
+import { eventSpan, expandOccurrences, expandRange, neverMatches, ruleParts, type Occurrence } from './occurrences'
 import type { SyncedCalendarEvent } from './types'
 import { formatDateTime, toWall } from './zones'
 
@@ -116,6 +116,112 @@ describe('occurrences', () => {
   it('walks an old daily series to a range years later', () => {
     const old = weekly({ start: { dateTime: '2016-01-01T09:00:00', timeZone: AMS }, end: { dateTime: '2016-01-01T09:15:00', timeZone: AMS }, recurrence: 'FREQ=DAILY' })
     expect(expandOccurrences([old], from, to, AMS)).toHaveLength(31)
+  })
+})
+
+// Each case below is what the server's Occurrences::instances gives for the same iCalendar (run on the API image).
+describe('occurrences as the server has them', () => {
+  const timed = (start: string, end: string, zone: string | null = AMS) => ({ start: { dateTime: start, timeZone: zone }, end: { dateTime: end, timeZone: zone } })
+
+  it('ends a timed series with an UNTIL date at midnight of that date', () => {
+    const series = calendarEvent('a', 'cal', { ...timed('2026-10-05T09:00:00', '2026-10-05T10:00:00'), recurrence: 'FREQ=DAILY;UNTIL=20261008' })
+    expect(expandOccurrences([series], from, to, AMS).map((o) => o.recurrenceId)).toEqual(['20261005T070000Z', '20261006T070000Z', '20261007T070000Z'])
+  })
+
+  it('keeps the start of a series whose UNTIL comes before it', () => {
+    const series = calendarEvent('b', 'cal', { ...timed('2026-10-05T09:00:00', '2026-10-05T10:00:00'), recurrence: 'FREQ=DAILY;UNTIL=20261001T000000Z' })
+    expect(expandOccurrences([series], from, to, AMS).map((o) => o.recurrenceId)).toEqual(['20261005T070000Z'])
+  })
+
+  it('compares a UTC UNTIL of a floating series as an instant in the reader zone', () => {
+    const series = calendarEvent('c', 'cal', { ...timed('2026-10-05T09:00:00', '2026-10-05T10:00:00', null), recurrence: 'FREQ=DAILY;UNTIL=20261007T080000Z' })
+    for (const zone of [AMS, 'Asia/Tokyo']) {
+      expect(expandOccurrences([series], from, to, zone).map((o) => o.recurrenceId)).toEqual(['20261005T090000Z', '20261006T090000Z', '20261007T090000Z'])
+    }
+  })
+
+  it('keeps an override whose occurrence an EXDATE also removes', () => {
+    const series = calendarEvent('d', 'cal', { uid: 'd@test', ...timed('2026-10-19T09:00:00', '2026-10-19T09:30:00', 'UTC'), recurrence: 'FREQ=DAILY;COUNT=3', exdates: ['20261020T090000Z'] })
+    const moved = calendarEvent('d-moved', 'cal', { uid: 'd@test', recurrenceId: '20261020T090000Z', ...timed('2026-10-20T14:00:00', '2026-10-20T14:30:00', 'UTC') })
+    expect(expandOccurrences([series, moved], from, to, 'UTC').map((o) => [o.event.id, o.recurrenceId, new Date(o.start).toISOString()])).toEqual([
+      ['d', '20261019T090000Z', '2026-10-19T09:00:00.000Z'],
+      ['d-moved', '20261020T090000Z', '2026-10-20T14:00:00.000Z'],
+      ['d', '20261021T090000Z', '2026-10-21T09:00:00.000Z'],
+    ])
+  })
+
+  it('moves a weekly 02:30 past the gap on the night clocks go forward', () => {
+    const series = calendarEvent('e', 'cal', { ...timed('2026-03-22T02:30:00', '2026-03-22T03:30:00'), recurrence: 'FREQ=WEEKLY;COUNT=3' })
+    const occurrences = expandOccurrences([series], Date.UTC(2026, 2, 1), Date.UTC(2026, 4, 1), AMS)
+    expect(occurrences.map((o) => o.recurrenceId)).toEqual(['20260322T013000Z', '20260329T013000Z', '20260405T003000Z'])
+    expect(occurrences.map((o) => local(o))).toEqual(['2026-03-22T02:30:00', '2026-03-29T03:30:00', '2026-04-05T02:30:00'])
+  })
+
+  it('steps an hourly series on the clock over the night clocks go back', () => {
+    const series = calendarEvent('f', 'cal', { ...timed('2026-10-25T00:00:00', '2026-10-25T00:15:00'), recurrence: 'FREQ=HOURLY;COUNT=5' })
+    expect(expandOccurrences([series], Date.UTC(2026, 9, 24), Date.UTC(2026, 9, 26), AMS).map((o) => o.recurrenceId)).toEqual([
+      '20261024T220000Z',
+      '20261024T230000Z',
+      '20261025T010000Z',
+      '20261025T020000Z',
+      '20261025T030000Z',
+    ])
+  })
+
+  it('jumps an old hourly series in elapsed hours, as the server does', () => {
+    const old = calendarEvent('k', 'cal', { ...timed('2016-01-01T00:00:00', '2016-01-01T00:15:00', 'UTC'), recurrence: 'FREQ=HOURLY;INTERVAL=2' })
+    const started = Date.now()
+    const occurrences = expandOccurrences([old], Date.UTC(2026, 9, 19), Date.UTC(2026, 9, 20), 'UTC')
+    expect(occurrences.map((o) => o.recurrenceId)).toHaveLength(12)
+    expect(occurrences[0]!.recurrenceId).toBe('20261019T000000Z')
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('applies an override for this and following to every later occurrence, moved as far as it moved', () => {
+    const series = calendarEvent('g', 'cal', { uid: 'g@test', summary: 'Sync', ...timed('2026-10-19T09:00:00', '2026-10-19T09:30:00', 'UTC'), recurrence: 'FREQ=WEEKLY;COUNT=4' })
+    const later = calendarEvent('g-later', 'cal', { uid: 'g@test', summary: 'Sync, later', recurrenceId: '20261026T090000Z', thisAndFuture: true, ...timed('2026-10-26T11:00:00', '2026-10-26T12:00:00', 'UTC') })
+    const occurrences = expandOccurrences([series, later], from, Date.UTC(2026, 11, 1), 'UTC')
+    expect(occurrences.map((o) => [o.event.summary, o.recurrenceId, new Date(o.start).toISOString(), new Date(o.end).toISOString(), o.seriesId])).toEqual([
+      ['Sync', '20261019T090000Z', '2026-10-19T09:00:00.000Z', '2026-10-19T09:30:00.000Z', 'g'],
+      ['Sync, later', '20261026T090000Z', '2026-10-26T11:00:00.000Z', '2026-10-26T12:00:00.000Z', 'g'],
+      ['Sync, later', '20261102T090000Z', '2026-11-02T11:00:00.000Z', '2026-11-02T12:00:00.000Z', 'g'],
+      ['Sync, later', '20261109T090000Z', '2026-11-09T11:00:00.000Z', '2026-11-09T12:00:00.000Z', 'g'],
+    ])
+  })
+
+  it('moves later all-day occurrences by the days a range override moved its own', () => {
+    const series = calendarEvent('h', 'cal', { uid: 'h@test', allDay: true, start: { date: '2026-10-19' }, end: { date: '2026-10-20' }, recurrence: 'FREQ=WEEKLY;COUNT=4' })
+    const later = calendarEvent('h-later', 'cal', { uid: 'h@test', allDay: true, recurrenceId: '20261026', thisAndFuture: true, start: { date: '2026-10-27' }, end: { date: '2026-10-28' } })
+    const occurrences = expandOccurrences([series, later], from, Date.UTC(2026, 11, 1), AMS)
+    expect(occurrences.map((o) => [o.recurrenceId, o.startDate, o.endDate])).toEqual([
+      ['20261019', '2026-10-19', '2026-10-20'],
+      ['20261026', '2026-10-27', '2026-10-28'],
+      ['20261102', '2026-11-03', '2026-11-04'],
+      ['20261109', '2026-11-10', '2026-11-11'],
+    ])
+  })
+
+  it('gives a rule that can never match only its start, without looping inside ical.js', () => {
+    expect(neverMatches(ruleParts('FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30'))).toBe(true)
+    expect(neverMatches(ruleParts('FREQ=YEARLY;BYMONTH=2,3;BYMONTHDAY=30'))).toBe(false)
+    expect(neverMatches(ruleParts('FREQ=MONTHLY;BYMONTHDAY=-1'))).toBe(false)
+    for (const rule of ['FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30', 'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30']) {
+      const series = calendarEvent('n', 'cal', { ...timed('2026-01-01T09:00:00', '2026-01-01T10:00:00', 'UTC'), recurrence: rule })
+      expect(expandOccurrences([series], Date.UTC(2026, 0, 1), Date.UTC(2030, 0, 1), 'UTC').map((o) => o.recurrenceId)).toEqual(['20260101T090000Z'])
+    }
+  })
+
+  it('leaves out days ical.js normalizes into another month', () => {
+    // The 30th of February and of March: only March has one.
+    const series = calendarEvent('m', 'cal', { ...timed('2026-01-30T09:00:00', '2026-01-30T10:00:00', 'UTC'), recurrence: 'FREQ=YEARLY;BYMONTH=2,3;BYMONTHDAY=30;COUNT=3' })
+    const keys = expandOccurrences([series], Date.UTC(2026, 0, 1), Date.UTC(2029, 0, 1), 'UTC').map((o) => o.recurrenceId)
+    expect(keys).toEqual(['20260130T090000Z', '20260330T090000Z', '20270330T090000Z'])
+  })
+
+  it('says which series it cut short at the step limit', () => {
+    // COUNT cannot be jumped over, so a walk from year 1 hits the limit, as on the server.
+    const endless = calendarEvent('x', 'cal', { ...timed('0001-01-01T00:00:00', '0001-01-01T00:30:00', 'UTC'), recurrence: 'FREQ=HOURLY;COUNT=100000000' })
+    expect(expandRange([endless], Date.UTC(2026, 9, 19), Date.UTC(2026, 9, 20), 'UTC').truncated).toEqual(['x'])
   })
 })
 

@@ -102,4 +102,9 @@ export interface SyncedCalendarEvent {
   defaultReminders: boolean
   /** Its reminders reach the user also in quiet and outside working hours. */
   important: boolean
+  /**
+   * An override with RANGE=THISANDFUTURE (RFC 5545 3.8.4.4): it changes every later occurrence too, moved as far as
+   * it moves its own. Always false on series and single events.
+   */
+  thisAndFuture: boolean
 }
