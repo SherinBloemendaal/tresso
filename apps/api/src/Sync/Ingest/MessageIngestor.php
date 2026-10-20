@@ -17,6 +17,7 @@ use App\Entity\MessageLocation;
 use App\Entity\MessageReference;
 use App\Entity\MessageSignals;
 use App\Entity\MessageText;
+use App\Enum\FolderRole;
 use App\HandOver\HandOvers;
 use App\Mailbox\MailboxChanges;
 use App\Repository\MailboxChangeRepository;
@@ -66,6 +67,11 @@ final readonly class MessageIngestor
                     // Moved into the inbox, or out of Spam: its calendar mail counts now.
                     $this->invitations->arrived($existing, $folder->getRole(), $input->calendarParts);
                     $this->applyFlags($existing, $input, $pendingFlags);
+                    // A delegate's answer rescued from Spam closes their hand-over now.
+                    if (FolderRole::Inbox === $folder->getRole()) {
+                        $this->entityManager->flush();
+                        $this->handOvers->messageArrived($existing, MessageIds::normalizeList([...$input->references, $input->inReplyTo], $messageId), $input->headers, $input->junk, $folder->getRole(), new \DateTimeImmutable());
+                    }
                     ++$linked;
                     continue;
                 }

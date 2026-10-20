@@ -28,7 +28,7 @@ use Symfony\Component\Uid\Uuid;
  * ({@see \App\Notification\MailNotifier}): the server decides, under a lock on the hand-over. It must still be open
  * and overdue; a focus block (holdDuringFocus) makes the notice wait for its end, quiet hours and other busy events
  * (focusDuringBusy) make it silent. It goes out on the channels the user chose for `hand_over` (channelsByKind, else
- * the phone and the desktop) through the {@see NotificationDispatcher}, keyed "handOver:{id}:{overdue at}" and claimed
+ * the phone and the desktop) through the {@see NotificationDispatcher}, keyed "handOver:{id}:{round}" and claimed
  * in the transaction that records it on the hand-over (`notifiedAt`, `notifiedChannels`, `notifiedSilently`), which is
  * how the delta brings it to the desktop app. A new due date starts a new round. The sweep delivers what a lost message
  * missed and sends failed deliveries again.
@@ -107,7 +107,7 @@ final readonly class HandOverNotifier
         /** @var list<string> $retry */
         $retry = $connection->fetchFirstColumn(
             "SELECT DISTINCT h.id FROM hand_over h
-             JOIN notification_delivery d ON d.delivery_key = 'handOver:' || h.id || ':' || EXTRACT(EPOCH FROM h.overdue_at)::BIGINT
+             JOIN notification_delivery d ON d.delivery_key = 'handOver:' || h.id || ':' || h.notice_round
              WHERE h.state = 'open' AND h.notified_at > :latest
                AND ((d.status = :failed AND d.attempts < :max AND d.updated_at <= CAST(:now AS TIMESTAMP) - INTERVAL '1 minute' * POWER(2, d.attempts - 1))
                  OR (d.status = :sending AND d.updated_at <= CAST(:now AS TIMESTAMP) - CAST(:stuck AS INTERVAL)))
@@ -134,9 +134,7 @@ final readonly class HandOverNotifier
     /** One per round: a new due date that passes tells again, a retry of the same round never twice. */
     public static function deliveryKey(HandOver $handOver): string
     {
-        $overdueAt = $handOver->getOverdueAt() ?? throw new \LogicException('Only an overdue hand-over is told about.');
-
-        return \sprintf('handOver:%s:%d', $handOver->getId()->toRfc4122(), $overdueAt->getTimestamp());
+        return \sprintf('handOver:%s:%d', $handOver->getId()->toRfc4122(), $handOver->getNoticeRound());
     }
 
     /**

@@ -28,6 +28,8 @@ final readonly class HandOvers
 {
     /** How many overdue hand-overs one heartbeat marks at most. */
     private const int SWEEP_BATCH = 100;
+    /** Mail queued to go out within this counts as sent now: the undo window, not a send-later. */
+    private const string FOLLOW_UP_WINDOW = '+1 minute';
 
     public function __construct(
         private EntityManagerInterface $entityManager,
@@ -125,8 +127,13 @@ final readonly class HandOvers
      * Mail the user sends to the delegate in a handed-over conversation is a follow-up, whether it was the one-click
      * nudge or written in the composer ("Edit first").
      */
-    public function messageQueued(OutgoingMessage $outgoing, \DateTimeImmutable $now): void
+    public function messageQueued(OutgoingMessage $outgoing, bool $forward, \DateTimeImmutable $now): void
     {
+        // A forward hands something over (perhaps again), it does not follow a hand-over up; mail sent later is not a
+        // follow-up yet, and must not stand in the way of a nudge now.
+        if ($forward || $outgoing->getSendAt() > $now->modify(self::FOLLOW_UP_WINDOW)) {
+            return;
+        }
         $followedUp = $this->handOvers->findFollowedUpBy($outgoing);
         foreach ($followedUp as $handOver) {
             $handOver->nudged($outgoing, $now);
@@ -168,7 +175,7 @@ final readonly class HandOvers
             $this->forwardCopy($handOver) ?? $handOver->getMessage(),
             $sendAt,
         ), $now);
-        $this->messageQueued($nudge, $now);
+        $this->messageQueued($nudge, false, $now);
         if ($handOver->getLastNudge() !== $nudge) {
             // Neither the message handed over nor the forward's copy is left to reply to: it is the nudge all the same.
             $handOver->nudged($nudge, $now);
