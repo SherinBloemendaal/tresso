@@ -1613,15 +1613,18 @@ planned again. A deadline that has passed, or a duration outside 5 minutes to 24
   and changed under a row lock, read again once locked, so two changes at once neither collide nor work from an
   older read):
   `bufferMinutes` (0 to 120) on both sides of busy time, `travelMinutes` (0 to 240) to and from busy time at a place
-  that does not name its own travel time, and `minimumNoticeMinutes` (up to 14 days). All are 0 without a row.
+  that does not name its own travel time, and `minimumNoticeMinutes` (up to 14 days). All are 0 without a row. The
+  same row holds `planTodos` (off without a row), the switch that plans todos on their own (see "Todos in the
+  calendar" in 3.14).
 - **Busy time** comes from every `BusyTimeSource`: the open edition's reads the user's visible calendars (or the
   `calendarIds` a search names) through the occurrence expander, so recurrence, overrides, exceptions and time zones
   are those of the range endpoint. An occurrence is busy when it is marked busy, not cancelled and not declined;
   tentative and unanswered invitations count. All-day occurrences take their days from midnight to midnight in the
   search's zone. An occurrence is at a place when its location is not a link and does not just name the service of its
   online meeting; an event's own travel time (set for leave-now) is its travel time here. A focus block is what the
-  reminders take for one: a timed busy event of the user's own, without guests, titled "Focus...". Planned todos can be
-  another source.
+  reminders take for one: a timed busy event of the user's own, without guests, titled "Focus...". Planned todos are
+  another source (`TodoBusyTimes`): the planned time of open todos, labelled with the todo's title and referenced by
+  its id. They are in no calendar, so they count whichever calendars a search names.
 - **Attendees' busy time** comes from every `AttendeeAvailabilitySource`; the open edition has none, so an attendee's
   availability is `unknown` and closes nothing, except for the user's own addresses, which are known. A provider's
   free/busy (Google, Microsoft Graph, CalDAV scheduling) can be added as a source. A source may also give an
@@ -1655,7 +1658,7 @@ planned again. A deadline that has passed, or a duration outside 5 minutes to 24
   (`source`: `manual`, `suggested` for an accepted AI suggestion, `automatic` from a smart inbox) and optionally the
   email it came from. The due date and time are wall-clock values in the user's own time zone, like a paper diary:
   "Friday 17:00" stays Friday 17:00 when the user travels. The duration and due date are what "Todos in the
-  calendar" (busy time, automatic planning) builds on.
+  calendar" (below) builds on.
 - One email has at most one todo: a unique index on `todo.message_id`, and every path that makes one from an email
   takes the user's todos lock first (lock order: smart inboxes, classification, todos). Deleting the email (or its
   account) clears the link, keeps the todo, and gives it a new change number, so clients drop the link too.
@@ -1686,6 +1689,54 @@ planned again. A deadline that has passed, or a duration outside 5 minutes to 24
   add and a detail panel ("Complete and archive email" archives the conversation the todo came from), "Make todo" in
   the reading pane (`T`), which uses the newest email someone else sent, and the auto-create switch in the smart
   inbox settings; the mobile app lists todos by section, checks them off, and makes them from a conversation.
+
+#### Todos in the calendar
+
+An open todo with a due date and a duration can hold time in the user's calendar, so nobody books a meeting over it.
+
+- **Where the time is kept:** on the todo itself: `plannedStart` and `plannedEnd` (instants, stored in UTC) and
+  `planState` (`planned`, or `conflict`). One todo holds at most one stretch of time; a todo of more than 24 hours
+  cannot be planned in one go. The entity keeps the invariant: completing a todo, or clearing its due date or its
+  duration, gives its time back, and a done todo or one without a due date or duration cannot be planned. Deleting
+  the todo deletes its time with it. The time is in the delta with the todo; no calendar event is written.
+- **Deadline:** the due date and time in the user's zone (that of the notification settings), or the end of the due
+  date when it has no time.
+- **Planning** (`App\Todo\TodoPlanner`) asks the meeting time finder (3.13) for the earliest free stretch of the
+  todo's duration from now to the deadline (`MeetingTimeQuery::beforeDeadline`, ignoring the todo's own time): within
+  working hours, around busy time, focus blocks, buffers and travel time, and after the minimum notice. A todo shorter
+  than the finder's 5 minutes holds only its own length. `POST /api/v1/todos/{id}/plan` (scope `todos:write`) plans
+  the todo, again when it was planned, and answers the todo; when it cannot, a 422 says why in words for the user (no
+  due date, no duration, done, longer than 24 hours, due date passed, no working hours or no free time left before
+  it). `DELETE /api/v1/todos/{id}/plan` gives the time back (204). Other users' todos are a 404.
+- **Busy time:** planned time counts as busy for the finder (`TodoBusyTimes`, see "Meeting time finder"), so meeting
+  proposals and other todos keep clear of it. A search can leave a todo out by its id in `ignore`.
+- **Keeping it right:** planned time that has not started is checked again when the todo's due date, time or duration
+  changes (in the same request) and after every change to the user's calendars: `CalendarStore` asks once per commit,
+  however many events it saved, for a `ReplanTodos` message (transport `async`), which checks the user's planned todos
+  earliest deadline first under the user's todos lock. Time still fits when it is as long as the todo takes, over by
+  the deadline, and nothing else busy overlaps it (calendar events, other todos). Time that no longer fits moves to the
+  earliest free time; when there is none it stays where it was with `planState` `conflict`, until the user plans it
+  again or removes it, or the time is free again (it goes back to `planned` then). Time that has started is left
+  alone.
+- **Planning on their own:** with `planTodos` on (scheduling preferences, `PATCH /api/v1/calendar/scheduling-preferences`)
+  an open todo with a due date and a duration is planned when it is made, reopened, or gets a new due date or duration;
+  switching it on plans the open todos that can be and have no time yet (a `ReplanTodos` with `planOpen`, after the
+  commit). A todo that finds no free time stays without. A calendar change only checks time that is planned, so a todo
+  whose time the user removed stays without until the todo itself changes. Switching it off leaves planned time where
+  it is.
+- **Provider calendars:** planned time stays in Tresso. It is not written to Google, Microsoft or CalDAV calendars
+  through the C5 write path: the design shows todo deadlines as a Tresso calendar of their own, and a block written to
+  a provider would come back through sync as an event the finder already counts. Others see it busy only where Tresso
+  answers for the user (meeting proposals); a provider's own free/busy does not see it.
+- **Clients:** `@tresso/core` places planned time (`todoBlocks`, `TodoBlock`) next to occurrences: the calendar layout
+  takes any item with a key, a start and an end, so planned todos share the time grid and its columns with events.
+  `plannedLabel` says where a todo is planned, `canPlan` whether it can be, and `planPath` is the endpoint. The web
+  views (day, week, month, agenda; also the desktop app) show planned todos in the Do colors, dashed when in conflict,
+  with a panel to plan again, remove the time or check the todo off; the todo detail plans a todo ("Plan
+  automatically", "Plan again", "Remove from calendar", "Show in calendar"), and Settings > Calendar has the
+  `planTodos` switch. The mobile agenda and day view show planned todos, a tap offers the same actions, and the todo
+  list plans a todo from a button on its row. The stores changed shape for the new fields: SQLite `SCHEMA_VERSION` 9
+  and IndexedDB `VERSION` 11, so existing copies sync again from the start.
 
 ### 3.15 Hand-overs
 
