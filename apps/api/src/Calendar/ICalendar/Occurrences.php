@@ -154,10 +154,11 @@ final class Occurrences
 
         $seen = [];
         $rdates = new \ArrayIterator($extra);
-        foreach (self::merge($ruled, $rdates) as $start) {
-            if (null !== $from && $start < $from) {
+        foreach (self::merge($ruled, $rdates) as $raw) {
+            if (null !== $from && $raw < $from) {
                 continue;
             }
+            $start = self::readBack($raw, $isDate, $floating);
             $key = self::key($start, $isDate, $floating);
             if (isset($seen[$key]) || isset($excluded[$key])) {
                 continue;
@@ -180,7 +181,9 @@ final class Occurrences
         }
         $before = 0;
         foreach (self::ruleStarts($rule, \DateTimeImmutable::createFromInterface($dtStart->getDateTime($zone)), null) as $start) {
-            if (self::key($start, !$dtStart->hasTime(), true === $dtStart->isFloating()) >= $key) {
+            $isDate = !$dtStart->hasTime();
+            $floating = true === $dtStart->isFloating();
+            if (self::key(self::readBack($start, $isDate, $floating), $isDate, $floating) >= $key) {
                 break;
             }
             ++$before;
@@ -289,6 +292,21 @@ final class Occurrences
         $instance->add($occurrenceId);
 
         return $instance;
+    }
+
+    /**
+     * A start as it reads back once written into an event: the clock time in its zone, read again. The rule walk can
+     * land on the first of two 02:30s on the night clocks go back, while the occurrence written from it (instance(),
+     * an override's RECURRENCE-ID, an EXDATE) reads back as the zone resolves that clock time. Keying starts by the
+     * read-back time makes them match the occurrence, its override and its EXDATE.
+     */
+    private static function readBack(\DateTimeImmutable $start, bool $isDate, bool $floating): \DateTimeImmutable
+    {
+        if ($isDate || $floating) {
+            return $start;
+        }
+
+        return new \DateTimeImmutable($start->format('Y-m-d H:i:s'), $start->getTimezone());
     }
 
     /**
