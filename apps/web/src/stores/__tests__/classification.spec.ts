@@ -8,7 +8,7 @@ import { useMailStore } from '../mail'
 const USER = 'classify-user'
 
 function smartInbox(id: string, verdict: SyncedSmartInbox['verdict'], position: number): SyncedSmartInbox {
-  return { id, builtin: null, name: id, instructions: '', includeSenders: [], excludeSenders: [], verdict, position }
+  return { id, builtin: null, name: id, instructions: '', includeSenders: [], excludeSenders: [], verdict, autoCreateTodo: false, position }
 }
 
 const first: ChangePage = {
@@ -46,6 +46,7 @@ const first: ChangePage = {
   calendarEvents: [],
   notifications: [],
   eventNotes: [],
+  todos: [],
   deleted: [],
 }
 

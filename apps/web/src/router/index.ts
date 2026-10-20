@@ -12,6 +12,8 @@ const router = createRouter({
     { path: '/smart/:smartInboxId', name: 'smart-inbox', component: HomeView },
     { path: '/smart/:smartInboxId/:threadId', name: 'smart-inbox-thread', component: HomeView },
     { path: '/search', name: 'search', component: () => import('@/views/SearchView.vue'), meta: { requiresAuth: true } },
+    { path: '/todos', name: 'todos', component: () => import('@/views/TodosView.vue'), meta: { requiresAuth: true } },
+    { path: '/todos/:todoId', name: 'todo', component: () => import('@/views/TodosView.vue'), meta: { requiresAuth: true } },
     { path: '/drafts', name: 'drafts', component: () => import('@/views/DraftsView.vue'), meta: { requiresAuth: true } },
     { path: '/outbox', name: 'outbox', component: () => import('@/views/OutboxView.vue'), meta: { requiresAuth: true } },
     {

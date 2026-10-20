@@ -7,7 +7,7 @@ import { useMailStore } from '@/stores/mail'
 import SettingsSmartInboxEditView from '../SettingsSmartInboxEditView.vue'
 
 function smartInbox(id: string, builtin: SyncedSmartInbox['builtin'], extra: Partial<SyncedSmartInbox> = {}): SyncedSmartInbox {
-  return { id, builtin, name: id, instructions: '', includeSenders: [], excludeSenders: [], verdict: 'know', position: 0, ...extra }
+  return { id, builtin, name: id, instructions: '', includeSenders: [], excludeSenders: [], verdict: 'know', autoCreateTodo: false, position: 0, ...extra }
 }
 
 /** Form validation runs asynchronously; let it and the requests it starts finish. */
@@ -94,7 +94,7 @@ describe('SettingsSmartInboxEditView', () => {
       {
         method: 'POST',
         path: '/api/v1/smart-inboxes',
-        body: { name: 'Partners', instructions: '', includeSenders: ['@partner.example', 'anna@else.example'], excludeSenders: [], verdict: 'delegate' },
+        body: { name: 'Partners', instructions: '', includeSenders: ['@partner.example', 'anna@else.example'], excludeSenders: [], verdict: 'delegate', autoCreateTodo: false },
       },
     ])
     expect(router.currentRoute.value.name).toBe('settings-smart-inboxes')
@@ -122,6 +122,31 @@ describe('SettingsSmartInboxEditView', () => {
     await settle()
 
     expect(requests).toEqual([{ method: 'PATCH', path: '/api/v1/smart-inboxes/invoices', body: { verdict: 'know' } }])
+  })
+
+  it('switches automatic todos on for a smart inbox with the Do verdict', async () => {
+    const wrapper = await mountFor('invoices')
+
+    await wrapper.get('#auto-create-todo').setValue(true)
+    await wrapper.get('form').trigger('submit')
+    await settle()
+
+    expect(requests).toEqual([{ method: 'PATCH', path: '/api/v1/smart-inboxes/invoices', body: { autoCreateTodo: true } }])
+  })
+
+  it('switches automatic todos off with another verdict, and offers them only with Do', async () => {
+    useMailStore().smartInboxes = [smartInbox('todo', 'todo', { name: 'To do', verdict: 'do', autoCreateTodo: true })]
+    const wrapper = await mountFor('todo')
+    expect((wrapper.get('#auto-create-todo').element as HTMLInputElement).checked).toBe(true)
+
+    await wrapper.get('input[value="know"]').setValue(true)
+    await settle()
+    expect(wrapper.get('#auto-create-todo').attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('Only available with the Do verdict.')
+    await wrapper.get('form').trigger('submit')
+    await settle()
+
+    expect(requests).toEqual([{ method: 'PATCH', path: '/api/v1/smart-inboxes/todo', body: { verdict: 'know', autoCreateTodo: false } }])
   })
 
   it('shows what the server refused on the field', async () => {

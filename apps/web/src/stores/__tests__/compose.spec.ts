@@ -32,7 +32,7 @@ function outgoing(status: SyncedOutgoingMessage['status'], lastError: string | n
 }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], deleted: [], ...extra }
 }
 
 describe('compose store', () => {

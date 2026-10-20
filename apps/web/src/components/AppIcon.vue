@@ -27,6 +27,9 @@ const paths = {
   know: ['M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z', 'M12 9a3 3 0 100 6 3 3 0 000-6z'],
   none: ['M6 12h12'],
   chevron: ['M6 9l6 6 6-6'],
+  todo: ['M6 4h12a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2z', 'M8 12l3 3 5-6'],
+  clock: ['M12 3a9 9 0 100 18 9 9 0 000-18z', 'M12 7v5l3 2'],
+  mail: ['M3 6h18v12H3z', 'M3 7l9 6 9-6'],
 } as const
 
 defineProps<{ name: keyof typeof paths; size?: number; label?: string }>()

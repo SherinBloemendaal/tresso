@@ -21,7 +21,7 @@ const account = { id: 'work', emailAddress: 'kim@company.example', displayName: 
 const inbox = { id: 'inbox', mailAccountId: 'work', name: 'INBOX', displayName: 'Inbox', role: 'inbox' as const }
 
 function page(cursor: number, extra: Partial<ChangePage> = {}): ChangePage {
-  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], deleted: [], ...extra }
+  return { cursor, hasMore: false, mailAccounts: [], folders: [], threads: [], messages: [], outgoingMessages: [], signatures: [], drafts: [], smartInboxes: [], calendars: [], calendarEvents: [], notifications: [], eventNotes: [], todos: [], deleted: [], ...extra }
 }
 
 function message(id: string, receivedAt: string, verdict: SyncedMessage['verdict'] = 'do'): SyncedMessage {

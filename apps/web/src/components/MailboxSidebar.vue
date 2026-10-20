@@ -7,6 +7,7 @@ import SenderAvatar from '@/components/SenderAvatar.vue'
 import SmartInboxMark from '@/components/SmartInboxMark.vue'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
+import { useTodosStore } from '@/stores/todos'
 
 const props = defineProps<{
   displayName: string
@@ -25,6 +26,7 @@ const emit = defineEmits<{ signOut: [] }>()
 const mail = useMailStore()
 const compose = useComposeStore()
 const outboxCount = computed(() => mail.outbox.length)
+const todos = useTodosStore()
 const failedCount = computed(() => mail.outbox.filter((message) => message.status === 'failed').length)
 
 const totalUnread = computed(() => [...props.unreadCounts.values()].reduce((sum, count) => sum + count, 0))
@@ -55,6 +57,11 @@ const statusText: Record<SyncedMailAccount['status'], string | null> = {
         <AppIcon name="inbox" />
         <span class="label">Unified Inbox</span>
         <span v-if="totalUnread > 0" class="count">{{ totalUnread }}<span class="visually-hidden"> unread</span></span>
+      </RouterLink>
+      <RouterLink :to="{ name: 'todos' }" class="item">
+        <AppIcon name="todo" />
+        <span class="label">Todos</span>
+        <span v-if="todos.openCount > 0" class="count">{{ todos.openCount }}<span class="visually-hidden"> open</span></span>
       </RouterLink>
       <RouterLink :to="{ name: 'drafts' }" class="item">
         <AppIcon name="draft" />

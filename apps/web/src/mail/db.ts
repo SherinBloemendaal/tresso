@@ -3,6 +3,7 @@ import {
   actionResult,
   arrivalOf,
   classifiedByUser,
+  compareTodos,
   contactMatches,
   deletedDraft,
   inList,
@@ -32,6 +33,7 @@ import {
   type SyncedDraft,
   type SyncedSmartInbox,
   type SyncedThread,
+  type SyncedTodo,
   type Verdict,
 } from '@tresso/core'
 
@@ -105,13 +107,14 @@ interface MailSchema extends DBSchema {
   }
   signatures: { key: string; value: SyncedSignature }
   smartInboxes: { key: string; value: SyncedSmartInbox }
+  todos: { key: string; value: SyncedTodo; indexes: { byMessage: string; byThread: string } }
 }
 
 type Stores = StoreNames<MailSchema>[]
 type WriteTx = IDBPTransaction<MailSchema, Stores, 'readwrite'>
 
-const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes']
-const VERSION = 5
+const ALL_STORES: Stores = ['meta', 'mailAccounts', 'folders', 'threads', 'messages', 'conversations', 'outgoing', 'contacts', 'signatures', 'drafts', 'smartInboxes', 'todos']
+const VERSION = 6
 
 export function databaseName(userId: string): string {
   return `tresso-mail-${userId}`
@@ -177,8 +180,14 @@ export class IndexedDbMailStore implements MailStore {
             }
           }
         }
-        // Outgoing mail, contacts, signatures, drafts and smart inboxes come from the delta: an existing copy syncs
-        // again from the start.
+        if (oldVersion < 6) {
+          // Smart inboxes stored before carry no autoCreateTodo; the sync from the start below brings it.
+          const todos = database.createObjectStore('todos', { keyPath: 'id' })
+          todos.createIndex('byMessage', 'messageId')
+          todos.createIndex('byThread', 'threadId')
+        }
+        // Outgoing mail, contacts, signatures, drafts, smart inboxes and todos come from the delta: an existing copy
+        // syncs again from the start.
         if (oldVersion >= 1) {
           await transaction.objectStore('meta').delete('cursor')
         }
@@ -231,6 +240,9 @@ export class IndexedDbMailStore implements MailStore {
           break
         case 'smartInbox':
           await tx.objectStore('smartInboxes').delete(deleted.id)
+          break
+        case 'todo':
+          await tx.objectStore('todos').delete(deleted.id)
           break
         case 'draft': {
           const local = await tx.objectStore('drafts').get(deleted.id)
@@ -297,6 +309,9 @@ export class IndexedDbMailStore implements MailStore {
     }
     for (const draft of page.drafts) {
       await applyDraft(tx, draft)
+    }
+    for (const todo of page.todos) {
+      await tx.objectStore('todos').put(todo)
     }
 
     const lists = await listFoldersOf(tx)
@@ -591,6 +606,48 @@ export class IndexedDbMailStore implements MailStore {
     messages.sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt))
 
     return { thread, messages }
+  }
+
+  async messages(ids: string[]): Promise<SyncedMessage[]> {
+    const store = this.db.transaction('messages').objectStore('messages')
+    const found = await Promise.all(ids.map((id) => store.get(id)))
+    return found.filter((message) => message !== undefined)
+  }
+
+  async todos(): Promise<SyncedTodo[]> {
+    return (await this.db.getAll('todos')).sort(compareTodos)
+  }
+
+  async todo(id: string): Promise<SyncedTodo | null> {
+    return (await this.db.get('todos', id)) ?? null
+  }
+
+  async todosOfThread(threadId: string): Promise<SyncedTodo[]> {
+    const tx = this.db.transaction(['todos', 'messages'])
+    const messageIds = await tx.objectStore('messages').index('byThread').getAllKeys(threadId)
+    const candidates = new Map<string, SyncedTodo>()
+    for (const todo of await tx.objectStore('todos').index('byThread').getAll(threadId)) {
+      candidates.set(todo.id, todo)
+    }
+    for (const messageId of messageIds) {
+      for (const todo of await tx.objectStore('todos').index('byMessage').getAll(messageId)) {
+        candidates.set(todo.id, todo)
+      }
+    }
+    // A message can move to another thread after its todo was made: the thread of the message on this device wins.
+    const own = new Set(messageIds)
+    const kept: SyncedTodo[] = []
+    for (const todo of candidates.values()) {
+      if (todo.messageId !== null && own.has(todo.messageId)) {
+        kept.push(todo)
+        continue
+      }
+      const elsewhere = todo.messageId === null ? undefined : await tx.objectStore('messages').get(todo.messageId)
+      if (elsewhere === undefined && todo.threadId === threadId) {
+        kept.push(todo)
+      }
+    }
+    return kept.sort(compareTodos)
   }
 }
 

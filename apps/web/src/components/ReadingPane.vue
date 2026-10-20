@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { classificationReasonText, type MessageAction, type SyncedMessage, type SyncedThread } from '@tresso/core'
+import { RouterLink, useRouter } from 'vue-router'
+import { classificationReasonText, dueLabel, type MessageAction, type SyncedMessage, type SyncedThread, type Todo } from '@tresso/core'
+import { errorMessage } from '@/api/errors'
 import type { AppliedAction } from '@tresso/core'
 import { shortcutAllowed, useMessageActions } from '@/mail/useMessageActions'
 import { useComposeStore } from '@/stores/compose'
 import { useMailStore } from '@/stores/mail'
 import { useSelectionStore } from '@/stores/selection'
+import { useTodosStore } from '@/stores/todos'
 import AppIcon from '@/components/AppIcon.vue'
 import ClassificationMenu from '@/components/ClassificationMenu.vue'
 import MessageCard from '@/components/MessageCard.vue'
@@ -26,6 +28,10 @@ const actions = useMessageActions()
 const { busy, exclusive } = actions
 const selection = useSelectionStore()
 const moveMenu = ref<InstanceType<typeof MenuButton> | null>(null)
+const todosStore = useTodosStore()
+/** The todos made from this conversation's emails. */
+const todos = ref<Todo[]>([])
+const makingTodo = ref(false)
 let unmounted = false
 
 const flagged = computed(() => messages.value.some((message) => message.flags.flagged))
@@ -37,10 +43,40 @@ const moveTargets = computed(() =>
 )
 
 async function load(): Promise<void> {
-  const result = await mail.thread(props.threadId)
+  const [result, threadTodos] = await Promise.all([mail.thread(props.threadId), mail.todosOfThread(props.threadId)])
   missing.value = result === null
   thread.value = result?.thread ?? null
   messages.value = result?.messages ?? []
+  todos.value = threadTodos
+}
+
+/**
+ * The email a todo is made from: the newest one someone else sent, which is what the conversation asks of the user;
+ * the newest one when the user wrote them all.
+ */
+function todoSource(): SyncedMessage | null {
+  const own = new Set(mail.accounts.map((account) => account.emailAddress.toLowerCase()))
+  const incoming = messages.value.filter((message) => !own.has(message.from.address.toLowerCase()))
+  return incoming[incoming.length - 1] ?? messages.value[messages.value.length - 1] ?? null
+}
+
+/** Makes a todo of the conversation, titled after its subject; the email keeps one todo however often this runs. */
+async function makeTodo(): Promise<void> {
+  const source = todoSource()
+  if (source === null || makingTodo.value) {
+    return
+  }
+  makingTodo.value = true
+  try {
+    await todosStore.makeFromMessage(source.id)
+    if (!unmounted) {
+      await load()
+    }
+  } catch (e) {
+    compose.notify({ text: errorMessage(e), tone: 'error' })
+  } finally {
+    makingTodo.value = false
+  }
 }
 
 watch(
@@ -67,8 +103,8 @@ watch(
   { immediate: true },
 )
 
-// New mail in this thread arrives through sync; reload so it shows up.
-watch(() => mail.conversations, load)
+// New mail in this thread arrives through sync, and todos made or changed elsewhere; reload so they show up.
+watch(() => [mail.conversations, mail.todos], load)
 
 function toggle(messageId: string): void {
   const next = new Set(expanded.value)
@@ -130,7 +166,7 @@ function shortcut(event: KeyboardEvent): void {
   if (!shortcutAllowed(event, compose.draft !== null && !compose.minimized) || thread.value === null || moveMenu.value?.open === true || selection.active) {
     return
   }
-  const action = { e: () => relocate('archive'), '#': () => relocate('trash'), u: markUnread, s: toggleFlag }[event.key.toLowerCase()]
+  const action = { e: () => relocate('archive'), '#': () => relocate('trash'), u: markUnread, s: toggleFlag, t: makeTodo }[event.key.toLowerCase()]
   if (action !== undefined) {
     event.preventDefault()
     void action()
@@ -154,6 +190,17 @@ onBeforeUnmount(() => {
         <button type="button" class="tool" :class="{ on: flagged }" :disabled="busy" :aria-pressed="flagged" aria-keyshortcuts="S" :title="flagged ? 'Remove flag (S)' : 'Flag (S)'" @click="toggleFlag">
           <AppIcon name="flag" label="Flag" />
         </button>
+        <button
+          v-if="todos.length === 0"
+          type="button"
+          class="tool make-todo"
+          :disabled="busy || makingTodo"
+          aria-keyshortcuts="T"
+          title="Make todo (T)"
+          @click="makeTodo"
+        >
+          <AppIcon name="todo" /> <span>Make todo</span>
+        </button>
         <MenuButton
           ref="moveMenu"
           class="move"
@@ -176,6 +223,15 @@ onBeforeUnmount(() => {
         <span v-if="classificationReasonText(thread.classificationReason ?? null)" class="reason">{{ classificationReasonText(thread.classificationReason ?? null) }}</span>
       </div>
       <h2 class="subject">{{ thread.subject || '(no subject)' }}</h2>
+      <ul v-if="todos.length > 0" class="todos" aria-label="Todos from this conversation">
+        <li v-for="todo in todos" :key="todo.id">
+          <RouterLink :to="{ name: 'todo', params: { todoId: todo.id } }" class="todo" :class="{ done: todo.completedAt !== null }">
+            <AppIcon name="todo" :size="15" />
+            <span class="todo-title">{{ todo.title }}</span>
+            <span class="todo-state">{{ dueLabel(todo, new Date()) ?? 'Open' }}</span>
+          </RouterLink>
+        </li>
+      </ul>
       <MessageCard
         v-for="message in messages"
         :key="message.id"
@@ -232,6 +288,49 @@ onBeforeUnmount(() => {
 }
 .move {
   margin-left: 8px;
+}
+.make-todo {
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.todos {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+.todo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--do-soft);
+  color: var(--ink);
+  font-size: 13px;
+  text-decoration: none;
+}
+.todo-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.todo-state {
+  color: var(--ink-2);
+}
+.todo.done {
+  background: transparent;
+}
+.todo.done .todo-title {
+  color: var(--ink-3);
+  text-decoration: line-through;
 }
 .tool.on {
   color: var(--delegate);
