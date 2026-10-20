@@ -7,6 +7,9 @@ namespace App\HandOver;
 use App\Entity\HandOver;
 use App\Entity\Message;
 use App\Entity\OutgoingMessage;
+use App\Entity\Thread;
+use App\Enum\FolderRole;
+use App\Enum\OutgoingStatus;
 use App\Outbox\Composition;
 use App\Outbox\Outbox;
 use App\Realtime\AfterCommitDispatcher;
@@ -25,8 +28,6 @@ final readonly class HandOvers
 {
     /** How many overdue hand-overs one heartbeat marks at most. */
     private const int SWEEP_BATCH = 100;
-    /** The notification kind, for the user's choice of channels (`channelsByKind`). */
-    public const string NOTIFICATION_KIND = 'hand_over';
 
     public function __construct(
         private EntityManagerInterface $entityManager,
@@ -99,10 +100,19 @@ final readonly class HandOvers
         }
     }
 
-    /** A message was stored: when it is the delegate's reply in a handed-over conversation, that hand-over is closed. */
-    public function messageArrived(Message $message, \DateTimeImmutable $now): void
+    /**
+     * A message was stored: when it is the delegate's answer in a handed-over conversation (see {@see ReplyCheck}),
+     * that hand-over is closed.
+     *
+     * @param list<string>          $references the Message-IDs it refers to (In-Reply-To, References), stored form
+     * @param array<string, string> $headers    its signal headers, by lower-cased name
+     */
+    public function messageArrived(Message $message, array $references, array $headers, bool $junk, ?FolderRole $folderRole, \DateTimeImmutable $now): void
     {
-        $answered = $this->handOvers->findAnsweredBy($message);
+        if (!ReplyCheck::isAnswer($headers, $junk, $folderRole)) {
+            return;
+        }
+        $answered = $this->handOvers->findAnsweredBy($message, $references);
         foreach ($answered as $handOver) {
             $handOver->replied($message, $now);
         }
@@ -112,8 +122,37 @@ final readonly class HandOvers
     }
 
     /**
+     * Mail the user sends to the delegate in a handed-over conversation is a follow-up, whether it was the one-click
+     * nudge or written in the composer ("Edit first").
+     */
+    public function messageQueued(OutgoingMessage $outgoing, \DateTimeImmutable $now): void
+    {
+        $followedUp = $this->handOvers->findFollowedUpBy($outgoing);
+        foreach ($followedUp as $handOver) {
+            $handOver->nudged($outgoing, $now);
+        }
+        if ([] !== $followedUp) {
+            $this->entityManager->flush();
+        }
+    }
+
+    /** Whether its latest nudge can still be stopped or is on its way: another one now would reach the delegate twice. */
+    public static function nudgeUnderWay(HandOver $handOver): bool
+    {
+        return \in_array($handOver->getLastNudge()?->getStatus(), [OutgoingStatus::Scheduled, OutgoingStatus::Queued, OutgoingStatus::Sending], true);
+    }
+
+    /** Two conversations became one: hand-overs follow the one that stays, and reach clients as changed. */
+    public function threadsMerged(Thread $gone, Thread $kept): void
+    {
+        foreach ($this->handOvers->findBy(['thread' => $gone]) as $handOver) {
+            $handOver->moveToThread($kept);
+        }
+    }
+
+    /**
      * Queues a reply to the delegate in the same conversation: to the forward when its copy in Sent is known, else to
-     * the message that was handed over.
+     * the message that was handed over. The outbox records it as the latest nudge (see messageQueued).
      */
     public function nudge(HandOver $handOver, string $html, \DateTimeImmutable $sendAt, \DateTimeImmutable $now): OutgoingMessage
     {
@@ -129,8 +168,12 @@ final readonly class HandOvers
             $this->forwardCopy($handOver) ?? $handOver->getMessage(),
             $sendAt,
         ), $now);
-        $handOver->nudged($nudge, $now);
-        $this->entityManager->flush();
+        $this->messageQueued($nudge, $now);
+        if ($handOver->getLastNudge() !== $nudge) {
+            // Neither the message handed over nor the forward's copy is left to reply to: it is the nudge all the same.
+            $handOver->nudged($nudge, $now);
+            $this->entityManager->flush();
+        }
 
         return $nudge;
     }

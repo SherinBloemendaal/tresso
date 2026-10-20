@@ -85,6 +85,7 @@ final readonly class HandOverResource
         public string $mailAccountId,
         /** The message handed over; null once it is gone. */
         public ?string $messageId,
+        /** The conversation of that message, or the one it was handed over in once the message is gone. */
         public ?string $threadId,
         public string $subject,
         public array $delegate,
@@ -111,7 +112,7 @@ final readonly class HandOverResource
             $handOver->getId()->toRfc4122(),
             $handOver->getMailAccount()->getId()->toRfc4122(),
             $handOver->getMessage()?->getId()->toRfc4122(),
-            $handOver->getMessage()?->getThread()->getId()->toRfc4122(),
+            ($handOver->getMessage()?->getThread() ?? $handOver->getThread())?->getId()->toRfc4122(),
             $handOver->getSubject(),
             ['address' => $handOver->getDelegateAddress(), 'name' => $handOver->getDelegateName()],
             $handOver->getNote(),

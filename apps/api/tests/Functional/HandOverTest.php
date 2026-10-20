@@ -4,14 +4,17 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional;
 
+use App\Entity\MailAccount;
 use App\Entity\OutgoingMessage;
 use App\HandOver\HandOverDue;
 use App\HandOver\HandOverDueHandler;
 use App\HandOver\NotifyOverdueHandOver;
 use App\HandOver\NotifyOverdueHandOverHandler;
-use App\Tests\Support\MockHttpRouter;
+use App\Sync\Ingest\MessageJanitor;
 use App\Tests\Support\InMemoryObjectStorage;
+use App\Tests\Support\MockHttpRouter;
 use Doctrine\ORM\EntityManagerInterface;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Symfony\Component\Messenger\Stamp\DelayStamp;
 use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
 use Symfony\Component\Uid\Uuid;
@@ -57,6 +60,7 @@ final class HandOverTest extends DatabaseTestCase
         self::assertResponseIsSuccessful();
         $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/folders', ['workerId' => 'w1', 'folders' => [
             ['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1],
+            ['remoteName' => 'Junk', 'displayName' => 'Junk', 'role' => 'spam', 'uidValidity' => 1],
         ]], $this->worker);
         self::assertResponseIsSuccessful();
 
@@ -119,6 +123,37 @@ final class HandOverTest extends DatabaseTestCase
         self::assertSame(['dueAt'], $this->violationPaths());
     }
 
+    public function testRejectsAForwardThatHandedOverSomethingAlready(): void
+    {
+        $this->handOverId();
+
+        $this->client->jsonRequest('POST', '/api/v1/hand-overs', $this->payload(), $this->kim);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame(['forwardId'], $this->violationPaths());
+    }
+
+    public function testRejectsAForwardOfAnotherMessage(): void
+    {
+        $this->ingest('2', '<other-1@duinzicht.example>', null, 'Room block for March', 'reservations@duinzicht.example', '2026-10-19T09:00:00+00:00');
+
+        $this->client->jsonRequest('POST', '/api/v1/hand-overs', $this->payload(['messageId' => $this->messageIdBySubject('Room block for March')]), $this->kim);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame(['forwardId'], $this->violationPaths());
+    }
+
+    public function testKeepsTheDueDateAsTheInstantTheClientMeant(): void
+    {
+        $dueAt = new \DateTimeImmutable('+3 days', new \DateTimeZone('Europe/Amsterdam'))->setTime(17, 0);
+
+        $handOver = $this->handOver(['dueAt' => $dueAt->format(\DATE_ATOM)]);
+
+        self::assertIsString($handOver['dueAt']);
+        self::assertSame($dueAt->getTimestamp(), new \DateTimeImmutable($handOver['dueAt'])->getTimestamp());
+        self::assertSame($dueAt->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d H:i:s'), $this->connection()->fetchOne('SELECT due_at FROM hand_over WHERE id = :id', ['id' => $handOver['id']]));
+    }
+
     public function testRejectsAForwardThatWasCancelled(): void
     {
         $this->client->jsonRequest('POST', '/api/v1/outgoing-messages/'.$this->forwardId.'/cancel', [], $this->kim);
@@ -155,8 +190,8 @@ final class HandOverTest extends DatabaseTestCase
     {
         $done = $this->handOverId();
         $this->patch($done, ['done' => true]);
-        $later = $this->handOver(['dueAt' => new \DateTimeImmutable('+5 days')->format(\DATE_ATOM)])['id'];
-        $sooner = $this->handOver(['dueAt' => new \DateTimeImmutable('+1 day')->format(\DATE_ATOM)])['id'];
+        $later = $this->handOver(['dueAt' => new \DateTimeImmutable('+5 days')->format(\DATE_ATOM), 'forwardId' => $this->forward()])['id'];
+        $sooner = $this->handOver(['dueAt' => new \DateTimeImmutable('+1 day')->format(\DATE_ATOM), 'forwardId' => $this->forward()])['id'];
 
         $this->client->request('GET', '/api/v1/hand-overs', server: $this->kim);
 
@@ -181,6 +216,102 @@ final class HandOverTest extends DatabaseTestCase
         self::assertSame('replied', $handOver['state']);
         self::assertSame($this->messageIdBySubject('Re: Fwd: Invoice question'), $handOver['replyMessageId']);
         self::assertNotNull($handOver['closedAt']);
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>, string}>
+     */
+    public static function notAnAnswer(): iterable
+    {
+        yield 'an out-of-office reply' => [['headers' => ['auto-submitted' => 'auto-replied']], 'INBOX'];
+        yield 'an automatic reply by Precedence' => [['headers' => ['precedence' => 'auto_reply']], 'INBOX'];
+        yield 'bulk mail' => [['headers' => ['precedence' => 'bulk']], 'INBOX'];
+        yield 'an X-Autoreply marker' => [['headers' => ['x-autoreply' => 'yes']], 'INBOX'];
+        yield 'an X-Autorespond marker' => [['headers' => ['x-autorespond' => 'Out of office']], 'INBOX'];
+        yield 'mail in Spam' => [[], 'Junk'];
+        yield 'mail the server flagged as junk' => [['junk' => true], 'INBOX'];
+        yield 'a forged sender (DMARC failed)' => [['headers' => ['authentication-results' => 'mx.company.example; dmarc=fail (p=none) header.from=company.example']], 'INBOX'];
+    }
+
+    /**
+     * @param array<string, mixed> $extra
+     */
+    #[DataProvider('notAnAnswer')]
+    public function testStaysOpenForMailThatIsNotTheirAnswer(array $extra, string $folder): void
+    {
+        $id = $this->handOverId();
+
+        $this->ingest('2', '<reply-1@company.example>', '<invoice-1@duinzicht.example>', 'Re: Fwd: Invoice question', 'lisa@company.example', new \DateTimeImmutable('+1 minute')->format(\DATE_ATOM), $extra, $folder);
+
+        self::assertSame('open', $this->get($id)['state']);
+    }
+
+    public function testClosesForAReplyThatSaysItIsNotAutomatic(): void
+    {
+        $id = $this->handOverId();
+
+        $this->ingest('2', '<reply-1@company.example>', '<invoice-1@duinzicht.example>', 'Re: Fwd: Invoice question', 'lisa@company.example', new \DateTimeImmutable('+1 minute')->format(\DATE_ATOM), ['headers' => ['auto-submitted' => 'no', 'authentication-results' => 'mx.company.example; dmarc=pass']]);
+
+        self::assertSame('replied', $this->get($id)['state']);
+    }
+
+    public function testStaysOpenForTheDelegatesMailFromBeforeTheHandOver(): void
+    {
+        $id = $this->handOverId();
+
+        $this->ingest('2', '<earlier@company.example>', '<invoice-1@duinzicht.example>', 'Re: Invoice question', 'lisa@company.example', '2026-10-19T09:00:00+00:00');
+
+        self::assertSame('open', $this->get($id)['state']);
+    }
+
+    public function testClosesWhenTheyReplyToTheForwardInAConversationOfItsOwn(): void
+    {
+        $id = $this->handOverId();
+
+        $this->ingest('2', '<reply-1@company.example>', '<'.$this->forwardMessageId().'>', 'Credit note sent', 'lisa@company.example', new \DateTimeImmutable('+1 minute')->format(\DATE_ATOM));
+
+        self::assertSame('replied', $this->get($id)['state']);
+    }
+
+    public function testStillClosesOnceTheMessageHandedOverIsGone(): void
+    {
+        $id = $this->handOverId();
+        $this->ingest('2', '<hotel-2@duinzicht.example>', '<invoice-1@duinzicht.example>', 'Re: Invoice question', 'reservations@duinzicht.example', new \DateTimeImmutable('+1 minute')->format(\DATE_ATOM));
+        $seq = $this->changeSeq($id);
+
+        $this->connection()->executeStatement('DELETE FROM message_location WHERE message_id = :id', ['id' => $this->originalId]);
+        $janitor = static::getContainer()->get(MessageJanitor::class);
+        $this->connection()->transactional(fn () => $janitor->removeOrphans($this->account()));
+        self::assertGreaterThan($seq, $this->changeSeq($id), 'Clients hear that the message is gone.');
+        self::assertNull($this->get($id)['messageId']);
+
+        $this->ingest('3', '<reply-1@company.example>', '<hotel-2@duinzicht.example>', 'Re: Invoice question', 'lisa@company.example', new \DateTimeImmutable('+2 minutes')->format(\DATE_ATOM));
+
+        self::assertSame('replied', $this->get($id)['state']);
+    }
+
+    public function testFollowsItsConversationWhenConversationsMerge(): void
+    {
+        $this->ingest('2', '<other-1@duinzicht.example>', null, 'Room block for March', 'reservations@duinzicht.example', '2026-10-19T09:00:00+00:00');
+        $otherId = $this->messageIdBySubject('Room block for March');
+        $this->client->jsonRequest('POST', '/api/v1/outgoing-messages', ['mailAccountId' => $this->accountId, 'to' => [['address' => 'lisa@company.example']], 'subject' => 'Fwd: Room block for March', 'html' => '<p>Yours</p>', 'inReplyToMessageId' => $otherId], $this->kim);
+        $forwardId = $this->responseString('id');
+        $id = $this->handOver(['messageId' => $otherId, 'forwardId' => $forwardId])['id'];
+        self::assertIsString($id);
+        $seq = $this->changeSeq($id);
+
+        // A message that refers to both conversations makes them one; the older one stays.
+        $sha = hash('sha256', 'both');
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
+            'remoteUid' => '3', 'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha, 'size' => 100, 'receivedAt' => '2026-10-19T10:00:00+00:00',
+            'messageId' => '<both@duinzicht.example>', 'references' => ['<invoice-1@duinzicht.example>', '<other-1@duinzicht.example>'],
+            'subject' => 'Both', 'from' => ['address' => 'reservations@duinzicht.example'], 'to' => [['address' => 'kim@company.example']], 'snippet' => '',
+        ]]], $this->worker);
+        self::assertResponseIsSuccessful();
+
+        $thread = $this->connection()->fetchOne('SELECT thread_id FROM hand_over WHERE id = :id', ['id' => $id]);
+        self::assertSame($this->connection()->fetchOne('SELECT thread_id FROM message WHERE id = :id', ['id' => $this->originalId]), $thread);
+        self::assertGreaterThan($seq, $this->changeSeq($id));
     }
 
     public function testStaysOpenForMailFromSomeoneElse(): void
@@ -345,7 +476,56 @@ final class HandOverTest extends DatabaseTestCase
         self::assertStringContainsString('To: Lisa Bakker <lisa@company.example>', $headers);
         self::assertStringContainsString('Subject: Re: Fwd: Invoice question', $headers);
         self::assertStringContainsString('In-Reply-To: <invoice-1@duinzicht.example>', $headers);
+        self::assertStringNotContainsStringIgnoringCase("\r\nCc:", $headers);
+        self::assertSame(['to' => [['address' => 'lisa@company.example', 'name' => 'Lisa Bakker']], 'cc' => [], 'bcc' => []], $this->outgoing($handOver['lastNudgeId'])->getRecipients());
         self::assertStringContainsString('any news on the invoice?', quoted_printable_decode($raw));
+    }
+
+    public function testRefusesAnotherNudgeWhileTheLastIsOnItsWay(): void
+    {
+        $id = $this->handOverId();
+        $this->client->jsonRequest('POST', '/api/v1/hand-overs/'.$id.'/nudge', ['html' => '<p>Any news?</p>', 'sendAt' => new \DateTimeImmutable('+5 seconds')->format(\DATE_ATOM)], $this->kim);
+        self::assertResponseIsSuccessful();
+
+        $this->client->jsonRequest('POST', '/api/v1/hand-overs/'.$id.'/nudge', ['html' => '<p>Any news?</p>'], $this->kim);
+
+        self::assertResponseStatusCodeSame(409);
+        self::assertEquals(1, $this->connection()->fetchOne("SELECT COUNT(*) FROM outgoing_message WHERE subject = 'Re: Fwd: Invoice question'"));
+    }
+
+    public function testNudgesAgainOnceTheLastWasCancelled(): void
+    {
+        $id = $this->handOverId();
+        $this->client->jsonRequest('POST', '/api/v1/hand-overs/'.$id.'/nudge', ['html' => '<p>Any news?</p>', 'sendAt' => new \DateTimeImmutable('+5 seconds')->format(\DATE_ATOM)], $this->kim);
+        $nudgeId = $this->decodedResponse()['lastNudgeId'] ?? null;
+        self::assertIsString($nudgeId);
+        $this->client->jsonRequest('POST', '/api/v1/outgoing-messages/'.$nudgeId.'/cancel', [], $this->kim);
+
+        $this->client->jsonRequest('POST', '/api/v1/hand-overs/'.$id.'/nudge', ['html' => '<p>Any news?</p>'], $this->kim);
+
+        self::assertResponseIsSuccessful();
+    }
+
+    public function testAFollowUpWrittenInTheComposerCountsAsANudge(): void
+    {
+        $id = $this->handOverId();
+
+        $this->client->jsonRequest('POST', '/api/v1/outgoing-messages', ['mailAccountId' => $this->accountId, 'to' => [['address' => 'lisa@company.example']], 'subject' => 'Re: Fwd: Invoice question', 'html' => '<p>Any news?</p>', 'inReplyToMessageId' => $this->originalId], $this->kim);
+        $followUp = $this->responseString('id');
+
+        $handOver = $this->get($id);
+        self::assertSame($followUp, $handOver['lastNudgeId']);
+        self::assertNotNull($handOver['nudgedAt']);
+    }
+
+    public function testAReplyToSomeoneElseIsNoNudge(): void
+    {
+        $id = $this->handOverId();
+
+        $this->client->jsonRequest('POST', '/api/v1/outgoing-messages', ['mailAccountId' => $this->accountId, 'to' => [['address' => 'reservations@duinzicht.example']], 'subject' => 'Re: Invoice question', 'html' => '<p>We are on it.</p>', 'inReplyToMessageId' => $this->originalId], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+
+        self::assertNull($this->get($id)['nudgedAt']);
     }
 
     public function testNudgesWithAnUndoWindow(): void
@@ -473,10 +653,13 @@ final class HandOverTest extends DatabaseTestCase
         return (int) $seq;
     }
 
-    private function ingest(string $uid, string $messageId, ?string $inReplyTo, string $subject, string $from, string $receivedAt): void
+    /**
+     * @param array<string, mixed> $extra more of the message as the worker sends it (headers, junk)
+     */
+    private function ingest(string $uid, string $messageId, ?string $inReplyTo, string $subject, string $from, string $receivedAt, array $extra = [], string $folder = 'INBOX'): void
     {
         $sha = hash('sha256', $messageId);
-        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [[
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$this->accountId.'/messages', ['workerId' => 'w1', 'folder' => $folder, 'messages' => [$extra + [
             'remoteUid' => $uid,
             'rawObjectKey' => 'raw/'.substr($sha, 0, 2).'/'.$sha,
             'size' => 100,
@@ -505,12 +688,42 @@ final class HandOverTest extends DatabaseTestCase
 
     private function raw(string $outgoingId): string
     {
+        return static::getContainer()->get(InMemoryObjectStorage::class)->read($this->outgoing($outgoingId)->getRawObjectKey());
+    }
+
+    private function outgoing(string $outgoingId): OutgoingMessage
+    {
         $entityManager = static::getContainer()->get(EntityManagerInterface::class);
         $entityManager->clear();
         $message = $entityManager->find(OutgoingMessage::class, Uuid::fromString($outgoingId));
         self::assertInstanceOf(OutgoingMessage::class, $message);
 
-        return static::getContainer()->get(InMemoryObjectStorage::class)->read($message->getRawObjectKey());
+        return $message;
+    }
+
+    /** Another forward of the message to Lisa, for one more hand-over. */
+    private function forward(): string
+    {
+        $this->client->jsonRequest('POST', '/api/v1/outgoing-messages', ['mailAccountId' => $this->accountId, 'to' => [['address' => 'lisa@company.example', 'name' => 'Lisa Bakker']], 'subject' => 'Fwd: Invoice question', 'html' => '<p>And this one</p>', 'inReplyToMessageId' => $this->originalId], $this->kim);
+        self::assertResponseStatusCodeSame(201);
+
+        return $this->responseString('id');
+    }
+
+    private function forwardMessageId(): string
+    {
+        $messageId = $this->outgoing($this->forwardId)->getMessageIdHeader();
+        self::assertNotSame('', $messageId);
+
+        return trim($messageId, '<>');
+    }
+
+    private function account(): MailAccount
+    {
+        $account = static::getContainer()->get(EntityManagerInterface::class)->find(MailAccount::class, Uuid::fromString($this->accountId));
+        self::assertInstanceOf(MailAccount::class, $account);
+
+        return $account;
     }
 
     /**

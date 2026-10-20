@@ -15,6 +15,7 @@ use App\Entity\MailAccount;
 use App\Entity\Message;
 use App\Entity\OutgoingMessage;
 use App\Enum\OutgoingStatus;
+use App\HandOver\HandOvers;
 use App\Outbox\AttachmentLimits;
 use App\Outbox\Composition;
 use App\Outbox\DraftFiling;
@@ -53,6 +54,7 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
         private AttachmentLimits $limits,
         private DownloadPolicy $downloads,
         private Unsubscriptions $unsubscriptions,
+        private HandOvers $handOvers,
     ) {
     }
 
@@ -109,6 +111,8 @@ final readonly class OutgoingMessageProcessor implements ProcessorInterface
                 if (null !== $draft) {
                     $this->filing->sending($draft, $queued);
                 }
+                // A reply to someone a conversation was handed over to follows that hand-over up.
+                $this->handOvers->messageQueued($queued, $now);
 
                 return $queued;
             }));

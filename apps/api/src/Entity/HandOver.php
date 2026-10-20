@@ -7,6 +7,7 @@ namespace App\Entity;
 use App\Enum\HandOverState;
 use App\Repository\HandOverRepository;
 use App\Sync\Change\TracksChanges;
+use App\Sync\Ingest\MessageIds;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Symfony\Bridge\Doctrine\Types\UuidType;
@@ -19,6 +20,7 @@ use Symfony\Component\Uid\Uuid;
 #[ORM\Entity(repositoryClass: HandOverRepository::class)]
 #[ORM\Index(columns: ['owner_id', 'change_seq'])]
 #[ORM\Index(columns: ['mail_account_id', 'state', 'due_at'])]
+#[ORM\UniqueConstraint(columns: ['forward_id'])]
 class HandOver implements TracksChanges
 {
     public const int MAX_NOTE = 10_000;
@@ -42,6 +44,14 @@ class HandOver implements TracksChanges
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(onDelete: 'SET NULL')]
     private ?Message $message;
+
+    /**
+     * The conversation it was handed over in, followed through merges; it still finds a reply once the message handed
+     * over is gone.
+     */
+    #[ORM\ManyToOne]
+    #[ORM\JoinColumn(onDelete: 'SET NULL')]
+    private ?Thread $thread;
 
     #[ORM\Column(length: 998)]
     private string $subject;
@@ -67,6 +77,10 @@ class HandOver implements TracksChanges
     #[ORM\ManyToOne]
     #[ORM\JoinColumn(onDelete: 'SET NULL')]
     private ?OutgoingMessage $forward;
+
+    /** The forward's Message-ID (stored form), which a reply to it refers to, whatever became of the conversation. */
+    #[ORM\Column(length: 998, nullable: true)]
+    private ?string $forwardMessageId;
 
     /** When the due date passed without a reply; set once, which is when the user is told. */
     #[ORM\Column(nullable: true)]
@@ -107,12 +121,14 @@ class HandOver implements TracksChanges
         $this->mailAccount = $message->getMailAccount();
         $this->owner = $this->mailAccount->getOwner();
         $this->message = $message;
+        $this->thread = $message->getThread();
         $this->subject = $message->getSubject();
         $this->delegateAddress = mb_strtolower($delegateAddress);
         $this->delegateName = $delegateName;
         $this->note = $note;
-        $this->dueAt = $dueAt;
+        $this->dueAt = self::utc($dueAt);
         $this->forward = $forward;
+        $this->forwardMessageId = MessageIds::normalize($forward?->getMessageIdHeader());
         $this->createdAt = $now;
         $this->updatedAt = $now;
     }
@@ -177,6 +193,21 @@ class HandOver implements TracksChanges
         return $this->forward;
     }
 
+    public function getThread(): ?Thread
+    {
+        return $this->thread;
+    }
+
+    public function moveToThread(Thread $thread): void
+    {
+        $this->thread = $thread;
+    }
+
+    public function getForwardMessageId(): ?string
+    {
+        return $this->forwardMessageId;
+    }
+
     public function getOverdueAt(): ?\DateTimeImmutable
     {
         return $this->overdueAt;
@@ -215,6 +246,7 @@ class HandOver implements TracksChanges
     /** A new due date; once it passes without a reply the user is told again. */
     public function reschedule(\DateTimeImmutable $dueAt, \DateTimeImmutable $now): void
     {
+        $dueAt = self::utc($dueAt);
         if ($dueAt == $this->dueAt) {
             return;
         }
@@ -275,6 +307,12 @@ class HandOver implements TracksChanges
         $this->updatedAt = $now;
     }
 
+    /** Stored without a zone, so always in UTC: the zone a client sent is not kept. */
+    private static function utc(\DateTimeImmutable $moment): \DateTimeImmutable
+    {
+        return $moment->setTimezone(new \DateTimeZone('UTC'));
+    }
+
     public function getChangeOwner(): User
     {
         return $this->owner;
@@ -282,7 +320,7 @@ class HandOver implements TracksChanges
 
     public static function clientFields(): ?array
     {
-        return ['message', 'subject', 'delegateAddress', 'delegateName', 'note', 'dueAt', 'state', 'forward', 'overdueAt', 'nudgedAt', 'lastNudge', 'reply', 'closedAt', 'updatedAt'];
+        return ['message', 'thread', 'subject', 'delegateAddress', 'delegateName', 'note', 'dueAt', 'state', 'forward', 'overdueAt', 'nudgedAt', 'lastNudge', 'reply', 'closedAt', 'updatedAt'];
     }
 
     public static function changeType(): string
