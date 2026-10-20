@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { batchTimeLabel, type BatchSchedule } from '@tresso/core'
+import { batchTimeLabel, NO_UNSUBSCRIBE_ON_IMAP, type BatchSchedule, type SyncedMailAccount } from '@tresso/core'
+import { useMailStore } from '@/stores/mail'
 import SettingsBatchesView from '../SettingsBatchesView.vue'
 
 const BROWSER_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -62,6 +63,25 @@ describe('SettingsBatchesView', () => {
   function timeInputs(wrapper: Awaited<ReturnType<typeof mountView>>) {
     return wrapper.findAll<HTMLInputElement>('input[type="time"]')
   }
+
+  function mailAccount(id: string, displayName: string, provider: string): SyncedMailAccount {
+    return { id, emailAddress: `${id}@example.test`, displayName, provider, status: 'active', statusDetail: null, lastSyncedAt: null, defaultSignatureId: null, calendarStatus: 'unknown', calendarStatusDetail: null }
+  }
+
+  it('explains why IMAP accounts offer no one-click unsubscribe, naming them', async () => {
+    useMailStore().accounts = [mailAccount('work', 'Work', 'imap'), mailAccount('gmail', 'Personal', 'gmail')]
+
+    const note = (await mountView()).get('[role="note"]')
+
+    expect(note.text()).toContain(NO_UNSUBSCRIBE_ON_IMAP)
+    expect(note.text()).toContain('This applies to Work.')
+  })
+
+  it('has nothing to explain when every account can unsubscribe', async () => {
+    useMailStore().accounts = [mailAccount('gmail', 'Personal', 'gmail')]
+
+    expect((await mountView()).find('[role="note"]').exists()).toBe(false)
+  })
 
   it('shows the saved times and zone, and marks the required fields from the schema', async () => {
     const wrapper = await mountView()
