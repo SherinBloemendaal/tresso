@@ -100,8 +100,8 @@ function shortcut(event: KeyboardEvent): void {
   if (!shortcutAllowed(event, compose.draft !== null && !compose.minimized)) {
     return
   }
-  // A key pressed while the next email still loads is for that email: none is lost.
-  const showing = current.value !== null
+  // Only for the email on screen: while the next one still loads, deciding keys wait for it to show.
+  const showing = thread.value !== null
   const keys: Record<string, (() => void) | undefined> = {
     d: showing ? () => triage.decide('do') : undefined,
     h: showing ? () => triage.decide('delegate') : undefined,

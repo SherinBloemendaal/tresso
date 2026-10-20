@@ -52,6 +52,7 @@ export const useHandOversStore = defineStore('handOvers', () => {
       nudge: (id, request) => auth.send<SyncedHandOver>('POST', `/api/v1/hand-overs/${encodeURIComponent(id)}/nudge`, request),
     },
     cancel: (outgoingId) => mail.cancelOutgoing(outgoingId),
+    outgoing: (outgoingId) => mail.outgoing(outgoingId),
     accounts: () => mail.accounts,
     signatures: () => mail.signatures,
     sync: () => mail.syncNow(),
@@ -67,20 +68,16 @@ export const useHandOversStore = defineStore('handOvers', () => {
     handingOver.value = message
   }
 
-  /** The message a conversation is handed over by: its newest from someone else, or its newest at all. */
-  async function messageOf(threadId: string): Promise<SyncedMessage | null> {
-    const found = await mail.thread(threadId)
-    if (found === null || found.messages.length === 0) {
-      return null
-    }
+  /** The message of these a conversation is handed over by: the newest from someone else, or the newest at all. */
+  function handOverMessage(messages: SyncedMessage[]): SyncedMessage | null {
     const own = new Set(mail.accounts.map((account) => account.emailAddress.toLowerCase()))
-    const incoming = found.messages.filter((message) => !own.has(message.from.address.toLowerCase()))
-    return incoming[incoming.length - 1] ?? found.messages[found.messages.length - 1]!
+    const incoming = messages.filter((message) => !own.has(message.from.address.toLowerCase()))
+    return incoming[incoming.length - 1] ?? messages[messages.length - 1] ?? null
   }
 
   /** Opens the dialog for a conversation. */
   async function openForThread(threadId: string): Promise<void> {
-    const message = await messageOf(threadId)
+    const message = handOverMessage((await mail.thread(threadId))?.messages ?? [])
     if (message === null) {
       compose.notify({ text: 'This conversation no longer exists.', tone: 'error' })
       return
@@ -89,11 +86,12 @@ export const useHandOversStore = defineStore('handOvers', () => {
   }
 
   /**
-   * Opens the dialog for a conversation and settles once it closes: with the hand-over, or null when the user closed
-   * it without handing over. The caller gives the notice (and its undo, see {@link takeBack}).
+   * Opens the dialog for the messages of a conversation the user saw and settles once it closes: with the hand-over,
+   * or null when the user closed it without handing over. The caller gives the notice (and its undo, see
+   * {@link takeBack}).
    */
-  async function handOverAndWait(threadId: string): Promise<HandedOver | null> {
-    const message = await messageOf(threadId)
+  async function handOverAndWait(messages: SyncedMessage[]): Promise<HandedOver | null> {
+    const message = handOverMessage(messages)
     if (message === null) {
       throw new Error('This conversation no longer exists.')
     }

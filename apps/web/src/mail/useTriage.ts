@@ -1,5 +1,5 @@
 import { computed, onScopeDispose, shallowRef, triggerRef, watch } from 'vue'
-import { TriageSession, currentTriage, todoOnDo, triageProgress, type TriageConversation, type TriageDecision, type TriageHooks, type TriageUndo } from '@tresso/core'
+import { TriageSession, currentTriage, todoOnDo, triageProgress, withdrawnNotice, type TriageConversation, type TriageDecision, type TriageHooks, type TriageUndo } from '@tresso/core'
 import { ApiError, errorMessage } from '@/api/errors'
 import { useMessageActions } from '@/mail/useMessageActions'
 import { useComposeStore } from '@/stores/compose'
@@ -45,13 +45,15 @@ export function useTriage(hooks: Partial<TriageHooks> = {}) {
    * not left, and the hand-over in any case.
    */
   async function handOver(conversation: TriageConversation): Promise<TriageUndo | null> {
-    const handed = await handOvers.handOverAndWait(conversation.thread.id)
+    const handed = await handOvers.handOverAndWait(conversation.messages)
     if (handed === null) {
       return null
     }
     return {
       undo: async () => {
-        await handOvers.takeBack(handed)
+        if ((await handOvers.takeBack(handed)) === 'withdrawn') {
+          compose.notify({ text: withdrawnNotice(handed), tone: 'info' })
+        }
       },
     }
   }
