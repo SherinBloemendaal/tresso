@@ -1468,7 +1468,8 @@ edition hands over by mail.
   gives the conversation of the message, or the kept one once the message is gone; the client stores resolve it again
   from their own copy the same way. When the message janitor removes a message a hand-over points at, the hand-over
   gets a new change number, so clients learn the link is gone.
-- **Closing:** every newly stored message is checked on ingest. From the delegate's address, received after the
+- **Closing:** every newly stored message is checked on ingest, and so is a known one that lands in an inbox (an
+  answer the user rescued from Spam). From the delegate's address, received after the
   conversation was handed over, and in it (the conversation of the message handed over, the kept conversation, or a
   reply to the forward by its Message-ID) closes it as `replied` with that message. Not an answer
   (`App\HandOver\ReplyCheck`): automatic replies (`Auto-Submitted` other than `no`, `Precedence` `auto_reply`,
@@ -1488,7 +1489,8 @@ edition hands over by mail.
   silent. It goes out as "No reply from {delegate} yet" through the `NotificationDispatcher` (kind `hand_over`, a
   `NotificationKind` case, path `/waiting?nudge={id}`, the phone's `reminders` channel, `userId` in its data) on the
   channels the user chose for `hand_over` in `channelsByKind`, else the phone and the desktop, keyed
-  `handOver:{id}:{overdue at}`, so a retry never notifies a device twice and a new round tells again. The claim is part
+  `handOver:{id}:{round}` (a round per time it became overdue), so a retry never notifies a device twice and a new
+  round tells again. The claim is part
   of the transaction that records the notice on the hand-over (`notifiedAt`, `notifiedChannels`, `notifiedSilently`;
   with no channel chosen the decision is recorded with none), and a scheduler task (`SweepHandOverNotices`, every
   minute) delivers what a lost message or an ended hold missed and sends failed or stuck deliveries again. The delta
@@ -1503,7 +1505,8 @@ edition hands over by mail.
   or failed nudge no longer counts as nudged. A nudge is refused (409) while the previous one is scheduled, queued or
   being sent, and the clients refuse a second send while one is under way. "Edit first" opens the follow-up in the
   compose window instead; any message the user sends to the delegate as a reply in the conversation, or to the
-  forward, counts as the latest nudge (recorded when the outbox queues it).
+  forward, counts as the latest nudge (recorded when the outbox queues it), except a forward (by its draft, or its
+  subject without one) and mail scheduled for later than its undo window, which neither counts nor blocks a nudge.
 - **Clients:** both stores keep hand-overs (`handOvers()` in "Waiting on" order: open ones by due date, then closed
   ones). The web client has Hand over in the reading pane (H) and offers it right after a conversation is judged
   `delegate`; the dialog (vee-validate) takes the person, the note and a due date (today while an hour of it is left,
