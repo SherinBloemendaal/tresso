@@ -182,3 +182,38 @@ func TestAnOccurrenceThatKeepsFailingStillReportsGraphsVersion(t *testing.T) {
 		etag = *r.ETag
 	}
 }
+
+func TestAnEditAtMicrosoftBeforeAFailedWriteIsAConflictNotAnOverwrite(t *testing.T) {
+	graph := newFakeGraph(t)
+	graph.put(single("ev9", "Lunch"))
+	fake := calsynctest.NewAPI(owner)
+	run(t, graph, fake)
+	calsynctest.Eventually(t, "the sync", func() bool { _, ok := fake.Objects(defaultCalendar)["ev9"]; return ok })
+	object := fake.Objects(defaultCalendar)["ev9"]
+	// Lisa edits the event after the worker read it; Graph then answers the worker's write with a 503, not a 412.
+	graph.mu.Lock()
+	graph.beforeWrite = func(method, path string) {
+		if method != http.MethodPatch || !strings.HasSuffix(path, "/events/ev9") || graph.beforeWrite == nil {
+			return
+		}
+		e := graph.events["ev9"]
+		e.Subject = "Lunch, Lisa's version"
+		graph.touch(e)
+		graph.beforeWrite = nil
+	}
+	graph.failures["PATCH /events/ev9"] = http.StatusServiceUnavailable
+	graph.mu.Unlock()
+
+	remoteID, etag := "ev9", object.ETag
+	renamed := strings.Replace(object.Ical, "SUMMARY:Lunch", "SUMMARY:Brunch", 1)
+	fake.Queue(api.CalendarOperation{ID: "rename", Kind: "put", CalendarRemoteID: defaultCalendar, UID: "uid-ev9", RemoteID: &remoteID, IfMatch: &etag, Ical: &renamed, Notify: true})
+	calsynctest.Eventually(t, "the write", func() bool { _, ok := fake.Result("rename"); return ok })
+
+	r, _ := fake.Result("rename")
+	if r.Outcome != api.OperationConflict || r.Current == nil || !strings.Contains(*r.Current.Ical, "Lisa's version") {
+		t.Fatalf("a retry would pass the If-Match and overwrite Lisa's edit; it is a conflict: %+v", r)
+	}
+	if e, _ := graph.get("ev9"); e.Subject != "Lunch, Lisa's version" {
+		t.Fatalf("subject = %q", e.Subject)
+	}
+}

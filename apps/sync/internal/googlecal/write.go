@@ -294,7 +294,8 @@ func (s *session) Write(ctx context.Context, calendar calsync.Calendar, operatio
 	if operation.Notify {
 		notify = "all"
 	}
-	w := &writer{session: s, calendar: calendar, info: info, operation: operation, notify: notify, self: s.self, series: current}
+	w := &writer{session: s, calendar: calendar, info: info, operation: operation, notify: notify, self: s.self}
+	w.begin(current)
 	var masterID string
 	if !exists {
 		masterID, err = w.create(ctx, doc)
@@ -314,7 +315,8 @@ func (s *session) Write(ctx context.Context, calendar calsync.Calendar, operatio
 		if result.Outcome == api.OperationRetry && masterID != "" {
 			// A series is written step by step, and an earlier attempt may have written part of it: every retry
 			// carries Google's version, so the next attempt starts from it, and when none is left Tresso keeps it.
-			s.progress(ctx, calendar, operation, masterID, &result)
+			// Unless someone else changed the event meanwhile: then it is a conflict, as a 412 would have been.
+			s.progress(ctx, calendar, operation, masterID, &result, w)
 		}
 		return result, accessErr
 	}
@@ -335,11 +337,49 @@ type writer struct {
 	self      string
 	// series is the resource as Google has it, for comparing the master with its cancelled occurrences.
 	series series
+	// known holds the ETag each event of the resource had when this attempt read it, or got from this attempt's own
+	// write of it: any other ETag is someone else's change.
+	known map[string]string
 }
 
-// send makes one change at Google.
+// begin records the resource as this attempt found it.
+func (w *writer) begin(current series) {
+	w.series = current
+	w.known = map[string]string{}
+	for _, e := range current.events() {
+		w.known[e.ID] = e.ETag
+	}
+}
+
+// send makes one change at Google and records the ETag Google gave the event it wrote.
 func (w *writer) send(ctx context.Context, method, rawURL string, query url.Values, ifMatch string, body any, out any) error {
-	return w.session.send(ctx, method, rawURL, query, ifMatch, body, out)
+	var written event
+	if out == nil {
+		out = &written
+	}
+	if err := w.session.send(ctx, method, rawURL, query, ifMatch, body, out); err != nil {
+		return err
+	}
+	if e, ok := out.(*event); ok && e.ID != "" {
+		w.known[e.ID] = e.ETag
+	}
+	return nil
+}
+
+// untouched: every event of the resource is as this attempt read or wrote it, so nobody else changed it meanwhile.
+// A write Google took before answering with an error also counts as someone else's change: a conflict, never an
+// overwrite.
+func (w *writer) untouched(current series) bool {
+	events := current.events()
+	if len(events) != len(w.known) {
+		return false
+	}
+	for _, e := range events {
+		if etag, ok := w.known[e.ID]; !ok || etag != e.ETag {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *writer) query(conference bool) url.Values {
@@ -377,7 +417,7 @@ func (w *writer) create(ctx context.Context, doc *ical.Component) (string, error
 		if !found {
 			return "", err
 		}
-		w.series = current
+		w.begin(current)
 		return id, w.update(ctx, doc, current)
 	}
 	if err != nil {
@@ -624,9 +664,13 @@ func (s *session) reread(ctx context.Context, calendar calsync.Calendar, operati
 
 // progress puts Google's id, ETag and version of a partly written event into a retry, so the API bases the next
 // attempt on that version.
-func (s *session) progress(ctx context.Context, calendar calsync.Calendar, operation api.CalendarOperation, masterID string, result *api.OperationResult) {
+func (s *session) progress(ctx context.Context, calendar calsync.Calendar, operation api.CalendarOperation, masterID string, result *api.OperationResult, w *writer) {
 	current, found, err := s.series(ctx, calendar.RemoteID, masterID, operation.UID)
 	if err != nil || !found {
+		return
+	}
+	if !w.untouched(current) {
+		*result = s.conflict(calendar, masterID, current)
 		return
 	}
 	etag := current.etag()

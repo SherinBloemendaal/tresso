@@ -107,6 +107,15 @@ type series struct {
 	exceptions []event
 }
 
+// events is the master (when there is one) and every exception of the resource.
+func (s series) events() []event {
+	out := make([]event, 0, len(s.exceptions)+1)
+	if s.master != nil {
+		out = append(out, *s.master)
+	}
+	return append(out, s.exceptions...)
+}
+
 // objectID is the resource a Google event belongs to: the master's id for exceptions, its own id otherwise.
 func objectID(e event) string {
 	if e.RecurringEventID != "" {
