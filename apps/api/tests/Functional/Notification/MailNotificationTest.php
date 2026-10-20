@@ -100,6 +100,7 @@ final class MailNotificationTest extends DatabaseTestCase
         self::assertSame('mail', $expo[0]['data']['kind']);
         self::assertSame('/thread/'.$thread['id'], $expo[0]['data']['path'], 'A tap opens the conversation.');
         self::assertSame($thread['id'], $expo[0]['data']['threadId']);
+        self::assertSame($this->kimsId()->toRfc4122(), $expo[0]['data']['userId'], 'A browser shows it only for the user who turned notifications on there.');
         self::assertCount(1, $this->http()->requestsTo(self::PUSH_ENDPOINT), 'The browser gets it by web push.');
 
         $notifications = $page['mailNotifications'];
@@ -269,7 +270,7 @@ final class MailNotificationTest extends DatabaseTestCase
         // As an AI classifier (Tresso Cloud) judges it: to hand over.
         $entityManager->wrapInTransaction(function () use ($message, $category): void {
             $message->classify($category, Verdict::Delegate, new \DateTimeImmutable());
-            $this->notifier()->consider($this->kim(), [[$message, Verdict::Know]], new \DateTimeImmutable());
+            $this->notifier()->consider($this->kim(), [$message], new \DateTimeImmutable());
         });
         $this->sendQueued();
 
@@ -277,6 +278,154 @@ final class MailNotificationTest extends DatabaseTestCase
         self::assertCount(1, $expo);
         self::assertSame('newsletter@shop.example', $expo[0]['title'], 'Without a name, the address.');
         self::assertSame('To hand over: Weekly deals', $expo[0]['body']);
+    }
+
+    public function testMailReachesOnlyItsOwnersDevices(): void
+    {
+        $this->createUser('lisa@example.test', 'Lisa');
+        $lisa = $this->userHeaders('lisa@example.test', ['settings:write']);
+        $this->client->jsonRequest('POST', '/api/v1/notification-devices', ['kind' => 'expo', 'endpoint' => 'ExponentPushToken[lisa]', 'name' => 'Lisa phone'], $lisa);
+        self::assertResponseIsSuccessful();
+
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review')]]);
+        $this->classifyAndSend();
+
+        $expo = $this->http()->requestsTo(self::EXPO_SEND);
+        self::assertCount(1, $expo);
+        $body = json_decode($expo[0]['body'], true, flags: \JSON_THROW_ON_ERROR);
+        self::assertIsArray($body);
+        self::assertSame('ExponentPushToken[abc123]', $body['to']);
+    }
+
+    public function testTheSameMailInTwoAccountsNotifiesOnce(): void
+    {
+        $this->client->jsonRequest('POST', '/api/v1/mail-accounts', [
+            'emailAddress' => 'kim@home.example',
+            'displayName' => 'Home',
+            'username' => 'kim@home.example',
+            'password' => 'app-password-2',
+            'imap' => ['host' => 'imap.home.example', 'port' => 993, 'security' => 'tls'],
+            'smtp' => ['host' => 'smtp.home.example', 'port' => 465, 'security' => 'tls'],
+        ], $this->kim);
+        $home = $this->responseString('id');
+        $this->client->jsonRequest('POST', '/internal/sync/leases', ['workerId' => 'w1'], $this->worker);
+        self::assertResponseIsSuccessful();
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$home.'/folders', ['workerId' => 'w1', 'folders' => [['remoteName' => 'INBOX', 'displayName' => 'Inbox', 'role' => 'inbox', 'uidValidity' => 1]]], $this->worker);
+        self::assertResponseIsSuccessful();
+
+        $both = $this->message('1', 'Budget review', ['messageId' => '<budget@partner.example>', 'to' => [['address' => self::ME], ['address' => 'kim@home.example']]]);
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$both]]);
+        $this->client->jsonRequest('POST', '/internal/sync/accounts/'.$home.'/messages', ['workerId' => 'w1', 'folder' => 'INBOX', 'messages' => [$both]], $this->worker);
+        self::assertResponseIsSuccessful();
+        $this->classifyAndSend();
+
+        self::assertSame(['do', 'do'], array_column($this->changes()['threads'], 'verdict'));
+        self::assertCount(1, $this->expoBodies());
+        self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification WHERE dropped_at IS NOT NULL'), 'The copy never notifies later either.');
+    }
+
+    public function testClassifyingAgainNeverNotifies(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [
+            $this->message('1', 'Weekly deals', ['from' => ['address' => 'newsletter@shop.example'], 'headers' => ['list-unsubscribe' => '<https://shop.example/u>']]),
+            $this->message('2', 'More deals', ['from' => ['address' => 'newsletter@shop.example'], 'headers' => ['list-unsubscribe' => '<https://shop.example/u>']]),
+        ]]);
+        $this->classifyAndSend();
+        $threads = array_column($this->changes()['threads'], 'id', 'subject');
+        $todo = $this->builtinId('todo');
+
+        // The user moves one to Todo: the sender's other mail is classified again, and judged `do` for the first time.
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threads['Weekly deals'].'/classification', ['smartInboxId' => $todo], $this->kim);
+        self::assertResponseIsSuccessful();
+        $this->runClassification();
+        $this->sendQueued();
+
+        self::assertSame('do', array_column($this->changes()['threads'], 'verdict', 'subject')['More deals']);
+        self::assertSame([], $this->expoBodies(), 'Neither the moved conversation nor the rerun pushes: that mail is not new.');
+        self::assertEquals(0, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification'));
+    }
+
+    public function testNewMailInAConversationTheUserPlacedElsewhereDoesNotNotify(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review', ['messageId' => '<budget@partner.example>'])]]);
+        $this->classifyAndSend();
+        $threadId = $this->changes()['threads'][0]['id'];
+        $this->client->jsonRequest('PUT', '/api/v1/threads/'.$threadId.'/classification', ['smartInboxId' => $this->builtinId('notification')], $this->kim);
+        self::assertResponseIsSuccessful();
+        $this->runClassification();
+
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('2', 'Re: Budget review', ['messageId' => '<reply@partner.example>', 'inReplyTo' => '<budget@partner.example>', 'from' => ['address' => 'bob@partner.example', 'name' => 'Bob']])]]);
+        $this->classifyAndSend();
+
+        // Someone else replied: no sender rule applies, so the reply alone would be `do`.
+        self::assertSame('do', $this->connection()->fetchOne("SELECT verdict FROM message WHERE subject = 'Re: Budget review'"));
+        $page = $this->changes();
+        self::assertCount(1, $page['threads'], 'The reply joined the conversation.');
+        self::assertSame('know', $page['threads'][0]['verdict'], 'The user\'s placement stays.');
+        self::assertCount(1, $this->expoBodies(), 'Only the first message notified.');
+    }
+
+    public function testDesktopOnlyMailReachesBrowsersAndTheDesktopApp(): void
+    {
+        $this->patchSettings(['channelsByKind' => ['mail' => ['desktop']]]);
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review')]]);
+        $this->classifyAndSend();
+
+        self::assertSame([], $this->expoBodies());
+        self::assertCount(1, $this->http()->requestsTo(self::PUSH_ENDPOINT));
+        self::assertSame(['desktop'], $this->changes()['mailNotifications'][0]['channels']);
+    }
+
+    public function testWithoutPreviewsOnlyTheAccountIsSaid(): void
+    {
+        $this->patchSettings(['mailPreviews' => false]);
+        self::assertFalse($this->getJson('/api/v1/notification-settings', $this->kim)['mailPreviews']);
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review', ['snippet' => 'The numbers'])]]);
+        $this->classifyAndSend();
+
+        $expo = $this->expoBodies();
+        self::assertSame('New mail from Work', $expo[0]['title']);
+        self::assertSame('', $expo[0]['body']);
+        self::assertStringNotContainsString('Budget', json_encode($expo[0], \JSON_THROW_ON_ERROR));
+        $delta = $this->changes()['mailNotifications'][0];
+        self::assertSame(['New mail from Work', ''], [$delta['title'], $delta['body']], 'The desktop app shows no more than the phone.');
+        self::assertSame(['New mail from Work', ''], $this->connection()->fetchNumeric('SELECT title, body FROM mail_notification'), 'Nor does the server keep it.');
+    }
+
+    public function testMailTooLateAfterAnOutageIsDropped(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review')]]);
+        $this->runClassification();
+
+        $this->notifier()->deliver($this->onlyNotificationId(), new \DateTimeImmutable('+2 hours +1 minute'));
+
+        self::assertSame([], $this->expoBodies());
+        self::assertEquals(1, $this->connection()->fetchOne('SELECT COUNT(*) FROM mail_notification WHERE dropped_at IS NOT NULL'));
+    }
+
+    public function testASendThatNeverReportedBackIsTriedAgain(): void
+    {
+        $this->ingest('messages', ['folder' => 'INBOX', 'messages' => [$this->message('1', 'Budget review')]]);
+        $this->classifyAndSend();
+        // As after a crash between claiming and sending.
+        $this->connection()->executeStatement("UPDATE notification_delivery SET status = 'sending', updated_at = updated_at - INTERVAL '11 minutes' WHERE target <> 'email' AND delivery_key LIKE 'mail:%' AND target = (SELECT id::text FROM notification_device WHERE kind = 'web_push')");
+
+        $this->notifier()->sweep(new \DateTimeImmutable());
+
+        self::assertCount(2, $this->http()->requestsTo(self::PUSH_ENDPOINT));
+        self::assertCount(1, $this->expoBodies(), 'What went out is never sent again.');
+    }
+
+    private function builtinId(string $builtin): string
+    {
+        $smartInboxes = $this->getJson('/api/v1/sync/changes?since=0&limit=2000', $this->kim)['smartInboxes'];
+        self::assertIsArray($smartInboxes);
+        foreach ($smartInboxes as $smartInbox) {
+            if (\is_array($smartInbox) && $builtin === $smartInbox['builtin'] && \is_string($smartInbox['id'])) {
+                return $smartInbox['id'];
+            }
+        }
+        self::fail('No built-in smart inbox '.$builtin.'.');
     }
 
     private function classifyAndSend(): void

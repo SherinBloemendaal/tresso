@@ -81,6 +81,9 @@ final readonly class NotificationSettingsProcessor implements ProcessorInterface
             if (null !== $data->holdMailInMeetings) {
                 $preferences->setHoldMailInMeetings($data->holdMailInMeetings);
             }
+            if (null !== $data->mailPreviews) {
+                $preferences->setMailPreviews($data->mailPreviews);
+            }
             if (null !== $data->leaveNow) {
                 $preferences->setLeaveNow($data->leaveNow);
             }

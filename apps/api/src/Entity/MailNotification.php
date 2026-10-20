@@ -115,6 +115,16 @@ class MailNotification implements SyncedOnlyWhenSeen
         return $this->fireAt;
     }
 
+    /**
+     * The user turned previews off: what the notification says becomes only which account the mail came to, so no
+     * sender, subject or text leaves the server (nor stays in this row).
+     */
+    public function hideContent(string $title): void
+    {
+        $this->title = mb_substr($title, 0, 255);
+        $this->body = '';
+    }
+
     /** A focus block or a meeting: it waits for their end. */
     public function postpone(\DateTimeImmutable $until): void
     {
