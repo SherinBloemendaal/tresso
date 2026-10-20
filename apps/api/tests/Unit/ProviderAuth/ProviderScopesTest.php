@@ -43,4 +43,18 @@ final class ProviderScopesTest extends TestCase
         self::assertSame([ProviderFeature::Mail], ProviderScopes::coveredFeatures(OAuthProvider::Microsoft, ['mail.readwrite', 'mail.send', 'openid', 'user.read']));
         self::assertSame([], ProviderScopes::coveredFeatures(OAuthProvider::Microsoft, ['mail.readwrite', 'user.read']));
     }
+
+    public function testCalendarsAreAFeatureOfTheirOwn(): void
+    {
+        $google = ProviderScopes::normalize(OAuthProvider::Google, 'openid https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly');
+        self::assertSame([ProviderFeature::Mail, ProviderFeature::Calendar], ProviderScopes::coveredFeatures(OAuthProvider::Google, $google));
+        self::assertSame([ProviderFeature::Mail], ProviderScopes::coveredFeatures(OAuthProvider::Google, ProviderScopes::normalize(OAuthProvider::Google, 'openid https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/calendar.events')), 'Without the calendar list there is no calendar sync.');
+
+        $microsoft = ProviderScopes::normalize(OAuthProvider::Microsoft, 'https://graph.microsoft.com/Calendars.ReadWrite Mail.ReadWrite Mail.Send User.Read');
+        self::assertSame([ProviderFeature::Mail, ProviderFeature::Calendar], ProviderScopes::coveredFeatures(OAuthProvider::Microsoft, $microsoft));
+        self::assertSame(
+            ['openid', 'email', 'profile', 'offline_access', 'https://graph.microsoft.com/Calendars.ReadWrite'],
+            ProviderScopes::request(OAuthProvider::Microsoft, [ProviderFeature::Calendar]),
+        );
+    }
 }

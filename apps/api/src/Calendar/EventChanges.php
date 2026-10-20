@@ -36,6 +36,8 @@ final readonly class EventChanges
         public ?int $travelMinutes = null,
         /** Important events reach the user also in quiet and outside working hours (PRIORITY 1). */
         public bool $important = false,
+        /** Ask the calendar's provider for an online meeting ("meet", "teams") when the event has none. */
+        public ?string $conferenceProvider = null,
     ) {
         if ($start->isDate !== $end->isDate) {
             throw new \InvalidArgumentException('Start and end must both be dates or both be date-times.');

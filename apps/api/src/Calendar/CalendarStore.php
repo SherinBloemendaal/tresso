@@ -36,11 +36,13 @@ final readonly class CalendarStore
     }
 
     /**
-     * @param bool $fromProvider the data came from the provider, so nothing has to be written back
+     * @param bool        $fromProvider the data came from the provider, so nothing has to be written back
+     * @param bool        $notify       a provider that schedules tells attendees (or the organizer) about the change
+     * @param string|null $comment      the user's comment with their answer to an invitation
      *
      * @return array<string, CalendarEvent> the resource's event rows by recurrence key
      */
-    public function save(CalendarObject $object, VCalendar $calendar, bool $fromProvider = false): array
+    public function save(CalendarObject $object, VCalendar $calendar, bool $fromProvider = false, bool $notify = true, ?string $comment = null): array
     {
         $uids = array_keys(CalendarDocument::eventsByUid($calendar));
         if ([$object->getUid()] !== $uids) {
@@ -61,13 +63,13 @@ final readonly class CalendarStore
         $this->planNotifications($object);
 
         if (!$fromProvider && !$object->getCalendar()->isLocal()) {
-            $this->queuePut($object);
+            $this->queuePut($object, $notify, $comment);
         }
 
         return $rows;
     }
 
-    public function remove(CalendarObject $object, bool $fromProvider = false): void
+    public function remove(CalendarObject $object, bool $fromProvider = false, bool $notify = true): void
     {
         $calendar = $object->getCalendar();
         $now = new \DateTimeImmutable();
@@ -83,8 +85,9 @@ final readonly class CalendarStore
                 }
             } elseif (null !== $pending) {
                 $pending->becomeDelete($remoteId, $object->getEtag());
+                $pending->schedule($notify, null);
             } else {
-                $this->entityManager->persist(CalendarOperation::delete($calendar, $object->getUid(), $remoteId, $object->getEtag(), $now));
+                $this->entityManager->persist(CalendarOperation::delete($calendar, $object->getUid(), $remoteId, $object->getEtag(), $now, $notify));
             }
             $this->announce($calendar);
         }
@@ -110,13 +113,15 @@ final readonly class CalendarStore
         $this->entityManager->flush();
     }
 
-    private function queuePut(CalendarObject $object): void
+    private function queuePut(CalendarObject $object, bool $notify, ?string $comment): void
     {
         $pending = $this->operations->findUnclaimedFor($object);
         if (null === $pending || CalendarOperationKind::Put !== $pending->getKind()) {
-            $this->entityManager->persist(CalendarOperation::put($object, new \DateTimeImmutable()));
-            $this->entityManager->flush();
+            $this->entityManager->persist(CalendarOperation::put($object, new \DateTimeImmutable(), $notify, $comment));
+        } else {
+            $pending->schedule($notify, $comment);
         }
+        $this->entityManager->flush();
         $this->announce($object->getCalendar());
     }
 

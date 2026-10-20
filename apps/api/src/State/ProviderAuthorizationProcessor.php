@@ -11,6 +11,7 @@ use App\ApiResource\Input\StartProviderAuthorization;
 use App\ApiResource\ProviderAuthorization;
 use App\Entity\MailAccount;
 use App\Enum\OAuthProvider;
+use App\Enum\ProviderFeature;
 use App\ProviderAuth\ProviderConnector;
 use App\ProviderAuth\ProviderSettings;
 use App\Repository\MailAccountRepository;
@@ -49,6 +50,11 @@ final readonly class ProviderAuthorizationProcessor implements ProcessorInterfac
             if (OAuthProvider::forMailProvider($mailAccount->getProvider()) !== $provider) {
                 throw self::violation($data, 'mailAccountId', \sprintf('This account does not sign in with %s.', $provider->label()), $data->mailAccountId);
             }
+        }
+
+        if (null === $mailAccount && !\in_array(ProviderFeature::Mail, $data->features, true)) {
+            // Calendars sync with the mail account they belong to.
+            throw self::violation($data, 'features', 'Allow calendars for a connected account: name it in mailAccountId, or ask for mail too.', implode(',', array_map(static fn (ProviderFeature $feature): string => $feature->value, $data->features)));
         }
 
         $started = $this->connector->start($owner, $provider, $data->features, $mailAccount);

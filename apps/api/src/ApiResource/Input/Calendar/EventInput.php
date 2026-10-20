@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\ApiResource\Input\Calendar;
 
+use App\Entity\Calendar;
 use App\Enum\EventStatus;
 use App\Enum\EventVisibility;
 use App\Enum\Transparency;
@@ -82,6 +83,13 @@ final class EventInput
     #[Assert\Url(protocols: ['https'], requireTld: true)]
     #[Assert\Length(max: 2048)]
     public ?string $conferenceUrl = null;
+
+    /**
+     * Ask the calendar's provider for an online meeting: "meet" (Google calendars) or "teams" (Microsoft calendars
+     * with Teams), as the calendar's conferenceProviders offer. The provider adds the join link when it saves the event.
+     */
+    #[Assert\Choice(choices: Calendar::CONFERENCE_PROVIDERS)]
+    public ?string $conferenceProvider = null;
 
     /** The account that sends invitations, for events with attendees in a calendar that has no account (Tresso). */
     #[Assert\Uuid]

@@ -15,7 +15,7 @@ use Symfony\Component\Validator\Constraints as Assert;
 final class CalendarStatusInput extends WorkerRequest
 {
     #[Assert\NotNull]
-    #[Assert\Choice(choices: [CalendarSyncStatus::Unsupported, CalendarSyncStatus::AuthFailed, CalendarSyncStatus::Unconfirmed, CalendarSyncStatus::Error])]
+    #[Assert\Choice(choices: [CalendarSyncStatus::Unsupported, CalendarSyncStatus::AuthFailed, CalendarSyncStatus::Unconfirmed, CalendarSyncStatus::NotGranted, CalendarSyncStatus::Error])]
     public ?CalendarSyncStatus $status = null;
 
     /** Short, user-safe description of the problem. */

@@ -86,6 +86,7 @@ final readonly class CalendarSynchronizer
             $calendar->setTimeZone($remote->timeZone);
             $calendar->setWritable($remote->writable);
             $calendar->setProviderSchedules($input->providerSchedules);
+            $calendar->setConferenceProviders(array_values(array_unique($remote->conferenceProviders)));
             $calendar->setPosition($position++);
             $seen[$remote->remoteId] = $calendar;
         }

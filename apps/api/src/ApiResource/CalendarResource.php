@@ -76,6 +76,8 @@ final readonly class CalendarResource
         public bool $visible,
         public bool $work,
         public bool $providerSchedules,
+        /** @var list<string> online meetings events of this calendar can get: "meet", "teams" */
+        public array $conferenceProviders,
         public int $position,
     ) {
     }
@@ -94,6 +96,7 @@ final readonly class CalendarResource
             $calendar->isVisible(),
             $calendar->isWork(),
             $calendar->providerSchedules(),
+            $calendar->getConferenceProviders(),
             $calendar->getPosition(),
         );
     }

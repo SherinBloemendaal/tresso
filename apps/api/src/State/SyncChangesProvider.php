@@ -485,7 +485,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
     {
         $rows = $this->connection->fetchAllAssociative(
             'SELECT c.id, c.mail_account_id, c.source, c.name, c.color, c.user_color, c.time_zone, c.writable, c.is_default,
-                    c.visible, c.work, c.provider_schedules, c.position
+                    c.visible, c.work, c.provider_schedules, c.conference_providers, c.position
              FROM calendar c WHERE c.owner_id = :user AND c.change_seq > :since AND c.change_seq <= :until ORDER BY c.change_seq',
             $range,
         );
@@ -502,6 +502,7 @@ final readonly class SyncChangesProvider implements ProviderInterface
             'visible' => (bool) $r['visible'],
             'work' => (bool) $r['work'],
             'providerSchedules' => (bool) $r['provider_schedules'],
+            'conferenceProviders' => self::json($r['conference_providers'], '[]'),
             'position' => self::int($r['position']),
         ], $rows);
     }

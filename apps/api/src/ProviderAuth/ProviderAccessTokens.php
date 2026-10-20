@@ -57,13 +57,17 @@ final readonly class ProviderAccessTokens
      *
      * @param bool $rejected the caller's last token was refused by the provider, so a cached one is not good enough
      *
+     * A grant without a feature's scopes stops the mail accounts for mail (mail is what they are for), but only
+     * refuses the token for a feature the user allows separately, such as calendars.
+     *
      * @throws ReauthorizationRequired
+     * @throws FeatureNotGranted
      * @throws ProviderUnavailable
      */
     public function accessToken(ProviderGrant $grant, ProviderFeature $feature, bool $rejected = false): AccessToken
     {
         // Nothing is thrown inside the transaction: an exception there closes the entity manager.
-        $token = $this->entityManager->wrapInTransaction(function () use ($grant, $feature, $rejected): AccessToken|ProviderUnavailable|null {
+        $token = $this->entityManager->wrapInTransaction(function () use ($grant, $feature, $rejected): AccessToken|ProviderUnavailable|FeatureNotGranted|null {
             $this->entityManager->refresh($grant, LockMode::PESSIMISTIC_WRITE);
             $provider = $grant->getProvider();
 
@@ -71,9 +75,7 @@ final readonly class ProviderAccessTokens
                 return null;
             }
             if (!$grant->hasScopes(ProviderScopes::required($provider, $feature))) {
-                $this->requireSignIn($grant, \sprintf('Tresso is not allowed to use the %s of this account. Sign in with %s again and allow it.', $feature->value, $provider->label()));
-
-                return null;
+                return $this->notGranted($grant, $feature);
             }
 
             $tokens = $this->vault->openGrant($grant);
@@ -104,15 +106,13 @@ final readonly class ProviderAccessTokens
             $this->entityManager->flush();
 
             if (!$grant->hasScopes(ProviderScopes::required($provider, $feature))) {
-                $this->requireSignIn($grant, \sprintf('Tresso is not allowed to use the %s of this account. Sign in with %s again and allow it.', $feature->value, $provider->label()));
-
-                return null;
+                return $this->notGranted($grant, $feature);
             }
 
             return new AccessToken($refreshed->accessToken, $refreshed->expiresAt);
         });
 
-        if ($token instanceof ProviderUnavailable) {
+        if ($token instanceof ProviderUnavailable || $token instanceof FeatureNotGranted) {
             throw $token;
         }
 
@@ -130,6 +130,17 @@ final readonly class ProviderAccessTokens
         $refreshToken = $this->vault->openGrant($grant)['refreshToken'] ?? null;
 
         return \is_string($refreshToken) ? $refreshToken : null;
+    }
+
+    private function notGranted(ProviderGrant $grant, ProviderFeature $feature): ?FeatureNotGranted
+    {
+        $provider = $grant->getProvider();
+        if (ProviderFeature::Mail !== $feature) {
+            return new FeatureNotGranted(\sprintf('Tresso is not allowed to use the %s of this account yet. Allow it by signing in with %s again.', $feature->label(), $provider->label()));
+        }
+        $this->requireSignIn($grant, \sprintf('Tresso is not allowed to use the %s of this account. Sign in with %s again and allow it.', $feature->value, $provider->label()));
+
+        return null;
     }
 
     /**
